@@ -371,12 +371,13 @@ impl TypedBody {
             for child in core_children(&expression.kind) {
                 check(child);
             }
-            if type_contains_inference(&expression.ty) {
+            if type_contains_inference(&expression.ty)
+                || core_metadata_contains_inference(&expression.kind)
+            {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4181",
                     span: expression.span,
-                    message: "Typed Core expression retains an unresolved inference variable"
-                        .into(),
+                    message: "Typed Core expression or embedded metadata retains an unresolved inference variable".into(),
                 });
             }
             if core_kind_is_recovered(&expression.kind) {
@@ -810,6 +811,106 @@ fn type_contains_inference(ty: &Type) -> bool {
         | Type::ConstGeneric { .. }
         | Type::Generic(_)
         | Type::Error => false,
+    }
+}
+
+fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
+    match kind {
+        CoreKind::Closure {
+            parameters,
+            captures,
+            ..
+        } => {
+            parameters.iter().any(|(_, ty)| type_contains_inference(ty))
+                || captures
+                    .iter()
+                    .any(|capture| type_contains_inference(&capture.ty))
+        }
+        CoreKind::Assign { place, .. } => place_contains_inference(place),
+        CoreKind::Perform { effect, .. } => effect.arguments.iter().any(type_contains_inference),
+        CoreKind::PatternTest { pattern, .. } => pattern_contains_inference(pattern),
+        CoreKind::Handle { clauses, .. } => clauses.iter().any(|clause| {
+            clause.effect.arguments.iter().any(type_contains_inference)
+                || clause.payload_types.iter().any(type_contains_inference)
+                || clause.patterns.iter().any(pattern_contains_inference)
+                || clause
+                    .bindings
+                    .iter()
+                    .any(|(_, ty)| type_contains_inference(ty))
+                || clause.continuation.as_ref().is_some_and(|continuation| {
+                    type_contains_inference(&continuation.parameter)
+                        || type_contains_inference(&continuation.result)
+                        || effect_row_contains_inference(&continuation.effects)
+                })
+        }),
+        CoreKind::Completion { clauses, .. } => clauses.iter().any(|clause| {
+            pattern_contains_inference(&clause.pattern)
+                || clause
+                    .bindings
+                    .iter()
+                    .any(|(_, ty)| type_contains_inference(ty))
+        }),
+        CoreKind::Literal(_)
+        | CoreKind::Local(_)
+        | CoreKind::Function(_)
+        | CoreKind::TraitMethod { .. }
+        | CoreKind::Constant(_)
+        | CoreKind::Tuple(_)
+        | CoreKind::Array(_)
+        | CoreKind::Record { .. }
+        | CoreKind::Field { .. }
+        | CoreKind::Enum { .. }
+        | CoreKind::Let { .. }
+        | CoreKind::Call { .. }
+        | CoreKind::Binary { .. }
+        | CoreKind::Block(_)
+        | CoreKind::Borrow { .. }
+        | CoreKind::Move(_)
+        | CoreKind::Unary { .. }
+        | CoreKind::Error => false,
+    }
+}
+
+fn effect_row_contains_inference(row: &EffectRow) -> bool {
+    row.effects
+        .iter()
+        .any(|effect| effect.arguments.iter().any(type_contains_inference))
+        || matches!(row.tail, Some(crate::types::EffectTail::Infer(_)))
+        || row.projections.iter().any(|projection| {
+            type_contains_inference(&projection.subject)
+                || projection
+                    .trait_arguments
+                    .iter()
+                    .any(type_contains_inference)
+                || projection
+                    .item_arguments
+                    .iter()
+                    .any(type_contains_inference)
+        })
+}
+
+fn place_contains_inference(place: &CorePlace) -> bool {
+    match place {
+        CorePlace::Local { ty, .. } => type_contains_inference(ty),
+        CorePlace::Field { base, ty, .. } => {
+            type_contains_inference(ty) || place_contains_inference(base)
+        }
+        CorePlace::Error => false,
+    }
+}
+
+fn pattern_contains_inference(pattern: &CorePattern) -> bool {
+    match pattern {
+        CorePattern::Tuple(values) => values.iter().any(pattern_contains_inference),
+        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
+            fields.iter().any(|field| {
+                type_contains_inference(&field.ty) || pattern_contains_inference(&field.pattern)
+            })
+        }
+        CorePattern::Any
+        | CorePattern::Bind { .. }
+        | CorePattern::Literal(_)
+        | CorePattern::Error => false,
     }
 }
 

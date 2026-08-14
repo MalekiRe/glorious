@@ -1,8 +1,8 @@
 use grandiose_stage0::{
-    BodySyntax, CaptureMode, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan,
-    DefinitionIndex, ElaboratedInterface, EscapeFlow, FileKey, FlowEventKind, InterfaceSet,
-    LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering, PackageKey, PlaceFlow, Quantity,
-    Span, Type, TypedBody, implementation_method_key,
+    BodySyntax, CallableId, CaptureMode, ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId,
+    CoreKind, DeclarationScan, DefinitionIndex, ElaboratedInterface, EscapeFlow, FileKey,
+    FlowEventKind, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction,
+    MirLowering, PackageKey, PlaceFlow, Quantity, Span, Type, TypedBody, implementation_method_key,
 };
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
@@ -140,6 +140,50 @@ fn typed_core_validation_rejects_impossible_structural_projection() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4183"),
         "invalid structural arity must be rejected before MIR lowering"
+    );
+}
+
+#[test]
+fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
+    let package = PackageKey("core-metadata-inference@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let body = TypedBody {
+        parameters: vec![],
+        expressions: vec![
+            CoreExpr {
+                kind: CoreKind::Closure {
+                    callable: CallableId(0),
+                    parameters: vec![],
+                    captures: vec![ClosureCapture {
+                        name: "captured".into(),
+                        mode: CaptureMode::SharedBorrow,
+                        ty: Type::Infer(InferVar(7)),
+                    }],
+                    body: CoreId(1),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("0".into()),
+                ty: Type::Scalar(grandiose_stage0::ScalarType::I64),
+                span,
+            },
+        ],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4181"),
+        "inference hidden in Core metadata must not reach lowering"
     );
 }
 
