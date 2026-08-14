@@ -416,6 +416,37 @@ fn typed_closures_reject_lifetime_binders_in_type_position() {
 }
 
 #[test]
+fn typed_closures_reject_const_binders_in_type_position() {
+    let package = PackageKey("core-closure-const-type@0.1.0".into());
+    let source = "pub fn main<n: u32>() -> i64 { let invalid = (item: n) -> i64 { 0 }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = &interface.definitions[0];
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4173"),
+        "{:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn concrete_associated_type_projections_normalize_in_typed_closure_contracts() {
     let package = PackageKey("core-associated-projection@0.1.0".into());
     let source = "trait Iterator { type Item; } struct Range<T> {} impl<T> Iterator for Range<T> { type Item = T; } pub fn main() -> i64 { let identity = (value: <Range<Text> as Iterator>::Item) -> Text { value }; 0 }";

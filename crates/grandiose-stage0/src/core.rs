@@ -294,7 +294,9 @@ impl TypedBody {
                     .iter()
                     .enumerate()
                     .filter(|(_, name)| {
-                        !header.generics.is_effect_row(name) && !header.generics.is_lifetime(name)
+                        !header.generics.is_effect_row(name)
+                            && !header.generics.is_lifetime(name)
+                            && header.generics.const_kind(name).is_none()
                     })
                     .map(|(index, name)| (name.clone(), index as u32))
                     .collect()
@@ -323,6 +325,17 @@ impl TypedBody {
                         .enumerate()
                         .filter(|(_, name)| header.generics.is_effect_row(name))
                         .map(|(index, name)| (name.clone(), index as u32))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            const_parameters: definition
+                .callable_header()
+                .map(|header| {
+                    header
+                        .generics
+                        .iter()
+                        .filter(|name| header.generics.const_kind(name).is_some())
+                        .cloned()
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -417,6 +430,11 @@ impl TypedBody {
         for (index, name) in context.implementation_header.generics.iter().enumerate() {
             if !context.implementation_header.generics.is_effect_row(name)
                 && !context.implementation_header.generics.is_lifetime(name)
+                && context
+                    .implementation_header
+                    .generics
+                    .const_kind(name)
+                    .is_none()
             {
                 generic_parameters.insert(name.clone(), index as u32);
             }
@@ -425,6 +443,7 @@ impl TypedBody {
         for (offset, name) in context.method.signature.generics.iter().enumerate() {
             if !context.method.signature.generics.is_effect_row(name)
                 && !context.method.signature.generics.is_lifetime(name)
+                && context.method.signature.generics.const_kind(name).is_none()
             {
                 generic_parameters.insert(name.clone(), method_base + offset as u32);
             }
@@ -458,6 +477,21 @@ impl TypedBody {
                 }
                 parameters
             },
+            const_parameters: context
+                .implementation_header
+                .generics
+                .iter()
+                .chain(context.method.signature.generics.iter())
+                .filter(|name| {
+                    context
+                        .implementation_header
+                        .generics
+                        .const_kind(name)
+                        .is_some()
+                        || context.method.signature.generics.const_kind(name).is_some()
+                })
+                .cloned()
+                .collect(),
             lifetime_parameters: {
                 let mut parameters = std::collections::BTreeMap::new();
                 for (index, name) in context.implementation_header.generics.iter().enumerate() {
@@ -540,6 +574,7 @@ impl TypedBody {
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters: std::collections::BTreeMap::new(),
             effect_row_parameters: std::collections::BTreeMap::new(),
+            const_parameters: std::collections::BTreeSet::new(),
             lifetime_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
             handled_effects: std::collections::BTreeSet::new(),
@@ -653,6 +688,10 @@ struct Elaborator<'a> {
     /// separate from `generic_parameters`: an effect row can be a callable
     /// tail but can never be elaborated as a value type.
     effect_row_parameters: std::collections::BTreeMap<String, u32>,
+    /// Const binders are not types. Retaining their namespace prevents a
+    /// closure annotation from accidentally treating one as `Type::Generic`
+    /// before structural const terms are elaborated.
+    const_parameters: std::collections::BTreeSet<String>,
     /// Lifetime binders have their own namespace and slot identity. They are
     /// valid only as the qualifier of a reference, never as a value type.
     lifetime_parameters: std::collections::BTreeMap<String, u32>,
@@ -1377,6 +1416,15 @@ impl Elaborator<'_> {
                     self.body.expression(self.body.root).span,
                     "G4172",
                     &format!("lifetime generic `{name}` cannot be used as a closure type"),
+                );
+                self.recovered = true;
+                return Type::Error;
+            }
+            if self.const_parameters.contains(name) {
+                self.error(
+                    self.body.expression(self.body.root).span,
+                    "G4173",
+                    &format!("const generic `{name}` cannot be used as a closure type"),
                 );
                 self.recovered = true;
                 return Type::Error;
