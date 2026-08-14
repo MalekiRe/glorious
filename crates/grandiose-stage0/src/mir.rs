@@ -834,6 +834,32 @@ impl MirLowering {
             };
         }
         if let Some(function) =
+            lowerer.lower_root_finite_replay_safe_resumption(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = function.validate() {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) =
             lowerer.lower_root_runtime_one_shot_resumption(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -1459,10 +1485,10 @@ struct Lowerer<'a> {
     lifted: BTreeMap<DefKey, MirFunction>,
     instructions: Vec<MirInstruction>,
     diagnostics: Vec<MirDiagnostic>,
-    /// Active only while lowering a direct root handler clause. In that
-    /// special CFG shape the captured continuation returns its supplied value
-    /// immediately, so exact finite resumptions can be represented without a
-    /// runtime continuation object while still charging every call.
+    /// Active only while lowering a statically specialized handler clause.
+    /// The plan makes the captured continuation explicit even when its
+    /// representation can be eliminated: either the root identity or a
+    /// replay-safe residual computation cloned once per finite resumption.
     direct_resumption: Option<DirectResumptionState>,
 }
 
@@ -1471,6 +1497,17 @@ struct DirectResumptionState {
     name: String,
     quantity: crate::quantity::Quantity,
     calls: u64,
+    plan: DirectResumptionPlan,
+}
+
+#[derive(Clone, Debug)]
+enum DirectResumptionPlan {
+    Identity,
+    PureResidual {
+        binding: String,
+        prefix: Vec<CoreId>,
+        result: CoreId,
+    },
 }
 
 /// One runtime dispatch matrix for one operation key in a nested handler.
@@ -3196,6 +3233,154 @@ impl Lowerer<'_> {
             blocks,
         })
     }
+    /// Specialize a finite multi-shot continuation when replay is completely
+    /// represented by cloning a pure residual computation. This is a real
+    /// resumption replay, not an alias for the VM's one-shot `Resume`: every
+    /// explicit `k(value)` evaluates the residual anew with that value bound
+    /// at the suspended performance site. Effects, moves, unique borrows,
+    /// mutable storage, and escaping control remain on the dynamic lowering
+    /// path until their snapshots and copy glue have a verifier contract.
+    fn lower_root_finite_replay_safe_resumption(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Block(computation_values) = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let first_perform = computation_values.iter().position(|candidate| {
+            matches!(
+                self.body.expression(*candidate).kind,
+                CoreKind::Let {
+                    value,
+                    ..
+                } if matches!(
+                    self.body.expression(value).kind,
+                    CoreKind::Perform { terminal: false, .. }
+                )
+            )
+        })?;
+        let (computation_prefix, operation_and_residual) =
+            computation_values.split_at(first_perform);
+        let (binding, residual) = operation_and_residual.split_first()?;
+        let CoreKind::Let { name, value } = self.body.expression(*binding).kind.clone() else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(value).kind.clone()
+        else {
+            return None;
+        };
+        let (residual_result, residual_prefix) = residual.split_last()?;
+        if !residual
+            .iter()
+            .all(|expression| self.core_is_replay_safe(*expression))
+        {
+            return None;
+        }
+        let matching = clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        let CoreHandlerResumption::Explicit {
+            name: continuation,
+            quantity,
+        } = &clause.resumption
+        else {
+            return None;
+        };
+        let upper = quantity.upper?;
+        if quantity.lower != upper
+            || upper < 2
+            || clause.patterns.len() != argument_ids.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+        {
+            return None;
+        }
+        for expression in root_prefix.iter().chain(computation_prefix.iter()) {
+            self.statement(*expression)?;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        let before_clause = self.named.clone();
+        self.bind_handler_patterns(&clause.patterns, &arguments)?;
+        // A generated continuation shadows an outer local with the same
+        // spelling. Remove the binding during clause lowering so the call
+        // recognition in `value` cannot accidentally select the outer local.
+        let shadowed = self.named.remove(continuation);
+        let previous = self.direct_resumption.replace(DirectResumptionState {
+            name: continuation.clone(),
+            quantity: *quantity,
+            calls: 0,
+            plan: DirectResumptionPlan::PureResidual {
+                binding: name,
+                prefix: residual_prefix.to_vec(),
+                result: *residual_result,
+            },
+        });
+        let result = self.value(clause.body);
+        let state = self
+            .direct_resumption
+            .take()
+            .expect("finite resumption state must outlive its clause body");
+        self.direct_resumption = previous;
+        self.named = before_clause;
+        if let Some(local) = shadowed {
+            self.named.insert(continuation.clone(), local);
+        }
+        let result = result?;
+        let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls)).ok()?;
+        if !state.quantity.contains(actual) {
+            self.error(
+                "G6005",
+                "finite resumption calls do not satisfy its declared quantity",
+            );
+            return Some(self.invalid_function(parameters));
+        }
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![MirBlock {
+                parameters: vec![],
+                instructions: std::mem::take(&mut self.instructions),
+                terminator: MirTerminator::Return { value: result },
+            }],
+        })
+    }
     /// Lower one nonempty, exact-one-shot continuation through the VM handler
     /// frame representation. The continuation begins immediately after the
     /// suspended `Perform`, so its `UninstallHandler` executes only after a
@@ -4347,6 +4532,7 @@ impl Lowerer<'_> {
                     name: name.clone(),
                     quantity: *quantity,
                     calls: 0,
+                    plan: DirectResumptionPlan::Identity,
                 });
                 let result = self.value(clause.body);
                 let state = self
@@ -4880,8 +5066,35 @@ impl Lowerer<'_> {
                             return None;
                         }
                     };
-                    self.instructions
-                        .push(MirInstruction::Copy { dst, src: argument });
+                    let plan = resumption.plan.clone();
+                    match plan {
+                        DirectResumptionPlan::Identity => {
+                            self.instructions
+                                .push(MirInstruction::Copy { dst, src: argument });
+                        }
+                        DirectResumptionPlan::PureResidual {
+                            binding,
+                            prefix,
+                            result,
+                        } => {
+                            // Each finite replay gets a fresh lowering of the
+                            // residual. Core IDs are intentionally shared by
+                            // the source tree, so restore its memoized values
+                            // afterward; retaining them would turn the next
+                            // `k(value)` into an unsound reuse of the first.
+                            let previous_named = self.named.clone();
+                            let previous_values = self.values.clone();
+                            self.named.insert(binding, argument);
+                            for expression in prefix {
+                                self.statement(expression)?;
+                            }
+                            let resumed = self.value(result)?;
+                            self.named = previous_named;
+                            self.values = previous_values;
+                            self.instructions
+                                .push(MirInstruction::Copy { dst, src: resumed });
+                        }
+                    }
                     self.values.insert(id, dst);
                     return Some(dst);
                 }
@@ -5132,6 +5345,51 @@ impl Lowerer<'_> {
                     if self.direct_known_perform(definition, arguments.clone()).is_some())
             }
             _ => false,
+        }
+    }
+    /// A finite static replay duplicates this expression once for every
+    /// continuation use. Keep the proof intentionally narrower than ordinary
+    /// effect-freedom: a move, unique loan, assignment, or moving closure
+    /// capture would duplicate an ownership action even if it cannot perform
+    /// an effect. The general VM continuation representation owns those cases
+    /// once it can describe snapshot copy glue to the verifier.
+    fn core_is_replay_safe(&self, id: CoreId) -> bool {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Function(_)
+            | CoreKind::TraitMethod { .. } => true,
+            CoreKind::Constant(_)
+            | CoreKind::Error
+            | CoreKind::Perform { .. }
+            | CoreKind::Handle { .. }
+            | CoreKind::Completion { .. }
+            | CoreKind::Assign { .. }
+            | CoreKind::Move(_) => false,
+            CoreKind::Closure { captures, .. } => captures.iter().all(|capture| {
+                !matches!(capture.mode, CaptureMode::Move | CaptureMode::UniqueBorrow)
+            }),
+            CoreKind::Borrow { unique, value } => !unique && self.core_is_replay_safe(value),
+            CoreKind::Unary { value, .. }
+            | CoreKind::Field { base: value, .. }
+            | CoreKind::PatternTest { subject: value, .. } => self.core_is_replay_safe(value),
+            CoreKind::Let { value, .. } => self.core_is_replay_safe(value),
+            CoreKind::Binary { left, right, .. } => {
+                self.core_is_replay_safe(left) && self.core_is_replay_safe(right)
+            }
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
+                .into_iter()
+                .all(|value| self.core_is_replay_safe(value)),
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
+                .into_iter()
+                .all(|field| self.core_is_replay_safe(field)),
+            CoreKind::Call { callee, arguments } => {
+                self.core_is_effect_free(id)
+                    && self.core_is_replay_safe(callee)
+                    && arguments
+                        .into_iter()
+                        .all(|argument| self.core_is_replay_safe(argument))
+            }
         }
     }
     /// A deliberately conservative proof used only to erase an unexercised
