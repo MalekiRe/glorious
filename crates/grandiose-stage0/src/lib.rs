@@ -69,8 +69,9 @@ pub use identity::{
     DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId, implementation_method_key,
 };
 pub use instance::{
-    InstanceArgument, InstanceGraph, InstanceGraphError, InstanceKey, InstanceKeyError,
-    InstanceLimits, InstanceRoot,
+    CallSummary, InstanceArgument, InstanceGraph, InstanceGraphError, InstanceKey,
+    InstanceKeyError, InstanceLimits, InstanceRoot, SummaryError, SummaryLimits,
+    solve_call_summaries,
 };
 pub use interface::{
     Definition, DefinitionNamespace, InterfaceCache, InterfaceCacheStats, InterfaceDiagnostic,

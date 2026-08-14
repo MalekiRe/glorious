@@ -445,6 +445,31 @@ pub struct CallSummary {
     pub may_control: bool,
     pub may_escape: bool,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SummaryLimits {
+    /// A bounded summary solver cannot publish a partially stabilized SCC.
+    /// The default is deliberately generous for finite structural summaries;
+    /// callers that expose this as a request resource can lower it.
+    pub iterations_per_scc: usize,
+}
+
+impl Default for SummaryLimits {
+    fn default() -> Self {
+        Self {
+            iterations_per_scc: 10_000,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SummaryError {
+    DidNotConverge {
+        component: Vec<InstanceKey>,
+        limit: usize,
+    },
+}
+
 impl Default for CallSummary {
     fn default() -> Self {
         Self {
@@ -480,8 +505,9 @@ impl CallSummary {
 
 pub fn solve_call_summaries(
     graph: &InstanceGraph,
+    limits: SummaryLimits,
     mut transfer: impl FnMut(&InstanceKey, &BTreeMap<InstanceKey, CallSummary>) -> CallSummary,
-) -> BTreeMap<InstanceKey, CallSummary> {
+) -> Result<BTreeMap<InstanceKey, CallSummary>, SummaryError> {
     let mut summaries = BTreeMap::new();
     for scc in graph.strongly_connected_components() {
         for key in &scc {
@@ -489,7 +515,8 @@ pub fn solve_call_summaries(
                 .entry(key.clone())
                 .or_insert_with(CallSummary::default);
         }
-        for _ in 0..=scc.len() * 4 {
+        let mut converged = false;
+        for _ in 0..limits.iterations_per_scc {
             let mut changed = false;
             for key in &scc {
                 let next = summaries[key].join(&transfer(key, &summaries));
@@ -499,11 +526,18 @@ pub fn solve_call_summaries(
                 }
             }
             if !changed {
+                converged = true;
                 break;
             }
         }
+        if !converged {
+            return Err(SummaryError::DidNotConverge {
+                component: scc,
+                limit: limits.iterations_per_scc,
+            });
+        }
     }
-    summaries
+    Ok(summaries)
 }
 
 #[cfg(test)]
@@ -754,7 +788,7 @@ mod tests {
             .unwrap();
         let first_effect = definition(b"first-effect");
         let second_effect = definition(b"second-effect");
-        let summaries = solve_call_summaries(&graph, |key, known| {
+        let summaries = solve_call_summaries(&graph, SummaryLimits::default(), |key, known| {
             let direct = if key == &first {
                 CallSummary {
                     effects: EffectRow::closed([first_effect]),
@@ -779,11 +813,51 @@ mod tests {
                 .fold(direct, |summary, callee| {
                     summary.join(known.get(callee).expect("SCC member has a seed summary"))
                 })
-        });
+        })
+        .unwrap();
         for key in [&first, &second] {
             let summary = &summaries[key];
             assert_eq!(summary.effects.effects.len(), 2);
             assert!(summary.may_abort && summary.may_control && summary.may_escape);
         }
+    }
+
+    #[test]
+    fn summary_solver_rejects_an_unbounded_recursive_growth() {
+        let key = InstanceKey::new(
+            definition(b"growth"),
+            &[GenericKind::Type],
+            vec![InstanceArgument::Type(Type::Scalar(ScalarType::I64))],
+        )
+        .unwrap();
+        let mut graph = InstanceGraph::default();
+        graph
+            .discover_root(
+                InstanceRoot {
+                    key: key.clone(),
+                    reason: "entry".into(),
+                },
+                InstanceLimits::default(),
+            )
+            .unwrap();
+        graph
+            .discover_callee(&key, key.clone(), InstanceLimits::default())
+            .unwrap();
+        let error = solve_call_summaries(
+            &graph,
+            SummaryLimits {
+                iterations_per_scc: 2,
+            },
+            |key, known| CallSummary {
+                invocation: Quantity::new(0, Some(known[key].invocation.upper.unwrap_or(0) + 1))
+                    .unwrap(),
+                ..CallSummary::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            SummaryError::DidNotConverge { limit: 2, .. }
+        ));
     }
 }
