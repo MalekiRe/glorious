@@ -107,8 +107,8 @@ pub use trait_solver::{
     TraitGoal, TraitMethodAnswer, TraitProjectionAnswer, TraitSolver, TraitSolverLimits,
 };
 pub use types::{
-    EffectInstance, EffectRow, EffectRowProjection, EffectTail, EffectVar, InferContext, InferVar,
-    Lifetime, Mutability, ScalarType, Type, TypeError,
+    ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail, EffectVar, GenericKind,
+    InferContext, InferVar, Lifetime, Mutability, ScalarType, Type, TypeError,
 };
 pub use vm_backend::{
     CandidateVmArtifact, CandidateVmProgram, STAGE0_VM_SCHEMA, VerifiedVmArtifact,

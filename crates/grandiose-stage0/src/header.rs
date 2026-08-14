@@ -10,6 +10,7 @@ use crate::{
     quantity::Quantity,
     scanner::{DeclarationKind, DeclarationShell, TokenRange},
     source::{LexedFile, Span, TokenKind},
+    types::{ConstKind, GenericKind},
 };
 
 /// A declaration's generic binders, including the small but semantically
@@ -22,6 +23,7 @@ pub struct GenericParameters {
     pub names: Vec<String>,
     pub effect_rows: BTreeSet<String>,
     pub lifetimes: BTreeSet<String>,
+    pub consts: BTreeSet<(String, ConstKind)>,
 }
 
 impl GenericParameters {
@@ -31,6 +33,28 @@ impl GenericParameters {
 
     pub fn is_lifetime(&self, name: &str) -> bool {
         self.lifetimes.contains(name)
+    }
+
+    pub fn const_kind(&self, name: &str) -> Option<ConstKind> {
+        self.consts
+            .iter()
+            .find_map(|(candidate, kind)| (candidate == name).then_some(*kind))
+    }
+
+    pub fn kind(&self, name: &str) -> GenericKind {
+        if self.is_effect_row(name) {
+            GenericKind::EffectRow
+        } else if self.is_lifetime(name) {
+            GenericKind::Lifetime
+        } else if let Some(kind) = self.const_kind(name) {
+            GenericKind::Const(kind)
+        } else {
+            GenericKind::Type
+        }
+    }
+
+    pub fn kinds(&self) -> Vec<GenericKind> {
+        self.names.iter().map(|name| self.kind(name)).collect()
     }
 }
 
@@ -1255,22 +1279,41 @@ impl Parser<'_> {
         while self.current().is_some() && !self.at_operator(">") {
             if let Some(name) = self.identifier() {
                 let is_lifetime = name.starts_with('\'');
-                let is_effect_row = if self.punctuation(':') {
+                let kind = if self.punctuation(':') {
                     if is_lifetime {
                         self.error("G3205", "lifetime binders cannot declare a kind");
-                        false
-                    } else if self.word() == Some("EffectRow") {
-                        self.position += 1;
-                        true
+                        None
                     } else {
-                        self.error("G3205", "expected `EffectRow` after generic kind `:`");
-                        false
+                        match self.word() {
+                            Some("EffectRow") => {
+                                self.position += 1;
+                                Some(GenericKind::EffectRow)
+                            }
+                            Some("u32") => {
+                                self.position += 1;
+                                Some(GenericKind::Const(ConstKind::U32))
+                            }
+                            Some("Quantity") => {
+                                self.position += 1;
+                                Some(GenericKind::Const(ConstKind::Quantity))
+                            }
+                            _ => {
+                                self.error(
+                                    "G3205",
+                                    "expected `EffectRow`, `u32`, or `Quantity` after generic kind `:`",
+                                );
+                                None
+                            }
+                        }
                     }
                 } else {
-                    false
+                    None
                 };
-                if is_effect_row {
+                if kind == Some(GenericKind::EffectRow) {
                     generics.effect_rows.insert(name.clone());
+                }
+                if let Some(GenericKind::Const(kind)) = kind {
+                    generics.consts.insert((name.clone(), kind));
                 }
                 if is_lifetime {
                     generics.lifetimes.insert(name.clone());

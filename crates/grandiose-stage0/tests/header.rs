@@ -1,5 +1,5 @@
 use grandiose_stage0::{
-    BodySyntax, DeclarationScan, Digest, EnumVariantPayloadHeader, FileKey, HeaderParse,
+    BodySyntax, ConstKind, DeclarationScan, Digest, EnumVariantPayloadHeader, FileKey, HeaderParse,
     HeaderType, LexedFile, LogicalPath, NominalLayoutHeader, PackageKey, ParsedHeader, Quantity,
 };
 
@@ -42,6 +42,26 @@ fn callable_headers_retain_generic_kind_metadata() {
     assert_eq!(header.generics, ["T", "e"]);
     assert!(!header.generics.is_effect_row("T"));
     assert!(header.generics.is_effect_row("e"));
+}
+
+#[test]
+fn callable_headers_retain_structural_const_binder_kinds() {
+    let package = PackageKey("header-const-generic-kinds@0.1.0".into());
+    let source = "pub fn capacity<n: u32, budget: Quantity>() -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert_eq!(header.generics, ["n", "budget"]);
+    assert_eq!(header.generics.const_kind("n"), Some(ConstKind::U32));
+    assert_eq!(
+        header.generics.const_kind("budget"),
+        Some(ConstKind::Quantity)
+    );
 }
 
 #[test]

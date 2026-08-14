@@ -1,8 +1,67 @@
 use grandiose_stage0::{
-    DeclarationScan, EffectTail, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout,
-    FileKey, InterfaceSet, LexedFile, Lifetime, LogicalPath, PackageKey, Quantity, ScalarType,
-    Type,
+    ConstKind, DeclarationScan, DefinitionIndex, EffectTail, ElaboratedHeader, ElaboratedInterface,
+    ElaboratedNominalLayout, FileKey, GenericKind, InterfaceSet, LexedFile, Lifetime, LogicalPath,
+    PackageKey, Quantity, ScalarType, Type,
 };
+
+#[test]
+fn callable_signatures_preserve_const_binder_kinds_and_reject_type_misuse() {
+    let package = PackageKey("signature-const-generics@0.1.0".into());
+    let source = "pub fn capacity<n: u32, budget: Quantity>() -> i64 { 0 } pub fn invalid<n: u32>(value: n) -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("capacity"))
+        .expect("capacity definition");
+    let ElaboratedHeader::Callable(signature) =
+        signatures.definitions.get(&definition.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert_eq!(
+        signature.generic_kinds,
+        [
+            GenericKind::Const(ConstKind::U32),
+            GenericKind::Const(ConstKind::Quantity),
+        ]
+    );
+    assert!(
+        signatures
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
+fn declaration_index_retains_const_generic_kinds_for_future_argument_elaboration() {
+    let package = PackageKey("signature-indexed-const-generics@0.1.0".into());
+    let source = "pub struct Tag<T, n: u32, budget: Quantity> {}";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let definition = interface.definitions.first().expect("Tag definition");
+    let index = DefinitionIndex::from_interface(&interface);
+    assert_eq!(
+        index.type_generic_kinds(definition.key),
+        Some(
+            [
+                GenericKind::Type,
+                GenericKind::Const(ConstKind::U32),
+                GenericKind::Const(ConstKind::Quantity),
+            ]
+            .as_slice()
+        )
+    );
+}
 
 #[test]
 fn interfaces_preserve_declared_reference_lifetimes_without_type_slots() {

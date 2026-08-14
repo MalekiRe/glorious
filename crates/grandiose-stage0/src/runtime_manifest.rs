@@ -149,6 +149,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             };
             crate::CallableSignature {
                 generics: 1,
+                generic_kinds: vec![crate::GenericKind::Type],
                 parameters: vec![Type::Scalar(ScalarType::Bool), thunk.clone(), thunk],
                 result,
                 effects: EffectRow::empty(),

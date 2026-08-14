@@ -40,6 +40,30 @@ pub enum Lifetime {
     Elided,
 }
 
+/// The closed structural-constant domains admitted by the G1 frontend.
+///
+/// A const binder is deliberately not a [`Type::Generic`]: it may participate
+/// in nominal identity and specialization, but cannot be used as a field,
+/// parameter, or result type.  Value syntax and normalization are introduced
+/// separately so this kind information is available at every frozen interface
+/// boundary first.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ConstKind {
+    U32,
+    Quantity,
+}
+
+/// Kinds of source generic binders retained by callable signatures.  Keeping
+/// these in source-slot order prevents a later phase from treating consts,
+/// regions, or rows as ordinary type substitutions.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum GenericKind {
+    Type,
+    EffectRow,
+    Lifetime,
+    Const(ConstKind),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mutability {
     Shared,

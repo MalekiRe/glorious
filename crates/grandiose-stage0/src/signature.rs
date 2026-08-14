@@ -12,12 +12,18 @@ use crate::{
     interface::{Definition, DefinitionNamespace, PackageInterface},
     quantity::Quantity,
     resolution::{DefinitionIndex, ResolutionState},
-    types::{EffectInstance, EffectRow, EffectRowProjection, Lifetime, Mutability, Type},
+    types::{
+        ConstKind, EffectInstance, EffectRow, EffectRowProjection, GenericKind, Lifetime,
+        Mutability, Type,
+    },
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
     pub generics: u32,
+    /// Generic binder kinds in the same slot order as the source header.
+    /// Callers use this to keep const substitutions out of the type namespace.
+    pub generic_kinds: Vec<GenericKind>,
     pub parameters: Vec<Type>,
     pub result: Type,
     pub effects: EffectRow,
@@ -171,6 +177,7 @@ impl ElaboratedInterface {
                 generics: BTreeMap::new(),
                 effect_row_generics: BTreeMap::new(),
                 lifetime_generics: BTreeMap::new(),
+                const_generics: BTreeMap::new(),
                 diagnostics: vec![],
             };
             let header = elaborator.definition(definition);
@@ -420,6 +427,7 @@ impl ElaboratedInterface {
         }
         Some(CallableSignature {
             generics: 0,
+            generic_kinds: vec![],
             parameters: signature
                 .parameters
                 .iter()
@@ -734,6 +742,7 @@ fn instantiate_trait_method_contract(
         .extend((0..method.generics).map(|offset| Type::Generic(implementation.generics + offset)));
     CallableSignature {
         generics: method.generics,
+        generic_kinds: method.generic_kinds.clone(),
         parameters: method
             .parameters
             .iter()
@@ -843,11 +852,15 @@ struct Elaborator<'a> {
     generics: BTreeMap<String, u32>,
     effect_row_generics: BTreeMap<String, u32>,
     lifetime_generics: BTreeMap<String, u32>,
+    const_generics: BTreeMap<String, (u32, ConstKind)>,
     diagnostics: Vec<SignatureDiagnostic>,
 }
 impl Elaborator<'_> {
     fn generic_binder_count(&self) -> u32 {
-        (self.generics.len() + self.effect_row_generics.len() + self.lifetime_generics.len()) as u32
+        (self.generics.len()
+            + self.effect_row_generics.len()
+            + self.lifetime_generics.len()
+            + self.const_generics.len()) as u32
     }
 
     fn definition(&mut self, definition: &Definition) -> ElaboratedHeader {
@@ -885,6 +898,7 @@ impl Elaborator<'_> {
         self.bind_generics(&header.generics);
         CallableSignature {
             generics: header.generics.len() as u32,
+            generic_kinds: header.generics.kinds(),
             parameters: header
                 .parameters
                 .iter()
@@ -914,6 +928,7 @@ impl Elaborator<'_> {
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
                 let outer_lifetime_generics = self.lifetime_generics.clone();
+                let outer_const_generics = self.const_generics.clone();
                 let base = self.generic_binder_count();
                 self.extend_generics(
                     &method.signature.generics,
@@ -923,6 +938,7 @@ impl Elaborator<'_> {
                 );
                 let signature = CallableSignature {
                     generics: method.signature.generics.len() as u32,
+                    generic_kinds: method.signature.generics.kinds(),
                     parameters: method
                         .signature
                         .parameters
@@ -947,6 +963,7 @@ impl Elaborator<'_> {
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
                 self.lifetime_generics = outer_lifetime_generics;
+                self.const_generics = outer_const_generics;
                 (method.name.clone(), signature)
             })
             .collect();
@@ -993,6 +1010,7 @@ impl Elaborator<'_> {
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
                 let outer_lifetime_generics = self.lifetime_generics.clone();
+                let outer_const_generics = self.const_generics.clone();
                 let base = self.generic_binder_count();
                 self.extend_generics(
                     &item.generics,
@@ -1004,6 +1022,7 @@ impl Elaborator<'_> {
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
                 self.lifetime_generics = outer_lifetime_generics;
+                self.const_generics = outer_const_generics;
                 (
                     item.name.clone(),
                     ElaboratedAssociatedTypeDefinition {
@@ -1022,6 +1041,7 @@ impl Elaborator<'_> {
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
                 let outer_lifetime_generics = self.lifetime_generics.clone();
+                let outer_const_generics = self.const_generics.clone();
                 let base = self.generic_binder_count();
                 self.extend_generics(
                     &item.generics,
@@ -1033,6 +1053,7 @@ impl Elaborator<'_> {
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
                 self.lifetime_generics = outer_lifetime_generics;
+                self.const_generics = outer_const_generics;
                 Some((
                     item.name.clone(),
                     ElaboratedAssociatedEffectRowDefinition {
@@ -1049,6 +1070,7 @@ impl Elaborator<'_> {
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
                 let outer_lifetime_generics = self.lifetime_generics.clone();
+                let outer_const_generics = self.const_generics.clone();
                 let base = self.generic_binder_count();
                 self.extend_generics(
                     &method.signature.generics,
@@ -1058,6 +1080,7 @@ impl Elaborator<'_> {
                 );
                 let signature = CallableSignature {
                     generics: method.signature.generics.len() as u32,
+                    generic_kinds: method.signature.generics.kinds(),
                     parameters: method
                         .signature
                         .parameters
@@ -1082,6 +1105,7 @@ impl Elaborator<'_> {
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
                 self.lifetime_generics = outer_lifetime_generics;
+                self.const_generics = outer_const_generics;
                 (method.name.clone(), signature)
             })
             .collect();
@@ -1102,6 +1126,7 @@ impl Elaborator<'_> {
         let declaration_generics = self.generics.clone();
         let declaration_effect_row_generics = self.effect_row_generics.clone();
         let declaration_lifetime_generics = self.lifetime_generics.clone();
+        let declaration_const_generics = self.const_generics.clone();
         let operations = header
             .operations
             .iter()
@@ -1109,6 +1134,7 @@ impl Elaborator<'_> {
                 self.generics = declaration_generics.clone();
                 self.effect_row_generics = declaration_effect_row_generics.clone();
                 self.lifetime_generics = declaration_lifetime_generics.clone();
+                self.const_generics = declaration_const_generics.clone();
                 let base = self.generic_binder_count();
                 self.extend_generics(
                     &operation.generics,
@@ -1141,6 +1167,7 @@ impl Elaborator<'_> {
         self.generics = declaration_generics;
         self.effect_row_generics = declaration_effect_row_generics;
         self.lifetime_generics = declaration_lifetime_generics;
+        self.const_generics = declaration_const_generics;
         ElaboratedEffect {
             generics: header.generics.len() as u32,
             operations,
@@ -1340,10 +1367,12 @@ impl Elaborator<'_> {
         self.generics.clear();
         self.effect_row_generics.clear();
         self.lifetime_generics.clear();
+        self.const_generics.clear();
         for (index, name) in parameters.iter().enumerate() {
             if self.generics.contains_key(name)
                 || self.effect_row_generics.contains_key(name)
                 || self.lifetime_generics.contains_key(name)
+                || self.const_generics.contains_key(name)
             {
                 self.error("G3301", format!("duplicate generic parameter `{name}`"));
             }
@@ -1351,6 +1380,9 @@ impl Elaborator<'_> {
                 self.effect_row_generics.insert(name.clone(), index as u32);
             } else if parameters.is_lifetime(name) {
                 self.lifetime_generics.insert(name.clone(), index as u32);
+            } else if let Some(kind) = parameters.const_kind(name) {
+                self.const_generics
+                    .insert(name.clone(), (index as u32, kind));
             } else {
                 self.generics.insert(name.clone(), index as u32);
             }
@@ -1378,6 +1410,7 @@ impl Elaborator<'_> {
             if self.generics.contains_key(name)
                 || self.effect_row_generics.contains_key(name)
                 || self.lifetime_generics.contains_key(name)
+                || self.const_generics.contains_key(name)
             {
                 self.diagnostics.push(SignatureDiagnostic {
                     code,
@@ -1390,6 +1423,9 @@ impl Elaborator<'_> {
             } else if parameters.is_lifetime(name) {
                 self.lifetime_generics
                     .insert(name.clone(), base + offset as u32);
+            } else if let Some(kind) = parameters.const_kind(name) {
+                self.const_generics
+                    .insert(name.clone(), (base + offset as u32, kind));
             } else {
                 self.generics.insert(name.clone(), base + offset as u32);
             }
@@ -1498,6 +1534,16 @@ impl Elaborator<'_> {
                 );
                 return Type::Error;
             }
+            if let Some((_, kind)) = self.const_generics.get(name) {
+                self.error(
+                    "G3317",
+                    format!(
+                        "const generic `{name}` of kind `{}` cannot be used as a type",
+                        const_kind_name(*kind)
+                    ),
+                );
+                return Type::Error;
+            }
             if let Some(scalar) = scalar(name) {
                 return if arguments.is_empty() {
                     Type::Scalar(scalar)
@@ -1580,6 +1626,13 @@ fn scalar(name: &str) -> Option<crate::types::ScalarType> {
         "Bytes" => Bytes,
         _ => return None,
     })
+}
+
+fn const_kind_name(kind: ConstKind) -> &'static str {
+    match kind {
+        ConstKind::U32 => "u32",
+        ConstKind::Quantity => "Quantity",
+    }
 }
 
 fn normalize_alias_type(

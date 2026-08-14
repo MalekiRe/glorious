@@ -11,6 +11,7 @@ use crate::{
     identity::{DefKey, ModuleKey},
     interface::{DefinitionNamespace, PackageInterface},
     source::Span,
+    types::GenericKind,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,8 +54,11 @@ pub struct DefinitionIndex {
     modules: BTreeMap<ModuleKey, ()>,
     imports: BTreeMap<ModuleKey, Vec<ImportBinding>>,
     type_generic_arities: BTreeMap<DefKey, u32>,
+    type_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
     trait_generic_arities: BTreeMap<DefKey, u32>,
+    trait_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
     effect_generic_arities: BTreeMap<DefKey, u32>,
+    effect_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -97,21 +101,28 @@ impl DefinitionIndex {
         self.modules.insert(interface.module.clone(), ());
         for definition in &interface.definitions {
             if definition.namespace == Some(DefinitionNamespace::Type) {
-                let arity = match &definition.syntax.header {
+                let (arity, kinds) = match &definition.syntax.header {
                     ParsedHeader::Nominal { generics, .. }
-                    | ParsedHeader::TypeAlias { generics, .. } => generics.len() as u32,
-                    _ => 0,
+                    | ParsedHeader::TypeAlias { generics, .. } => {
+                        (generics.len() as u32, generics.kinds())
+                    }
+                    _ => (0, vec![]),
                 };
                 self.type_generic_arities.insert(definition.key, arity);
+                self.type_generic_kinds.insert(definition.key, kinds);
             }
             match &definition.syntax.header {
                 ParsedHeader::Trait(header) => {
                     self.trait_generic_arities
                         .insert(definition.key, header.generics.len() as u32);
+                    self.trait_generic_kinds
+                        .insert(definition.key, header.generics.kinds());
                 }
                 ParsedHeader::Effect(header) => {
                     self.effect_generic_arities
                         .insert(definition.key, header.generics.len() as u32);
+                    self.effect_generic_kinds
+                        .insert(definition.key, header.generics.kinds());
                 }
                 _ => {}
             }
@@ -178,12 +189,29 @@ impl DefinitionIndex {
         self.type_generic_arities.get(&definition).copied()
     }
 
+    /// Source-slot kinds for a nominal or alias declaration. This is the
+    /// authority future generic-argument elaboration uses to keep structural
+    /// constants out of the type-substitution namespace.
+    pub fn type_generic_kinds(&self, definition: DefKey) -> Option<&[GenericKind]> {
+        self.type_generic_kinds.get(&definition).map(Vec::as_slice)
+    }
+
     pub fn trait_generic_arity(&self, definition: DefKey) -> Option<u32> {
         self.trait_generic_arities.get(&definition).copied()
     }
 
+    pub fn trait_generic_kinds(&self, definition: DefKey) -> Option<&[GenericKind]> {
+        self.trait_generic_kinds.get(&definition).map(Vec::as_slice)
+    }
+
     pub fn effect_generic_arity(&self, definition: DefKey) -> Option<u32> {
         self.effect_generic_arities.get(&definition).copied()
+    }
+
+    pub fn effect_generic_kinds(&self, definition: DefKey) -> Option<&[GenericKind]> {
+        self.effect_generic_kinds
+            .get(&definition)
+            .map(Vec::as_slice)
     }
 
     /// Resolve a source path from its owning lexical module.  The package

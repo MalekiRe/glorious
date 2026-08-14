@@ -1059,6 +1059,7 @@ fn substitute_callable_signature(
 ) -> CallableSignature {
     CallableSignature {
         generics: 0,
+        generic_kinds: vec![],
         parameters: value
             .parameters
             .iter()
