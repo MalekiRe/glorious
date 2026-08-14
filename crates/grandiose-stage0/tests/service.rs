@@ -1,6 +1,6 @@
 use grandiose_stage0::{
     BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError, BootstrapLimits, BootstrapManifest,
-    BootstrapManifestError, BootstrapStage, CompilationMode, CompilationRequest,
+    BootstrapManifestError, BootstrapStage, CompilationMode, CompilationRequest, CompileDiagnostic,
     CompilerBuildIdentity, DiagnosticClass, Digest, LogicalPath, PackageKey, Severity, SourceInput,
     StageZeroCompiler, VmArtifactError, VmExecutionLimits, VmInstruction,
     decode_and_verify_program, decode_program,
@@ -185,6 +185,44 @@ fn service_failures_preserve_source_identity_classification_and_request_provenan
         "source diagnostic lost its span"
     );
     assert_eq!(diagnostic.input_fingerprint, Some(expected_world));
+}
+
+#[test]
+fn compile_diagnostic_canonicalization_is_stable_and_deduplicates_exact_facts() {
+    let request = request("pub fn main() -> i64 { missing_name }");
+    let file = request.sources[0].key;
+    let source = grandiose_stage0::SourceSpan {
+        file,
+        start: 12,
+        end: 24,
+    };
+    let duplicate = CompileDiagnostic {
+        code: "G4104",
+        message: "unresolved name `missing_name`".into(),
+        class: DiagnosticClass::Source,
+        severity: Severity::Error,
+        primary: Some(source),
+        input_fingerprint: Some(Digest::of_bytes(b"first-world")),
+    };
+    let same_code_different_location = CompileDiagnostic {
+        primary: Some(grandiose_stage0::SourceSpan {
+            start: 25,
+            end: 37,
+            ..source
+        }),
+        input_fingerprint: Some(Digest::of_bytes(b"second-world")),
+        ..duplicate.clone()
+    };
+
+    let diagnostics = CompileDiagnostic::canonicalize(vec![
+        same_code_different_location.clone(),
+        duplicate.clone(),
+        duplicate,
+    ]);
+
+    assert_eq!(diagnostics.len(), 2);
+    assert_eq!(diagnostics[0].primary, Some(source));
+    assert_eq!(diagnostics[1], same_code_different_location);
 }
 
 #[test]

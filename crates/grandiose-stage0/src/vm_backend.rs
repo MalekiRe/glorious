@@ -991,6 +991,17 @@ pub fn verify(artifact: CandidateVmArtifact) -> Result<VerifiedVmArtifact, VmArt
     if artifact.fingerprint != artifact.computed_fingerprint() {
         return Err(VmArtifactError::FingerprintMismatch);
     }
+    // A standalone artifact is executed by `VerifiedVmArtifact` through the
+    // zero-argument entrypoint. Parameterized functions belong in a verified
+    // program, whose caller supplies and verifies their argument values. Do
+    // not let a parameterized function cross this boundary: its initially
+    // readable verifier registers would otherwise be absent at runtime.
+    if artifact.function.parameters != 0 {
+        return Err(VmArtifactError::CallArity {
+            expected: artifact.function.parameters,
+            found: 0,
+        });
+    }
     verify_function(&artifact.function)?;
     Ok(VerifiedVmArtifact { artifact })
 }

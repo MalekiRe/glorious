@@ -68,6 +68,38 @@ impl CompileDiagnostic {
             input_fingerprint: None,
         }
     }
+
+    /// Canonicalize a diagnostic batch at the service boundary.  Individual
+    /// compiler phases deliberately retain local recovery behavior, so more
+    /// than one phase can independently report the same source fact.  The
+    /// published result must neither depend on phase traversal order nor make
+    /// clients render that fact repeatedly.
+    pub fn canonicalize(mut diagnostics: Vec<Self>) -> Vec<Self> {
+        diagnostics.sort_by(|left, right| left.stable_key().cmp(&right.stable_key()));
+        diagnostics.dedup_by(|left, right| left.stable_key() == right.stable_key());
+        diagnostics
+    }
+
+    fn stable_key(
+        &self,
+    ) -> (
+        &'static str,
+        DiagnosticClass,
+        Severity,
+        Option<SourceSpan>,
+        &str,
+    ) {
+        // Request provenance is attached after all phase-local diagnostics
+        // have been produced.  It identifies the outcome, not a distinct
+        // user-facing diagnostic fact, and is intentionally excluded here.
+        (
+            self.code,
+            self.class,
+            self.severity,
+            self.primary,
+            &self.message,
+        )
+    }
 }
 #[derive(Debug)]
 pub struct CompilationOutcome {
@@ -617,23 +649,7 @@ fn failed(input_fingerprint: Digest, mut diagnostics: Vec<CompileDiagnostic>) ->
     for diagnostic in &mut diagnostics {
         diagnostic.input_fingerprint = Some(input_fingerprint);
     }
-    diagnostics.sort_by(|left, right| {
-        (
-            left.code,
-            left.class,
-            left.severity,
-            left.primary,
-            &left.message,
-        )
-            .cmp(&(
-                right.code,
-                right.class,
-                right.severity,
-                right.primary,
-                &right.message,
-            ))
-    });
-    ServiceError::Failed(diagnostics)
+    ServiceError::Failed(CompileDiagnostic::canonicalize(diagnostics))
 }
 
 fn constant_cycle(

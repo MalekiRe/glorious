@@ -726,6 +726,31 @@ fn verifier_rejects_malformed_candidate_artifacts_before_execution() {
 }
 
 #[test]
+fn standalone_artifact_verifier_rejects_unbound_entry_parameters() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"parameterized-artifact")),
+            captures: 0,
+            parameters: 1,
+            registers: vec![VmType::I64],
+            instructions: vec![VmInstruction::Return { value: 0 }],
+        },
+        fingerprint: Digest::of_bytes(b"parameterized-artifact-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::CallArity {
+            expected: 1,
+            found: 0,
+        })
+    ));
+}
+
+#[test]
 fn verifier_rejects_type_confused_constants_before_execution() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
