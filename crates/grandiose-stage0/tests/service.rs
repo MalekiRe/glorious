@@ -2,7 +2,8 @@ use grandiose_stage0::{
     BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError, BootstrapLimits, BootstrapManifest,
     BootstrapManifestError, BootstrapStage, CompilationMode, CompilationRequest,
     CompilerBuildIdentity, DiagnosticClass, Digest, LogicalPath, PackageKey, Severity, SourceInput,
-    StageZeroCompiler, VmArtifactError, VmExecutionLimits, decode_and_verify_program,
+    StageZeroCompiler, VmArtifactError, VmExecutionLimits, VmInstruction,
+    decode_and_verify_program, decode_program,
 };
 use std::collections::BTreeMap;
 
@@ -800,6 +801,33 @@ fn service_forwards_a_nested_partial_one_shot_handler_through_vm_frames() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_forwards_through_an_arbitrary_depth_one_shot_handler_chain() {
+    let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle { handle { handle Ask::ask(40) { Ask::ask(0) with k => k(0) } } { Ask::ask(1) with k => k(1) } } { Ask::ask(2) with k => k(2) } } { Ask::ask(value) with k => k(value + 2) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .count(),
+        4
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::Forward))
+            .count(),
+        3
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
 }
 
 #[test]

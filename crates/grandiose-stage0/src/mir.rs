@@ -1022,6 +1022,32 @@ impl MirLowering {
             };
         }
         if let Some(function) =
+            lowerer.lower_root_runtime_deep_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = function.validate() {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) =
             lowerer.lower_root_runtime_nested_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -3045,6 +3071,241 @@ impl Lowerer<'_> {
                 instructions: vec![MirInstruction::Forward],
                 terminator: MirTerminator::Unreachable,
             });
+        }
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+    /// Lower an arbitrary lexical chain of three or more exact-one-shot
+    /// handlers around one direct performance. Each source handler remains a
+    /// real VM frame: a refutable arm runs its structural tests and explicitly
+    /// forwards the suspended operation to the next outer frame. This covers
+    /// deeper forwarding graphs without pretending that the continuation is a
+    /// direct value substitution. Setup expressions, multiple sibling arms,
+    /// completion clauses, and non-linear resumptions deliberately remain on
+    /// the more general lowering paths below.
+    fn lower_root_runtime_deep_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (mut current, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle { .. } => (root, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                matches!(self.body.expression(*handler).kind, CoreKind::Handle { .. })
+                    .then_some((*handler, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let mut layers = Vec::<CoreHandlerClause>::new();
+        while let CoreKind::Handle {
+            computation,
+            clauses,
+        } = self.body.expression(current).kind.clone()
+        {
+            // This direct-chain specialization has one operational arm per
+            // layer and no completion behavior to preserve. The ordinary
+            // lowering remains responsible for richer handler shapes.
+            if clauses.len() != 1 || clauses[0].terminal {
+                return None;
+            }
+            layers.push(clauses[0].clone());
+            current = match self.body.expression(computation).kind.clone() {
+                CoreKind::Handle { .. } => computation,
+                CoreKind::Block(values) if values.len() == 1 => values[0],
+                _ => computation,
+            };
+        }
+        if layers.len() < 3 {
+            return None;
+        }
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(current).kind.clone()
+        else {
+            return None;
+        };
+        for clause in &layers {
+            let quantity = match &clause.resumption {
+                CoreHandlerResumption::Explicit { quantity, .. }
+                | CoreHandlerResumption::Tail { quantity } => *quantity,
+                CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => {
+                    return None;
+                }
+            };
+            if quantity != crate::quantity::Quantity::ONCE
+                || clause.patterns.len() != clause.payload_types.len()
+            {
+                return None;
+            }
+        }
+
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        let resume_type = self.body.expression(current).ty.clone();
+        let payloads = layers
+            .iter()
+            .map(|clause| {
+                clause
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), current))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let tests = layers
+            .iter()
+            .zip(&payloads)
+            .map(|(clause, payloads)| {
+                if clause.patterns.iter().all(pattern_is_irrefutable) {
+                    return Some(Vec::new());
+                }
+                clause
+                    .patterns
+                    .iter()
+                    .cloned()
+                    .zip(payloads.iter().copied())
+                    .map(|(pattern, subject)| {
+                        Some((
+                            self.alloc(Type::Scalar(crate::types::ScalarType::Bool), current),
+                            subject,
+                            lower_pattern(pattern)?,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .collect::<Option<Vec<_>>>()?;
+
+        let body_blocks = (0..layers.len())
+            .map(|index| MirBlockId(index as u32 + 1))
+            .collect::<Vec<_>>();
+        let mut next_block = body_blocks.len() as u32 + 1;
+        let test_blocks = tests
+            .iter()
+            .map(|tests| {
+                (0..tests.len())
+                    .map(|_| {
+                        let block = MirBlockId(next_block);
+                        next_block += 1;
+                        block
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let forward_blocks = tests
+            .iter()
+            .map(|tests| {
+                (!tests.is_empty()).then(|| {
+                    let block = MirBlockId(next_block);
+                    next_block += 1;
+                    block
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (((clause, payloads), tests), body) in layers
+            .iter()
+            .zip(&payloads)
+            .zip(&test_blocks)
+            .zip(&body_blocks)
+        {
+            entry.push(MirInstruction::InstallHandler {
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads.clone(),
+                resume_type: resume_type.clone(),
+                target: tests.first().copied().unwrap_or(*body),
+            });
+        }
+        let result = self.alloc(resume_type, current);
+        entry.push(MirInstruction::Perform {
+            dst: result,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        for _ in &layers {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+
+        let base_named = self.named.clone();
+        let base_values = self.values.clone();
+        let mut bodies = Vec::with_capacity(layers.len());
+        for (clause, payloads) in layers.iter().zip(&payloads) {
+            self.instructions = Vec::new();
+            self.named = base_named.clone();
+            self.values = base_values.clone();
+            self.bind_handler_patterns(&clause.patterns, payloads)?;
+            let resumed = self.direct_handler_clause_value(clause)?;
+            self.instructions
+                .push(MirInstruction::Resume { value: resumed });
+            bodies.push(std::mem::take(&mut self.instructions));
+        }
+        self.named = base_named;
+        self.values = base_values;
+
+        let mut blocks = vec![MirBlock {
+            parameters: vec![],
+            instructions: entry,
+            terminator: MirTerminator::Return { value: result },
+        }];
+        for instructions in bodies {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions,
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        for (layer_index, (tests, test_block_ids)) in tests.into_iter().zip(test_blocks).enumerate()
+        {
+            for (index, (condition, subject, pattern)) in tests.into_iter().enumerate() {
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: condition,
+                        subject,
+                        pattern,
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: test_block_ids
+                            .get(index + 1)
+                            .copied()
+                            .unwrap_or(body_blocks[layer_index]),
+                        then_arguments: vec![],
+                        else_target: forward_blocks[layer_index]
+                            .expect("refutable handler has a forward block"),
+                        else_arguments: vec![],
+                    },
+                });
+            }
+        }
+        for forward in forward_blocks {
+            if forward.is_some() {
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::Forward],
+                    terminator: MirTerminator::Unreachable,
+                });
+            }
         }
         Some(MirFunction {
             definition: self.definition,
