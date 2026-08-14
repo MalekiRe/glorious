@@ -54,14 +54,15 @@ pub struct HandlerClause {
     /// is a normal-completion pattern unless it resolves as an operation.
     pub operation_candidate: bool,
     pub path: Vec<String>,
-    /// Type arguments on the protocol portion of `Protocol<Args>::operation`.
-    /// Protocol arguments establish the nominal effect-instance identity.
-    pub effect_arguments: Vec<HeaderType>,
-    /// Type arguments applied to the operation itself, after its final path
-    /// segment: `Effect::operation<T>(...)`. These are distinct from the
-    /// protocol arguments above, since only protocol arguments contribute to
-    /// the nominal runtime effect-instance identity.
-    pub operation_arguments: Vec<HeaderType>,
+    /// Explicit generic arguments on the protocol portion of
+    /// `Protocol<Args>::operation`. Protocol arguments establish the nominal
+    /// effect-instance identity and retain their source kind until resolution.
+    pub effect_arguments: Vec<HeaderGenericArgument>,
+    /// Explicit generic arguments applied to the operation itself, after its
+    /// final path segment: `Effect::operation<Args>(...)`. These are distinct
+    /// from the protocol arguments above, since only protocol arguments
+    /// contribute to the nominal runtime effect-instance identity.
+    pub operation_arguments: Vec<HeaderGenericArgument>,
     pub patterns: Vec<PatternId>,
     pub resumption: Option<String>,
     /// The final unified arm pattern was `_`, spelling a discarded
@@ -75,17 +76,17 @@ pub struct HandlerClause {
 pub enum ExprKind {
     Literal(String),
     Path(Vec<String>),
-    /// A path with explicit source type arguments. Namespace resolution owns
-    /// whether it denotes an effect protocol, nominal constructor, or another
-    /// generic entity; the parser must not guess from its spelling.
+    /// A path with explicit source generic arguments. Namespace resolution
+    /// owns whether it denotes an effect protocol, nominal constructor, or
+    /// another generic entity; the parser must not guess from its spelling.
     GenericPath {
         path: Vec<String>,
-        /// Type arguments applied to the leading protocol or trait path,
-        /// before `::`: `Effect<T>::operation`.
-        effect_arguments: Vec<HeaderType>,
-        /// Type arguments applied to the final operation or method path,
-        /// after `::`: `Effect::operation<T>`.
-        operation_arguments: Vec<HeaderType>,
+        /// Generic arguments applied to the leading protocol or trait path,
+        /// before `::`: `Effect<Args>::operation`.
+        effect_arguments: Vec<HeaderGenericArgument>,
+        /// Generic arguments applied to the final operation or method path,
+        /// after `::`: `Effect::operation<Args>`.
+        operation_arguments: Vec<HeaderGenericArgument>,
     },
     Tuple(Vec<ExprId>),
     /// Finite machine-array construction. Its element type is inferred by
@@ -699,31 +700,26 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_effect_path(&mut self) -> Option<(Vec<String>, Vec<HeaderType>, Vec<HeaderType>)> {
+    fn parse_effect_path(
+        &mut self,
+    ) -> Option<(
+        Vec<String>,
+        Vec<HeaderGenericArgument>,
+        Vec<HeaderGenericArgument>,
+    )> {
         let first = self.expect_identifier()?;
-        let mut effect_arguments = vec![];
-        if self.generic_path_ahead() {
-            self.position += 1;
-            while !self.at_operator(">") && self.current().is_some() {
-                effect_arguments.push(self.closure_type()?);
-                if !self.at_punctuation(',') {
-                    break;
-                }
-                self.position += 1;
-            }
-            if !self.at_operator(">") {
-                self.error_current("G4026", "expected `>` in handler effect application");
-                return None;
-            }
-            self.position += 1;
-        }
+        let effect_arguments = if self.generic_path_ahead() {
+            self.parse_generic_arguments("G4026", "expected `>` in handler effect application")?
+        } else {
+            vec![]
+        };
         let mut path = vec![first];
         while self.at_punctuation(':') && self.peek_punctuation(1, ':') {
             self.position += 2;
             path.push(self.expect_identifier()?);
         }
         let operation_arguments = if path.len() > 1 && self.operation_generic_ahead() {
-            self.parse_type_arguments("G4026", "expected `>` in handler operation application")?
+            self.parse_generic_arguments("G4026", "expected `>` in handler operation application")?
         } else {
             vec![]
         };
@@ -810,18 +806,40 @@ impl Parser<'_> {
         false
     }
 
-    fn parse_type_arguments(
+    fn parse_generic_arguments(
         &mut self,
         code: &'static str,
         missing_message: &'static str,
-    ) -> Option<Vec<HeaderType>> {
+    ) -> Option<Vec<HeaderGenericArgument>> {
         if !self.at_operator("<") {
             return Some(vec![]);
         }
         self.position += 1;
         let mut arguments = vec![];
         while !self.at_operator(">") && self.current().is_some() {
-            arguments.push(self.closure_type()?);
+            if self.at_punctuation('{') {
+                arguments.push(HeaderGenericArgument::EffectRow(
+                    self.closure_effect_row_literal(code)?,
+                ));
+            } else if self.word().is_some_and(|name| name.starts_with('\'')) {
+                arguments.push(HeaderGenericArgument::Lifetime(self.expect_identifier()?));
+            } else if self.at_punctuation('[') {
+                arguments.push(HeaderGenericArgument::Quantity(
+                    self.closure_structural_quantity_argument()?,
+                ));
+            } else if let Some(index) = self.current()
+                && self.lexed.tokens[index].kind == TokenKind::Integer
+            {
+                match u32::try_from(self.closure_structural_integer_expression()) {
+                    Ok(value) => arguments.push(HeaderGenericArgument::U32(value)),
+                    Err(_) => {
+                        self.error_current(code, "structural u32 generic argument is out of range");
+                        return None;
+                    }
+                }
+            } else {
+                arguments.push(HeaderGenericArgument::Type(self.closure_type()?));
+            }
             if !self.at_punctuation(',') {
                 break;
             }
@@ -878,15 +896,15 @@ impl Parser<'_> {
                 let mut path = vec![self.text(index).to_owned()];
                 let mut effect_arguments = vec![];
                 if self.generic_path_ahead() {
-                    effect_arguments =
-                        self.parse_type_arguments("G4026", "expected `>` in effect application")?;
+                    effect_arguments = self
+                        .parse_generic_arguments("G4026", "expected `>` in effect application")?;
                 }
                 while self.at_punctuation(':') && self.peek_punctuation(1, ':') {
                     self.position += 2;
                     path.push(self.expect_identifier()?);
                 }
                 let operation_arguments = if path.len() > 1 && self.operation_generic_ahead() {
-                    self.parse_type_arguments("G4026", "expected `>` in operation application")?
+                    self.parse_generic_arguments("G4026", "expected `>` in operation application")?
                 } else {
                     vec![]
                 };
@@ -1214,43 +1232,41 @@ impl Parser<'_> {
     }
 
     fn closure_type_arguments(&mut self) -> Option<Vec<HeaderGenericArgument>> {
-        if !self.at_operator("<") {
-            return Some(vec![]);
-        }
-        self.position += 1;
-        let mut arguments = vec![];
-        while !self.at_operator(">") && self.current().is_some() {
-            if self.at_punctuation('[') {
-                arguments.push(HeaderGenericArgument::Quantity(
-                    self.closure_structural_quantity_argument()?,
-                ));
-            } else if let Some(index) = self.current()
-                && self.lexed.tokens[index].kind == TokenKind::Integer
-            {
-                match u32::try_from(self.closure_structural_integer_expression()) {
-                    Ok(value) => arguments.push(HeaderGenericArgument::U32(value)),
-                    Err(_) => {
-                        self.error_current(
-                            "G4009",
-                            "structural u32 generic argument is out of range",
-                        );
-                        return None;
-                    }
-                }
-            } else {
-                arguments.push(HeaderGenericArgument::Type(self.closure_type()?));
+        self.parse_generic_arguments("G4009", "expected `>` in closure type application")
+    }
+
+    /// Parse the row-literal form of an explicit `EffectRow` argument.  This
+    /// intentionally shares the body type parser with typed closures, so a
+    /// nested effect application retains every generic slot rather than being
+    /// prematurely reduced to a path-shaped type.
+    fn closure_effect_row_literal(&mut self, code: &'static str) -> Option<EffectRowHeader> {
+        self.expect_punctuation('{')?;
+        let mut effects = vec![];
+        let mut tail = None;
+        while !self.at_punctuation('}') && self.current().is_some() {
+            if self.at_operator("|") {
+                self.position += 1;
+                tail = Some(self.expect_identifier()?);
+                break;
+            }
+            effects.push(self.closure_type()?);
+            if self.at_operator("|") {
+                continue;
             }
             if !self.at_punctuation(',') {
+                if !self.at_punctuation('}') {
+                    self.error_current(code, "expected `,` between effect-row members");
+                    return None;
+                }
                 break;
             }
             self.position += 1;
         }
-        if !self.at_operator(">") {
-            self.error_current("G4009", "expected `>` in closure type application");
+        if self.expect_punctuation('}').is_none() {
+            self.error_current(code, "expected `}` after effect-row argument");
             return None;
         }
-        self.position += 1;
-        Some(arguments)
+        Some(EffectRowHeader { effects, tail })
     }
 
     fn closure_structural_quantity_argument(&mut self) -> Option<Quantity> {

@@ -1999,14 +1999,6 @@ impl Elaborator<'_> {
                         effect_arguments,
                         operation_arguments,
                     } => {
-                        let effect_arguments = effect_arguments
-                            .iter()
-                            .map(|argument| self.header_type(argument))
-                            .collect::<Vec<_>>();
-                        let operation_arguments = operation_arguments
-                            .iter()
-                            .map(|argument| self.header_type(argument))
-                            .collect::<Vec<_>>();
                         if let Some(value) = self.trait_method_call(
                             path.clone(),
                             effect_arguments.clone(),
@@ -2018,8 +2010,8 @@ impl Elaborator<'_> {
                         }
                         if let Some(value) = self.perform(
                             path.clone(),
-                            effect_arguments,
-                            operation_arguments,
+                            effect_arguments.clone(),
+                            operation_arguments.clone(),
                             arguments.clone(),
                             expression.span,
                         ) {
@@ -2622,6 +2614,88 @@ impl Elaborator<'_> {
                 })
                 .collect(),
         )
+    }
+
+    /// Elaborate body-local explicit generic arguments only after resolving
+    /// the callee declaration's slot kinds.  Unlike the legacy header helper
+    /// above, this retains a row, lifetime, or structural value as its own
+    /// `GenericArgument` all the way to the instantiation contract boundary.
+    fn body_generic_arguments(
+        &mut self,
+        arguments: &[crate::header::HeaderGenericArgument],
+        kinds: &[crate::GenericKind],
+        span: Span,
+        code: &'static str,
+        arity_message: &'static str,
+    ) -> Option<Vec<GenericArgument>> {
+        if arguments.len() != kinds.len() {
+            self.error(span, code, arity_message);
+            self.recovered = true;
+            return None;
+        }
+        Some(
+            arguments
+                .iter()
+                .zip(kinds)
+                .map(|(argument, kind)| match (argument, kind) {
+                    (
+                        crate::header::HeaderGenericArgument::Type(
+                            crate::header::HeaderType::Path(path),
+                        ),
+                        crate::GenericKind::Const(expected),
+                    ) if path.len() == 1 => {
+                        let parameter = self
+                            .const_parameters
+                            .get(&path[0])
+                            .copied()
+                            .filter(|(_, found)| found == expected);
+                        match parameter {
+                            Some((index, kind)) => GenericArgument::ConstGeneric { index, kind },
+                            None => GenericArgument::Type(
+                                self.header_type(&crate::header::HeaderType::Path(path.clone())),
+                            ),
+                        }
+                    }
+                    (crate::header::HeaderGenericArgument::Type(value), _) => {
+                        GenericArgument::Type(self.header_type(value))
+                    }
+                    (crate::header::HeaderGenericArgument::Lifetime(value), _) => {
+                        GenericArgument::Lifetime(self.header_lifetime(Some(value)))
+                    }
+                    (crate::header::HeaderGenericArgument::EffectRow(value), _) => {
+                        GenericArgument::EffectRow(self.closure_effects(value, span))
+                    }
+                    (crate::header::HeaderGenericArgument::U32(value), _) => {
+                        GenericArgument::ConstU32(*value)
+                    }
+                    (crate::header::HeaderGenericArgument::Quantity(value), _) => {
+                        GenericArgument::ConstQuantity(*value)
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// Existing callable and effect-operation signature substitution is
+    /// deliberately type-valued. Keep that boundary explicit instead of
+    /// coercing a well-kinded source row, lifetime, or const into `Type::Error`.
+    fn generic_arguments_as_types(
+        &mut self,
+        arguments: Vec<GenericArgument>,
+        span: Span,
+        code: &'static str,
+        message: &'static str,
+    ) -> Option<Vec<Type>> {
+        let mut values = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            let GenericArgument::Type(value) = argument else {
+                self.error(span, code, message);
+                self.recovered = true;
+                return None;
+            };
+            values.push(value);
+        }
+        Some(values)
     }
     fn header_path(
         &mut self,
@@ -4261,8 +4335,8 @@ impl Elaborator<'_> {
     fn trait_method_call(
         &mut self,
         path: Vec<String>,
-        trait_arguments: Vec<Type>,
-        operation_arguments: Vec<Type>,
+        trait_arguments: Vec<crate::header::HeaderGenericArgument>,
+        operation_arguments: Vec<crate::header::HeaderGenericArgument>,
         supplied: Vec<ExprId>,
         span: Span,
     ) -> Option<CoreId> {
@@ -4287,13 +4361,19 @@ impl Elaborator<'_> {
                 "qualified method path does not name a frozen trait",
             ));
         };
-        if trait_arguments.len() != trait_header.generics as usize {
-            return Some(self.fail(
-                span,
-                "G4168",
-                "trait method qualification has the wrong number of trait arguments",
-            ));
-        }
+        let trait_arguments = self.body_generic_arguments(
+            &trait_arguments,
+            &trait_header.generic_kinds,
+            span,
+            "G4168",
+            "trait method qualification generic arguments do not match its declaration",
+        )?;
+        let trait_arguments = self.generic_arguments_as_types(
+            trait_arguments,
+            span,
+            "G4168",
+            "qualified trait methods require type-valued trait arguments",
+        )?;
         let Some(method_header) = trait_header.methods.get(name) else {
             return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
         };
@@ -4321,7 +4401,19 @@ impl Elaborator<'_> {
                     "trait method operation arguments do not match its declaration",
                 ));
             }
-            operation_arguments
+            let arguments = self.body_generic_arguments(
+                &operation_arguments,
+                &vec![crate::GenericKind::Type; method_header.generics as usize],
+                span,
+                "G4168",
+                "trait method operation arguments do not match its declaration",
+            )?;
+            self.generic_arguments_as_types(
+                arguments,
+                span,
+                "G4168",
+                "qualified trait methods require type-valued operation arguments",
+            )?
         };
         let trait_arguments = trait_arguments
             .into_iter()
@@ -4420,8 +4512,8 @@ impl Elaborator<'_> {
     fn perform(
         &mut self,
         path: Vec<String>,
-        effect_arguments: Vec<Type>,
-        operation_arguments: Vec<Type>,
+        effect_arguments: Vec<crate::header::HeaderGenericArgument>,
+        operation_arguments: Vec<crate::header::HeaderGenericArgument>,
         arguments: Vec<ExprId>,
         span: Span,
     ) -> Option<CoreId> {
@@ -4448,34 +4540,49 @@ impl Elaborator<'_> {
                 "resolved effect has no frozen operation table",
             ));
         };
-        if effect.generics as usize != effect_arguments.len() {
-            return Some(self.fail(
-                span,
-                "G4151",
-                "effect operation protocol arguments do not match its declaration",
-            ));
-        }
-        let operation_arguments =
-            match self.operation_generic_arguments(effect, operation_name, operation_arguments) {
-                Some(arguments) => arguments,
-                None => {
-                    return Some(self.fail(
-                        span,
-                        "G4152",
-                        "effect does not declare the requested operation",
-                    ));
-                }
-            };
-        let Some((operation_index, operation)) = self.signatures.instantiate_effect_operation(
-            effect_definition,
+        let effect_arguments = match self.body_generic_arguments(
             &effect_arguments,
-            &operation_arguments,
+            &effect.generic_kinds,
+            span,
+            "G4151",
+            "effect operation protocol arguments do not match its declaration",
+        ) {
+            Some(arguments) => arguments,
+            None => {
+                return Some(self.fail(
+                    span,
+                    "G4151",
+                    "effect operation protocol arguments do not match its declaration",
+                ));
+            }
+        };
+        let operation_arguments = match self.operation_generic_arguments(
+            effect,
             operation_name,
-        ) else {
+            &operation_arguments,
+            span,
+        ) {
+            Some(arguments) => arguments,
+            None => {
+                return Some(self.fail(
+                    span,
+                    "G4152",
+                    "effect does not declare the requested operation",
+                ));
+            }
+        };
+        let Ok((operation_index, operation)) =
+            self.signatures.instantiate_effect_operation_generic(
+                effect_definition,
+                &effect_arguments,
+                &operation_arguments,
+                operation_name,
+            )
+        else {
             return Some(self.fail(
                 span,
                 "G4152",
-                "effect operation arguments do not match its declaration",
+                "effect operation generic arguments do not satisfy its declaration contract",
             ));
         };
         if operation.parameters.len() != arguments.len() {
@@ -4507,10 +4614,7 @@ impl Elaborator<'_> {
             .collect::<Vec<_>>();
         let instance = EffectInstance {
             definition: effect_definition,
-            arguments: effect_arguments
-                .into_iter()
-                .map(GenericArgument::Type)
-                .collect(),
+            arguments: effect_arguments,
         };
         self.check_effect_instance(&instance, Some(operation_index), span);
         Some(self.alloc(
@@ -4531,17 +4635,28 @@ impl Elaborator<'_> {
         &mut self,
         effect: &ElaboratedEffect,
         name: &str,
-        supplied: Vec<Type>,
-    ) -> Option<Vec<Type>> {
+        supplied: &[crate::header::HeaderGenericArgument],
+        span: Span,
+    ) -> Option<Vec<GenericArgument>> {
         let operation = effect
             .operations
             .iter()
             .find(|operation| operation.name == name)?;
         let count = operation.generics.checked_sub(effect.generics)? as usize;
         if supplied.is_empty() && count != 0 {
-            return Some((0..count).map(|_| self.inference.fresh()).collect());
+            return Some(
+                (0..count)
+                    .map(|_| GenericArgument::Type(self.inference.fresh()))
+                    .collect(),
+            );
         }
-        (supplied.len() == count).then_some(supplied)
+        self.body_generic_arguments(
+            supplied,
+            &vec![crate::GenericKind::Type; count],
+            span,
+            "G4152",
+            "effect operation arguments do not match its declaration",
+        )
     }
     fn handle(&mut self, computation: ExprId, clauses: Vec<HandlerClause>, span: Span) -> CoreId {
         // With no operation or completion arm, the standard completion arm is
@@ -5254,28 +5369,21 @@ impl Elaborator<'_> {
             self.recovered = true;
             return ResolvedHandlerClause::error(source);
         };
-        let effect_arguments = source
-            .effect_arguments
-            .iter()
-            .map(|argument| self.header_type(argument))
-            .collect::<Vec<_>>();
-        let operation_arguments = source
-            .operation_arguments
-            .iter()
-            .map(|argument| self.header_type(argument))
-            .collect::<Vec<_>>();
-        if declaration.generics as usize != effect_arguments.len() {
-            self.error(
-                source.span,
-                "G4163",
-                "handler effect arguments do not match its declaration",
-            );
-            self.recovered = true;
+        let Some(effect_arguments) = self.body_generic_arguments(
+            &source.effect_arguments,
+            &declaration.generic_kinds,
+            source.span,
+            "G4163",
+            "handler effect arguments do not match its declaration",
+        ) else {
             return ResolvedHandlerClause::error(source);
-        }
-        let Some(operation_arguments) =
-            self.operation_generic_arguments(declaration, operation_name, operation_arguments)
-        else {
+        };
+        let Some(operation_arguments) = self.operation_generic_arguments(
+            declaration,
+            operation_name,
+            &source.operation_arguments,
+            source.span,
+        ) else {
             self.error(
                 source.span,
                 "G4162",
@@ -5284,12 +5392,14 @@ impl Elaborator<'_> {
             self.recovered = true;
             return ResolvedHandlerClause::error(source);
         };
-        let Some((operation_index, operation)) = self.signatures.instantiate_effect_operation(
-            effect,
-            &effect_arguments,
-            &operation_arguments,
-            operation_name,
-        ) else {
+        let Ok((operation_index, operation)) =
+            self.signatures.instantiate_effect_operation_generic(
+                effect,
+                &effect_arguments,
+                &operation_arguments,
+                operation_name,
+            )
+        else {
             self.error(
                 source.span,
                 "G4162",
@@ -5372,10 +5482,7 @@ impl Elaborator<'_> {
             source,
             effect: EffectInstance {
                 definition: effect,
-                arguments: effect_arguments
-                    .into_iter()
-                    .map(GenericArgument::Type)
-                    .collect(),
+                arguments: effect_arguments,
             },
             operation_index,
             operation,

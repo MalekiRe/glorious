@@ -2227,6 +2227,21 @@ fn handler_effect_application_arity_is_diagnosed_as_an_operation_arm() {
 }
 
 #[test]
+fn effect_operation_generic_kind_mismatches_reach_the_contract_boundary() {
+    let core = core_for(
+        "core-effect-generic-kind@0.1.0",
+        "effect State<T> { get() -> T; } pub fn main() -> i64 { State<'static>::get() }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4152"),
+        "lifetime syntax was not preserved to effect generic-contract checking: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn placeflow_joins_handler_arms_conservatively_after_dynamic_selection() {
     let package = PackageKey("core-handler-flow@0.1.0".into());
     let source = "effect Console { read() -> i64; } pub fn main() -> i64 { let value = 7; handle Console::read() { Console::read() => move value, Console::read() => 0 }; value }";

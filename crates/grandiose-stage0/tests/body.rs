@@ -1,6 +1,6 @@
 use grandiose_stage0::{
-    BodySyntax, DeclarationScan, ExprKind, FileKey, LexedFile, LogicalPath, PackageKey,
-    PatternKind, TokenRange,
+    BodySyntax, DeclarationScan, ExprKind, FileKey, HeaderGenericArgument, LexedFile, LogicalPath,
+    PackageKey, PatternKind, TokenRange,
 };
 
 fn parse(source: &str) -> BodySyntax {
@@ -271,6 +271,51 @@ fn body_parser_keeps_operation_generic_arguments_separate_from_effect_arguments(
     ));
     assert_eq!(clauses[0].effect_arguments.len(), 1);
     assert_eq!(clauses[0].operation_arguments.len(), 1);
+}
+
+#[test]
+fn body_parser_preserves_all_explicit_generic_argument_kinds_on_effect_paths() {
+    let source = "{ handle perform Ask<'static, {Trace | Tail}, 7, [1, 2]>::ask<'_, {Log}, 3, [0, *]>(value) { Ask<'static, {Trace | Tail}, 7, [1, 2]>::ask<'_, {Log}, 3, [0, *]>(value) => value } }";
+    let body = parse(source);
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected outer block")
+    };
+    let ExprKind::Handle {
+        computation,
+        clauses,
+    } = &body.expression(values[0]).kind
+    else {
+        panic!("expected handler")
+    };
+    let ExprKind::Call { callee, .. } = &body.expression(*computation).kind else {
+        panic!("expected effect operation call")
+    };
+    let ExprKind::GenericPath {
+        effect_arguments,
+        operation_arguments,
+        ..
+    } = &body.expression(*callee).kind
+    else {
+        panic!("expected generic effect operation path")
+    };
+
+    assert!(matches!(effect_arguments.as_slice(), [
+        HeaderGenericArgument::Lifetime(name),
+        HeaderGenericArgument::EffectRow(row),
+        HeaderGenericArgument::U32(7),
+        HeaderGenericArgument::Quantity(quantity),
+    ] if name == "'static" && row.effects.len() == 1 && row.tail.as_deref() == Some("Tail")
+        && *quantity == grandiose_stage0::Quantity::new(1, Some(2)).unwrap()));
+    assert!(matches!(operation_arguments.as_slice(), [
+        HeaderGenericArgument::Lifetime(name),
+        HeaderGenericArgument::EffectRow(row),
+        HeaderGenericArgument::U32(3),
+        HeaderGenericArgument::Quantity(quantity),
+    ] if name == "'_" && row.effects.len() == 1 && row.tail.is_none()
+        && *quantity == grandiose_stage0::Quantity::new(0, None).unwrap()));
+    assert_eq!(clauses[0].effect_arguments, *effect_arguments);
+    assert_eq!(clauses[0].operation_arguments, *operation_arguments);
 }
 
 #[test]
