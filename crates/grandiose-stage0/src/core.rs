@@ -10799,7 +10799,10 @@ fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bo
     reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves).is_err() || !leaves.is_empty()
 }
 
-fn instantiate_nominal_field_type(ty: &Type, arguments: &[GenericArgument]) -> Result<Type, ()> {
+pub(crate) fn instantiate_nominal_field_type(
+    ty: &Type,
+    arguments: &[GenericArgument],
+) -> Result<Type, ()> {
     match ty {
         Type::Generic(index) => match arguments.get(*index as usize) {
             Some(GenericArgument::Type(ty)) => Ok(ty.clone()),

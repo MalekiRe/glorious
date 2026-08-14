@@ -4430,6 +4430,54 @@ fn service_rejects_discarding_a_projected_aggregate_parameter_callable() {
 }
 
 #[test]
+fn service_rejects_dropping_an_unprojected_nominal_callable_parameter() {
+    let source = "pub struct CallbackBox { callback: (i64) -> i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn discard(box: CallbackBox) -> i64 { 0 } pub fn main() -> i64 { discard(CallbackBox { callback: add_one }) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("discarding a whole exact-callback struct parameter unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing whole-nominal callable lower-bound diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_tracks_generic_nominal_callable_fields_through_closure_execution() {
+    let source = "pub struct CallbackBox<T> { callback: T } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn invoke(box: CallbackBox<(i64) -> i64>) -> i64 { let call = (value: i64) -> i64 { box.callback(value) }; call(41) } pub fn main() -> i64 { invoke(CallbackBox { callback: add_one }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_checks_nominal_callable_payloads_at_handler_arm_boundaries() {
+    let source = "pub struct CallbackBox { callback: (i64) -> i64 } effect Invoke { invoke(box: CallbackBox) -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn main() -> i64 { handle Invoke::invoke(CallbackBox { callback: add_one }) { Invoke::invoke(box) => 0 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("handler arm dropped an exact callback nested in its payload struct");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing handler nominal-payload lower-bound diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_executes_nominal_callable_payloads_captured_by_handler_closures() {
+    let source = "pub struct CallbackBox { callback: (i64) -> i64 } effect Invoke { invoke(box: CallbackBox) -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn main() -> i64 { handle Invoke::invoke(CallbackBox { callback: add_one }) { Invoke::invoke(box) => { let relay = (value: i64) -> i64 { box.callback(value) }; relay(41) } } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_overwriting_a_projected_aggregate_parameter_callable() {
     let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replace(pair: Pair) -> i64 { pair.function = (value: i64) -> i64 { value }; 0 } pub fn main() -> i64 { replace(Pair { function: add_one, value: 0 }) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

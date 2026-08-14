@@ -10,10 +10,11 @@
 use crate::{
     core::{
         CallableId, CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
-        CorePlace, TypedBody,
+        CorePlace, TypedBody, instantiate_nominal_field_type,
     },
     placeflow::{FlowEventKind, MoveFact, PlaceFlow, strict_expression_abrupt},
     quantity::{Quantity, QuantityError},
+    signature::{ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout},
     source::Span,
     types::Type,
 };
@@ -102,12 +103,33 @@ impl UseFlow {
     /// a valid witness for a quantitative callable contract, and reporting a
     /// second use error for it would be misleading.
     pub fn analyze(body: &TypedBody, ownership: &PlaceFlow) -> Self {
+        Self::analyze_with_optional_interface(body, ownership, None)
+    }
+
+    /// Analyze a source body with the frozen nominal layouts that define its
+    /// aggregate ownership.  The layout is an explicit semantic input: a
+    /// callable field in a struct parameter is an owned capability even when
+    /// its body never happens to project that field.
+    pub fn analyze_with_interface(
+        body: &TypedBody,
+        ownership: &PlaceFlow,
+        signatures: &ElaboratedInterface,
+    ) -> Self {
+        Self::analyze_with_optional_interface(body, ownership, Some(signatures))
+    }
+
+    fn analyze_with_optional_interface(
+        body: &TypedBody,
+        ownership: &PlaceFlow,
+        signatures: Option<&ElaboratedInterface>,
+    ) -> Self {
         if !ownership.diagnostics.is_empty() {
             return Self::default();
         }
         let mut analyzer = Analyzer {
             body,
             ownership,
+            signatures,
             next_key: 0,
             contracts: BTreeMap::new(),
             facts: BTreeMap::new(),
@@ -407,6 +429,7 @@ struct Environment {
 struct Analyzer<'a> {
     body: &'a TypedBody,
     ownership: &'a PlaceFlow,
+    signatures: Option<&'a ElaboratedInterface>,
     next_key: u32,
     contracts: BTreeMap<ContractKey, Contract>,
     facts: BTreeMap<ContractKey, Quantity>,
@@ -1117,8 +1140,49 @@ impl Analyzer<'_> {
                     })
                     .collect(),
             ),
+            Type::Nominal {
+                definition,
+                arguments,
+            } => self.nominal_struct_binding(name, *definition, arguments, span),
             _ => Binding::Other,
         }
+    }
+
+    /// Struct fields are stable owned projections, unlike enum payloads whose
+    /// active variant is not known at a parameter boundary.  Decompose only
+    /// the former here; enum and opaque nominal capability ownership remains
+    /// conservatively opaque until it gains a variant-sensitive owner model.
+    fn nominal_struct_binding(
+        &mut self,
+        name: &str,
+        definition: crate::DefKey,
+        arguments: &[crate::GenericArgument],
+        span: Span,
+    ) -> Binding {
+        let Some(ElaboratedHeader::Nominal {
+            layout: ElaboratedNominalLayout::Struct(fields),
+            ..
+        }) = self
+            .signatures
+            .and_then(|signatures| signatures.definitions.get(&definition))
+        else {
+            return Binding::Other;
+        };
+        let mut bindings = BTreeMap::new();
+        for (index, field) in fields.iter().enumerate() {
+            let Ok(field_type) = instantiate_nominal_field_type(&field.ty, arguments) else {
+                // Frozen signature validation normally makes this impossible.
+                // Do not invent a partially decomposed owner for malformed
+                // imported Core; its structural validator remains the
+                // authoritative fail-closed boundary.
+                return Binding::Other;
+            };
+            bindings.insert(
+                index as u32,
+                self.binding_for_type(&format!("{name}.{index}"), &field_type, span),
+            );
+        }
+        Binding::Aggregate(bindings)
     }
 
     /// Install the bindings introduced by one conditionally selected arm and

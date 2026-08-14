@@ -1264,7 +1264,7 @@ impl StageZeroCompiler {
                         Some(diagnostic.span),
                     )
                 }));
-                let uses = UseFlow::analyze(&core, &flow);
+                let uses = UseFlow::analyze_with_interface(&core, &flow, &signatures);
                 diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| {
                     CompileDiagnostic::source(
                         diagnostic.code,
@@ -1415,7 +1415,7 @@ impl StageZeroCompiler {
                             Some(diagnostic.span),
                         )
                     }));
-                    let uses = UseFlow::analyze(&core, &flow);
+                    let uses = UseFlow::analyze_with_interface(&core, &flow, &signatures);
                     diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(
                             diagnostic.code,
