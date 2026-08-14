@@ -1064,6 +1064,51 @@ fn vm_lowers_typed_cfg_edge_arguments_through_parallel_copies() {
 }
 
 #[test]
+fn vm_omits_identity_cfg_edge_transfers() {
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let mir = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-identity-edge")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![MirLocalDecl {
+            ty: i64_ty.clone(),
+            source: CoreId(u32::MAX),
+        }],
+        result: i64_ty,
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 42,
+                }],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![MirLocal(0)],
+                },
+            },
+            MirBlock {
+                parameters: vec![MirLocal(0)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(0) },
+            },
+        ],
+    };
+    let candidate = emit_vm(&mir).unwrap();
+    assert_eq!(candidate.function.instructions.len(), 3);
+    assert!(matches!(
+        candidate.function.instructions.as_slice(),
+        [
+            VmInstruction::ConstI64 { value: 42, .. },
+            VmInstruction::Jump { .. },
+            VmInstruction::Return { .. },
+        ]
+    ));
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn verifier_rejects_branch_targets_outside_the_instruction_stream() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,

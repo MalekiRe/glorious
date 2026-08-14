@@ -838,12 +838,19 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
         starts.push(next);
         let control_len = match &block.terminator {
             MirTerminator::Return { .. } => 1,
-            MirTerminator::Goto { arguments, .. } => edge_length(arguments),
+            MirTerminator::Goto { target, arguments } => {
+                edge_length(arguments, &function.blocks[target.0 as usize])
+            }
             MirTerminator::SwitchBool {
+                then_target,
                 then_arguments,
+                else_target,
                 else_arguments,
                 ..
-            } => 1 + edge_length(then_arguments) + edge_length(else_arguments),
+            } => {
+                1 + edge_length(then_arguments, &function.blocks[then_target.0 as usize])
+                    + edge_length(else_arguments, &function.blocks[else_target.0 as usize])
+            }
             MirTerminator::Unreachable => 1,
         };
         next = next
@@ -888,7 +895,8 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
                     .get(else_target.0 as usize)
                     .ok_or(VmArtifactError::UnsupportedControlFlow)?;
                 let then_edge = instructions.len() as u32 + 1;
-                let else_edge = then_edge + edge_length(then_arguments);
+                let else_edge = then_edge
+                    + edge_length(then_arguments, &function.blocks[then_target.0 as usize]);
                 instructions.push(VmInstruction::BranchBool {
                     condition: condition.0,
                     then_target: then_edge,
@@ -926,8 +934,13 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
         function,
     })
 }
-fn edge_length(arguments: &[MirLocal]) -> u32 {
-    arguments.len() as u32 * 2 + 1
+fn edge_length(arguments: &[MirLocal], target: &crate::mir::MirBlock) -> u32 {
+    let transfers = arguments
+        .iter()
+        .zip(&target.parameters)
+        .filter(|(argument, parameter)| argument != parameter)
+        .count();
+    transfers as u32 * 2 + 1
 }
 fn target_index(target: u32, starts: &[u32]) -> Result<usize, VmArtifactError> {
     starts
@@ -935,9 +948,10 @@ fn target_index(target: u32, starts: &[u32]) -> Result<usize, VmArtifactError> {
         .position(|start| *start == target)
         .ok_or(VmArtifactError::UnsupportedControlFlow)
 }
-/// Materialize a CFG edge through fresh temporaries.  Reading every argument
-/// before writing any destination implements the MIR's parallel edge-argument
-/// semantics even for a cyclic permutation of block parameters.
+/// Materialize a CFG edge through fresh temporaries. Identity transfers are
+/// omitted; every remaining argument is read before any destination is
+/// written, preserving the MIR's parallel edge-argument semantics for swaps
+/// and other cycles.
 fn emit_edge(
     arguments: &[MirLocal],
     target: &crate::mir::MirBlock,
@@ -946,16 +960,19 @@ fn emit_edge(
     instructions: &mut Vec<VmInstruction>,
 ) {
     let mut temporaries = Vec::with_capacity(arguments.len());
-    for argument in arguments {
+    for (argument, parameter) in arguments.iter().zip(&target.parameters) {
+        if argument == parameter {
+            continue;
+        }
         let temporary = registers.len() as u32;
         registers.push(registers[argument.0 as usize].clone());
         instructions.push(VmInstruction::Copy {
             dst: temporary,
             src: argument.0,
         });
-        temporaries.push(temporary);
+        temporaries.push((temporary, *parameter));
     }
-    for (temporary, parameter) in temporaries.into_iter().zip(&target.parameters) {
+    for (temporary, parameter) in temporaries {
         instructions.push(VmInstruction::Copy {
             dst: parameter.0,
             src: temporary,
