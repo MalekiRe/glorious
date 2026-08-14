@@ -70,6 +70,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_equal<T>` in distributed std.
     /// Its i64 specialization returns the canonical 0-or-1 u32 predicate.
     IntEqual,
+    /// Exact generic declaration `__g1_int_less<T>` in distributed std.
+    /// Its i64 specialization returns the canonical 0-or-1 u32 predicate.
+    IntLess,
 }
 
 impl PrimitiveRole {
@@ -110,6 +113,7 @@ impl PrimitiveRole {
             Self::IntCheckedAdd => "int-checked-add",
             Self::IntWrappingAdd => "int-wrapping-add",
             Self::IntEqual => "int-equal",
+            Self::IntLess => "int-less",
         }
     }
 
@@ -150,6 +154,7 @@ impl PrimitiveRole {
             "int-checked-add" => Self::IntCheckedAdd,
             "int-wrapping-add" => Self::IntWrappingAdd,
             "int-equal" => Self::IntEqual,
+            "int-less" => Self::IntLess,
             _ => return None,
         })
     }
@@ -521,7 +526,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
-        PrimitiveRole::IntEqual => crate::CallableSignature {
+        PrimitiveRole::IntEqual | PrimitiveRole::IntLess => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0), Type::Generic(0)],
@@ -578,6 +583,7 @@ fn manifest_digest(
             PrimitiveRole::IntCheckedAdd => 32,
             PrimitiveRole::IntWrappingAdd => 33,
             PrimitiveRole::IntEqual => 34,
+            PrimitiveRole::IntLess => 38,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
