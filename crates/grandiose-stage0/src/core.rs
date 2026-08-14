@@ -2732,6 +2732,21 @@ impl Elaborator<'_> {
                     crate::header::HeaderGenericArgument::Type(crate::header::HeaderType::Path(
                         path,
                     )),
+                    crate::GenericKind::EffectRow,
+                ) if path.len() == 1 => match self.effect_row_parameters.get(&path[0]).copied() {
+                    Some(index) => GenericArgument::EffectRow(EffectRow {
+                        effects: Default::default(),
+                        projections: vec![],
+                        tail: Some(crate::EffectTail::Generic(index)),
+                    }),
+                    None => GenericArgument::Type(
+                        self.header_type(&crate::header::HeaderType::Path(path.clone())),
+                    ),
+                },
+                (
+                    crate::header::HeaderGenericArgument::Type(crate::header::HeaderType::Path(
+                        path,
+                    )),
                     crate::GenericKind::Const(expected),
                 ) if path.len() == 1 => {
                     let parameter = self
@@ -2852,33 +2867,55 @@ impl Elaborator<'_> {
             .resolve_path(DefinitionNamespace::Type, self.module, path)
         {
             ResolutionState::Resolved(definition) => {
-                let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
-                if kinds.len() != arguments.len() {
+                let span = self.body.expression(self.body.root).span;
+                let Some(arguments) = self.header_nominal_arguments(definition, arguments, span)
+                else {
                     return Type::Error;
-                }
-                Type::Nominal {
+                };
+                self.signatures.normalize_type_aliases(Type::Nominal {
                     definition,
-                    arguments: self
-                        .body_generic_arguments(
-                            arguments,
-                            kinds,
-                            self.body.expression(self.body.root).span,
-                            "G4158",
-                            "nominal generic arguments do not match its declaration",
-                        )
-                        .unwrap_or_else(|| {
-                            arguments
-                                .iter()
-                                .map(|_| GenericArgument::Type(Type::Error))
-                                .collect()
-                        }),
-                }
+                    arguments,
+                })
             }
             ResolutionState::Ambiguous(_) => Type::Error,
             ResolutionState::Inaccessible(_)
             | ResolutionState::Unresolved
             | ResolutionState::Recovered => Type::Error,
         }
+    }
+
+    /// Source type annotations are semantic nominal applications, even when
+    /// they occur inside a typed closure rather than a declaration header.
+    /// Validate every supplied slot before constructing its identity; doing
+    /// so prevents a row, region, or const from degrading into `Type::Error`.
+    fn header_nominal_arguments(
+        &mut self,
+        definition: DefKey,
+        source: &[crate::header::HeaderGenericArgument],
+        span: Span,
+    ) -> Option<Vec<GenericArgument>> {
+        let kinds = self.index.type_generic_kinds(definition)?.to_vec();
+        let arguments = self.body_generic_arguments(
+            source,
+            &kinds,
+            span,
+            "G4158",
+            "nominal type annotation has the wrong number of generic arguments",
+        )?;
+        if arguments
+            .iter()
+            .zip(&kinds)
+            .all(|(argument, kind)| generic_argument_matches_kind(argument, *kind))
+        {
+            return Some(arguments);
+        }
+        self.error(
+            span,
+            "G4158",
+            "nominal type annotation has a generic argument of the wrong kind",
+        );
+        self.recovered = true;
+        None
     }
     fn projection_error(&mut self, code: &'static str, message: &str) {
         let span = self.body.expression(self.body.root).span;
@@ -2939,7 +2976,8 @@ impl Elaborator<'_> {
                         self.recovered = true;
                         continue;
                     };
-                    if declaration.generics != arguments.len() as u32 {
+                    let kinds = declaration.generic_kinds.clone();
+                    if kinds.len() != arguments.len() {
                         self.error(
                             span,
                             "G4115",
@@ -2948,28 +2986,31 @@ impl Elaborator<'_> {
                         self.recovered = true;
                         continue;
                     }
+                    let Some(arguments) = self.body_generic_arguments(
+                        arguments,
+                        &kinds,
+                        span,
+                        "G4115",
+                        "closure effect application has the wrong number of arguments",
+                    ) else {
+                        continue;
+                    };
+                    if !arguments
+                        .iter()
+                        .zip(&kinds)
+                        .all(|(argument, kind)| generic_argument_matches_kind(argument, *kind))
+                    {
+                        self.error(
+                            span,
+                            "G4115",
+                            "closure effect application has a generic argument of the wrong kind",
+                        );
+                        self.recovered = true;
+                        continue;
+                    }
                     resolved.effects.insert(EffectInstance {
                         definition,
-                        arguments: arguments
-                            .iter()
-                            .map(|argument| {
-                                GenericArgument::Type(match argument {
-                                    crate::header::HeaderGenericArgument::Type(argument) => {
-                                        self.header_type(argument)
-                                    }
-                                    crate::header::HeaderGenericArgument::U32(_) => Type::Error,
-                                    crate::header::HeaderGenericArgument::Quantity(_) => {
-                                        Type::Error
-                                    }
-                                    crate::header::HeaderGenericArgument::Lifetime(_) => {
-                                        Type::Error
-                                    }
-                                    crate::header::HeaderGenericArgument::EffectRow(_) => {
-                                        Type::Error
-                                    }
-                                })
-                            })
-                            .collect(),
+                        arguments,
                     });
                 }
                 crate::header::HeaderType::Projection {

@@ -1146,6 +1146,96 @@ fn typed_closures_normalize_structural_const_arithmetic_in_type_contracts() {
 }
 
 #[test]
+fn typed_closures_retain_mixed_nominal_annotation_identity_through_aliases() {
+    let core = core_for(
+        "core-closure-mixed-nominal-alias@0.1.0",
+        "effect Trace { note(); } pub struct Mixed<'a, e: EffectRow, n: u32, q: Quantity, T> {} type Alias = Mixed<'static, {Trace}, 7, [1, 2], i64>; pub fn main() -> i64 { let identity = (value: Alias) -> Mixed<'static, {Trace}, 7, [1, 2], i64> { value }; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let closure = core
+        .expressions
+        .iter()
+        .find(|expression| matches!(expression.kind, CoreKind::Closure { .. }))
+        .expect("typed closure");
+    let Type::Callable {
+        parameters, result, ..
+    } = &closure.ty
+    else {
+        panic!("typed closure did not receive a callable type")
+    };
+    let matches_mixed = |value: &Type| {
+        matches!(
+            value,
+            Type::Nominal { arguments, .. }
+                if matches!(
+                    arguments.as_slice(),
+                    [
+                        GenericArgument::Lifetime(Lifetime::Static),
+                        GenericArgument::EffectRow(row),
+                        GenericArgument::ConstU32(7),
+                        GenericArgument::ConstQuantity(quantity),
+                        GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+                    ] if row.effects.len() == 1 && *quantity == Quantity::new(1, Some(2)).unwrap()
+                )
+        )
+    };
+    assert!(matches_mixed(&parameters[0]));
+    assert!(matches_mixed(result));
+}
+
+#[test]
+fn typed_closures_substitute_mixed_generic_alias_annotation_identity() {
+    let core = core_for(
+        "core-closure-mixed-nominal-generic-alias@0.1.0",
+        "pub struct Mixed<'a, e: EffectRow, n: u32, q: Quantity, T> {} type Alias<'a, e: EffectRow, n: u32, q: Quantity, T> = Mixed<'a, e, n, q, T>; pub fn main<'a, e: EffectRow, n: u32, q: Quantity, T>() -> i64 { let identity = (value: Alias<'a, e, n, q, T>) -> Mixed<'a, e, n, q, T> { value }; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let closure = core
+        .expressions
+        .iter()
+        .find(|expression| matches!(expression.kind, CoreKind::Closure { .. }))
+        .expect("typed closure");
+    let Type::Callable {
+        parameters, result, ..
+    } = &closure.ty
+    else {
+        panic!("typed closure did not receive a callable type")
+    };
+    let matches_generic = |value: &Type| {
+        matches!(
+            value,
+            Type::Nominal { arguments, .. }
+                if matches!(arguments.as_slice(), [
+                    GenericArgument::Lifetime(Lifetime::Generic(0)),
+                    GenericArgument::EffectRow(row),
+                    GenericArgument::ConstGeneric { index: 2, kind: grandiose_stage0::ConstKind::U32 },
+                    GenericArgument::ConstGeneric { index: 3, kind: grandiose_stage0::ConstKind::Quantity },
+                    GenericArgument::Type(Type::Generic(4)),
+                ] if row.tail == Some(grandiose_stage0::EffectTail::Generic(1)))
+        )
+    };
+    assert!(matches_generic(&parameters[0]));
+    assert!(matches_generic(result));
+}
+
+#[test]
+fn typed_closure_nominal_annotations_diagnose_wrong_kind_and_arity() {
+    let core = core_for(
+        "core-closure-nominal-annotation-errors@0.1.0",
+        "pub struct Tag<n: u32> {} pub fn main() -> i64 { let wrong_kind = (value: Tag<i64>) -> i64 { 0 }; let wrong_arity = (value: Tag) -> i64 { 0 }; 0 }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "G4158")
+            .count()
+            >= 2,
+        "{:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn typed_closures_reject_unbound_lifetime_annotations() {
     let package = PackageKey("core-closure-unbound-lifetime@0.1.0".into());
     let source = "pub fn main() -> i64 { let identity = (item: &'a i64) -> i64 { 0 }; 0 }";

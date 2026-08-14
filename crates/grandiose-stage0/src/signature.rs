@@ -13,8 +13,8 @@ use crate::{
     quantity::Quantity,
     resolution::{DefinitionIndex, ResolutionState},
     types::{
-        ConstKind, EffectInstance, EffectRow, EffectRowProjection, GenericArgument, GenericKind,
-        Lifetime, Mutability, Type,
+        ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail, GenericArgument,
+        GenericKind, Lifetime, Mutability, Type,
     },
 };
 
@@ -296,6 +296,14 @@ impl ElaboratedInterface {
             .diagnostics
             .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));
         merged
+    }
+
+    /// Normalize a body-local type annotation through the frozen transparent
+    /// alias table. Header elaboration already performs this while freezing
+    /// declarations; typed closures need the same identity-preserving bridge
+    /// for aliases written inside a body.
+    pub fn normalize_type_aliases(&self, value: Type) -> Type {
+        normalize_alias_type(value, &self.definitions, &mut vec![], &mut vec![])
     }
 
     fn validate_associated_type_definitions(&mut self) {
@@ -1679,7 +1687,6 @@ impl Elaborator<'_> {
         match &definition.syntax.header {
             ParsedHeader::Function(header) => ElaboratedHeader::Callable(self.callable(header)),
             ParsedHeader::TypeAlias { generics, target } => {
-                self.require_type_generics(generics, "type aliases");
                 self.bind_generics(generics);
                 ElaboratedHeader::Alias {
                     generics: generics.len() as u32,
@@ -2545,6 +2552,21 @@ impl Elaborator<'_> {
                 (HeaderGenericArgument::EffectRow(value), GenericKind::EffectRow) => {
                     GenericArgument::EffectRow(self.effect_row(value))
                 }
+                (HeaderGenericArgument::Type(HeaderType::Path(path)), GenericKind::EffectRow)
+                    if path.len() == 1 => match self.effect_row_generics.get(&path[0]) {
+                        Some(index) => GenericArgument::EffectRow(EffectRow {
+                            effects: Default::default(),
+                            projections: vec![],
+                            tail: Some(EffectTail::Generic(*index)),
+                        }),
+                        None => {
+                            self.error(
+                                "G3318",
+                                format!("generic argument for `{name}` must be an effect-row generic"),
+                            );
+                            GenericArgument::EffectRow(EffectRow::empty())
+                        }
+                    },
                 (HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
                     GenericArgument::ConstU32(*value)
                 }
@@ -2764,8 +2786,7 @@ fn normalize_alias_type(
                 return Type::Error;
             }
             stack.push(definition);
-            let arguments = generic_arguments_as_runtime_types(&arguments);
-            let substituted = substitute_alias_generics(target.clone(), &arguments);
+            let substituted = substitute_alias_generic_identity(target.clone(), &arguments);
             let normalized = normalize_alias_type(substituted, definitions, stack, diagnostics);
             stack.pop();
             normalized
@@ -2900,12 +2921,172 @@ fn generic_argument_as_runtime_type(argument: GenericArgument) -> Type {
     }
 }
 
-fn generic_arguments_as_runtime_types(arguments: &[GenericArgument]) -> Vec<Type> {
-    arguments
-        .iter()
-        .cloned()
-        .map(generic_argument_as_runtime_type)
-        .collect()
+/// Substitute transparent-alias binders without crossing a runtime type-only
+/// boundary. Alias applications are nominal identity, so a region, row, or
+/// structural constant must survive just as it does in a direct nominal path.
+fn substitute_alias_generic_identity(value: Type, arguments: &[GenericArgument]) -> Type {
+    match value {
+        Type::Generic(TRAIT_SELF_GENERIC) => Type::Generic(TRAIT_SELF_GENERIC),
+        Type::Generic(index) => arguments
+            .get(index as usize)
+            .and_then(generic_argument_as_type)
+            .unwrap_or(Type::Error),
+        Type::ConstGeneric { index, kind } => arguments
+            .get(index as usize)
+            .and_then(|argument| generic_argument_as_const_type(argument, kind))
+            .unwrap_or(Type::Error),
+        Type::Nominal {
+            definition,
+            arguments: values,
+        } => Type::Nominal {
+            definition,
+            arguments: values
+                .into_iter()
+                .map(|argument| substitute_alias_generic_identity_argument(argument, arguments))
+                .collect(),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } => Type::Projection {
+            subject: Box::new(substitute_alias_generic_identity(*subject, arguments)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|value| substitute_alias_generic_identity(value, arguments))
+                .collect(),
+            name,
+            item_arguments: item_arguments
+                .into_iter()
+                .map(|value| substitute_alias_generic_identity(value, arguments))
+                .collect(),
+        },
+        Type::Tuple(values) => Type::Tuple(
+            values
+                .into_iter()
+                .map(|value| substitute_alias_generic_identity(value, arguments))
+                .collect(),
+        ),
+        Type::Array(value) => Type::Array(Box::new(substitute_alias_generic_identity(
+            *value, arguments,
+        ))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability,
+            lifetime: substitute_alias_lifetime(lifetime, arguments),
+            referent: Box::new(substitute_alias_generic_identity(*referent, arguments)),
+        },
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            lifetime_binders,
+            parameters: parameters
+                .into_iter()
+                .map(|value| substitute_alias_generic_identity(value, arguments))
+                .collect(),
+            result: Box::new(substitute_alias_generic_identity(*result, arguments)),
+            effects: substitute_alias_generic_identity_effect_row(effects, arguments),
+            invocation,
+        },
+        value => value,
+    }
+}
+
+fn substitute_alias_generic_identity_argument(
+    argument: GenericArgument,
+    arguments: &[GenericArgument],
+) -> GenericArgument {
+    match argument {
+        GenericArgument::Type(value) => {
+            GenericArgument::Type(substitute_alias_generic_identity(value, arguments))
+        }
+        GenericArgument::EffectRow(value) => GenericArgument::EffectRow(
+            substitute_alias_generic_identity_effect_row(value, arguments),
+        ),
+        GenericArgument::Lifetime(value) => {
+            GenericArgument::Lifetime(substitute_alias_lifetime(value, arguments))
+        }
+        GenericArgument::ConstGeneric { index, kind } => arguments
+            .get(index as usize)
+            .filter(|argument| generic_argument_matches_const_kind(argument, kind))
+            .cloned()
+            .unwrap_or(GenericArgument::ConstGeneric { index, kind }),
+        argument => argument,
+    }
+}
+
+fn substitute_alias_lifetime(value: Lifetime, arguments: &[GenericArgument]) -> Lifetime {
+    match value {
+        Lifetime::Generic(index) => arguments
+            .get(index as usize)
+            .and_then(|argument| match argument {
+                GenericArgument::Lifetime(value) => Some(*value),
+                _ => None,
+            })
+            .unwrap_or(value),
+        value => value,
+    }
+}
+
+fn substitute_alias_generic_identity_effect_row(
+    value: EffectRow,
+    arguments: &[GenericArgument],
+) -> EffectRow {
+    let mut row = EffectRow {
+        effects: value
+            .effects
+            .into_iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(|argument| substitute_alias_generic_identity_argument(argument, arguments))
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| EffectRowProjection {
+                subject: Box::new(substitute_alias_generic_identity(
+                    *projection.subject,
+                    arguments,
+                )),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(|value| substitute_alias_generic_identity(value, arguments))
+                    .collect(),
+                name: projection.name,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(|value| substitute_alias_generic_identity(value, arguments))
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    };
+    if let Some(EffectTail::Generic(index)) = row.tail {
+        if let Some(GenericArgument::EffectRow(argument)) = arguments.get(index as usize) {
+            row.effects.extend(argument.effects.clone());
+            row.projections.extend(argument.projections.clone());
+            row.tail = argument.tail;
+        }
+    }
+    row.canonicalized()
 }
 
 fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {

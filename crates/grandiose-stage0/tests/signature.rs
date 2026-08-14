@@ -394,6 +394,45 @@ fn nominal_headers_preserve_mixed_kind_argument_identity() {
 }
 
 #[test]
+fn generic_aliases_substitute_every_nominal_argument_kind() {
+    let package = PackageKey("signature-mixed-nominal-alias@0.1.0".into());
+    let source = "effect Trace { note(); } pub struct Mixed<'a, e: EffectRow, n: u32, q: Quantity, T> {} pub type Alias<'a, e: EffectRow, n: u32, q: Quantity, T> = Mixed<'a, e, n, q, T>; pub fn value<'a, e: EffectRow, n: u32, q: Quantity, T>() -> Alias<'a, e, n, q, T> { panic }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("value"))
+        .expect("value definition");
+    let ElaboratedHeader::Callable(signature) = signatures
+        .definitions
+        .get(&definition.key)
+        .expect("value signature")
+    else {
+        panic!("expected callable")
+    };
+    assert!(matches!(
+        &signature.result,
+        Type::Nominal { arguments, .. }
+            if matches!(arguments.as_slice(), [
+                GenericArgument::Lifetime(Lifetime::Generic(0)),
+                GenericArgument::EffectRow(row),
+                GenericArgument::ConstGeneric { index: 2, kind: ConstKind::U32 },
+                GenericArgument::ConstGeneric { index: 3, kind: ConstKind::Quantity },
+                GenericArgument::Type(Type::Generic(4)),
+            ] if row.tail == Some(EffectTail::Generic(1)))
+    ));
+}
+
+#[test]
 fn nominal_const_applications_reject_wrong_slot_kinds() {
     let package = PackageKey("signature-const-generic-slot-kinds@0.1.0".into());
     let source = "pub struct Tag<n: u32> {} pub struct Box<T> {} pub fn type_in_const() -> Tag<i64> { panic } pub fn const_in_type() -> Box<7> { panic }";
@@ -1532,7 +1571,7 @@ fn generic_kinds_reject_crossing_type_and_effect_row_positions() {
 }
 
 #[test]
-fn effect_row_binders_are_preserved_for_nominals_but_rejected_for_aliases() {
+fn effect_row_binders_are_preserved_for_nominals_and_aliases() {
     let package = PackageKey("signature-effect-row-binder-context@0.1.0".into());
     let source = "struct Invalid<e: EffectRow> {} trait AlsoInvalid<e: EffectRow> {} type Alias<e: EffectRow> = i64;";
     let file = FileKey::new(&package, "src/lib.glorious");
@@ -1546,7 +1585,7 @@ fn effect_row_binders_are_preserved_for_nominals_but_rejected_for_aliases() {
             .iter()
             .filter(|diagnostic| diagnostic.code == "G3314")
             .count(),
-        1,
+        0,
         "{:#?}",
         signatures.diagnostics
     );
