@@ -13837,6 +13837,29 @@ impl Lowerer<'_> {
                                 self.instructions
                                     .push(MirInstruction::Copy { dst, src: *value });
                             }
+                            Some(PrimitiveRole::IntConvertWrappingToI64) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic wrapping i64 conversion requires one operand",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                {
+                                    self.error("G6005", "generic wrapping i64 conversion is only authorized for frozen i64");
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::Copy { dst, src: *value });
+                            }
                             None => match host_import {
                                 Some(import) => self.instructions.push(MirInstruction::HostCall {
                                     dst,
