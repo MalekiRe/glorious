@@ -3108,6 +3108,11 @@ impl MirProgram {
                     "MIR instance body definition does not match its executable identity".into(),
                 );
             }
+            if materialized_instance_retains_generic_placeholder(&self.functions[executable]) {
+                return Err(
+                    "MIR instance body retains a generic placeholder in frozen metadata".into(),
+                );
+            }
         }
         for function in self.functions.values() {
             function.validate()?;
@@ -3172,6 +3177,190 @@ impl MirProgram {
             }
         }
         Ok(())
+    }
+}
+
+/// An instance key is admitted only after every generic argument is concrete.
+/// Its executable body therefore has no binder namespace in which a source
+/// generic placeholder could be interpreted. Check all frozen type witnesses,
+/// not only local registers: aggregate layouts, patterns, handler frames,
+/// host ABI records, and capture environments are independently consumed by
+/// MIR/VM verification.
+fn materialized_instance_retains_generic_placeholder(function: &MirFunction) -> bool {
+    type_retains_generic_placeholder(&function.result)
+        || function
+            .locals
+            .iter()
+            .any(|local| type_retains_generic_placeholder(&local.ty))
+        || function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(instruction_retains_generic_placeholder)
+}
+
+fn type_retains_generic_placeholder(value: &Type) -> bool {
+    match value {
+        Type::Generic(_) | Type::ConstGeneric { .. } | Type::Infer(_) | Type::Error => true,
+        Type::Nominal { arguments, .. } => arguments
+            .iter()
+            .any(generic_argument_retains_generic_placeholder),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            type_retains_generic_placeholder(subject)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_retains_generic_placeholder)
+                || item_arguments
+                    .iter()
+                    .any(generic_argument_retains_generic_placeholder)
+        }
+        Type::Tuple(values) => values.iter().any(type_retains_generic_placeholder),
+        Type::Array(value) => type_retains_generic_placeholder(value),
+        Type::Reference {
+            lifetime, referent, ..
+        } => {
+            matches!(
+                lifetime,
+                crate::Lifetime::Generic(_) | crate::Lifetime::Elided
+            ) || type_retains_generic_placeholder(referent)
+        }
+        Type::Callable {
+            parameters,
+            result,
+            effects,
+            ..
+        } => {
+            parameters.iter().any(type_retains_generic_placeholder)
+                || type_retains_generic_placeholder(result)
+                || effect_row_retains_generic_placeholder(effects)
+        }
+        Type::Unit | Type::Never | Type::Scalar(_) | Type::ConstU32(_) | Type::ConstQuantity(_) => {
+            false
+        }
+    }
+}
+
+fn generic_argument_retains_generic_placeholder(value: &GenericArgument) -> bool {
+    match value {
+        GenericArgument::Type(value) => type_retains_generic_placeholder(value),
+        GenericArgument::EffectRow(value) => effect_row_retains_generic_placeholder(value),
+        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Elided)
+        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstProjection { .. }
+        | GenericArgument::ConstInfer { .. } => true,
+        GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Bound { .. })
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstQuantity(_) => false,
+    }
+}
+
+fn effect_row_retains_generic_placeholder(value: &crate::EffectRow) -> bool {
+    matches!(
+        value.tail,
+        Some(crate::EffectTail::Generic(_) | crate::EffectTail::Infer(_))
+    ) || value.effects.iter().any(|effect| {
+        effect
+            .arguments
+            .iter()
+            .any(generic_argument_retains_generic_placeholder)
+    }) || value.projections.iter().any(|projection| {
+        type_retains_generic_placeholder(&projection.subject)
+            || projection
+                .trait_arguments
+                .iter()
+                .any(generic_argument_retains_generic_placeholder)
+            || projection
+                .item_arguments
+                .iter()
+                .any(generic_argument_retains_generic_placeholder)
+    })
+}
+
+fn instruction_retains_generic_placeholder(instruction: &MirInstruction) -> bool {
+    match instruction {
+        MirInstruction::MakeArray { element_type, .. }
+        | MirInstruction::ProjectArray { element_type, .. } => {
+            type_retains_generic_placeholder(element_type)
+        }
+        MirInstruction::MakeRecord { field_types, .. }
+        | MirInstruction::MakeEnum { field_types, .. } => {
+            field_types.iter().any(type_retains_generic_placeholder)
+        }
+        MirInstruction::ProjectRecord { field_type, .. }
+        | MirInstruction::ProjectTuple { field_type, .. }
+        | MirInstruction::UpdateRecord { field_type, .. } => {
+            type_retains_generic_placeholder(field_type)
+        }
+        MirInstruction::PatternTest { pattern, .. } => pattern_retains_generic_placeholder(pattern),
+        MirInstruction::Perform {
+            effect_arguments, ..
+        } => effect_arguments
+            .iter()
+            .any(generic_argument_retains_generic_placeholder),
+        MirInstruction::InstallHandler {
+            effect_arguments,
+            resume_type,
+            ..
+        } => {
+            type_retains_generic_placeholder(resume_type)
+                || effect_arguments
+                    .iter()
+                    .any(generic_argument_retains_generic_placeholder)
+        }
+        MirInstruction::Call {
+            generic_arguments,
+            trait_instance,
+            ..
+        }
+        | MirInstruction::MakeCallable {
+            generic_arguments,
+            trait_instance,
+            ..
+        } => {
+            !generic_arguments.is_empty()
+                || trait_instance.is_some()
+                || matches!(instruction, MirInstruction::MakeCallable { environment: Some(environment), .. } if environment.captures.iter().any(|capture| type_retains_generic_placeholder(&capture.ty)))
+        }
+        MirInstruction::HostCall {
+            parameters, result, ..
+        } => {
+            parameters.iter().any(type_retains_generic_placeholder)
+                || type_retains_generic_placeholder(result)
+        }
+        _ => false,
+    }
+}
+
+fn pattern_retains_generic_placeholder(pattern: &MirPattern) -> bool {
+    match pattern {
+        MirPattern::Any | MirPattern::Literal(_) => false,
+        MirPattern::Tuple(patterns) => patterns.iter().any(pattern_retains_generic_placeholder),
+        MirPattern::Array { element, elements } => {
+            type_retains_generic_placeholder(element)
+                || elements.iter().any(pattern_retains_generic_placeholder)
+        }
+        MirPattern::Record {
+            field_types,
+            fields,
+            ..
+        }
+        | MirPattern::Enum {
+            field_types,
+            fields,
+            ..
+        } => {
+            field_types.iter().any(type_retains_generic_placeholder)
+                || fields.iter().any(|field| {
+                    type_retains_generic_placeholder(&field.ty)
+                        || pattern_retains_generic_placeholder(&field.pattern)
+                })
+        }
     }
 }
 fn references(value: &MirInstruction) -> Vec<MirLocal> {

@@ -319,6 +319,14 @@ fn service_executes_a_concrete_generic_mir_instance_through_vm_linking() {
 }
 
 #[test]
+fn service_specializes_generic_aggregate_layout_metadata_before_vm_linking() {
+    let source = "pub struct Box<T> { value: T } pub fn wrap<T>(value: T) -> Box<T> { Box<T> { value: value } } pub fn main() -> i64 { let boxed = wrap(42); boxed.value }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_finalizes_main_as_a_closed_zero_argument_effect_boundary() {
     for (source, message) in [
         (

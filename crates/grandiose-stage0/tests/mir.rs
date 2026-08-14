@@ -941,6 +941,69 @@ fn mir_program_accepts_a_canonical_zero_generic_instance_at_vm_boundary() {
 }
 
 #[test]
+fn mir_program_rejects_generic_placeholders_in_a_canonical_instance_body() {
+    let key = InstanceKey::new(
+        DefKey(Digest::of_bytes(b"residual-instance-template")),
+        &[GenericKind::Type],
+        vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+    )
+    .expect("closed instance key");
+    let executable = DefKey(key.fingerprint());
+    let mut function = graph();
+    function.definition = executable;
+    // Preserve the fixture's typed CFG while forging a cached specialized
+    // body that still contains the declaration-local `T` in its value layout.
+    for local in &mut function.locals[1..] {
+        local.ty = Type::Generic(0);
+    }
+    function.result = Type::Generic(0);
+    let program = MirProgram {
+        entry: executable,
+        functions: BTreeMap::from([(executable, function)]),
+        instances: BTreeMap::from([(executable, MirInstance { key, executable })]),
+    };
+    assert!(program.validate().is_err_and(|error| {
+        error.contains("retains a generic placeholder in frozen metadata")
+    }));
+    assert!(
+        emit_vm_program(&program).is_err(),
+        "a hostile cached instance must not reach frozen VM linkage"
+    );
+}
+
+#[test]
+fn mir_program_rejects_generic_handler_metadata_in_a_canonical_instance_body() {
+    let key = InstanceKey::new(
+        DefKey(Digest::of_bytes(b"residual-handler-instance-template")),
+        &[GenericKind::Type],
+        vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+    )
+    .expect("closed instance key");
+    let executable = DefKey(key.fingerprint());
+    let mut function = graph();
+    function.definition = executable;
+    function.blocks[0]
+        .instructions
+        .push(MirInstruction::InstallHandler {
+            effect: DefKey(Digest::of_bytes(b"residual-handler-effect")),
+            effect_arguments: vec![],
+            operation: 0,
+            payload_destinations: vec![],
+            resume_type: Type::Generic(0),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(1),
+        });
+    let program = MirProgram {
+        entry: executable,
+        functions: BTreeMap::from([(executable, function)]),
+        instances: BTreeMap::from([(executable, MirInstance { key, executable })]),
+    };
+    assert!(program.validate().is_err_and(|error| {
+        error.contains("retains a generic placeholder in frozen metadata")
+    }));
+}
+
+#[test]
 fn mir_validation_rejects_noncanonical_nested_effect_row_identity() {
     let projection = |name: &str| EffectRowProjection {
         subject: Box::new(Type::Scalar(ScalarType::I64)),

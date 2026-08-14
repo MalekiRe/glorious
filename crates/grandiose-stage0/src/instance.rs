@@ -911,6 +911,68 @@ mod tests {
     }
 
     #[test]
+    fn distinct_closed_substitutions_cannot_share_an_executable_identity() {
+        let kinds = [GenericKind::Type, GenericKind::Const(ConstKind::U32)];
+        let i64 = InstanceKey::new(
+            definition(b"identity"),
+            &kinds,
+            vec![
+                InstanceArgument::Type(Type::Scalar(ScalarType::I64)),
+                InstanceArgument::ConstU32(1),
+            ],
+        )
+        .unwrap();
+        let text = InstanceKey::new(
+            definition(b"identity"),
+            &kinds,
+            vec![
+                InstanceArgument::Type(Type::Scalar(ScalarType::Text)),
+                InstanceArgument::ConstU32(1),
+            ],
+        )
+        .unwrap();
+        let different_const = InstanceKey::new(
+            definition(b"identity"),
+            &kinds,
+            vec![
+                InstanceArgument::Type(Type::Scalar(ScalarType::I64)),
+                InstanceArgument::ConstU32(2),
+            ],
+        )
+        .unwrap();
+        assert_ne!(i64, text);
+        assert_ne!(i64, different_const);
+        assert_ne!(i64.fingerprint(), text.fingerprint());
+        assert_ne!(i64.fingerprint(), different_const.fingerprint());
+
+        let effect_kinds = [GenericKind::EffectRow];
+        let first_effect = InstanceKey::new(
+            definition(b"effectful"),
+            &effect_kinds,
+            vec![InstanceArgument::EffectRow(EffectRow::closed_instances([
+                crate::EffectInstance {
+                    definition: definition(b"first-effect"),
+                    arguments: vec![],
+                },
+            ]))],
+        )
+        .unwrap();
+        let second_effect = InstanceKey::new(
+            definition(b"effectful"),
+            &effect_kinds,
+            vec![InstanceArgument::EffectRow(EffectRow::closed_instances([
+                crate::EffectInstance {
+                    definition: definition(b"second-effect"),
+                    arguments: vec![],
+                },
+            ]))],
+        )
+        .unwrap();
+        assert_ne!(first_effect, second_effect);
+        assert_ne!(first_effect.fingerprint(), second_effect.fingerprint());
+    }
+
+    #[test]
     fn executable_instances_reject_open_or_body_local_terms() {
         let generic = InstanceKey::new(
             definition(b"id"),

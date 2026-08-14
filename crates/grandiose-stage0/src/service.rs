@@ -1840,16 +1840,60 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
     for block in &mut function.blocks {
         for instruction in &mut block.instructions {
             match instruction {
-                crate::MirInstruction::Perform {
-                    effect_arguments, ..
+                crate::MirInstruction::MakeArray { element_type, .. }
+                | crate::MirInstruction::ProjectArray { element_type, .. } => {
+                    *element_type = specialize_type(element_type, arguments);
                 }
-                | crate::MirInstruction::InstallHandler {
+                crate::MirInstruction::MakeRecord { field_types, .. }
+                | crate::MirInstruction::MakeEnum { field_types, .. } => {
+                    *field_types = field_types
+                        .iter()
+                        .map(|field| specialize_type(field, arguments))
+                        .collect();
+                }
+                crate::MirInstruction::ProjectRecord { field_type, .. }
+                | crate::MirInstruction::ProjectTuple { field_type, .. }
+                | crate::MirInstruction::UpdateRecord { field_type, .. } => {
+                    *field_type = specialize_type(field_type, arguments);
+                }
+                crate::MirInstruction::PatternTest { pattern, .. } => {
+                    specialize_mir_pattern(pattern, arguments);
+                }
+                crate::MirInstruction::Perform {
                     effect_arguments, ..
                 } => {
                     *effect_arguments = effect_arguments
                         .iter()
                         .map(|argument| specialize_generic_argument(argument, arguments))
                         .collect();
+                }
+                crate::MirInstruction::InstallHandler {
+                    effect_arguments,
+                    resume_type,
+                    ..
+                } => {
+                    *effect_arguments = effect_arguments
+                        .iter()
+                        .map(|argument| specialize_generic_argument(argument, arguments))
+                        .collect();
+                    *resume_type = specialize_type(resume_type, arguments);
+                }
+                crate::MirInstruction::HostCall {
+                    parameters, result, ..
+                } => {
+                    *parameters = parameters
+                        .iter()
+                        .map(|parameter| specialize_type(parameter, arguments))
+                        .collect();
+                    *result = specialize_type(result, arguments);
+                }
+                crate::MirInstruction::MakeCallable {
+                    environment: Some(environment),
+                    ..
+                } => {
+                    for capture in &mut environment.captures {
+                        capture.ty = specialize_type(&capture.ty, arguments);
+                    }
                 }
                 _ => {}
             }
@@ -1881,6 +1925,46 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
                     .iter()
                     .map(|argument| specialize_generic_argument(argument, arguments))
                     .collect();
+            }
+        }
+    }
+}
+
+/// Every type witness embedded in MIR crosses the frozen VM boundary
+/// independently of a local register declaration.  A concrete instance must
+/// specialize those witnesses too: otherwise a generic record layout or
+/// pattern can survive even when the value registers were made concrete.
+fn specialize_mir_pattern(pattern: &mut crate::MirPattern, arguments: &[GenericArgument]) {
+    match pattern {
+        crate::MirPattern::Any | crate::MirPattern::Literal(_) => {}
+        crate::MirPattern::Tuple(elements) => {
+            for element in elements {
+                specialize_mir_pattern(element, arguments);
+            }
+        }
+        crate::MirPattern::Array { element, elements } => {
+            *element = specialize_type(element, arguments);
+            for element in elements {
+                specialize_mir_pattern(element, arguments);
+            }
+        }
+        crate::MirPattern::Record {
+            field_types,
+            fields,
+            ..
+        }
+        | crate::MirPattern::Enum {
+            field_types,
+            fields,
+            ..
+        } => {
+            *field_types = field_types
+                .iter()
+                .map(|field| specialize_type(field, arguments))
+                .collect();
+            for field in fields {
+                field.ty = specialize_type(&field.ty, arguments);
+                specialize_mir_pattern(&mut field.pattern, arguments);
             }
         }
     }
@@ -2304,10 +2388,13 @@ fn constant_cycle(
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::specialize_type;
+    use super::{specialize_mir_local_types, specialize_type};
     use crate::{
-        DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, EffectTail,
-        GenericArgument, Lifetime, Mutability, Quantity, ScalarType, Type,
+        CallableId, CaptureMode, CoreId, DefKey, Digest, EffectInstance, EffectRow,
+        EffectRowProjection, EffectTail, EnvironmentBrand, GenericArgument, Lifetime, MirBlock,
+        MirBlockId, MirCapture, MirCaptureEnvironment, MirFunction, MirInstruction, MirLocal,
+        MirLocalDecl, MirPattern, MirPatternField, MirTerminator, Mutability, Quantity, ScalarType,
+        Type,
     };
 
     fn key(name: &str) -> DefKey {
@@ -2419,5 +2506,109 @@ mod tests {
                 && trait_arguments == &vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))]
                 && item_arguments == &vec![GenericArgument::ConstU32(17)]
         ));
+    }
+
+    #[test]
+    fn materialization_specializes_every_frozen_mir_type_witness() {
+        let generic = Type::Generic(0);
+        let callable = Type::Callable {
+            lifetime_binders: 0,
+            parameters: vec![generic.clone()],
+            result: Box::new(generic.clone()),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+        };
+        let mut function = MirFunction {
+            definition: key("specialize-frozen-mir-witnesses"),
+            captures: 0,
+            parameters: vec![],
+            locals: vec![
+                MirLocalDecl {
+                    ty: generic.clone(),
+                    source: CoreId(u32::MAX),
+                },
+                MirLocalDecl {
+                    ty: Type::Scalar(ScalarType::Bool),
+                    source: CoreId(u32::MAX),
+                },
+                MirLocalDecl {
+                    ty: callable.clone(),
+                    source: CoreId(u32::MAX),
+                },
+            ],
+            result: generic.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![MirBlock {
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::MakeRecord {
+                        dst: MirLocal(0),
+                        definition: key("generic-record"),
+                        fields: vec![],
+                        field_types: vec![generic.clone()],
+                    },
+                    MirInstruction::PatternTest {
+                        dst: MirLocal(1),
+                        subject: MirLocal(0),
+                        pattern: MirPattern::Record {
+                            definition: key("generic-record"),
+                            field_types: vec![generic.clone()],
+                            field_count: 1,
+                            fields: vec![MirPatternField {
+                                index: 0,
+                                ty: generic.clone(),
+                                pattern: MirPattern::Array {
+                                    element: generic.clone(),
+                                    elements: vec![],
+                                },
+                            }],
+                        },
+                    },
+                    MirInstruction::InstallHandler {
+                        effect: key("generic-handler"),
+                        effect_arguments: vec![GenericArgument::Type(generic.clone())],
+                        operation: 0,
+                        payload_destinations: vec![],
+                        resume_type: generic.clone(),
+                        continuation: crate::MirContinuationPolicy::Consume,
+                        target: MirBlockId(0),
+                    },
+                    MirInstruction::HostCall {
+                        dst: MirLocal(0),
+                        capability: "test".into(),
+                        symbol: "specialized".into(),
+                        parameters: vec![generic.clone()],
+                        result: generic.clone(),
+                        arguments: vec![],
+                    },
+                    MirInstruction::MakeCallable {
+                        dst: MirLocal(2),
+                        callee: key("generic-callable"),
+                        captures: vec![],
+                        generic_arguments: vec![],
+                        trait_instance: None,
+                        environment: Some(MirCaptureEnvironment {
+                            brand: EnvironmentBrand {
+                                owner: key("generic-owner"),
+                                callable: CallableId(0),
+                            },
+                            captures: vec![MirCapture {
+                                mode: CaptureMode::Move,
+                                ty: callable,
+                            }],
+                        }),
+                    },
+                ],
+                terminator: MirTerminator::Unreachable,
+            }],
+        };
+        specialize_mir_local_types(
+            &mut function,
+            &[GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        );
+        assert!(
+            !format!("{function:?}").contains("Generic(0)"),
+            "a concrete instance retained a generic frozen witness: {function:#?}"
+        );
     }
 }
