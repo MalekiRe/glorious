@@ -163,6 +163,52 @@ fn program_host_capability_declarations_are_canonical_exact_and_fingerprinted() 
 }
 
 #[test]
+fn program_host_capabilities_exclude_unreachable_emitted_helpers() {
+    let entry = DefKey(Digest::of_bytes(b"reachable-host-capability-entry"));
+    let unused = DefKey(Digest::of_bytes(b"unreachable-host-capability-helper"));
+    let entry_function = VmFunction {
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let unused_host_function = VmFunction {
+        definition: unused,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::HostCall {
+                dst: 0,
+                capability: "clock".into(),
+                symbol: "now".into(),
+                parameters: vec![],
+                result: VmType::I64,
+                arguments: vec![],
+            },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(entry, entry_function), (unused, unused_host_function)]),
+        fingerprint: Digest::of_bytes(b"unreachable-host-capability-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+
+    let verified = verify_vm_program(program)
+        .expect("an unreachable helper must not inflate executable capability declarations");
+    assert_eq!(verified.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
     let effect = DefKey(Digest::of_bytes(b"cross-frame-ask"));
     let caller = DefKey(Digest::of_bytes(b"cross-frame-caller"));
