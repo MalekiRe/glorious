@@ -6803,14 +6803,123 @@ impl Elaborator<'_> {
             ("+" | "-", Type::Scalar(ScalarType::I64 | ScalarType::F64)) => value_ty.clone(),
             ("!", Type::Scalar(ScalarType::Bool)) => Type::Scalar(ScalarType::Bool),
             _ => {
-                return self.fail(
-                    span,
-                    "G4117",
-                    "prefix operator has incompatible operand type",
-                );
+                return self.operator_trait_call(operator, vec![value], span);
             }
         };
         self.alloc(CoreKind::Unary { operator, value }, result, span)
+    }
+
+    /// Lower a source-declared operator through the same identity-carrying
+    /// trait-method representation as an explicitly-qualified trait call.
+    /// Primitive scalar operators intentionally remain trusted Core nodes;
+    /// every other spelling is selected from traits actually in lexical scope
+    /// and carries the selected implementation `DefKey` to MIR.
+    fn operator_trait_call(&mut self, operator: String, values: Vec<CoreId>, span: Span) -> CoreId {
+        let Some(receiver) = values.first().copied() else {
+            return self.fail(span, "G4117", "operator has no receiver operand");
+        };
+        let subject = self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
+        let mut selected = Vec::new();
+        let mut solver_ambiguous = false;
+        let mut solver_overflow = false;
+        let mut refuted = false;
+        for definition in self
+            .index
+            .visible_definitions(DefinitionNamespace::Trait, self.module)
+        {
+            let Some(ElaboratedHeader::Trait(trait_header)) =
+                self.signatures.definitions.get(&definition)
+            else {
+                continue;
+            };
+            if !trait_header.methods.contains_key(&operator) {
+                continue;
+            }
+            // An operator has no source slot for `Trait<T, Effects, 'a>`
+            // arguments. Derive them from receiver patterns in the frozen
+            // impl set, then keep the normal solver as the single selector of
+            // implementation evidence.
+            for relation in
+                TraitSolver::new(self.signatures).relations_for_subject(definition, &subject)
+            {
+                let Some(method_generic_kinds) =
+                    TraitSolver::new(self.signatures).method_generic_kinds(&relation, &operator)
+                else {
+                    continue;
+                };
+                let method_arguments =
+                    self.inferred_method_generic_arguments(&method_generic_kinds);
+                let trait_arguments = relation.arguments.clone();
+                match TraitSolver::new(self.signatures).select_method(
+                    TraitGoal {
+                        relation,
+                        subject: subject.clone(),
+                    },
+                    &operator,
+                    &method_arguments,
+                ) {
+                    TraitMethodAnswer::Selected {
+                        evidence,
+                        method,
+                        signature,
+                    } => selected.push((
+                        evidence,
+                        method,
+                        trait_arguments,
+                        method_arguments,
+                        signature,
+                    )),
+                    TraitMethodAnswer::Ambiguous => solver_ambiguous = true,
+                    TraitMethodAnswer::Overflow => solver_overflow = true,
+                    TraitMethodAnswer::Refuted { .. } => refuted = true,
+                    TraitMethodAnswer::NoSolution
+                    | TraitMethodAnswer::MissingMethod { .. }
+                    | TraitMethodAnswer::MethodArity { .. } => {}
+                }
+            }
+        }
+        let (evidence, method, trait_arguments, method_arguments, signature) = match selected.len()
+        {
+            1 => selected.pop().expect("one selected operator method"),
+            0 if solver_overflow => {
+                return self.fail(
+                    span,
+                    "G4117",
+                    "operator trait selection exceeded the solver limit",
+                );
+            }
+            0 if solver_ambiguous => {
+                return self.fail(span, "G4117", "operator trait implementation is ambiguous");
+            }
+            0 if refuted => {
+                return self.fail(
+                    span,
+                    "G4117",
+                    "operator trait implementation is refuted by a negative implementation",
+                );
+            }
+            0 => return self.fail(span, "G4117", "operator has incompatible operand type"),
+            _ => return self.fail(span, "G4117", "operator trait implementation is ambiguous"),
+        };
+        let callee = self.alloc(
+            CoreKind::TraitMethod {
+                evidence,
+                method,
+                trait_arguments,
+                method_arguments,
+            },
+            Type::Callable {
+                lifetime_binders: 0,
+                parameters: signature.parameters.clone(),
+                result: Box::new(signature.result.clone()),
+                effects: signature.effects.clone(),
+                invocation: signature.invocation,
+            },
+            span,
+        );
+        let call = self.call(callee, values, span);
+        self.check_where_bounds(signature.where_bounds.clone(), span);
+        call
     }
     fn call(&mut self, callee: CoreId, arguments: Vec<CoreId>, span: Span) -> CoreId {
         let callable = self.expressions[callee.0 as usize].ty.clone();
@@ -9129,11 +9238,17 @@ impl Elaborator<'_> {
         };
         let left_ty = self.expressions[left.0 as usize].ty.clone();
         let right_ty = self.expressions[right.0 as usize].ty.clone();
+        // Built-in arithmetic is homogeneous, but a trait operator is not:
+        // `Index::[]`, comparisons against a wrapper, and application-style
+        // domain operators may legitimately have different left/right types.
+        // Only require this unification on the trusted primitive fast path;
+        // a failed homogeneous probe falls through to the selected trait
+        // method, whose complete callable contract checks both operands.
         let operand_ty = match self.inference.unify(left_ty.clone(), right_ty) {
             Ok(ty) => ty,
             Err(_) => {
-                self.fail(span, "G4109", "operator operands have incompatible types");
-                return false;
+                values.push(self.operator_trait_call(operator, vec![left, right], span));
+                return true;
             }
         };
         let numeric = matches!(operand_ty, Type::Scalar(ScalarType::I64 | ScalarType::F64));
@@ -9153,8 +9268,8 @@ impl Elaborator<'_> {
             "==" | "!=" if equality => Type::Scalar(ScalarType::Bool),
             "<" | "<=" | ">" | ">=" if ordered => Type::Scalar(ScalarType::Bool),
             _ => {
-                self.fail(span, "G4117", "operator has incompatible operand type");
-                return false;
+                values.push(self.operator_trait_call(operator, vec![left, right], span));
+                return true;
             }
         };
         values.push(self.alloc(

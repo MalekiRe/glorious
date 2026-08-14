@@ -1525,6 +1525,38 @@ impl TraitSolver {
             TraitAnswer::Overflow => TraitMethodAnswer::Overflow,
         }
     }
+
+    /// Recover the concrete relation arguments implied by a receiver before
+    /// selecting an implicit trait surface. The normal solver deliberately
+    /// refuses caller-owned inference variables in a frozen goal; operator
+    /// syntax has no written trait arguments, so its elaborator derives them
+    /// from an implementation receiver pattern and then issues an ordinary
+    /// canonical `select_method` request.
+    ///
+    /// This exposes only substituted frozen relation identities. Coherence,
+    /// negative implementations, and where-obligations remain the authority
+    /// of `select_method`.
+    pub fn relations_for_subject(
+        &self,
+        definition: DefKey,
+        subject: &Type,
+    ) -> Vec<ElaboratedTraitReference> {
+        let mut relations = Vec::new();
+        for rule in self
+            .rules
+            .iter()
+            .filter(|rule| rule.implementation.relation.definition == definition)
+        {
+            let mut substitution = ImplementationSubstitution::default();
+            if match_type(&rule.implementation.self_ty, subject, &mut substitution).is_some() {
+                let relation = substitute_relation(&rule.implementation.relation, &substitution);
+                if !relations.contains(&relation) {
+                    relations.push(relation);
+                }
+            }
+        }
+        relations
+    }
     fn solve_at(
         &mut self,
         goal: TraitGoal,

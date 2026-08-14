@@ -317,6 +317,45 @@ impl DefinitionIndex {
         self.classify(self.entries.get(&(namespace, name.to_owned())), None)
     }
 
+    /// Return the declaration identities reachable by an unqualified lookup
+    /// from `requester`.  Implicit language surfaces (such as operator
+    /// dispatch) must use this rather than scanning every frozen definition:
+    /// a public trait in an unrelated module is not brought into scope merely
+    /// because it happens to declare the same operator spelling.
+    ///
+    /// The result is sorted and deduplicated by `DefKey`, and every candidate
+    /// has passed the ordinary lexical/import/module visibility resolver.
+    pub fn visible_definitions(
+        &self,
+        namespace: DefinitionNamespace,
+        requester: &ModuleKey,
+    ) -> Vec<DefKey> {
+        let mut names = BTreeSet::new();
+        let mut lexical = requester.clone();
+        loop {
+            names.extend(self.module_member_names(&lexical, namespace, &mut BTreeSet::new()));
+            let Some(parent) = parent_module_path(&lexical.path) else {
+                break;
+            };
+            lexical.path = parent;
+        }
+        let mut definitions = BTreeSet::new();
+        for name in names {
+            match self.resolve_path(namespace, requester, &[name]) {
+                ResolutionState::Resolved(definition) => {
+                    definitions.insert(definition);
+                }
+                ResolutionState::Ambiguous(definitions_for_name) => {
+                    definitions.extend(definitions_for_name);
+                }
+                ResolutionState::Unresolved
+                | ResolutionState::Inaccessible(_)
+                | ResolutionState::Recovered => {}
+            }
+        }
+        definitions.into_iter().collect()
+    }
+
     /// Seal a module's exported semantic surface after the complete module
     /// graph has been indexed. Interface collection intentionally runs before
     /// that graph is complete, so its local header fingerprint cannot know

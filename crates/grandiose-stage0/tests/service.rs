@@ -7260,3 +7260,169 @@ fn service_parses_bare_operator_trait_and_implementation_methods() {
     );
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
+
+#[test]
+fn service_selects_and_executes_visible_infix_trait_operators() {
+    let source = r#"
+        infixl 40 **;
+        trait Combine { **(left: i64, right: i64) -> i64; }
+        impl Combine for i64 {
+            **(left: i64, right: i64) -> i64 { left + right }
+        }
+        pub fn main() -> i64 { 20 ** 22 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a source-defined infix trait operator must lower through selected evidence");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_infers_trait_generic_arguments_for_operator_dispatch() {
+    let source = r#"
+        infixl 40 **;
+        trait Combine<T> { **(left: T, right: T) -> T; }
+        impl<T> Combine<T> for T { **(left: T, right: T) -> T { left } }
+        pub fn main() -> i64 { 42 ** 0 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("operator dispatch must infer trait arguments from the receiver");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_selects_prefix_trait_operators_and_preserves_callable_contracts() {
+    let source = r#"
+        prefix 80 ~;
+        trait Invert { ~(value: i64) -> i64; }
+        impl Invert for i64 { ~(value: i64) -> i64 { 42 - value } }
+        pub fn main() -> i64 { ~1 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a source-defined prefix trait operator must execute through the VM");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_trait_operators_accept_heterogeneous_operands_via_method_contracts() {
+    let source = r#"
+        infixl 40 **;
+        trait Choose { **(left: i64, right: Bool) -> i64; }
+        impl Choose for i64 { **(left: i64, right: Bool) -> i64 { left } }
+        pub fn main() -> i64 { 42 ** true }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).expect(
+        "trait operator parameter contracts, not homogeneous primitive rules, govern dispatch",
+    );
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_ambiguous_visible_trait_operator_identities() {
+    let source = r#"
+        infixl 40 **;
+        trait First { **(left: i64, right: i64) -> i64; }
+        trait Second { **(left: i64, right: i64) -> i64; }
+        impl First for i64 { **(left: i64, right: i64) -> i64 { left } }
+        impl Second for i64 { **(left: i64, right: i64) -> i64 { right } }
+        pub fn main() -> i64 { 1 ** 2 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("ambiguous trait operator unexpectedly entered an artifact");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "G4117" && diagnostic.message.contains("ambiguous")
+        }),
+        "missing deterministic operator ambiguity diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_incompatible_trait_operator_operands_before_mir() {
+    let source = r#"
+        infixl 40 **;
+        trait Combine { **(left: i64, right: i64) -> i64; }
+        impl Combine for i64 { **(left: i64, right: i64) -> i64 { left } }
+        pub fn main() -> i64 { 1 ** true }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("incompatible trait operator operands unexpectedly entered an artifact");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4107"),
+        "missing callable parameter contract diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_selects_operator_traits_imported_into_lexical_scope() {
+    let root = r#"
+        mod math;
+        use math::Combine;
+        infixl 40 **;
+        pub fn main() -> i64 { 20 ** 22 }
+    "#;
+    let child = r#"
+        pub trait Combine { **(left: i64, right: i64) -> i64; }
+        impl Combine for i64 { **(left: i64, right: i64) -> i64 { left + right } }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_module(root, child))
+        .expect("an imported public operator trait must be eligible for dispatch");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_does_not_dispatch_to_operator_traits_outside_lexical_scope() {
+    let root = r#"
+        mod math;
+        infixl 40 **;
+        pub fn main() -> i64 { 20 ** 22 }
+    "#;
+    let child = r#"
+        pub trait Combine { **(left: i64, right: i64) -> i64; }
+        impl Combine for i64 { **(left: i64, right: i64) -> i64 { left + right } }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request_with_module(root, child))
+    else {
+        panic!("an out-of-scope operator trait unexpectedly participated in dispatch");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4117"),
+        "missing out-of-scope operator diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_forged_operator_implementation_contract_before_dispatch() {
+    let source = r#"
+        infixl 40 **;
+        trait Combine { **(left: i64, right: i64) -> i64; }
+        impl Combine for i64 { **(left: i64, right: Bool) -> i64 { left } }
+        pub fn main() -> i64 { 20 ** 22 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("a forged operator implementation contract unexpectedly entered an artifact");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4147"),
+        "missing frozen trait/implementation contract diagnostic: {diagnostics:#?}"
+    );
+}

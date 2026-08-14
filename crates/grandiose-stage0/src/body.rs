@@ -536,9 +536,12 @@ impl Parser<'_> {
                 join(self.lexed.tokens[start].span, self.expression(value).span),
             ));
         }
-        if let Some(operator) = self.operator().map(str::to_owned)
-            && matches!(operator.as_str(), "+" | "-" | "!")
-        {
+        // Keep the prefix spelling lossless until Typed Core consults the
+        // frozen module fixity table.  Restricting this to the primitive
+        // `+`, `-`, and `!` forms made a header-declared `prefix ~` parse as
+        // a recovery error before trait-based operator dispatch could ever
+        // select its implementation.
+        if let Some(operator) = self.operator().map(str::to_owned) {
             let start = self.advance()?;
             let value = self
                 .parse_prefix()
