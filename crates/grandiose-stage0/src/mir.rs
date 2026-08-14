@@ -3744,13 +3744,13 @@ impl Lowerer<'_> {
                     .or_else(|| self.find_transfer_label(value)),
                 _ => self.find_transfer_label(value),
             },
-            CoreKind::Call { callee, arguments } => {
-                self.find_transfer_label(callee).or_else(|| {
-                    arguments
-                        .into_iter()
-                        .find_map(|value| self.find_transfer_label(value))
-                })
-            }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => self.find_transfer_label(callee).or_else(|| {
+                arguments
+                    .into_iter()
+                    .find_map(|value| self.find_transfer_label(value))
+            }),
             CoreKind::Perform { arguments, .. } => arguments
                 .into_iter()
                 .find_map(|value| self.find_transfer_label(value)),
@@ -3835,7 +3835,9 @@ impl Lowerer<'_> {
                     self.value(left).is_some() && self.prepare_label_path(right, target)
                 }
             }
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 if self.prepare_label_path(callee, target) {
                     return true;
                 }
@@ -7429,7 +7431,9 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
-        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
         else {
             return None;
         };
@@ -7609,7 +7613,9 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
-        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
         else {
             return None;
         };
@@ -7790,7 +7796,10 @@ impl Lowerer<'_> {
         else {
             return None;
         };
-        let CoreKind::Call { callee, arguments } = self.body.expression(call).kind.clone() else {
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(call).kind.clone()
+        else {
             return None;
         };
         if residual.is_empty() {
@@ -7976,7 +7985,9 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
-        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
         else {
             return None;
         };
@@ -8314,7 +8325,9 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
-        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
         else {
             return None;
         };
@@ -8578,7 +8591,9 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
-        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
         else {
             return None;
         };
@@ -8877,7 +8892,9 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
-        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
         else {
             return None;
         };
@@ -10262,7 +10279,9 @@ impl Lowerer<'_> {
                 };
                 self.instructions.push(instruction);
             }
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 let direct_resumption = match &self.body.expression(callee).kind {
                     // An identity-bearing Core node can only be produced for
                     // a lexical alias of the currently active continuation.
@@ -10520,7 +10539,9 @@ impl Lowerer<'_> {
                 }
                 self.direct_operation(*last)
             }
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 let definition = match self.body.expression(callee).kind {
                     CoreKind::Function { definition, .. }
                     | CoreKind::TraitMethod {
@@ -10632,7 +10653,9 @@ impl Lowerer<'_> {
             CoreKind::Block(values) => values
                 .last()
                 .is_some_and(|value| self.has_direct_perform(*value)),
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 matches!(self.body.expression(callee).kind, CoreKind::Function { definition, .. }
                     | CoreKind::TraitMethod { method: definition, .. }
                     if self.direct_known_perform(definition, arguments.clone()).is_some())
@@ -10680,7 +10703,9 @@ impl Lowerer<'_> {
             CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
                 .into_iter()
                 .all(|field| self.core_is_replay_safe(field)),
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 self.core_is_effect_free(id)
                     && self.core_is_replay_safe(callee)
                     && arguments
@@ -10726,7 +10751,9 @@ impl Lowerer<'_> {
                 self.core_is_effect_free(left) && self.core_is_effect_free(right)
             }
             CoreKind::Closure { .. } => true,
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 self.core_is_effect_free(callee)
                     && arguments
                         .into_iter()
@@ -10755,7 +10782,9 @@ impl Lowerer<'_> {
                     fields,
                     "terminal aggregate construction has no reachable terminal performance",
                 ),
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 let mut values = vec![callee];
                 values.extend(arguments.clone());
                 if values

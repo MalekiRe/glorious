@@ -8,7 +8,7 @@
 //! completion exits all use the same provenance model.
 
 use crate::{
-    core::{CoreId, CoreKind, CorePlace, EnvironmentBrand, TypedBody},
+    core::{CallReferenceOrigin, CoreId, CoreKind, CorePlace, EnvironmentBrand, TypedBody},
     placeflow::PlaceFlow,
     source::Span,
     types::Type,
@@ -224,16 +224,63 @@ impl Analyzer<'_> {
                     })
                     .collect(),
             },
-            CoreKind::Call { callee, arguments } => {
-                // Calls are not escape boundaries by themselves: their
-                // callable contract owns the outlives relationship. Still
-                // visit all operands so nested `let` expressions retain their
-                // value provenance for the surrounding body.
+            CoreKind::Call {
+                callee,
+                arguments,
+                reference_origin,
+            } => {
+                // A call result is a boundary value in its own right. The
+                // frozen Core contract names the caller argument whose region
+                // it forwards, so relaying `&local` through a helper cannot
+                // erase a later return/suspension/drop-check obligation.
                 self.value(callee);
-                for argument in arguments {
-                    self.value(argument);
+                let values = arguments
+                    .into_iter()
+                    .map(|argument| self.value(argument))
+                    .collect::<Vec<_>>();
+                match reference_origin {
+                    CallReferenceOrigin::None => Value::None,
+                    CallReferenceOrigin::External => Value::ExternalBorrowed,
+                    CallReferenceOrigin::Paths(paths) => {
+                        let mut result = Value::None;
+                        for path in paths {
+                            let Some(argument) = values.get(path.argument as usize) else {
+                                self.error(
+                                    expression.span,
+                                    "G5023",
+                                    "reference-valued call names an argument outside its frozen arity",
+                                );
+                                continue;
+                            };
+                            let Some(value) = value_at_path(argument, &path.argument_fields) else {
+                                self.error(
+                                    expression.span,
+                                    "G5023",
+                                    "reference-valued call forwards an argument without structural provenance",
+                                );
+                                continue;
+                            };
+                            if !put_value_at_path(&mut result, &path.result_fields, value) {
+                                self.error(
+                                    expression.span,
+                                    "G5023",
+                                    "reference-valued call has contradictory frozen result paths",
+                                );
+                            }
+                        }
+                        result
+                    }
+                    CallReferenceOrigin::Opaque => {
+                        if known_reference_bearing_type(&expression.ty) {
+                            self.error(
+                                expression.span,
+                                "G5023",
+                                "reference-valued call has no frozen caller-region provenance",
+                            );
+                        }
+                        Value::None
+                    }
                 }
-                Value::None
             }
             CoreKind::Perform { arguments, .. } => {
                 for argument in arguments {
@@ -489,6 +536,43 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
         current = field;
     }
     false
+}
+
+fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
+    let mut value = value;
+    for field in path {
+        let Value::Aggregate(fields) = value else {
+            return None;
+        };
+        value = fields.get(*field as usize)?;
+    }
+    Some(value.clone())
+}
+
+fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bool {
+    if path.is_empty() {
+        if !matches!(target, Value::None) {
+            return false;
+        }
+        *target = replacement;
+        return true;
+    }
+    let required = path[0] as usize + 1;
+    if matches!(target, Value::None) {
+        *target = Value::Aggregate(vec![Value::None; required]);
+    }
+    let Value::Aggregate(fields) = target else {
+        return false;
+    };
+    if fields.len() < required {
+        fields.resize(required, Value::None);
+    }
+    put_value_at_path(&mut fields[path[0] as usize], &path[1..], replacement)
+}
+
+fn known_reference_bearing_type(value: &Type) -> bool {
+    matches!(value, Type::Reference { .. })
+        || matches!(value, Type::Tuple(values) if values.iter().any(known_reference_bearing_type))
 }
 
 fn join(mut values: Vec<Value>) -> Value {

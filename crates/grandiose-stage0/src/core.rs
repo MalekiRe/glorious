@@ -8,7 +8,7 @@ use crate::{
     interface::{Definition, DefinitionNamespace},
     pattern::{PatternDecision, PatternGenericScope, elaborate_pattern_with_scope},
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
-    signature::{ElaboratedEffect, ElaboratedHeader, ElaboratedInterface},
+    signature::{ElaboratedEffect, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout},
     source::Span,
     trait_solver::{
         TraitAnswer, TraitConstProjectionAnswer, TraitEffectRowProjectionAnswer, TraitGoal,
@@ -216,6 +216,30 @@ pub struct CoreCompletionClause {
     pub body: CoreId,
     pub span: Span,
 }
+/// Frozen provenance for a direct-reference result at a callable boundary.
+/// A reference-valued call must either name the one argument whose region it
+/// forwards, prove that it is external/static, or be explicitly opaque.  The
+/// latter is rejected by ownership consumers rather than silently shortening
+/// a caller loan based on a callee implementation detail.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CallReferenceOrigin {
+    /// The result has no direct reference component.
+    None,
+    /// Every direct reference leaf in the result is mapped to one caller
+    /// argument/projection leaf. The vectors use frozen structural field
+    /// indices, never source spellings.
+    Paths(Vec<CallReferencePath>),
+    /// The result is an external/static reference with no caller loan.
+    External,
+    /// Core could not prove a unique source region for a reference result.
+    Opaque,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallReferencePath {
+    pub result_fields: Vec<u32>,
+    pub argument: u32,
+    pub argument_fields: Vec<u32>,
+}
 /// One branch-local view of a source `is` test.  The boolean result selects
 /// the completion arm; this record supplies the corresponding structural
 /// subject and frozen projection plan only to a proven-positive arm.
@@ -416,6 +440,7 @@ pub enum CoreKind {
     Call {
         callee: CoreId,
         arguments: Vec<CoreId>,
+        reference_origin: CallReferenceOrigin,
     },
     /// Canonical effect performance selected by the effect namespace, never a
     /// value function merely named like an operation.
@@ -599,6 +624,15 @@ impl TypedBody {
             if let Some(message) = core_structural_error(&expression.kind) {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4183",
+                    span: expression.span,
+                    message,
+                });
+            }
+            if let Some(message) =
+                call_reference_origin_error(self, &expression.kind, &expression.ty)
+            {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4187",
                     span: expression.span,
                     message,
                 });
@@ -905,10 +939,15 @@ impl CoreFingerprintEncoder<'_> {
                 self.place(place);
                 self.id(*value);
             }
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee,
+                arguments,
+                reference_origin,
+            } => {
                 self.bytes(b"call");
                 self.id(*callee);
                 self.ids(arguments);
+                self.debug(reference_origin);
             }
             CoreKind::Perform {
                 effect,
@@ -1043,7 +1082,9 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
             }
             children
         }
-        CoreKind::Call { callee, arguments } => std::iter::once(*callee)
+        CoreKind::Call {
+            callee, arguments, ..
+        } => std::iter::once(*callee)
             .chain(arguments.iter().copied())
             .collect(),
         CoreKind::Perform { arguments, .. } => arguments.clone(),
@@ -1124,6 +1165,63 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
         }),
         _ => None,
     }
+}
+
+fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type) -> Option<String> {
+    let CoreKind::Call {
+        arguments,
+        reference_origin,
+        ..
+    } = kind
+    else {
+        return None;
+    };
+    let is_reference = known_reference_bearing_type(result);
+    match reference_origin {
+        CallReferenceOrigin::None if is_reference => {
+            Some("reference-valued call omitted its frozen caller-region provenance".into())
+        }
+        CallReferenceOrigin::Paths(paths) => {
+            if !known_reference_bearing_type(result) && !matches!(result, Type::Nominal { .. }) {
+                return Some("call-reference paths require a reference-bearing result".into());
+            }
+            let mut result_paths = std::collections::BTreeSet::new();
+            for path in paths {
+                if !result_paths.insert(path.result_fields.clone()) {
+                    return Some(
+                        "call-reference provenance repeats a result projection path".into(),
+                    );
+                }
+                let Some(argument) = arguments.get(path.argument as usize) else {
+                    return Some("call-reference provenance indexes a missing argument".into());
+                };
+                if !body.contains(*argument) {
+                    return None;
+                }
+            }
+            None
+        }
+        CallReferenceOrigin::External => match result {
+            Type::Reference {
+                lifetime: Lifetime::Static,
+                ..
+            } => None,
+            _ => {
+                Some("external call-reference provenance requires a static reference result".into())
+            }
+        },
+        // An unconstrained generic result may later instantiate to a scalar
+        // or a reference. Its call-site Core has no direct path to validate;
+        // ownership consumers reject it only when the frozen concrete use is
+        // reference-bearing.
+        CallReferenceOrigin::Opaque => None,
+        CallReferenceOrigin::None => None,
+    }
+}
+
+fn known_reference_bearing_type(value: &Type) -> bool {
+    matches!(value, Type::Reference { .. })
+        || matches!(value, Type::Tuple(values) if values.iter().any(known_reference_bearing_type))
 }
 
 fn refinement_environment_error(environment: &RefinementEnvironment) -> Option<String> {
@@ -4479,7 +4577,9 @@ impl Elaborator<'_> {
                     record_capture(captures, name, CaptureMode::UniqueBorrow, ty.clone());
                 }
             }
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 self.collect_captures(*callee, locals, captures);
                 for argument in arguments {
                     self.collect_captures(*argument, locals, captures);
@@ -4571,11 +4671,12 @@ impl Elaborator<'_> {
             let ty = self.expressions[index].ty.clone();
             self.expressions[index].ty = self.zonk_type(ty, span);
             let kind = self.expressions[index].kind.clone();
-            self.expressions[index].kind = self.zonk_core_metadata(kind, span);
+            let result = self.expressions[index].ty.clone();
+            self.expressions[index].kind = self.zonk_core_metadata(kind, span, &result);
         }
     }
 
-    fn zonk_core_metadata(&mut self, mut kind: CoreKind, span: Span) -> CoreKind {
+    fn zonk_core_metadata(&mut self, mut kind: CoreKind, span: Span, result: &Type) -> CoreKind {
         match &mut kind {
             CoreKind::Closure {
                 parameters,
@@ -4621,6 +4722,14 @@ impl Elaborator<'_> {
                     .cloned()
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
+            }
+            CoreKind::Call {
+                arguments,
+                reference_origin,
+                ..
+            } => {
+                *reference_origin =
+                    call_reference_origin(self.signatures, &self.expressions, arguments, result);
             }
             CoreKind::PatternTest {
                 pattern,
@@ -4686,7 +4795,6 @@ impl Elaborator<'_> {
             | CoreKind::Field { .. }
             | CoreKind::Enum { .. }
             | CoreKind::Let { .. }
-            | CoreKind::Call { .. }
             | CoreKind::Binary { .. }
             | CoreKind::Block(_)
             | CoreKind::Borrow { .. }
@@ -5806,7 +5914,15 @@ impl Elaborator<'_> {
             self.check_effects(&effects, span);
             self.check_call_where_bounds(callee, span);
         }
-        self.alloc(CoreKind::Call { callee, arguments }, result, span)
+        self.alloc(
+            CoreKind::Call {
+                callee,
+                arguments,
+                reference_origin: CallReferenceOrigin::Opaque,
+            },
+            result,
+            span,
+        )
     }
     /// Resolve a qualified trait method used as a first-class callable.  A
     /// trait selection needs a concrete subject, so unlike an immediately
@@ -8777,6 +8893,222 @@ fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::Generi
                 crate::GenericKind::Const(crate::ConstKind::Quantity)
             )
     )
+}
+
+fn call_reference_origin(
+    signatures: &ElaboratedInterface,
+    expressions: &[CoreExpr],
+    arguments: &[CoreId],
+    result: &Type,
+) -> CallReferenceOrigin {
+    let mut result_leaves = vec![];
+    if reference_leaf_paths(signatures, result, &mut vec![], &mut result_leaves).is_err() {
+        return CallReferenceOrigin::Opaque;
+    }
+    if result_leaves.is_empty() {
+        return CallReferenceOrigin::None;
+    }
+    if result_leaves.iter().all(|(_, ty)| {
+        matches!(
+            ty,
+            Type::Reference {
+                lifetime: Lifetime::Static,
+                ..
+            }
+        )
+    }) {
+        return CallReferenceOrigin::External;
+    }
+    let mut argument_leaves = vec![];
+    for (argument, id) in arguments.iter().enumerate() {
+        let Some(expression) = expressions.get(id.0 as usize) else {
+            return CallReferenceOrigin::Opaque;
+        };
+        let mut leaves = vec![];
+        if reference_leaf_paths(signatures, &expression.ty, &mut vec![], &mut leaves).is_err() {
+            return CallReferenceOrigin::Opaque;
+        }
+        argument_leaves.extend(
+            leaves
+                .into_iter()
+                .map(|(fields, ty)| (argument as u32, fields, ty)),
+        );
+    }
+    let mut paths = vec![];
+    for (result_fields, result_ty) in result_leaves {
+        let Type::Reference {
+            lifetime: result_lifetime,
+            referent: result_referent,
+            ..
+        } = result_ty
+        else {
+            unreachable!("reference leaf traversal only yields references");
+        };
+        if matches!(result_lifetime, Lifetime::Static) {
+            // A mixed static/caller-owned aggregate needs a path-level
+            // external representation that Core does not yet encode.
+            return CallReferenceOrigin::Opaque;
+        }
+        let candidates = argument_leaves
+            .iter()
+            .filter(|(_, _, candidate)| {
+                matches!(candidate, Type::Reference { lifetime, referent, .. }
+                    if lifetime == &result_lifetime && referent == &result_referent)
+            })
+            .collect::<Vec<_>>();
+        let [(argument, argument_fields, _)] = candidates.as_slice() else {
+            return CallReferenceOrigin::Opaque;
+        };
+        paths.push(CallReferencePath {
+            result_fields,
+            argument: *argument,
+            argument_fields: argument_fields.clone(),
+        });
+    }
+    CallReferenceOrigin::Paths(paths)
+}
+
+/// Discover direct reference leaves through the sealed structural shapes that
+/// Typed Core can project. Nominal layouts are read from the frozen interface
+/// and instantiated with their canonical application arguments; an enum or
+/// opaque projection with a reference-bearing payload remains deliberately
+/// opaque because a path would depend on a runtime variant.
+fn reference_leaf_paths(
+    signatures: &ElaboratedInterface,
+    ty: &Type,
+    path: &mut Vec<u32>,
+    leaves: &mut Vec<(Vec<u32>, Type)>,
+) -> Result<(), ()> {
+    match ty {
+        Type::Reference { .. } => leaves.push((path.clone(), ty.clone())),
+        Type::Tuple(fields) => {
+            for (index, field) in fields.iter().enumerate() {
+                path.push(index as u32);
+                reference_leaf_paths(signatures, field, path, leaves)?;
+                path.pop();
+            }
+        }
+        Type::Nominal {
+            definition,
+            arguments,
+        } => match signatures.definitions.get(definition) {
+            Some(ElaboratedHeader::Nominal {
+                layout: ElaboratedNominalLayout::Struct(fields),
+                ..
+            }) => {
+                for (index, field) in fields.iter().enumerate() {
+                    path.push(index as u32);
+                    let field = instantiate_nominal_field_type(&field.ty, arguments)?;
+                    reference_leaf_paths(signatures, &field, path, leaves)?;
+                    path.pop();
+                }
+            }
+            Some(ElaboratedHeader::Nominal {
+                layout: ElaboratedNominalLayout::Enum(variants),
+                ..
+            }) => {
+                if variants.iter().any(|variant| match &variant.payload {
+                    crate::signature::ElaboratedEnumVariantPayload::Unit => false,
+                    crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => fields
+                        .iter()
+                        .any(|field| type_may_contain_reference(signatures, field)),
+                    crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => fields
+                        .iter()
+                        .any(|field| type_may_contain_reference(signatures, &field.ty)),
+                }) {
+                    return Err(());
+                }
+            }
+            Some(ElaboratedHeader::Nominal {
+                layout: ElaboratedNominalLayout::Opaque,
+                ..
+            })
+            | None => return Err(()),
+            _ => return Err(()),
+        },
+        Type::Array(element) => {
+            if type_may_contain_reference(signatures, element) {
+                return Err(());
+            }
+        }
+        Type::Projection { .. } | Type::Generic(_) | Type::Infer(_) => return Err(()),
+        Type::Callable { .. }
+        | Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Error => {}
+    }
+    Ok(())
+}
+
+fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bool {
+    let mut leaves = vec![];
+    reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves).is_err() || !leaves.is_empty()
+}
+
+fn instantiate_nominal_field_type(ty: &Type, arguments: &[GenericArgument]) -> Result<Type, ()> {
+    match ty {
+        Type::Generic(index) => match arguments.get(*index as usize) {
+            Some(GenericArgument::Type(ty)) => Ok(ty.clone()),
+            _ => Err(()),
+        },
+        Type::Tuple(fields) => fields
+            .iter()
+            .map(|field| instantiate_nominal_field_type(field, arguments))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Type::Tuple),
+        Type::Array(element) => Ok(Type::Array(Box::new(instantiate_nominal_field_type(
+            element, arguments,
+        )?))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Ok(Type::Reference {
+            mutability: *mutability,
+            lifetime: instantiate_nominal_field_lifetime(*lifetime, arguments)?,
+            referent: Box::new(instantiate_nominal_field_type(referent, arguments)?),
+        }),
+        Type::Nominal {
+            definition,
+            arguments: nested,
+        } => Ok(Type::Nominal {
+            definition: *definition,
+            arguments: nested
+                .iter()
+                .map(|argument| instantiate_nominal_generic_argument(argument, arguments))
+                .collect::<Result<_, _>>()?,
+        }),
+        value => Ok(value.clone()),
+    }
+}
+
+fn instantiate_nominal_field_lifetime(
+    lifetime: Lifetime,
+    arguments: &[GenericArgument],
+) -> Result<Lifetime, ()> {
+    match lifetime {
+        Lifetime::Generic(index) => match arguments.get(index as usize) {
+            Some(GenericArgument::Lifetime(lifetime)) => Ok(*lifetime),
+            _ => Err(()),
+        },
+        lifetime => Ok(lifetime),
+    }
+}
+
+fn instantiate_nominal_generic_argument(
+    argument: &GenericArgument,
+    arguments: &[GenericArgument],
+) -> Result<GenericArgument, ()> {
+    match argument {
+        GenericArgument::Type(ty) => {
+            instantiate_nominal_field_type(ty, arguments).map(GenericArgument::Type)
+        }
+        value => Ok(value.clone()),
+    }
 }
 
 fn structural_const_error(kind: crate::ConstKind) -> GenericArgument {

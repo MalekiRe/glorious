@@ -535,9 +535,9 @@ impl Analyzer<'_> {
             CoreKind::Perform { arguments, .. } => {
                 self.sequence(arguments, environment, expression.span)
             }
-            CoreKind::Call { callee, arguments } => {
-                self.call(callee, arguments, environment, expression.span)
-            }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => self.call(callee, arguments, environment, expression.span),
             CoreKind::Handle {
                 computation,
                 clauses,
@@ -1505,6 +1505,7 @@ mod tests {
                     kind: CoreKind::Call {
                         callee: CoreId(0),
                         arguments: vec![CoreId(1)],
+                        reference_origin: crate::core::CallReferenceOrigin::None,
                     },
                     ty: Type::Scalar(crate::types::ScalarType::I64),
                     span: span(),
@@ -1538,6 +1539,7 @@ mod tests {
                     kind: CoreKind::Call {
                         callee: CoreId(3),
                         arguments: vec![],
+                        reference_origin: crate::core::CallReferenceOrigin::None,
                     },
                     ty: Type::Scalar(crate::types::ScalarType::I64),
                     span: span(),

@@ -1,7 +1,9 @@
 //! Ownership facts derived solely from Typed Core before MIR lowering.
 
 use crate::{
-    core::{CaptureMode, CoreId, CoreKind, CorePlace, RefinementBrand, TypedBody},
+    core::{
+        CallReferenceOrigin, CaptureMode, CoreId, CoreKind, CorePlace, RefinementBrand, TypedBody,
+    },
     source::Span,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -37,6 +39,23 @@ impl Projection {
                 text
             })
     }
+}
+
+fn projection_key(root: &str, fields: &[u32]) -> String {
+    fields.iter().fold(root.to_owned(), |mut key, field| {
+        key.push('.');
+        key.push_str(&field.to_string());
+        key
+    })
+}
+
+fn belongs_to_scope(locals: &BTreeSet<String>, key: &str) -> bool {
+    locals.iter().any(|local| {
+        key == local
+            || key
+                .strip_prefix(local)
+                .is_some_and(|suffix| suffix.starts_with('.'))
+    })
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -274,8 +293,15 @@ impl Analyzer<'_> {
             .expect("refinement journal follows PlaceFlow scopes");
         self.refinements.truncate(refinement_start);
         let locals = scope.into_values().collect::<BTreeSet<_>>();
-        for local in &locals {
-            self.release_owner_loans(local, span);
+        let owners = self
+            .projection_loans
+            .iter()
+            .filter_map(|loan| loan.owner.as_deref())
+            .filter(|owner| belongs_to_scope(&locals, owner))
+            .map(str::to_owned)
+            .collect::<BTreeSet<_>>();
+        for owner in owners {
+            self.release_owner_loans(&owner, span);
         }
         self.states.retain(|name, _| !locals.contains(name));
         self.projection_loans.retain(|loan| {
@@ -283,19 +309,20 @@ impl Analyzer<'_> {
                 && !loan
                     .owner
                     .as_ref()
-                    .is_some_and(|owner| locals.contains(owner))
+                    .is_some_and(|owner| belongs_to_scope(&locals, owner))
         });
         self.moved_places
             .retain(|place| !locals.contains(&place.root));
-        self.reborrow_parents
-            .retain(|child, parent| !locals.contains(child) && !locals.contains(parent));
+        self.reborrow_parents.retain(|child, parent| {
+            !belongs_to_scope(&locals, child) && !belongs_to_scope(&locals, parent)
+        });
         self.reference_origins.retain(|name, loan| {
-            !locals.contains(name)
+            !belongs_to_scope(&locals, name)
                 && !locals.contains(&loan.place.root)
                 && !loan
                     .owner
                     .as_ref()
-                    .is_some_and(|owner| locals.contains(owner))
+                    .is_some_and(|owner| belongs_to_scope(&locals, owner))
         });
     }
 
@@ -428,7 +455,9 @@ impl Analyzer<'_> {
                 self.visit_with_live_after(value, live_after);
                 self.use_deref_reference(value, e.span, false);
             }
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 if let CoreKind::Closure { environment, .. } =
                     self.body.expression(callee).kind.clone()
                 {
@@ -659,7 +688,9 @@ impl Analyzer<'_> {
                 self.collect_local_uses(*value, uses);
                 self.collect_place_uses(place, uses);
             }
-            CoreKind::Call { callee, arguments } => {
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
                 self.collect_local_uses(*callee, uses);
                 for argument in arguments {
                     self.collect_local_uses(*argument, uses);
@@ -1349,8 +1380,108 @@ impl Analyzer<'_> {
                     self.record_aggregate_reference_origins(&key, field);
                 }
             }
+            CoreKind::Call {
+                arguments,
+                reference_origin,
+                ..
+            } => self.record_call_reference_origin(name, id, &arguments, reference_origin),
             _ => {}
         }
+    }
+
+    /// Reify every frozen caller-region path a call result is permitted to
+    /// forward. Each path is an owned alias, keeping its backing loan live
+    /// through the matching result projection while suspending a unique
+    /// caller reference during that projection's use.
+    fn record_call_reference_origin(
+        &mut self,
+        result: &str,
+        call: CoreId,
+        arguments: &[CoreId],
+        origin: CallReferenceOrigin,
+    ) {
+        let CallReferenceOrigin::Paths(paths) = origin else {
+            if matches!(origin, CallReferenceOrigin::Opaque)
+                && known_reference_bearing_type(&self.body.expression(call).ty)
+            {
+                self.error(
+                    self.body.expression(self.body.root).span,
+                    "G5023",
+                    "reference-valued call has no frozen caller-region provenance".into(),
+                );
+            }
+            return;
+        };
+        for path in paths {
+            let Some(argument) = arguments.get(path.argument as usize).copied() else {
+                self.error(
+                    self.body.expression(self.body.root).span,
+                    "G5023",
+                    "reference-valued call names an argument outside its frozen arity".into(),
+                );
+                continue;
+            };
+            let Some(parent) = self.reference_loan_from_value_path(argument, &path.argument_fields)
+            else {
+                self.error(
+                    self.body.expression(argument).span,
+                    "G5023",
+                    "reference-valued call forwards an argument without a live reference provenance"
+                        .into(),
+                );
+                continue;
+            };
+            let result = projection_key(result, &path.result_fields);
+            let alias = ProjectionLoan {
+                place: parent.place.clone(),
+                unique: parent.unique,
+                owner: Some(result.clone()),
+            };
+            self.reference_origins.insert(result.clone(), alias.clone());
+            if !self.projection_loans.contains(&alias) {
+                self.projection_loans.push(alias);
+            }
+            if let Some(owner) = parent.owner {
+                self.reborrow_parents.insert(result, owner);
+            }
+            self.event(
+                FlowEventKind::Reborrow(parent.place.root),
+                self.body.expression(argument).span,
+            );
+        }
+    }
+
+    fn reference_loan_from_value(&self, id: CoreId) -> Option<ProjectionLoan> {
+        match &self.body.expression(id).kind {
+            CoreKind::Borrow { unique, value } => {
+                self.projection(*value).map(|place| ProjectionLoan {
+                    place,
+                    unique: *unique,
+                    owner: None,
+                })
+            }
+            CoreKind::Local(_) | CoreKind::Field { .. } => {
+                let key = self.reference_origin_key(id)?;
+                self.projection_loans
+                    .iter()
+                    .find(|loan| loan.owner.as_deref() == Some(key.as_str()))
+                    .cloned()
+                    .or_else(|| self.reference_origins.get(&key).cloned())
+            }
+            _ => None,
+        }
+    }
+
+    fn reference_loan_from_value_path(&self, id: CoreId, fields: &[u32]) -> Option<ProjectionLoan> {
+        if fields.is_empty() {
+            return self.reference_loan_from_value(id);
+        }
+        let key = projection_key(&self.reference_origin_key(id)?, fields);
+        self.projection_loans
+            .iter()
+            .find(|loan| loan.owner.as_deref() == Some(key.as_str()))
+            .cloned()
+            .or_else(|| self.reference_origins.get(&key).cloned())
     }
 
     fn record_assigned_reference_origin(&mut self, place: &CorePlace, value: CoreId) {
@@ -1537,6 +1668,11 @@ impl Analyzer<'_> {
             message,
         })
     }
+}
+
+fn known_reference_bearing_type(value: &crate::types::Type) -> bool {
+    matches!(value, crate::types::Type::Reference { .. })
+        || matches!(value, crate::types::Type::Tuple(values) if values.iter().any(known_reference_bearing_type))
 }
 
 /// A handler arm is dynamically selected.  Until the full quantity analysis

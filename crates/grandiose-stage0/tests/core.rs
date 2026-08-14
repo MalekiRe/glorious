@@ -3359,6 +3359,108 @@ fn call_lifetime_instantiation_preserves_a_generic_reference_relationship() {
 }
 
 #[test]
+fn call_reference_provenance_tracks_tuple_and_nominal_result_paths() {
+    let tuple = core_for(
+        "core-call-reference-tuple-path@0.1.0",
+        "pub fn relay<'a>(value: (&'a i64, i64)) -> (&'a i64, i64) { value } pub fn main() -> i64 { let value = 42; let pair = (&value, 0); let forwarded = relay(pair); 0 }",
+    );
+    assert!(tuple.diagnostics.is_empty(), "{:#?}", tuple.diagnostics);
+    let tuple_call = tuple
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Call {
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(paths),
+                ..
+            } => Some(paths),
+            _ => None,
+        })
+        .expect("tuple relay call provenance");
+    assert_eq!(tuple_call.len(), 1);
+    assert_eq!(tuple_call[0].result_fields, [0]);
+    assert_eq!(tuple_call[0].argument, 0);
+    assert_eq!(tuple_call[0].argument_fields, [0]);
+    let tuple_flow = PlaceFlow::analyze(&tuple);
+    assert!(tuple_flow.diagnostics.is_empty(), "{tuple_flow:#?}");
+
+    let nominal = core_for(
+        "core-call-reference-nominal-path@0.1.0",
+        "pub struct Box<T> { value: T } pub fn relay<'a>(value: Box<&'a i64>) -> Box<&'a i64> { value } pub fn main() -> i64 { let value = 42; let boxed = Box { value: &value }; let forwarded = relay(boxed); 0 }",
+    );
+    assert!(nominal.diagnostics.is_empty(), "{:#?}", nominal.diagnostics);
+    let nominal_flow = PlaceFlow::analyze(&nominal);
+    assert!(nominal_flow.diagnostics.is_empty(), "{nominal_flow:#?}");
+}
+
+#[test]
+fn forged_call_reference_paths_fail_closed_before_ownership() {
+    let mut core = core_for(
+        "core-forged-call-reference-path@0.1.0",
+        "pub fn relay<'a>(value: (&'a i64, i64)) -> (&'a i64, i64) { value } pub fn main() -> i64 { let value = 1; let pair = (&value, 0); let forwarded = relay(pair); *forwarded.0 }",
+    );
+    let call = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Call {
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(paths),
+                ..
+            } => Some(paths),
+            _ => None,
+        })
+        .expect("relay call provenance");
+    call[0].argument = 99;
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4187"),
+        "forged call provenance path was accepted: {:#?}",
+        core.validate()
+    );
+}
+
+#[test]
+fn call_reference_provenance_preserves_return_and_suspension_escape_obligations() {
+    let returned = core_for(
+        "core-call-reference-return-escape@0.1.0",
+        "pub fn relay<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> &i64 { let value = 1; relay(&value) }",
+    );
+    assert!(
+        returned.diagnostics.is_empty(),
+        "{:#?}",
+        returned.diagnostics
+    );
+    let returned_flow = PlaceFlow::analyze(&returned);
+    let returned_escape = EscapeFlow::analyze(&returned, &returned_flow);
+    assert!(
+        returned_escape
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "a relayed body-local reference escaped through a call result: {returned_escape:#?}"
+    );
+
+    let suspended = core_for(
+        "core-call-reference-suspension-escape@0.1.0",
+        "effect Save { [0, 1] save(value: &i64); } pub fn relay<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 / {Save} { let value = 1; handle Save::save(relay(&value)) { Save::save(_) with _ => () }; 0 }",
+    );
+    assert!(
+        suspended.diagnostics.is_empty(),
+        "{:#?}",
+        suspended.diagnostics
+    );
+    let suspended_flow = PlaceFlow::analyze(&suspended);
+    let suspended_escape = EscapeFlow::analyze(&suspended, &suspended_flow);
+    assert!(
+        suspended_escape
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5015"),
+        "a cancellation handler hid a relayed body-local reference from suspension checking: {suspended_escape:#?}"
+    );
+}
+
+#[test]
 fn rigid_lifetime_contracts_reject_short_borrows_at_return_assignment_and_aggregate_boundaries() {
     let returned = core_for(
         "core-return-outlives@0.1.0",
