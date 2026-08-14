@@ -371,6 +371,7 @@ impl TypedBody {
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
+            direct_resumption_callee: None,
         };
         let expected_result = signatures
             .definitions
@@ -536,6 +537,7 @@ impl TypedBody {
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
+            direct_resumption_callee: None,
         };
         let mut parameters = vec![];
         for (parameter, ty) in context
@@ -607,6 +609,7 @@ impl TypedBody {
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
+            direct_resumption_callee: None,
         };
         let expected = match signatures.definitions.get(&definition.key) {
             Some(ElaboratedHeader::Constant(Some(ty))) => Some(ty.clone()),
@@ -747,6 +750,12 @@ struct Elaborator<'a> {
     /// frame. Keep the restriction at Typed Core, where capture facts are
     /// explicit and source recovery cannot manufacture an executable escape.
     active_resumptions: Vec<String>,
+    /// A frame-bound resumption is not yet a first-class closure value in the
+    /// runtime representation.  This short-lived authorization is installed
+    /// only while elaborating the callee of `k(value)` (or migration spelling
+    /// `resume(k, value)`).  Every other value use fails at Typed Core rather
+    /// than leaking to a later MIR-only failure.
+    direct_resumption_callee: Option<String>,
 }
 impl Elaborator<'_> {
     fn expression(&mut self, id: ExprId) -> CoreId {
@@ -891,7 +900,7 @@ impl Elaborator<'_> {
                 if matches!(self.body.expression(callee).kind, ExprKind::Path(ref path) if path.len() == 1 && path[0] == "resume")
                     && let [resumption, value] = arguments.as_slice()
                 {
-                    let callee = self.expression(*resumption);
+                    let callee = self.direct_resumption_callee(*resumption);
                     let expected = match self.expressions[callee.0 as usize].ty.clone() {
                         Type::Callable { parameters, .. } => parameters.first().cloned(),
                         _ => None,
@@ -971,7 +980,7 @@ impl Elaborator<'_> {
                 {
                     return value;
                 }
-                let callee = self.expression(callee);
+                let callee = self.direct_resumption_callee(callee);
                 let expected = match self.expressions[callee.0 as usize].ty.clone() {
                     Type::Callable { parameters, .. } => Some(parameters),
                     _ => None,
@@ -2206,6 +2215,16 @@ impl Elaborator<'_> {
         if path.len() == 1
             && let Some(ty) = self.locals.lookup(&path[0]).cloned()
         {
+            if self.active_resumptions.iter().any(|name| name == &path[0])
+                && self.direct_resumption_callee.as_deref() != Some(path[0].as_str())
+            {
+                self.error(
+                    span,
+                    "G4175",
+                    "handler resumption must be invoked directly and cannot be used as an ordinary value",
+                );
+                self.recovered = true;
+            }
             return self.alloc(CoreKind::Local(path[0].clone()), ty, span);
         }
         match self
@@ -2257,6 +2276,26 @@ impl Elaborator<'_> {
             ),
             _ => self.fail(span, "G4104", "unresolved value reference"),
         }
+    }
+    /// Elaborate a source expression in the one context where the current
+    /// runtime representation may consume a generated continuation: the
+    /// immediate callee position of a call.  Keeping the authorization scoped
+    /// to this expression rejects aliases, stores, borrows, and returns while
+    /// preserving direct calls and the migration `resume(k, value)` spelling.
+    fn direct_resumption_callee(&mut self, id: ExprId) -> CoreId {
+        let authorization = match &self.body.expression(id).kind {
+            ExprKind::Path(path)
+                if path.len() == 1
+                    && self.active_resumptions.iter().any(|name| name == &path[0]) =>
+            {
+                Some(path[0].clone())
+            }
+            _ => None,
+        };
+        let previous = std::mem::replace(&mut self.direct_resumption_callee, authorization);
+        let value = self.expression(id);
+        self.direct_resumption_callee = previous;
+        value
     }
     fn assignment_place(&mut self, id: ExprId, span: Span) -> CorePlace {
         let expression = self.body.expression(id);

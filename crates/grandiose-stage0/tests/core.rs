@@ -1401,6 +1401,37 @@ fn handler_resumption_cannot_escape_through_a_nested_closure_capture() {
 }
 
 #[test]
+fn handler_resumption_cannot_be_aliased_as_an_ordinary_value() {
+    let package = PackageKey("core-handler-resumption-alias@0.1.0".into());
+    let source = "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => { let saved = k; saved(42) } } }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4175"),
+        "resumption alias escaped Typed Core validation: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn handler_payload_binders_do_not_escape_into_the_enclosing_closure() {
     let package = PackageKey("core-handler-scope@0.1.0".into());
     let source = "effect Console { read(value: i64) -> i64; } pub fn main() -> i64 { let delayed = (ignored: i64) -> i64 { handle Console::read(1) { Console::read(value) => value } }; 0 }";
