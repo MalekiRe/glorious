@@ -1410,7 +1410,11 @@ impl TypedBody {
                 "body belongs to a non-callable declaration",
             );
         }
-        let root = elaborator.expression(body.root);
+        // The declared result is useful while elaborating, not merely as a
+        // post-hoc assertion.  In particular, a result such as
+        // `(i64 -> i64, Array<i64>)` supplies the parameter type of a compact
+        // closure and the element type of an empty array nested in the body.
+        let root = elaborator.expression_expected(body.root, expected_result.clone());
         if let Some(expected) = expected_result {
             let actual = elaborator.expressions[root.0 as usize].ty.clone();
             if elaborator
@@ -1575,7 +1579,8 @@ impl TypedBody {
             elaborator.locals.define(parameter.name.clone(), ty.clone());
             parameters.push((parameter.name.clone(), ty.clone()));
         }
-        let root = elaborator.expression(body.root);
+        let root =
+            elaborator.expression_expected(body.root, Some(context.signature.result.clone()));
         let actual = elaborator.expressions[root.0 as usize].ty.clone();
         if elaborator
             .unify_rigid_lifetimes(
@@ -1667,7 +1672,7 @@ impl TypedBody {
                 None
             }
         };
-        let root = elaborator.expression(body.root);
+        let root = elaborator.expression_expected(body.root, expected.clone());
         if let Some(expected) = expected {
             let actual = elaborator.expressions[root.0 as usize].ty.clone();
             if elaborator
@@ -1949,59 +1954,10 @@ impl Elaborator<'_> {
                 )
             }
             ExprKind::Block(values) | ExprKind::ContextualBlock(values) => {
-                self.locals.enter();
-                let values = values
-                    .into_iter()
-                    .map(|value| self.expression(value))
-                    .collect::<Vec<_>>();
-                let ty = values
-                    .last()
-                    .map(|value| self.expressions[value.0 as usize].ty.clone())
-                    .unwrap_or(Type::Unit);
-                self.locals.leave();
-                self.alloc(CoreKind::Block(values), ty, expression.span)
+                self.block_expected(values, None, expression.span)
             }
-            ExprKind::Tuple(values) => {
-                let values = values
-                    .into_iter()
-                    .map(|value| self.expression(value))
-                    .collect::<Vec<_>>();
-                let ty = if values.is_empty() {
-                    Type::Unit
-                } else {
-                    Type::Tuple(
-                        values
-                            .iter()
-                            .map(|value| self.expressions[value.0 as usize].ty.clone())
-                            .collect(),
-                    )
-                };
-                self.alloc(CoreKind::Tuple(values), ty, expression.span)
-            }
-            ExprKind::Array(values) => {
-                let element = self.inference.fresh();
-                let values = values
-                    .into_iter()
-                    .map(|value| {
-                        let value = self.expression(value);
-                        let actual = self.expressions[value.0 as usize].ty.clone();
-                        if self.inference.unify(element.clone(), actual).is_err() {
-                            self.error(
-                                expression.span,
-                                "G4119",
-                                "array elements have incompatible types",
-                            );
-                            self.recovered = true;
-                        }
-                        value
-                    })
-                    .collect();
-                self.alloc(
-                    CoreKind::Array(values),
-                    Type::Array(Box::new(element)),
-                    expression.span,
-                )
-            }
+            ExprKind::Tuple(values) => self.tuple_expected(values, None, expression.span),
+            ExprKind::Array(values) => self.array_expected(values, None, expression.span),
             ExprKind::Record {
                 path,
                 arguments,
@@ -2254,6 +2210,7 @@ impl Elaborator<'_> {
                 None,
                 crate::header::EffectRowHeader::default(),
                 body,
+                None,
                 expression.span,
             ),
             ExprKind::TypedClosure {
@@ -2261,7 +2218,7 @@ impl Elaborator<'_> {
                 result,
                 effects,
                 body,
-            } => self.closure(parameters, result, effects, body, expression.span),
+            } => self.closure(parameters, result, effects, body, None, expression.span),
             // Recovery is a first-class parser outcome, rather than an
             // unsupported source construct. Preserve it as the Core error
             // sentinel so every downstream semantic pass can remain total
@@ -2276,6 +2233,24 @@ impl Elaborator<'_> {
     fn expression_expected(&mut self, id: ExprId, expected: Option<Type>) -> CoreId {
         let expression = self.body.expression(id).clone();
         match expression.kind {
+            ExprKind::Block(values) => self.block_expected(values, expected, expression.span),
+            ExprKind::Tuple(values) => self.tuple_expected(values, expected, expression.span),
+            ExprKind::Array(values) => self.array_expected(values, expected, expression.span),
+            ExprKind::Closure { parameters, body } => self.closure(
+                parameters
+                    .into_iter()
+                    .map(|name| ClosureParameter {
+                        name,
+                        ty: None,
+                        span: expression.span,
+                    })
+                    .collect(),
+                None,
+                crate::header::EffectRowHeader::default(),
+                body,
+                expected,
+                expression.span,
+            ),
             // A qualified trait method is a genuine callable value, not only
             // special syntax for an immediately-applied call.  Its receiver
             // type comes from the contextual callable contract, which is the
@@ -2324,7 +2299,7 @@ impl Elaborator<'_> {
                     "G4118",
                     "contextual block requires explicit parameters for a nonzero-argument callable",
                 ),
-                Some(_) => self.expression(id),
+                Some(expected) => self.block_expected(values, Some(expected), expression.span),
                 None => self.fail(
                     expression.span,
                     "G4118",
@@ -2333,6 +2308,111 @@ impl Elaborator<'_> {
             },
             _ => self.expression(id),
         }
+    }
+    /// Elaborate a lexical block with the result expectation available only
+    /// to its tail expression.  Earlier statements execute for their effects
+    /// and must not inherit a value contract intended for the block result.
+    fn block_expected(
+        &mut self,
+        values: Vec<ExprId>,
+        expected: Option<Type>,
+        span: Span,
+    ) -> CoreId {
+        self.locals.enter();
+        let value_count = values.len();
+        let values = values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                if index + 1 == value_count {
+                    self.expression_expected(value, expected.clone())
+                } else {
+                    self.expression(value)
+                }
+            })
+            .collect::<Vec<_>>();
+        let ty = values
+            .last()
+            .map(|value| self.expressions[value.0 as usize].ty.clone())
+            .unwrap_or(Type::Unit);
+        self.locals.leave();
+        self.alloc(CoreKind::Block(values), ty, span)
+    }
+
+    /// Elaborate tuple elements against their corresponding structural
+    /// expectation.  This is deliberately exact: a tuple does not gain an
+    /// implicit conversion merely because one of its elements happens to
+    /// type-check under a different shape.
+    fn tuple_expected(
+        &mut self,
+        values: Vec<ExprId>,
+        expected: Option<Type>,
+        span: Span,
+    ) -> CoreId {
+        let expected_elements = match expected {
+            Some(Type::Tuple(elements)) if elements.len() == values.len() => Some(elements),
+            Some(Type::Unit) if values.is_empty() => Some(vec![]),
+            _ => None,
+        };
+        let values = values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                self.expression_expected(
+                    value,
+                    expected_elements
+                        .as_ref()
+                        .and_then(|elements| elements.get(index))
+                        .cloned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let ty = if values.is_empty() {
+            Type::Unit
+        } else {
+            Type::Tuple(
+                values
+                    .iter()
+                    .map(|value| self.expressions[value.0 as usize].ty.clone())
+                    .collect(),
+            )
+        };
+        self.alloc(CoreKind::Tuple(values), ty, span)
+    }
+
+    /// Elaborate every array element under the single expected element type;
+    /// this is what gives an empty array a stable body-local type before the
+    /// surrounding expression is frozen.
+    fn array_expected(
+        &mut self,
+        values: Vec<ExprId>,
+        expected: Option<Type>,
+        span: Span,
+    ) -> CoreId {
+        let expected_element = match expected {
+            Some(Type::Array(element)) => Some(*element),
+            _ => None,
+        };
+        let element = expected_element
+            .clone()
+            .unwrap_or_else(|| self.inference.fresh());
+        let values = values
+            .into_iter()
+            .map(|value| {
+                let value = self.expression_expected(value, expected_element.clone());
+                let actual = self.expressions[value.0 as usize].ty.clone();
+                if self.inference.unify(element.clone(), actual).is_err() {
+                    self.error(span, "G4119", "array elements have incompatible types");
+                    self.recovered = true;
+                }
+                value
+            })
+            .collect();
+        self.alloc(
+            CoreKind::Array(values),
+            Type::Array(Box::new(element)),
+            span,
+        )
     }
     fn contextual_zero_arg_closure(
         &mut self,
@@ -2350,9 +2430,17 @@ impl Elaborator<'_> {
         let previous_effects = std::mem::replace(&mut self.declared_effects, effects.clone());
         let previous_handled = std::mem::take(&mut self.handled_effects);
         let previous_handled_operations = std::mem::take(&mut self.handled_operations);
+        let value_count = values.len();
         let values = values
             .into_iter()
-            .map(|value| self.expression(value))
+            .enumerate()
+            .map(|(index, value)| {
+                if index + 1 == value_count {
+                    self.expression_expected(value, Some(result.clone()))
+                } else {
+                    self.expression(value)
+                }
+            })
             .collect::<Vec<_>>();
         self.declared_effects = previous_effects;
         self.handled_effects = previous_handled;
@@ -2404,20 +2492,50 @@ impl Elaborator<'_> {
         declared_result: Option<crate::header::HeaderType>,
         effects: crate::header::EffectRowHeader,
         body: ExprId,
+        expected: Option<Type>,
         span: Span,
     ) -> CoreId {
+        // Compact closures deliberately omit a source signature.  A callable
+        // expectation provides that signature without creating a general
+        // implicit conversion: arity must still match exactly, and annotated
+        // closures retain their own explicit contract.
+        let parameter_count = parameters.len();
+        let expected_callable = expected.and_then(|expected| match expected {
+            Type::Callable {
+                lifetime_binders: 0,
+                parameters,
+                result,
+                effects,
+                invocation,
+            } if parameters.len() == parameter_count => {
+                Some((parameters, *result, effects, invocation))
+            }
+            _ => None,
+        });
+        let expected_parameters = expected_callable
+            .as_ref()
+            .map(|(parameters, _, _, _)| parameters);
         let parameters = parameters
             .into_iter()
-            .map(|parameter| {
+            .enumerate()
+            .map(|(index, parameter)| {
                 let ty = parameter
                     .ty
                     .as_ref()
                     .map(|ty| self.header_type(ty))
+                    .or_else(|| {
+                        expected_parameters
+                            .and_then(|parameters| parameters.get(index))
+                            .cloned()
+                    })
                     .unwrap_or_else(|| self.inference.fresh());
                 (parameter.name, ty)
             })
             .collect::<Vec<_>>();
-        let effects = self.closure_effects(&effects, span);
+        let effects = expected_callable
+            .as_ref()
+            .map(|(_, _, effects, _)| effects.clone())
+            .unwrap_or_else(|| self.closure_effects(&effects, span));
         self.locals.enter();
         for (name, ty) in &parameters {
             self.locals.define(name.clone(), ty.clone());
@@ -2428,16 +2546,21 @@ impl Elaborator<'_> {
         let previous_effects = std::mem::replace(&mut self.declared_effects, effects.clone());
         let previous_handled = std::mem::take(&mut self.handled_effects);
         let previous_handled_operations = std::mem::take(&mut self.handled_operations);
-        let body = self.expression(body);
+        let expected_result = declared_result
+            .as_ref()
+            .map(|ty| self.header_type(ty))
+            .or_else(|| {
+                expected_callable
+                    .as_ref()
+                    .map(|(_, result, _, _)| result.clone())
+            });
+        let body = self.expression_expected(body, expected_result.clone());
         self.declared_effects = previous_effects;
         self.handled_effects = previous_handled;
         self.handled_operations = previous_handled_operations;
         self.locals.leave();
         let actual_result = self.expressions[body.0 as usize].ty.clone();
-        let result = declared_result
-            .as_ref()
-            .map(|ty| self.header_type(ty))
-            .unwrap_or_else(|| actual_result.clone());
+        let result = expected_result.unwrap_or_else(|| actual_result.clone());
         if self
             .unify_rigid_lifetimes(result.clone(), actual_result, span)
             .is_err()

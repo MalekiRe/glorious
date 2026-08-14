@@ -3316,6 +3316,13 @@ fn service_infers_and_lowers_immediately_invoked_compact_closures() {
 }
 
 #[test]
+fn service_uses_parameter_expectations_for_compact_closure_arguments() {
+    let source = "pub fn invoke(callback: (i64) -> i64) -> i64 { callback(41) } pub fn main() -> i64 { invoke({ value => value + 1 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_lowers_lexically_bound_closures_with_creation_time_captures() {
     let source = "pub fn main() -> i64 { let value = 40; let add = (extra: i64) -> i64 { value + extra }; add(2) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

@@ -88,6 +88,30 @@ fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
 }
 
 #[test]
+fn declared_result_expectations_flow_through_blocks_and_structured_values() {
+    let core = core_for(
+        "core-structured-expected-types@0.1.0",
+        "pub fn main() -> ((i64) -> i64, Array<i64>) { ({ value => value }, []) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.ty,
+            Type::Callable {
+                parameters,
+                result,
+                ..
+            } if parameters == &vec![Type::Scalar(ScalarType::I64)]
+                && **result == Type::Scalar(ScalarType::I64)
+        )
+    }));
+    assert!(core.expressions.iter().any(|expression| {
+        expression.ty == Type::Array(Box::new(Type::Scalar(ScalarType::I64)))
+            && matches!(expression.kind, CoreKind::Array(ref values) if values.is_empty())
+    }));
+}
+
+#[test]
 fn typed_core_retains_explicit_nominal_arguments_on_record_and_enum_construction() {
     let core = core_for(
         "core-explicit-nominal-construction@0.1.0",
