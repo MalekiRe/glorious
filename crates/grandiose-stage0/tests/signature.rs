@@ -2,11 +2,11 @@ use std::collections::BTreeMap;
 
 use grandiose_stage0::{
     CallableSignature, ConstKind, DeclarationScan, DefKey, DefinitionIndex, Digest, EffectRow,
-    EffectTail, ElaboratedAssociatedTypeBinding, ElaboratedHeader, ElaboratedInterface,
-    ElaboratedNominalLayout, ElaboratedTraitReference, FileKey, GenericArgument, GenericKind,
-    InstantiationError, InterfaceSet, LexedFile, Lifetime, LogicalPath, NominalField, PackageKey,
-    Quantity, ScalarType, StructuralU32Expr, TraitSolver, Type,
-    intrinsic_callable_trait_definition, intrinsic_label_trait_definition,
+    EffectTail, ElaboratedAssociatedTypeBinding, ElaboratedHeader, ElaboratedImplementation,
+    ElaboratedInterface, ElaboratedNominalLayout, ElaboratedTraitReference, FileKey,
+    GenericArgument, GenericKind, InstantiationError, InterfaceSet, LexedFile, Lifetime,
+    LogicalPath, NominalField, PackageKey, Quantity, ScalarType, StructuralU32Expr, TraitSolver,
+    Type, intrinsic_callable_trait_definition, intrinsic_label_trait_definition,
 };
 
 #[test]
@@ -229,6 +229,74 @@ fn unresolved_source_fn_spelling_freezes_the_intrinsic_callable_identity() {
     assert_eq!(
         signature.where_associated_effect_bindings[0].name,
         "Effects"
+    );
+}
+
+#[test]
+fn source_trait_named_runs_in_remains_a_source_trait() {
+    let package = PackageKey("signature-source-runs-in@0.1.0".into());
+    let source = "trait RunsIn {} pub fn apply<T>() -> i64 where T: RunsIn { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let declared_runs_in = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("RunsIn"))
+        .expect("source RunsIn trait")
+        .key;
+    let apply = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("apply"))
+        .expect("apply definition");
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&apply.key).unwrap()
+    else {
+        panic!("expected callable signature")
+    };
+    assert_eq!(signature.where_bounds[0].1.definition, declared_runs_in);
+    assert_ne!(
+        signature.where_bounds[0].1.definition,
+        grandiose_stage0::intrinsic_runs_in_trait_definition()
+    );
+}
+
+#[test]
+fn frozen_interfaces_reject_forged_intrinsic_runs_in_implementations() {
+    let mut interface = ElaboratedInterface::default();
+    interface.definitions.insert(
+        DefKey(Digest::of_bytes(b"forged-intrinsic-runs-in-implementation")),
+        ElaboratedHeader::Implementation(ElaboratedImplementation {
+            generics: 0,
+            generic_kinds: vec![],
+            negative: false,
+            relation: ElaboratedTraitReference {
+                definition: grandiose_stage0::intrinsic_runs_in_trait_definition(),
+                arguments: vec![],
+            },
+            self_ty: Type::Scalar(ScalarType::I64),
+            where_bounds: vec![],
+            associated_types: BTreeMap::new(),
+            associated_effect_rows: BTreeMap::new(),
+            associated_consts: BTreeMap::new(),
+            methods: BTreeMap::new(),
+        }),
+    );
+    interface.validate_projection_obligations();
+    assert!(
+        interface
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4173"),
+        "forged intrinsic RunsIn implementation was accepted: {:#?}",
+        interface.diagnostics
     );
 }
 

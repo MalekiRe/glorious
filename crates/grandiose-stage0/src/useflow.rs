@@ -1948,6 +1948,19 @@ mod tests {
                                 name: "function".into(),
                                 mode: CaptureMode::Move,
                             }],
+                            runs_in: crate::core::RunsInEvidence {
+                                environment: crate::core::EnvironmentBrand {
+                                    owner: crate::DefKey(crate::Digest::of_bytes(b"useflow-test")),
+                                    callable: CallableId(0),
+                                },
+                                callable: CallableId(0),
+                                effects: EffectRow::empty(),
+                                post_states: vec![crate::core::CapturePostState {
+                                    name: "function".into(),
+                                    mode: CaptureMode::Move,
+                                }],
+                                sealed: true,
+                            },
                             sealed: true,
                         },
                         body: CoreId(2),

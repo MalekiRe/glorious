@@ -52,7 +52,7 @@ pub use core::{
     CaptureEnvironment, CaptureMode, CapturePostState, ClosureCapture, CoreDiagnostic, CoreExpr,
     CoreHandlerClause, CoreHandlerContinuationContract, CoreHandlerResumption, CoreId, CoreKind,
     CorePattern, CorePatternField, CorePlace, EnvironmentBrand, LabelBrand, RefinementBrand,
-    RefinementEnvironment, TypedBody,
+    RefinementEnvironment, RunsInEvidence, TypedBody,
 };
 pub use dependency::{DependencyLedger, DependencyNode, DependencyStatus, DependencyTrace};
 pub use diagnostic::{Diagnostic, DiagnosticClass, DiagnosticCode, Severity, SourceSpan};
@@ -126,7 +126,8 @@ pub use signature::{
     ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface,
     ElaboratedNominalLayout, ElaboratedTrait, ElaboratedTraitReference, InstantiationError,
     NominalField, SignatureDiagnostic, intrinsic_callable_trait_definition,
-    intrinsic_label_trait_definition, is_intrinsic_callable_trait, is_intrinsic_label_trait,
+    intrinsic_label_trait_definition, intrinsic_runs_in_trait_definition,
+    is_intrinsic_callable_trait, is_intrinsic_label_trait, is_intrinsic_runs_in_trait,
 };
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{

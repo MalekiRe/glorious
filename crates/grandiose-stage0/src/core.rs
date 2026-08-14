@@ -94,6 +94,17 @@ pub struct CapturePostState {
     pub name: String,
     pub mode: CaptureMode,
 }
+/// Compiler-created proof that one callable may run against exactly one
+/// sealed capture environment. Source code cannot spell its environment
+/// brand, so a trait merely named `RunsIn` never grants this authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunsInEvidence {
+    pub environment: EnvironmentBrand,
+    pub callable: CallableId,
+    pub effects: EffectRow,
+    pub post_states: Vec<CapturePostState>,
+    pub sealed: bool,
+}
 /// A closure's complete, post-inference environment.  Capture mode selection
 /// remains the responsibility of PlaceFlow; this record seals that selected
 /// layout together with the callable that is allowed to consume it.
@@ -102,6 +113,7 @@ pub struct CaptureEnvironment {
     pub brand: EnvironmentBrand,
     pub captures: Vec<ClosureCapture>,
     pub post_states: Vec<CapturePostState>,
+    pub runs_in: RunsInEvidence,
     pub sealed: bool,
 }
 /// Positive evidence produced by `is`. Bindings remain facts rather than
@@ -119,16 +131,30 @@ pub struct RefinementEnvironment {
     pub sealed: bool,
 }
 impl CaptureEnvironment {
-    fn seal(owner: DefKey, callable: CallableId, captures: Vec<ClosureCapture>) -> Self {
+    fn seal(
+        owner: DefKey,
+        callable: CallableId,
+        captures: Vec<ClosureCapture>,
+        effects: EffectRow,
+    ) -> Self {
+        let brand = EnvironmentBrand { owner, callable };
+        let post_states: Vec<CapturePostState> = captures
+            .iter()
+            .map(|capture| CapturePostState {
+                name: capture.name.clone(),
+                mode: capture.mode,
+            })
+            .collect();
         Self {
-            brand: EnvironmentBrand { owner, callable },
-            post_states: captures
-                .iter()
-                .map(|capture| CapturePostState {
-                    name: capture.name.clone(),
-                    mode: capture.mode,
-                })
-                .collect(),
+            brand,
+            runs_in: RunsInEvidence {
+                environment: brand,
+                callable,
+                effects,
+                post_states: post_states.clone(),
+                sealed: true,
+            },
+            post_states,
             captures,
             sealed: true,
         }
@@ -715,7 +741,7 @@ impl TypedBody {
                     message: "Typed Core contains a recovered structural form".into(),
                 });
             }
-            if let Some(message) = core_structural_error(&expression.kind) {
+            if let Some(message) = core_structural_error(&expression.kind, &expression.ty) {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4183",
                     span: expression.span,
@@ -986,6 +1012,12 @@ impl CoreFingerprintEncoder<'_> {
         self.generic_arguments(&value.arguments);
     }
 
+    fn effect_row(&mut self, value: &EffectRow) {
+        // Effect rows are already canonical frozen identities at this
+        // boundary, including delayed projections and their tail.
+        self.debug(value);
+    }
+
     fn pattern(&mut self, value: &CorePattern) {
         match value {
             CorePattern::Any => self.bytes(b"any"),
@@ -1078,6 +1110,11 @@ impl CoreFingerprintEncoder<'_> {
             self.ty(&capture.ty);
         }
         self.debug(&value.post_states);
+        self.debug(value.runs_in.environment);
+        self.debug(value.runs_in.callable);
+        self.effect_row(&value.runs_in.effects);
+        self.debug(&value.runs_in.post_states);
+        self.bytes(&[value.runs_in.sealed as u8]);
         self.bytes(&[value.sealed as u8]);
     }
 
@@ -1469,13 +1506,13 @@ fn core_kind_is_recovered(kind: &CoreKind) -> bool {
     }
 }
 
-fn core_structural_error(kind: &CoreKind) -> Option<String> {
+fn core_structural_error(kind: &CoreKind, ty: &Type) -> Option<String> {
     match kind {
         CoreKind::Closure {
             callable,
             environment,
             ..
-        } => capture_environment_error(*callable, environment),
+        } => capture_environment_error(*callable, environment, ty),
         CoreKind::Field {
             index, field_count, ..
         } if index >= field_count => Some(format!(
@@ -1863,12 +1900,30 @@ fn handler_clause_error(clauses: &[CoreHandlerClause]) -> Option<String> {
 fn capture_environment_error(
     callable: CallableId,
     environment: &CaptureEnvironment,
+    callable_ty: &Type,
 ) -> Option<String> {
     if !environment.sealed {
         return Some("Typed Core closure has an unsealed capture environment".into());
     }
     if environment.brand.callable != callable {
         return Some("Typed Core closure environment brand belongs to another callable".into());
+    }
+    let Type::Callable { effects, .. } = callable_ty else {
+        return Some("Typed Core closure lacks a callable type for its RunsIn evidence".into());
+    };
+    if !environment.runs_in.sealed
+        || environment.runs_in.environment != environment.brand
+        || environment.runs_in.callable != callable
+        || environment.runs_in.post_states != environment.post_states
+    {
+        return Some(
+            "Typed Core closure has forged or incomplete RunsIn environment evidence".into(),
+        );
+    }
+    if environment.runs_in.effects != *effects {
+        return Some(
+            "Typed Core RunsIn evidence does not match the closure effect contract".into(),
+        );
     }
     let mut names = std::collections::BTreeSet::new();
     for capture in &environment.captures {
@@ -2196,6 +2251,7 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
                     .captures
                     .iter()
                     .any(|capture| type_contains_inference(&capture.ty))
+                || effect_row_contains_inference(&environment.runs_in.effects)
         }
         CoreKind::Assign { place, .. } => place_contains_inference(place),
         CoreKind::Function { arguments, .. } => {
@@ -2296,6 +2352,7 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
                     .captures
                     .iter()
                     .any(|capture| !is_canonical_type_identity(&capture.ty))
+                || !is_canonical_effect_row_identity(&environment.runs_in.effects)
         }
         CoreKind::Assign { place, .. } => place_contains_noncanonical_type_identity(place),
         CoreKind::Function { arguments, .. } => arguments
@@ -2455,6 +2512,10 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
                     .captures
                     .iter()
                     .any(|capture| type_contains_out_of_scope_bound_lifetime(&capture.ty))
+                || effect_row_contains_out_of_scope_bound_lifetime(
+                    &environment.runs_in.effects,
+                    &[],
+                )
         }
         CoreKind::Assign { place, .. } => place_contains_out_of_scope_bound_lifetime(place),
         CoreKind::Function { arguments, .. } => arguments
@@ -4011,7 +4072,12 @@ impl Elaborator<'_> {
             CoreKind::Closure {
                 callable,
                 parameters,
-                environment: CaptureEnvironment::seal(self.definition, callable, captures),
+                environment: CaptureEnvironment::seal(
+                    self.definition,
+                    callable,
+                    captures,
+                    effects.clone(),
+                ),
                 body,
             },
             Type::Callable {
@@ -4120,7 +4186,12 @@ impl Elaborator<'_> {
             CoreKind::Closure {
                 callable,
                 parameters: parameters.clone(),
-                environment: CaptureEnvironment::seal(self.definition, callable, captures),
+                environment: CaptureEnvironment::seal(
+                    self.definition,
+                    callable,
+                    captures,
+                    effects.clone(),
+                ),
                 body,
             },
             Type::Callable {

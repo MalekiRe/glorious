@@ -51,6 +51,19 @@ pub fn is_intrinsic_label_trait(reference: &ElaboratedTraitReference) -> bool {
     reference.definition == intrinsic_label_trait_definition()
 }
 
+/// Stable identity for compiler-created callable-environment evidence. Unlike
+/// `Fn` and `Label`, it deliberately has no source spelling fallback: source
+/// cannot manufacture an environment brand by writing `RunsIn`.
+pub fn intrinsic_runs_in_trait_definition() -> DefKey {
+    DefKey(crate::Digest::of_bytes(
+        b"grandiose-stage0-intrinsic-runs-in-trait-v1",
+    ))
+}
+
+pub fn is_intrinsic_runs_in_trait(reference: &ElaboratedTraitReference) -> bool {
+    reference.definition == intrinsic_runs_in_trait_definition()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
     pub generics: u32,
@@ -1219,6 +1232,14 @@ impl ElaboratedInterface {
                         .into(),
                 });
             }
+            if *definition == intrinsic_runs_in_trait_definition() {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4173",
+                    message:
+                        "frozen interfaces cannot define the intrinsic `RunsIn` trait identity"
+                            .into(),
+                });
+            }
             match header {
                 ElaboratedHeader::Callable(signature)
                 | ElaboratedHeader::ValueAlias { signature, .. } => {
@@ -1333,6 +1354,14 @@ impl ElaboratedInterface {
                             code: "G4172",
                             message:
                                 "frozen interfaces cannot implement the intrinsic `Label` trait"
+                                    .into(),
+                        });
+                    }
+                    if is_intrinsic_runs_in_trait(&implementation.relation) {
+                        diagnostics.push(SignatureDiagnostic {
+                            code: "G4173",
+                            message:
+                                "frozen interfaces cannot implement the intrinsic `RunsIn` trait"
                                     .into(),
                         });
                     }

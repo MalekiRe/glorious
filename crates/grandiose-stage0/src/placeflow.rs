@@ -928,6 +928,18 @@ impl Analyzer<'_> {
         span: Span,
         owner: Option<&str>,
     ) {
+        if !environment.runs_in.sealed
+            || environment.runs_in.environment != environment.brand
+            || environment.runs_in.callable != environment.brand.callable
+            || environment.runs_in.post_states != environment.post_states
+        {
+            self.error(
+                span,
+                "G5020",
+                "closure RunsIn evidence does not match its sealed environment".into(),
+            );
+            return;
+        }
         if environment.post_states.len() != environment.captures.len()
             || environment
                 .captures

@@ -11,7 +11,10 @@ use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedEnumVariantPayload,
     ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface, ElaboratedNominalLayout,
     ElaboratedTrait, ElaboratedTraitReference, GenericArgument, Type, implementation_method_key,
-    signature::{TRAIT_SELF_GENERIC, is_intrinsic_callable_trait, is_intrinsic_label_trait},
+    signature::{
+        TRAIT_SELF_GENERIC, is_intrinsic_callable_trait, is_intrinsic_label_trait,
+        is_intrinsic_runs_in_trait,
+    },
     types::{canonical_generic_arguments_encoding, canonical_type_encoding},
 };
 
@@ -1601,6 +1604,14 @@ impl TraitSolver {
         }
         if is_intrinsic_label_trait(&goal.relation) {
             return self.solve_intrinsic_label_goal(&goal);
+        }
+        // `RunsIn` evidence is emitted only by Core closure sealing, where a
+        // brand is checked against the exact capture post-state and callable
+        // effects. A general source-trait query has no such environment
+        // witness, so it must fail closed rather than treating a spelling or
+        // forged interface implementation as authority.
+        if is_intrinsic_runs_in_trait(&goal.relation) {
+            return TraitAnswerIndex::NoSolution;
         }
         self.steps += 1;
         let key = goal_key(&goal);

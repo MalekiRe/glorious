@@ -207,35 +207,57 @@ impl Analyzer<'_> {
                 }
                 result
             }
-            CoreKind::Closure { environment, .. } => Value::Closure {
-                environment: environment.brand,
-                captures: environment
-                    .captures
-                    .into_iter()
-                    .flat_map(|capture| {
-                        let value = self
-                            .values
-                            .get(&capture.name)
-                            .cloned()
-                            .unwrap_or(Value::None);
-                        // Moving a reference into a callable changes the
-                        // owner of the reference slot, not the provenance of
-                        // its backing place.  Treat move captures exactly as
-                        // borrowed captures at this outlives boundary: a
-                        // returned callable, aggregate, or effect payload
-                        // must still carry every backing root.  PlaceFlow
-                        // separately records the move/reborrow and keeps the
-                        // loan live for the callable environment.
-                        borrowed_roots(&value)
-                            .into_iter()
-                            .map(|root| Capture::Borrowed {
-                                root,
-                                environment: environment.brand,
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect(),
-            },
+            CoreKind::Closure {
+                callable,
+                environment,
+                ..
+            } => {
+                let runs_in_matches = environment.runs_in.sealed
+                    && environment.runs_in.environment == environment.brand
+                    && environment.runs_in.callable == callable
+                    && environment.runs_in.post_states == environment.post_states
+                    && matches!(
+                        &expression.ty,
+                        Type::Callable { effects, .. } if environment.runs_in.effects == *effects
+                    );
+                if !runs_in_matches {
+                    self.error(
+                        expression.span,
+                        "G5014",
+                        "closure with invalid RunsIn evidence cannot cross an escape boundary",
+                    );
+                    return Value::None;
+                }
+                Value::Closure {
+                    environment: environment.brand,
+                    captures: environment
+                        .captures
+                        .into_iter()
+                        .flat_map(|capture| {
+                            let value = self
+                                .values
+                                .get(&capture.name)
+                                .cloned()
+                                .unwrap_or(Value::None);
+                            // Moving a reference into a callable changes the
+                            // owner of the reference slot, not the provenance of
+                            // its backing place.  Treat move captures exactly as
+                            // borrowed captures at this outlives boundary: a
+                            // returned callable, aggregate, or effect payload
+                            // must still carry every backing root.  PlaceFlow
+                            // separately records the move/reborrow and keeps the
+                            // loan live for the callable environment.
+                            borrowed_roots(&value)
+                                .into_iter()
+                                .map(|root| Capture::Borrowed {
+                                    root,
+                                    environment: environment.brand,
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .collect(),
+                }
+            }
             CoreKind::Call {
                 callee,
                 arguments,

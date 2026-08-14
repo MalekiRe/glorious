@@ -8,7 +8,7 @@ use grandiose_stage0::{
     TraitEffectRowProjectionAnswer, TraitExplanationTerminal, TraitGoal, TraitMethodAnswer,
     TraitProjectionAnswer, TraitSelectionExplanation, TraitSolver, TraitSolverLimits, Type,
     implementation_method_key, intrinsic_callable_trait_definition,
-    intrinsic_label_trait_definition,
+    intrinsic_label_trait_definition, intrinsic_runs_in_trait_definition,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -125,6 +125,40 @@ fn intrinsic_label_evidence_requires_an_escaping_callable_not_a_spelled_trait() 
                 arguments: vec![],
             },
             subject: escape,
+        }),
+        TraitAnswer::NoSolution
+    ));
+}
+
+#[test]
+fn intrinsic_runs_in_requires_core_environment_evidence_not_a_source_trait_spelling() {
+    let (interface, signatures) = signatures("trait RunsIn {}");
+    let declared_runs_in = key(&interface, "RunsIn");
+    let callable = Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Scalar(ScalarType::I64)),
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+    };
+    let mut solver = TraitSolver::new(&signatures);
+    assert!(matches!(
+        solver.solve(TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: intrinsic_runs_in_trait_definition(),
+                arguments: vec![],
+            },
+            subject: callable.clone(),
+        }),
+        TraitAnswer::NoSolution
+    ));
+    assert!(matches!(
+        solver.solve(TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: declared_runs_in,
+                arguments: vec![],
+            },
+            subject: callable,
         }),
         TraitAnswer::NoSolution
     ));

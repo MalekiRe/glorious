@@ -5,7 +5,7 @@ use grandiose_stage0::{
     EffectRow, EffectRowProjection, EffectTail, EffectVar, ElaboratedInterface, EnvironmentBrand,
     EscapeFlow, FileKey, FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile,
     Lifetime, LogicalPath, MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow,
-    Quantity, ScalarType, Span, StructuralU32Expr, Type, TypedBody, UseFlow,
+    Quantity, RunsInEvidence, ScalarType, Span, StructuralU32Expr, Type, TypedBody, UseFlow,
     implementation_method_key,
 };
 use std::collections::BTreeSet;
@@ -792,6 +792,21 @@ fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
                             name: "captured".into(),
                             mode: CaptureMode::SharedBorrow,
                         }],
+                        runs_in: RunsInEvidence {
+                            environment: EnvironmentBrand {
+                                owner: grandiose_stage0::DefKey(
+                                    grandiose_stage0::Digest::of_bytes(b"core-test"),
+                                ),
+                                callable: CallableId(0),
+                            },
+                            callable: CallableId(0),
+                            effects: EffectRow::empty(),
+                            post_states: vec![CapturePostState {
+                                name: "captured".into(),
+                                mode: CaptureMode::SharedBorrow,
+                            }],
+                            sealed: true,
+                        },
                         sealed: true,
                     },
                     body: CoreId(1),
@@ -5875,6 +5890,12 @@ fn closures_seal_distinct_owner_scoped_environment_brands() {
         .collect::<Vec<_>>();
     assert_eq!(environments.len(), 2);
     assert!(environments.iter().all(|environment| environment.sealed));
+    assert!(environments.iter().all(|environment| {
+        environment.runs_in.sealed
+            && environment.runs_in.environment == environment.brand
+            && environment.runs_in.callable == environment.brand.callable
+            && environment.runs_in.post_states == environment.post_states
+    }));
     assert_eq!(environments[0].brand.owner, environments[1].brand.owner);
     assert_ne!(environments[0].brand, environments[1].brand);
     assert_eq!(environments[0].captures[0].name, "value");
@@ -5927,6 +5948,18 @@ fn typed_core_rejects_replayed_capture_environment_brand() {
                         },
                         captures: vec![],
                         post_states: vec![],
+                        runs_in: RunsInEvidence {
+                            environment: EnvironmentBrand {
+                                owner: grandiose_stage0::DefKey(
+                                    grandiose_stage0::Digest::of_bytes(b"foreign-owner"),
+                                ),
+                                callable: CallableId(0),
+                            },
+                            callable: CallableId(0),
+                            effects: EffectRow::empty(),
+                            post_states: vec![],
+                            sealed: true,
+                        },
                         sealed: true,
                     },
                     body: CoreId(1),
@@ -6005,6 +6038,39 @@ fn capture_environments_seal_and_validate_mode_derived_post_states() {
                 .iter()
                 .any(|diagnostic| diagnostic.code == "G6000"),
         "MIR accepted a forged capture post-state: {lowered:#?}"
+    );
+}
+
+#[test]
+fn typed_core_rejects_runs_in_evidence_with_a_forged_effect_contract() {
+    let mut core = core_for(
+        "core-runs-in-effect-contract@0.1.0",
+        "effect Log { note(); } pub fn main() -> i64 { let action = () -> i64 / {Log} { Log::note(); 0 }; 0 }",
+    );
+    let environment = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Closure { environment, .. } => Some(environment),
+            _ => None,
+        })
+        .expect("effectful closure environment");
+    assert!(!environment.runs_in.effects.effects.is_empty());
+    environment.runs_in.effects = EffectRow::empty();
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4183"),
+        "forged RunsIn effect evidence passed Typed Core validation"
+    );
+    let flow = PlaceFlow::analyze(&core);
+    let escape = EscapeFlow::analyze(&core, &flow);
+    assert!(
+        escape
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5014"),
+        "escape checking trusted forged RunsIn evidence: {escape:#?}"
     );
 }
 
