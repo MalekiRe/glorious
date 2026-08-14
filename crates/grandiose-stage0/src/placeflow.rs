@@ -142,6 +142,7 @@ impl PlaceFlow {
             reference_origins: BTreeMap::new(),
             moved_places: BTreeSet::new(),
             scopes: vec![BTreeMap::new()],
+            scope_refinement_starts: vec![0],
             next_shadow: 0,
             events: vec![],
             refinements: vec![],
@@ -202,6 +203,11 @@ struct Analyzer<'a> {
     /// ownership facts need lexical identities so an inner `let value` does
     /// not alias an outer loan of the same spelling.
     scopes: Vec<BTreeMap<String, String>>,
+    /// The refinement journal position at each lexical boundary.  Positive
+    /// pattern evidence is branch-local evidence, so it must not survive an
+    /// arm/block exit merely because it shares a source spelling with an
+    /// outer local.
+    scope_refinement_starts: Vec<usize>,
     next_shadow: u32,
     events: Vec<FlowEvent>,
     refinements: Vec<RefinementFact>,
@@ -249,13 +255,27 @@ impl Analyzer<'_> {
             .insert(spelling.to_owned(), identity);
     }
 
-    fn visit_scoped_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {
+    fn fresh_binding(&mut self, name: &str) -> String {
+        let identity = format!("{name}#{}", self.next_shadow);
+        self.next_shadow = self.next_shadow.saturating_add(1);
+        identity
+    }
+
+    fn begin_scope(&mut self) {
         self.scopes.push(BTreeMap::new());
-        self.visit_sequence(values, live_after);
+        self.scope_refinement_starts.push(self.refinements.len());
+    }
+
+    fn end_scope(&mut self, span: Span) {
         let scope = self.scopes.pop().expect("nested PlaceFlow scope");
+        let refinement_start = self
+            .scope_refinement_starts
+            .pop()
+            .expect("refinement journal follows PlaceFlow scopes");
+        self.refinements.truncate(refinement_start);
         let locals = scope.into_values().collect::<BTreeSet<_>>();
         for local in &locals {
-            self.release_owner_loans(local, self.body.expression(self.body.root).span);
+            self.release_owner_loans(local, span);
         }
         self.states.retain(|name, _| !locals.contains(name));
         self.projection_loans.retain(|loan| {
@@ -277,6 +297,29 @@ impl Analyzer<'_> {
                     .as_ref()
                     .is_some_and(|owner| locals.contains(owner))
         });
+    }
+
+    fn activate_branch_bindings<'b>(
+        &mut self,
+        bindings: impl IntoIterator<Item = &'b (String, crate::types::Type)>,
+        resumption: Option<&str>,
+    ) {
+        for (name, _) in bindings {
+            let identity = self.fresh_binding(name);
+            self.activate_binding(name, identity.clone());
+            self.states.insert(identity, LocalState::Initialized);
+        }
+        if let Some(name) = resumption {
+            let identity = self.fresh_binding(name);
+            self.activate_binding(name, identity.clone());
+            self.states.insert(identity, LocalState::Initialized);
+        }
+    }
+
+    fn visit_scoped_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {
+        self.begin_scope();
+        self.visit_sequence(values, live_after);
+        self.end_scope(self.body.expression(self.body.root).span);
     }
 
     /// Visit an expression while retaining only loans whose owner may be used
@@ -422,6 +465,7 @@ impl Analyzer<'_> {
                 let incoming_moves = self.moved_places.clone();
                 let incoming_parents = self.reborrow_parents.clone();
                 let incoming_origins = self.reference_origins.clone();
+                let incoming_refinements = self.refinements.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
@@ -429,15 +473,20 @@ impl Analyzer<'_> {
                     self.moved_places = incoming_moves.clone();
                     self.reborrow_parents = incoming_parents.clone();
                     self.reference_origins = incoming_origins.clone();
-                    for (name, _) in clause.bindings {
-                        self.states.insert(name, LocalState::Initialized);
-                    }
-                    if let crate::core::CoreHandlerResumption::Explicit { name, .. } =
-                        clause.resumption
-                    {
-                        self.states.insert(name, LocalState::Initialized);
-                    }
+                    self.refinements = incoming_refinements.clone();
+                    self.begin_scope();
+                    let resumption = match &clause.resumption {
+                        crate::core::CoreHandlerResumption::Explicit { name, .. } => {
+                            Some(name.as_str())
+                        }
+                        _ => None,
+                    };
+                    self.activate_branch_bindings(&clause.bindings, resumption);
                     self.visit_with_live_after(clause.body, live_after);
+                    // A dynamically selected arm may update outer places,
+                    // but neither its payload nor continuation identity may
+                    // become an outer post-state fact.
+                    self.end_scope(clause.span);
                     exits.push((
                         self.states.clone(),
                         self.projection_loans.clone(),
@@ -456,6 +505,7 @@ impl Analyzer<'_> {
                     self.projection_loans = join_handler_projection_loans(&exits, &incoming);
                     self.moved_places = join_handler_moves(&exits, &incoming);
                     self.join_reborrow_facts(&exits, &incoming);
+                    self.refinements = incoming_refinements;
                 }
             }
             CoreKind::Completion {
@@ -472,6 +522,7 @@ impl Analyzer<'_> {
                 let incoming_moves = self.moved_places.clone();
                 let incoming_parents = self.reborrow_parents.clone();
                 let incoming_origins = self.reference_origins.clone();
+                let incoming_refinements = self.refinements.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
@@ -479,10 +530,16 @@ impl Analyzer<'_> {
                     self.moved_places = incoming_moves.clone();
                     self.reborrow_parents = incoming_parents.clone();
                     self.reference_origins = incoming_origins.clone();
-                    for (name, _) in clause.bindings {
-                        self.states.insert(name, LocalState::Initialized);
-                    }
+                    self.refinements = incoming_refinements.clone();
+                    self.begin_scope();
+                    // `bindings` includes the positive refinement
+                    // environment when this completion arm opens one.  Give
+                    // those names the same generative treatment as ordinary
+                    // completion-pattern binders: forged Core cannot use a
+                    // matching spelling to retarget an outer loan.
+                    self.activate_branch_bindings(&clause.bindings, None);
                     self.visit_with_live_after(clause.body, live_after);
+                    self.end_scope(clause.span);
                     exits.push((
                         self.states.clone(),
                         self.projection_loans.clone(),
@@ -501,6 +558,7 @@ impl Analyzer<'_> {
                     self.projection_loans = join_handler_projection_loans(&exits, &incoming);
                     self.moved_places = join_handler_moves(&exits, &incoming);
                     self.join_reborrow_facts(&exits, &incoming);
+                    self.refinements = incoming_refinements;
                 }
             }
             CoreKind::Tuple(values) | CoreKind::Array(values) => {
@@ -671,7 +729,18 @@ impl Analyzer<'_> {
             .projection_loans
             .iter()
             .filter_map(|loan| loan.owner.as_ref())
-            .filter(|owner| !live_after.contains(*owner))
+            .filter(|owner| {
+                // `live_after` originates from frozen Core spellings, while
+                // loan owners are generative lexical identities. Preserve an
+                // outer owner if its spelling is live beyond an arm, and
+                // preserve the active branch identity when a branch-local
+                // spelling is used later in the same arm. The arm scope
+                // itself releases the latter before the dynamic join.
+                !live_after.contains(*owner)
+                    && !live_after
+                        .iter()
+                        .any(|name| self.resolve_name(name) == **owner)
+            })
             .cloned()
             .collect::<BTreeSet<_>>();
         for owner in dead {

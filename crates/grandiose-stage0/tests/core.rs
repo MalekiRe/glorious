@@ -1043,6 +1043,99 @@ fn placeflow_propagates_live_loans_across_dynamic_handler_exits() {
 }
 
 #[test]
+fn handler_payload_shadowing_keeps_the_outer_loan_across_the_dynamic_join() {
+    let source = "effect Read { read(value: i64) -> i64; } pub fn main(value: i64) -> i64 { let loan = &mut value; handle Read::read(1) { Read::read(value) => { let branch = &mut value; branch; 0 } }; value; loan; 0 }";
+    let flow = flow_for("core-handler-payload-place-shadow@0.1.0", source);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5008"),
+        "a payload spelling must not overwrite the outer unique loan at the handler join: {flow:#?}"
+    );
+    assert!(
+        flow.final_states.keys().all(|name| !name.contains('#')),
+        "handler payload identities escaped their clause scope: {flow:#?}"
+    );
+}
+
+#[test]
+fn forged_completion_refinement_shadowing_cannot_retarget_outer_place_facts() {
+    let mut core = core_for(
+        "core-forged-completion-refinement-place-shadow@0.1.0",
+        "pub enum Result { Ok(i64), Err } pub fn main(value: i64, result: Result) -> i64 { let loan = &mut value; handle result is Result::Ok(found) { true => { let branch = &mut found; branch; 0 }; false => 0 }; value; loan; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let clause = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Completion { clauses, .. } => Some(&mut clauses[0]),
+            _ => None,
+        })
+        .expect("positive completion arm");
+    assert!(
+        clause.refinement.is_some(),
+        "fixture needs a refinement arm"
+    );
+    clause.bindings[0].0 = "value".into();
+    let refinement = clause.refinement.as_mut().expect("refinement arm");
+    refinement.environment.bindings[0] = "value".into();
+    refinement.environment.binding_types[0].0 = "value".into();
+    for expression in &mut core.expressions {
+        if matches!(&expression.kind, CoreKind::Local(name) if name == "found") {
+            expression.kind = CoreKind::Local("value".into());
+        }
+    }
+    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5008"),
+        "forged refinement spelling erased an outer unique loan: {flow:#?}"
+    );
+    assert!(
+        flow.active_loans
+            .iter()
+            .all(|loan| loan.owner.as_deref() != Some("branch")),
+        "a completion-arm reborrow escaped through the join: {flow:#?}"
+    );
+}
+
+#[test]
+fn forged_explicit_resumption_shadowing_cannot_erase_an_outer_loan() {
+    let mut core = core_for(
+        "core-forged-resumption-place-shadow@0.1.0",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main(value: i64) -> i64 { let loan = &mut value; handle Ask::ask() { Ask::ask() with k => k(0) }; value; loan; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let clause = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Handle { clauses, .. } => Some(&mut clauses[0]),
+            _ => None,
+        })
+        .expect("handler arm");
+    let CoreHandlerResumption::Explicit { name, .. } = &mut clause.resumption else {
+        panic!("fixture needs an explicit resumption");
+    };
+    *name = "value".into();
+    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5008"),
+        "forged resumption spelling erased an outer unique loan: {flow:#?}"
+    );
+    assert!(
+        flow.final_states.keys().all(|name| !name.contains('#')),
+        "resumption identity escaped its handler arm: {flow:#?}"
+    );
+}
+
+#[test]
 fn placeflow_releases_a_named_loan_after_a_nested_block_last_use() {
     let source =
         "pub fn main() -> i64 { let value = 1; let loan = &mut value; { loan; 0 }; value }";
