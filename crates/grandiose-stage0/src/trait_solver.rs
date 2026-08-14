@@ -11,7 +11,7 @@ use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedEnumVariantPayload,
     ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface, ElaboratedNominalLayout,
     ElaboratedTrait, ElaboratedTraitReference, GenericArgument, Type, implementation_method_key,
-    signature::{TRAIT_SELF_GENERIC, is_intrinsic_callable_trait},
+    signature::{TRAIT_SELF_GENERIC, is_intrinsic_callable_trait, is_intrinsic_label_trait},
     types::{canonical_generic_arguments_encoding, canonical_type_encoding},
 };
 
@@ -1567,6 +1567,9 @@ impl TraitSolver {
         if is_intrinsic_callable_trait(&goal.relation) {
             return self.solve_intrinsic_callable_goal(&goal);
         }
+        if is_intrinsic_label_trait(&goal.relation) {
+            return self.solve_intrinsic_label_goal(&goal);
+        }
         self.steps += 1;
         let key = goal_key(&goal);
         match self.tables.get(&key).copied() {
@@ -1660,6 +1663,26 @@ impl TraitSolver {
         let key = goal_key(goal);
         TraitAnswerIndex::Proven(DefKey(Digest::of_parts([
             b"grandiose-stage0-intrinsic-callable-evidence-v1".as_slice(),
+            key.as_bytes().as_slice(),
+        ])))
+    }
+
+    fn solve_intrinsic_label_goal(&self, goal: &TraitGoal) -> TraitAnswerIndex {
+        let [GenericArgument::Type(payload)] = goal.relation.arguments.as_slice() else {
+            return TraitAnswerIndex::NoSolution;
+        };
+        let Type::Callable {
+            parameters, result, ..
+        } = &goal.subject
+        else {
+            return TraitAnswerIndex::NoSolution;
+        };
+        if parameters.as_slice() != [payload.clone()] || !matches!(result.as_ref(), Type::Never) {
+            return TraitAnswerIndex::NoSolution;
+        }
+        let key = goal_key(goal);
+        TraitAnswerIndex::Proven(DefKey(Digest::of_parts([
+            b"grandiose-stage0-intrinsic-label-evidence-v1".as_slice(),
             key.as_bytes().as_slice(),
         ])))
     }

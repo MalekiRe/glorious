@@ -38,6 +38,19 @@ pub fn is_intrinsic_callable_trait(reference: &ElaboratedTraitReference) -> bool
     reference.definition == intrinsic_callable_trait_definition()
 }
 
+/// Stable identity for the compiler-owned nonlocal-exit contract. Like `Fn`,
+/// this never relies on a prelude name during solving: a resolved source trait
+/// named `Label` is an ordinary trait with no escape authority.
+pub fn intrinsic_label_trait_definition() -> DefKey {
+    DefKey(crate::Digest::of_bytes(
+        b"grandiose-stage0-intrinsic-label-trait-v1",
+    ))
+}
+
+pub fn is_intrinsic_label_trait(reference: &ElaboratedTraitReference) -> bool {
+    reference.definition == intrinsic_label_trait_definition()
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
     pub generics: u32,
@@ -1021,6 +1034,13 @@ impl ElaboratedInterface {
                         .into(),
                 });
             }
+            if *definition == intrinsic_label_trait_definition() {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4172",
+                    message: "frozen interfaces cannot define the intrinsic `Label` trait identity"
+                        .into(),
+                });
+            }
             match header {
                 ElaboratedHeader::Callable(signature)
                 | ElaboratedHeader::ValueAlias { signature, .. } => {
@@ -1128,6 +1148,14 @@ impl ElaboratedInterface {
                             code: "G4169",
                             message: "frozen interfaces cannot implement the intrinsic `Fn` trait"
                                 .into(),
+                        });
+                    }
+                    if is_intrinsic_label_trait(&implementation.relation) {
+                        diagnostics.push(SignatureDiagnostic {
+                            code: "G4172",
+                            message:
+                                "frozen interfaces cannot implement the intrinsic `Label` trait"
+                                    .into(),
                         });
                     }
                     let mut ambient = implementation.where_bounds.clone();
@@ -1284,6 +1312,9 @@ impl ElaboratedInterface {
             if is_intrinsic_callable_trait(relation) {
                 self.validate_intrinsic_callable_bound(signature, subject, relation, diagnostics);
             }
+            if is_intrinsic_label_trait(relation) {
+                self.validate_intrinsic_label_bound(subject, relation, diagnostics);
+            }
         }
         for binding in &signature.where_associated_type_bindings {
             self.validate_type_projection_obligations(&binding.subject, &ambient, diagnostics);
@@ -1405,6 +1436,36 @@ impl ElaboratedInterface {
             diagnostics.push(SignatureDiagnostic {
                 code: "G4168",
                 message: "intrinsic `Fn` Effects equality does not match callable effects".into(),
+            });
+        }
+    }
+
+    /// A label value is an escaping one-argument callable.  The concrete
+    /// `Never` result prevents an ordinary returning callback from acquiring
+    /// nonlocal-exit authority merely by matching the `Label` spelling.
+    fn validate_intrinsic_label_bound(
+        &self,
+        subject: &Type,
+        relation: &ElaboratedTraitReference,
+        diagnostics: &mut Vec<SignatureDiagnostic>,
+    ) {
+        let [GenericArgument::Type(payload)] = relation.arguments.as_slice() else {
+            diagnostics.push(SignatureDiagnostic {
+                code: "G4170",
+                message: "intrinsic `Label` requires exactly one payload type argument".into(),
+            });
+            return;
+        };
+        let Type::Callable {
+            parameters, result, ..
+        } = subject
+        else {
+            return;
+        };
+        if parameters.as_slice() != [payload.clone()] || !matches!(result.as_ref(), Type::Never) {
+            diagnostics.push(SignatureDiagnostic {
+                code: "G4171",
+                message: "intrinsic `Label<B>` requires an escaping callable `(B) -> !`".into(),
             });
         }
     }
@@ -3937,6 +3998,19 @@ impl Elaborator<'_> {
                     }
                     return ElaboratedTraitReference {
                         definition: intrinsic_callable_trait_definition(),
+                        arguments,
+                    };
+                }
+                if path == ["Label"] {
+                    let arguments = self.elaborate_unresolved_generic_arguments(source_arguments);
+                    if !matches!(arguments.as_slice(), [GenericArgument::Type(_)]) {
+                        self.error(
+                            "G4170",
+                            "intrinsic `Label` requires exactly one payload type argument".into(),
+                        );
+                    }
+                    return ElaboratedTraitReference {
+                        definition: intrinsic_label_trait_definition(),
                         arguments,
                     };
                 }

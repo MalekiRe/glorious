@@ -126,7 +126,7 @@ pub use signature::{
     ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface,
     ElaboratedNominalLayout, ElaboratedTrait, ElaboratedTraitReference, InstantiationError,
     NominalField, SignatureDiagnostic, intrinsic_callable_trait_definition,
-    is_intrinsic_callable_trait,
+    intrinsic_label_trait_definition, is_intrinsic_callable_trait, is_intrinsic_label_trait,
 };
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{

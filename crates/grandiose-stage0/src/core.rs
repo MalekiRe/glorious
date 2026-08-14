@@ -6877,7 +6877,22 @@ impl Elaborator<'_> {
     /// identity and therefore cannot make an arbitrary value callable.
     fn callable_contract_from_ambient_fn_bound(&self, value: &Type) -> Option<Type> {
         for (subject, relation) in &self.ambient_where_bounds {
-            if subject != value || !crate::is_intrinsic_callable_trait(relation) {
+            if subject != value {
+                continue;
+            }
+            if crate::is_intrinsic_label_trait(relation) {
+                let [crate::GenericArgument::Type(payload)] = relation.arguments.as_slice() else {
+                    continue;
+                };
+                return Some(Type::Callable {
+                    lifetime_binders: 0,
+                    parameters: vec![payload.clone()],
+                    result: Box::new(Type::Never),
+                    effects: EffectRow::empty(),
+                    invocation: crate::Quantity::ONCE,
+                });
+            }
+            if !crate::is_intrinsic_callable_trait(relation) {
                 continue;
             }
             let parameters = match relation.arguments.as_slice() {

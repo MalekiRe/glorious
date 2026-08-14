@@ -6,7 +6,7 @@ use grandiose_stage0::{
     ElaboratedNominalLayout, ElaboratedTraitReference, FileKey, GenericArgument, GenericKind,
     InstantiationError, InterfaceSet, LexedFile, Lifetime, LogicalPath, NominalField, PackageKey,
     Quantity, ScalarType, StructuralU32Expr, TraitSolver, Type,
-    intrinsic_callable_trait_definition,
+    intrinsic_callable_trait_definition, intrinsic_label_trait_definition,
 };
 
 #[test]
@@ -229,6 +229,47 @@ fn unresolved_source_fn_spelling_freezes_the_intrinsic_callable_identity() {
     assert_eq!(
         signature.where_associated_effect_bindings[0].name,
         "Effects"
+    );
+}
+
+#[test]
+fn frozen_interfaces_reject_forged_intrinsic_label_contracts() {
+    let intrinsic = intrinsic_label_trait_definition();
+    let mut interface = ElaboratedInterface::default();
+    interface.definitions.insert(
+        DefKey(Digest::of_bytes(b"forged-intrinsic-label-signature")),
+        ElaboratedHeader::Callable(CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![],
+            result: Type::Unit,
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![(
+                Type::Callable {
+                    lifetime_binders: 0,
+                    parameters: vec![Type::Scalar(ScalarType::I64)],
+                    result: Box::new(Type::Scalar(ScalarType::I64)),
+                    effects: EffectRow::empty(),
+                    invocation: Quantity::ONCE,
+                },
+                ElaboratedTraitReference {
+                    definition: intrinsic,
+                    arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+                },
+            )],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        }),
+    );
+    interface.validate_projection_obligations();
+    assert!(
+        interface
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4171"),
+        "{:#?}",
+        interface.diagnostics
     );
 }
 

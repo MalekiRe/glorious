@@ -142,6 +142,18 @@ fn typed_core_rejects_a_forged_unfrozen_top_level_value_initializer() {
 }
 
 #[test]
+fn typed_core_opens_intrinsic_label_where_contract_for_generic_escape_calls() {
+    let core = core_for(
+        "core-intrinsic-label-contract",
+        "pub fn main<L>(exit: L) -> ! where L: Label<i64> { exit(7) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(expression.kind, CoreKind::Call { .. }) && expression.ty == Type::Never
+    }));
+}
+
+#[test]
 fn declared_result_expectations_flow_through_blocks_and_structured_values() {
     let core = core_for(
         "core-structured-expected-types@0.1.0",
