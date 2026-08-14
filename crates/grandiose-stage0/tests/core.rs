@@ -3786,6 +3786,117 @@ fn inferred_generic_aggregate_reference_paths_refine_after_instantiation() {
 }
 
 #[test]
+fn opaque_generic_result_shapes_distinguish_concrete_scalars_from_enum_reference_payloads() {
+    let concrete = core_for(
+        "core-opaque-reference-shape-concrete-generic@0.1.0",
+        "pub enum Maybe<T> { Some(T), None } pub fn relay<T>(value: Maybe<T>) -> Maybe<T> { value } pub fn main() -> bool { let value = relay<i64>(Maybe<i64>::Some(41)); value is Maybe<i64>::Some(_) }",
+    );
+    assert!(
+        concrete.diagnostics.is_empty(),
+        "{:#?}",
+        concrete.diagnostics
+    );
+    let (origin, shape) = concrete
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Call {
+                reference_origin,
+                reference_shape,
+                ..
+            } => Some((reference_origin, reference_shape)),
+            _ => None,
+        })
+        .expect("generic enum call did not reach frozen Core");
+    assert!(matches!(
+        origin,
+        grandiose_stage0::CallReferenceOrigin::None
+    ));
+    assert_eq!(*shape, grandiose_stage0::CallReferenceShape::None);
+    assert!(
+        !PlaceFlow::analyze(&concrete)
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "concrete non-reference generic materialization inherited declaration opacity"
+    );
+
+    let opaque = core_for(
+        "core-opaque-reference-shape-enum-payload@0.1.0",
+        "pub enum Maybe<T> { Some(T), None } pub fn relay<T>(value: Maybe<T>) -> Maybe<T> { value } pub fn main() -> Maybe<&i64> { let local = 1; relay(Maybe::Some(&local)) }",
+    );
+    assert!(opaque.diagnostics.is_empty(), "{:#?}", opaque.diagnostics);
+    let (origin, shape) = opaque
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Call {
+                reference_origin,
+                reference_shape,
+                ..
+            } => Some((reference_origin, reference_shape)),
+            _ => None,
+        })
+        .expect("opaque enum result call did not reach frozen Core");
+    assert!(matches!(
+        origin,
+        grandiose_stage0::CallReferenceOrigin::Opaque
+    ));
+    assert_eq!(
+        *shape,
+        grandiose_stage0::CallReferenceShape::OpaquePotentiallyReference
+    );
+    assert!(
+        PlaceFlow::analyze(&opaque)
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "opaque enum reference payload escaped the frozen ownership boundary"
+    );
+}
+
+#[test]
+fn forged_opaque_result_shape_cannot_bypass_core_or_mir_validation() {
+    let mut core = core_for(
+        "core-forged-opaque-reference-shape@0.1.0",
+        "pub fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { identity(41) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let shape = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Call {
+                reference_shape, ..
+            } => Some(reference_shape),
+            _ => None,
+        })
+        .expect("generic scalar call did not reach frozen Core");
+    *shape = grandiose_stage0::CallReferenceShape::OpaquePotentiallyReference;
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4187"),
+        "forged opaque result shape was accepted by Core: {:#?}",
+        core.validate()
+    );
+    let flow = PlaceFlow::analyze(&core);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-opaque-reference-shape")),
+        &core,
+        &flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR accepted a forged opaque result shape: {lowered:#?}"
+    );
+}
+
+#[test]
 fn forged_nominal_callable_contract_cannot_retarget_a_sibling_argument() {
     let mut core = core_for(
         "core-forged-nominal-call-reference-relation@0.1.0",

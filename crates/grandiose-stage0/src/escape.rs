@@ -8,7 +8,10 @@
 //! completion exits all use the same provenance model.
 
 use crate::{
-    core::{CallReferenceOrigin, CoreId, CoreKind, CorePlace, EnvironmentBrand, TypedBody},
+    core::{
+        CallReferenceOrigin, CallReferenceShape, CoreId, CoreKind, CorePlace, EnvironmentBrand,
+        TypedBody,
+    },
     placeflow::PlaceFlow,
     source::Span,
     types::Type,
@@ -228,6 +231,7 @@ impl Analyzer<'_> {
                 callee,
                 arguments,
                 reference_origin,
+                reference_shape,
                 ..
             } => {
                 // A call result is a boundary value in its own right. The
@@ -241,8 +245,9 @@ impl Analyzer<'_> {
                     .collect::<Vec<_>>();
                 self.reference_result_value(
                     &reference_origin,
-                    values,
+                    reference_shape,
                     &expression.ty,
+                    values,
                     expression.span,
                     "call",
                 )
@@ -318,8 +323,9 @@ impl Analyzer<'_> {
     fn reference_result_value(
         &mut self,
         origin: &CallReferenceOrigin,
-        values: Vec<Value>,
+        shape: CallReferenceShape,
         result_ty: &Type,
+        values: Vec<Value>,
         span: Span,
         boundary: &str,
     ) -> Value {
@@ -358,7 +364,9 @@ impl Analyzer<'_> {
                 result
             }
             CallReferenceOrigin::Opaque => {
-                if known_reference_bearing_type(result_ty) {
+                if matches!(shape, CallReferenceShape::OpaquePotentiallyReference)
+                    && !contains_open_type_parameter(result_ty)
+                {
                     self.error(
                         span,
                         "G5023",
@@ -384,6 +392,7 @@ impl Analyzer<'_> {
             operation,
             arguments,
             reference_origin,
+            reference_shape,
             ..
         } = expression.kind
         else {
@@ -398,8 +407,9 @@ impl Analyzer<'_> {
         }
         let result = self.reference_result_value(
             &reference_origin,
-            values.clone(),
+            reference_shape,
             &expression.ty,
+            values.clone(),
             expression.span,
             "effect operation",
         );
@@ -666,11 +676,6 @@ fn put_value_at_path(target: &mut Value, path: &[u32], replacement: Value) -> bo
     put_value_at_path(&mut fields[path[0] as usize], &path[1..], replacement)
 }
 
-fn known_reference_bearing_type(value: &Type) -> bool {
-    matches!(value, Type::Reference { .. })
-        || matches!(value, Type::Tuple(values) if values.iter().any(known_reference_bearing_type))
-}
-
 fn join(mut values: Vec<Value>) -> Value {
     match values.len() {
         0 => Value::None,
@@ -696,6 +701,37 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
             }
         }
         Value::Closure { .. } | Value::None | Value::ExternalBorrowed => {}
+    }
+}
+
+/// See the matching PlaceFlow helper. An open type parameter is checked at
+/// the concrete instantiation boundary; it cannot by itself identify a
+/// body-local backing place in this generic declaration.
+fn contains_open_type_parameter(value: &Type) -> bool {
+    match value {
+        Type::Generic(_) => true,
+        Type::Tuple(values) => values.iter().any(contains_open_type_parameter),
+        Type::Array(value) | Type::Reference { referent: value, .. } => {
+            contains_open_type_parameter(value)
+        }
+        Type::Nominal { arguments, .. } => arguments.iter().any(|argument| {
+            matches!(argument, crate::types::GenericArgument::Type(value) if contains_open_type_parameter(value))
+        }),
+        Type::Callable {
+            parameters, result, ..
+        } => {
+            parameters.iter().any(contains_open_type_parameter)
+                || contains_open_type_parameter(result)
+        }
+        Type::Projection { .. }
+        | Type::Infer(_)
+        | Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Error => false,
     }
 }
 

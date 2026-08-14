@@ -234,6 +234,58 @@ pub enum CallReferenceOrigin {
     /// Core could not prove a unique source region for a reference result.
     Opaque,
 }
+/// The sealed reference-bearing shape of a callable result.  This is kept
+/// alongside its provenance because an opaque nominal, enum, array, or
+/// projection has no Core projection path even though it may carry a
+/// body-local loan.  Later phases must not mistake that lack of a path for a
+/// proof that the value is scalar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CallReferenceShape {
+    /// The realized result is proven not to contain a reference.
+    None,
+    /// Every reference component is static/external.
+    External,
+    /// At least one component forwards a caller path (possibly alongside
+    /// static components).
+    CallerPaths,
+    /// The realized result may contain a non-static reference, but Core has
+    /// no sound structural path through its representation.
+    OpaquePotentiallyReference,
+}
+
+/// Classify the *realized* result rather than the declaration contract alone.
+/// A generic contract is necessarily opaque before instantiation, but a VM
+/// specialization such as `identity<i64>` is conclusively non-reference and
+/// must not inherit that conservative declaration opacity.
+fn call_reference_shape(
+    signatures: &ElaboratedInterface,
+    result: &Type,
+    origin: &CallReferenceOrigin,
+) -> CallReferenceShape {
+    let mut leaves = vec![];
+    match reference_leaf_paths(signatures, result, &mut vec![], &mut leaves) {
+        Ok(()) if leaves.is_empty() => CallReferenceShape::None,
+        Ok(())
+            if leaves.iter().all(|(_, leaf)| {
+                matches!(
+                    leaf,
+                    Type::Reference {
+                        lifetime: Lifetime::Static,
+                        ..
+                    }
+                )
+            }) =>
+        {
+            CallReferenceShape::External
+        }
+        Ok(()) if matches!(origin, CallReferenceOrigin::Paths(_)) => {
+            CallReferenceShape::CallerPaths
+        }
+        // A visible non-static reference whose relation is ambiguous is just
+        // as unsafe as a representation that cannot be opened at all.
+        Ok(()) | Err(()) => CallReferenceShape::OpaquePotentiallyReference,
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallReferencePath {
     pub result_fields: Vec<u32>,
@@ -445,6 +497,10 @@ pub enum CoreKind {
         /// seals interface-aware nominal paths for Core validation.
         reference_contract: CallReferenceOrigin,
         reference_origin: CallReferenceOrigin,
+        /// Frozen classification of the realized result.  It prevents an
+        /// opaque representation from being treated as a non-reference by
+        /// ownership or lowering consumers that cannot reopen interfaces.
+        reference_shape: CallReferenceShape,
     },
     /// Canonical effect performance selected by the effect namespace, never a
     /// value function merely named like an operation.
@@ -463,6 +519,8 @@ pub enum CoreKind {
         /// machinery must never infer a shorter region from an implementation
         /// detail after Core has been sealed.
         reference_origin: CallReferenceOrigin,
+        /// See [`CoreKind::Call::reference_shape`].
+        reference_shape: CallReferenceShape,
     },
     /// Deep handler scope.  Its operations are already namespace-resolved,
     /// structurally typed, and coverage-checked before this Core boundary.
@@ -958,12 +1016,14 @@ impl CoreFingerprintEncoder<'_> {
                 arguments,
                 reference_contract,
                 reference_origin,
+                reference_shape,
             } => {
                 self.bytes(b"call");
                 self.id(*callee);
                 self.ids(arguments);
                 self.debug(reference_contract);
                 self.debug(reference_origin);
+                self.debug(reference_shape);
             }
             CoreKind::Perform {
                 effect,
@@ -972,6 +1032,7 @@ impl CoreFingerprintEncoder<'_> {
                 terminal,
                 reference_contract,
                 reference_origin,
+                reference_shape,
             } => {
                 self.bytes(b"perform");
                 self.effect(effect);
@@ -980,6 +1041,7 @@ impl CoreFingerprintEncoder<'_> {
                 self.ids(arguments);
                 self.debug(reference_contract);
                 self.debug(reference_origin);
+                self.debug(reference_shape);
             }
             CoreKind::Handle {
                 computation,
@@ -1188,15 +1250,17 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
 }
 
 fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type) -> Option<String> {
-    let (arguments, reference_origin, boundary, callable_contract) = match kind {
+    let (arguments, reference_origin, reference_shape, boundary, callable_contract) = match kind {
         CoreKind::Call {
             arguments,
             reference_contract,
             reference_origin,
+            reference_shape,
             ..
         } => (
             arguments,
             reference_origin,
+            reference_shape,
             "call",
             // The callee expression may have already opened its lifetime
             // binders. The separately frozen contract retains the
@@ -1207,15 +1271,41 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
             arguments,
             reference_contract,
             reference_origin,
+            reference_shape,
             ..
         } => (
             arguments,
             reference_origin,
+            reference_shape,
             "effect operation",
             Some(reference_contract.clone()),
         ),
         _ => return None,
     };
+    // A declaration-generic contract may remain `Opaque` even after its
+    // realized result specializes to a scalar or static reference.  The
+    // shape is intentionally more precise in those cases; all other origin
+    // forms have one exact compatible shape.
+    let shape_matches_origin = match reference_origin {
+        CallReferenceOrigin::None => matches!(reference_shape, CallReferenceShape::None),
+        CallReferenceOrigin::External => {
+            matches!(reference_shape, CallReferenceShape::External)
+        }
+        CallReferenceOrigin::Paths(_) => {
+            matches!(reference_shape, CallReferenceShape::CallerPaths)
+        }
+        CallReferenceOrigin::Opaque => matches!(
+            reference_shape,
+            CallReferenceShape::None
+                | CallReferenceShape::External
+                | CallReferenceShape::OpaquePotentiallyReference
+        ),
+    };
+    if !shape_matches_origin {
+        return Some(format!(
+            "reference-valued {boundary} does not match its frozen result shape"
+        ));
+    }
     if let Some(contract) = callable_contract
         && !matches!(contract, CallReferenceOrigin::Opaque)
         && reference_origin != &contract
@@ -4780,6 +4870,7 @@ impl Elaborator<'_> {
                 arguments,
                 reference_contract,
                 reference_origin,
+                reference_shape,
                 ..
             } => {
                 effect.arguments = effect
@@ -4803,10 +4894,12 @@ impl Elaborator<'_> {
                 } else {
                     *reference_origin = reference_contract.clone();
                 }
+                *reference_shape = call_reference_shape(self.signatures, result, reference_origin);
             }
             CoreKind::Call {
                 arguments,
                 reference_origin,
+                reference_shape,
                 ..
             } => {
                 // Generic/HRTB callable signatures preserve a more precise
@@ -4821,6 +4914,7 @@ impl Elaborator<'_> {
                         result,
                     );
                 }
+                *reference_shape = call_reference_shape(self.signatures, result, reference_origin);
             }
             CoreKind::PatternTest {
                 pattern,
@@ -6011,12 +6105,14 @@ impl Elaborator<'_> {
             self.check_effects(&effects, span);
             self.check_call_where_bounds(callee, span);
         }
+        let reference_shape = call_reference_shape(self.signatures, &result, &reference_contract);
         self.alloc(
             CoreKind::Call {
                 callee,
                 arguments,
                 reference_contract: reference_contract.clone(),
                 reference_origin: reference_contract,
+                reference_shape,
             },
             result,
             span,
@@ -6485,6 +6581,8 @@ impl Elaborator<'_> {
             &operation.parameters,
             &operation.result,
         );
+        let reference_shape =
+            call_reference_shape(self.signatures, &operation.result, &reference_contract);
         Some(self.alloc(
             CoreKind::Perform {
                 effect: instance,
@@ -6493,6 +6591,7 @@ impl Elaborator<'_> {
                 terminal: operation.terminal,
                 reference_origin: reference_contract.clone(),
                 reference_contract,
+                reference_shape,
             },
             operation.result.clone(),
             span,
@@ -9205,16 +9304,34 @@ fn reference_leaf_paths(
                 layout: ElaboratedNominalLayout::Enum(variants),
                 ..
             }) => {
-                if variants.iter().any(|variant| match &variant.payload {
-                    crate::signature::ElaboratedEnumVariantPayload::Unit => false,
-                    crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => fields
-                        .iter()
-                        .any(|field| type_may_contain_reference(signatures, field)),
-                    crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => fields
-                        .iter()
-                        .any(|field| type_may_contain_reference(signatures, &field.ty)),
-                }) {
-                    return Err(());
+                // A runtime variant has no stable Core projection path, but
+                // its generic payloads must still be instantiated before we
+                // decide whether it could contain a reference.  Otherwise a
+                // concrete `Enum<i64>` inherits the declaration's `T`
+                // opacity and spuriously blocks VM materialization.
+                for variant in variants {
+                    let fields = match &variant.payload {
+                        crate::signature::ElaboratedEnumVariantPayload::Unit => continue,
+                        crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => fields,
+                        crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => {
+                            let fields = fields.iter().map(|field| &field.ty).collect::<Vec<_>>();
+                            if fields.into_iter().try_fold(false, |contains, field| {
+                                let field = instantiate_nominal_field_type(field, arguments)?;
+                                Ok::<_, ()>(
+                                    contains || type_may_contain_reference(signatures, &field),
+                                )
+                            })? {
+                                return Err(());
+                            }
+                            continue;
+                        }
+                    };
+                    if fields.iter().try_fold(false, |contains, field| {
+                        let field = instantiate_nominal_field_type(field, arguments)?;
+                        Ok::<_, ()>(contains || type_may_contain_reference(signatures, &field))
+                    })? {
+                        return Err(());
+                    }
                 }
             }
             Some(ElaboratedHeader::Nominal {

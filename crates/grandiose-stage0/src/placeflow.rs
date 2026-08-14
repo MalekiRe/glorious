@@ -2,8 +2,8 @@
 
 use crate::{
     core::{
-        CallReferenceOrigin, CaptureMode, CoreId, CoreKind, CorePattern, CorePlace,
-        RefinementBrand, TypedBody,
+        CallReferenceOrigin, CallReferenceShape, CaptureMode, CoreId, CoreKind, CorePattern,
+        CorePlace, RefinementBrand, TypedBody,
     },
     source::Span,
     types::Type,
@@ -483,8 +483,12 @@ impl Analyzer<'_> {
                 self.use_deref_reference(value, e.span, false);
             }
             CoreKind::Call {
-                callee, arguments, ..
+                callee,
+                arguments,
+                reference_shape,
+                ..
             } => {
+                self.reject_opaque_reference_result(reference_shape, &e.ty, e.span, "call");
                 if let CoreKind::Closure { environment, .. } =
                     self.body.expression(callee).kind.clone()
                 {
@@ -504,7 +508,17 @@ impl Analyzer<'_> {
                     self.visit_sequence(&values, live_after);
                 }
             }
-            CoreKind::Perform { arguments, .. } => {
+            CoreKind::Perform {
+                arguments,
+                reference_shape,
+                ..
+            } => {
+                self.reject_opaque_reference_result(
+                    reference_shape,
+                    &e.ty,
+                    e.span,
+                    "effect operation",
+                );
                 self.visit_sequence(&arguments, live_after);
             }
             CoreKind::Handle {
@@ -1427,7 +1441,7 @@ impl Analyzer<'_> {
                 arguments,
                 reference_origin,
                 ..
-            } => self.record_call_reference_origin(name, id, &arguments, reference_origin),
+            } => self.record_call_reference_origin(name, &arguments, reference_origin),
             _ => {}
         }
     }
@@ -1439,20 +1453,10 @@ impl Analyzer<'_> {
     fn record_call_reference_origin(
         &mut self,
         result: &str,
-        call: CoreId,
         arguments: &[CoreId],
         origin: CallReferenceOrigin,
     ) {
         let CallReferenceOrigin::Paths(paths) = origin else {
-            if matches!(origin, CallReferenceOrigin::Opaque)
-                && known_reference_bearing_type(&self.body.expression(call).ty)
-            {
-                self.error(
-                    self.body.expression(self.body.root).span,
-                    "G5023",
-                    "reference-valued call has no frozen caller-region provenance".into(),
-                );
-            }
             return;
         };
         for path in paths {
@@ -1490,6 +1494,24 @@ impl Analyzer<'_> {
             self.event(
                 FlowEventKind::Reborrow(parent.place.root),
                 self.body.expression(argument).span,
+            );
+        }
+    }
+
+    fn reject_opaque_reference_result(
+        &mut self,
+        shape: CallReferenceShape,
+        result: &crate::types::Type,
+        span: Span,
+        boundary: &str,
+    ) {
+        if matches!(shape, CallReferenceShape::OpaquePotentiallyReference)
+            && !contains_open_type_parameter(result)
+        {
+            self.error(
+                span,
+                "G5023",
+                format!("reference-valued {boundary} has no frozen caller-region provenance"),
             );
         }
     }
@@ -1880,9 +1902,39 @@ impl Analyzer<'_> {
     }
 }
 
-fn known_reference_bearing_type(value: &crate::types::Type) -> bool {
-    matches!(value, crate::types::Type::Reference { .. })
-        || matches!(value, crate::types::Type::Tuple(values) if values.iter().any(known_reference_bearing_type))
+/// A generic body is checked once, before every VM instance materializes its
+/// type argument. An open `T` cannot itself name a body-local reference: a
+/// concrete use is checked at its call boundary after instantiation. Do not
+/// turn that deferred proof obligation into a false-positive in the generic
+/// declaration, while keeping opaque projections and concrete aggregates
+/// fail-closed.
+fn contains_open_type_parameter(value: &crate::types::Type) -> bool {
+    match value {
+        crate::types::Type::Generic(_) => true,
+        crate::types::Type::Tuple(values) => values.iter().any(contains_open_type_parameter),
+        crate::types::Type::Array(value)
+        | crate::types::Type::Reference { referent: value, .. } => {
+            contains_open_type_parameter(value)
+        }
+        crate::types::Type::Nominal { arguments, .. } => arguments.iter().any(|argument| {
+            matches!(argument, crate::types::GenericArgument::Type(value) if contains_open_type_parameter(value))
+        }),
+        crate::types::Type::Callable {
+            parameters, result, ..
+        } => {
+            parameters.iter().any(contains_open_type_parameter)
+                || contains_open_type_parameter(result)
+        }
+        crate::types::Type::Projection { .. }
+        | crate::types::Type::Infer(_)
+        | crate::types::Type::Unit
+        | crate::types::Type::Never
+        | crate::types::Type::Scalar(_)
+        | crate::types::Type::ConstU32(_)
+        | crate::types::Type::ConstQuantity(_)
+        | crate::types::Type::ConstGeneric { .. }
+        | crate::types::Type::Error => false,
+    }
 }
 
 /// Flatten a frozen pattern to the structural paths owned by each binder.

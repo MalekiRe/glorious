@@ -48,10 +48,10 @@ pub use bootstrap::{
 };
 pub use coherence::{CoherenceDiagnostic, CoherenceSet, ImplHead};
 pub use core::{
-    CallReferenceOrigin, CallReferencePath, CallableBrand, CallableId, CaptureEnvironment,
-    CaptureMode, CapturePostState, ClosureCapture, CoreDiagnostic, CoreExpr, CoreHandlerClause,
-    CoreHandlerContinuationContract, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
-    CorePatternField, CorePlace, EnvironmentBrand, LabelBrand, RefinementBrand,
+    CallReferenceOrigin, CallReferencePath, CallReferenceShape, CallableBrand, CallableId,
+    CaptureEnvironment, CaptureMode, CapturePostState, ClosureCapture, CoreDiagnostic, CoreExpr,
+    CoreHandlerClause, CoreHandlerContinuationContract, CoreHandlerResumption, CoreId, CoreKind,
+    CorePattern, CorePatternField, CorePlace, EnvironmentBrand, LabelBrand, RefinementBrand,
     RefinementEnvironment, TypedBody,
 };
 pub use dependency::{DependencyLedger, DependencyNode, DependencyStatus, DependencyTrace};
