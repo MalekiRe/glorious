@@ -90,6 +90,33 @@ fn qualified_paths_are_lexical_and_enforce_module_visibility() {
 }
 
 #[test]
+fn nested_modules_inherit_private_items_from_enclosing_modules() {
+    let package = PackageKey("resolution-lexical-private-item@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "struct Scratch {} mod compiler;");
+    let compiler = collect("crate::compiler", "mod frontend;");
+    let frontend = collect(
+        "crate::compiler::frontend",
+        "fn check(value: Scratch) { () }",
+    );
+    let index = DefinitionIndex::from_interfaces([&root, &compiler, &frontend]);
+    let owner = ModuleKey {
+        package,
+        path: "crate::compiler::frontend".into(),
+    };
+
+    assert!(matches!(
+        index.resolve_path(DefinitionNamespace::Type, &owner, &["Scratch".into()]),
+        ResolutionState::Resolved(_)
+    ));
+}
+
+#[test]
 fn private_nested_module_paths_do_not_leak_public_members_to_siblings_or_ancestors() {
     let package = PackageKey("resolution-private-module@0.1.0".into());
     let collect = |module: &str, source: &str| {

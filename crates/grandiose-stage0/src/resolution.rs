@@ -637,15 +637,35 @@ impl DefinitionIndex {
             }
         }
         let module = if path.len() == 1 {
-            let resolved =
-                self.resolve_member(namespace, owner, name, owner, false, &mut BTreeSet::new());
-            return match resolved {
-                ResolutionState::Unresolved if namespace == DefinitionNamespace::Trait => {
-                    language_prelude_trait(path)
-                        .map(ResolutionState::Resolved)
-                        .unwrap_or(ResolutionState::Unresolved)
+            // An unqualified item lookup is lexical: a nested module may use
+            // declarations inherited from its enclosing modules, with the
+            // nearest declaration winning.  The original owner remains the
+            // requester for every step, so this does not grant a child access
+            // to a private sibling or an external package's private API.
+            let mut lexical = owner.clone();
+            loop {
+                let resolved = self.resolve_member(
+                    namespace,
+                    &lexical,
+                    name,
+                    owner,
+                    false,
+                    &mut BTreeSet::new(),
+                );
+                if !matches!(resolved, ResolutionState::Unresolved) {
+                    return resolved;
                 }
-                other => other,
+                let Some(parent) = parent_module_path(&lexical.path) else {
+                    break;
+                };
+                lexical.path = parent;
+            }
+            return if namespace == DefinitionNamespace::Trait {
+                language_prelude_trait(path)
+                    .map(ResolutionState::Resolved)
+                    .unwrap_or(ResolutionState::Unresolved)
+            } else {
+                ResolutionState::Unresolved
             };
         } else {
             match self.lexical_module(owner, owner, &path[..path.len() - 1]) {
@@ -1151,7 +1171,18 @@ impl DefinitionIndex {
         };
         let visible = entries
             .iter()
-            .filter(|entry| owner.is_none_or(|owner| entry.public || entry.module == *owner))
+            // Private declarations are lexical capabilities: the declaring
+            // module and its descendants may use them, while siblings,
+            // ancestors, and other packages may not.  This deliberately
+            // mirrors `module_path_visible_to`, which already applies the
+            // same descendant rule to private module edges.
+            .filter(|entry| {
+                owner.is_none_or(|owner| {
+                    entry.public
+                        || (entry.module.package == owner.package
+                            && module_is_descendant_of(owner, &entry.module.path))
+                })
+            })
             .map(|entry| entry.key)
             .collect::<Vec<_>>();
         if visible.is_empty() {
