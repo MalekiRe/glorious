@@ -758,23 +758,26 @@ impl TypedBody {
         signatures: &ElaboratedInterface,
         ambient: &[(Type, crate::ElaboratedTraitReference)],
     ) -> Vec<CoreDiagnostic> {
-        let types = self
-            .parameters
-            .iter()
-            .map(|(_, ty)| ty.clone())
-            .chain(
-                self.expressions
-                    .iter()
-                    .map(|expression| expression.ty.clone()),
-            )
-            .collect::<Vec<_>>();
+        let mut terms = FrozenProjectionTerms::default();
+        for (_, ty) in &self.parameters {
+            terms.types.push(ty);
+        }
+        for expression in &self.expressions {
+            terms.types.push(&expression.ty);
+            collect_core_projection_terms(&expression.kind, &mut terms);
+        }
         let span = self
             .expressions
             .get(self.root.0 as usize)
             .map(|expression| expression.span)
             .unwrap_or_else(invalid_typed_core_span);
         signatures
-            .projection_obligation_diagnostics(&types, ambient)
+            .projection_obligation_diagnostics_for_frozen_terms(
+                terms.types,
+                terms.arguments,
+                terms.effect_rows,
+                ambient,
+            )
             .into_iter()
             .map(|diagnostic| CoreDiagnostic {
                 code: diagnostic.code,
@@ -789,6 +792,160 @@ impl TypedBody {
 
     fn contains(&self, id: CoreId) -> bool {
         (id.0 as usize) < self.expressions.len()
+    }
+}
+
+/// Borrowed type-kind carriers discovered in a frozen Core product.  Keeping
+/// this separate from structural validation ensures projection evidence is
+/// rechecked in every metadata position without treating rows or substitutions
+/// as fabricated value types.
+#[derive(Default)]
+struct FrozenProjectionTerms<'a> {
+    types: Vec<&'a Type>,
+    arguments: Vec<&'a GenericArgument>,
+    effect_rows: Vec<&'a EffectRow>,
+}
+
+fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProjectionTerms<'a>) {
+    match kind {
+        CoreKind::Closure {
+            parameters,
+            environment,
+            ..
+        } => {
+            terms.types.extend(parameters.iter().map(|(_, ty)| ty));
+            terms
+                .types
+                .extend(environment.captures.iter().map(|capture| &capture.ty));
+        }
+        CoreKind::Assign { place, .. } => collect_place_projection_terms(place, terms),
+        CoreKind::Function { arguments, .. } => terms.arguments.extend(arguments),
+        CoreKind::TraitMethod {
+            trait_arguments,
+            method_arguments,
+            ..
+        } => terms
+            .arguments
+            .extend(trait_arguments.iter().chain(method_arguments)),
+        CoreKind::Perform {
+            effect,
+            payload_types,
+            ..
+        } => {
+            terms.arguments.extend(&effect.arguments);
+            terms.types.extend(payload_types);
+        }
+        CoreKind::PatternTest {
+            pattern,
+            refinement,
+            ..
+        } => {
+            collect_pattern_projection_terms(pattern, terms);
+            terms
+                .types
+                .extend(refinement.binding_types.iter().map(|(_, ty)| ty));
+        }
+        CoreKind::Handle { clauses, .. } => {
+            for clause in clauses {
+                terms.arguments.extend(&clause.effect.arguments);
+                terms.types.extend(&clause.payload_types);
+                for pattern in &clause.patterns {
+                    collect_pattern_projection_terms(pattern, terms);
+                }
+                terms.types.extend(clause.bindings.iter().map(|(_, ty)| ty));
+                if let Some(continuation) = &clause.continuation {
+                    terms.types.push(&continuation.parameter);
+                    terms.types.push(&continuation.result);
+                    terms.effect_rows.push(&continuation.effects);
+                }
+            }
+        }
+        CoreKind::Completion { clauses, .. } => {
+            for clause in clauses {
+                collect_pattern_projection_terms(&clause.pattern, terms);
+                terms.types.extend(clause.bindings.iter().map(|(_, ty)| ty));
+                if let Some(refinement) = &clause.refinement {
+                    collect_pattern_projection_terms(&refinement.pattern, terms);
+                    terms.types.extend(
+                        refinement
+                            .environment
+                            .binding_types
+                            .iter()
+                            .map(|(_, ty)| ty),
+                    );
+                }
+            }
+        }
+        CoreKind::Literal(_)
+        | CoreKind::Local(_)
+        | CoreKind::Resumption { .. }
+        | CoreKind::Constant(_)
+        | CoreKind::Tuple(_)
+        | CoreKind::Array(_)
+        | CoreKind::Record { .. }
+        | CoreKind::Field { .. }
+        | CoreKind::Enum { .. }
+        | CoreKind::Let { .. }
+        | CoreKind::Label { .. }
+        | CoreKind::Transfer { .. }
+        | CoreKind::Call { .. }
+        | CoreKind::Binary { .. }
+        | CoreKind::Block(_)
+        | CoreKind::Borrow { .. }
+        | CoreKind::Deref(_)
+        | CoreKind::Move(_)
+        | CoreKind::Unary { .. }
+        | CoreKind::Error => {}
+    }
+}
+
+fn collect_place_projection_terms<'a>(place: &'a CorePlace, terms: &mut FrozenProjectionTerms<'a>) {
+    match place {
+        CorePlace::Local { ty, .. } | CorePlace::Deref { ty, .. } => terms.types.push(ty),
+        CorePlace::Field { base, ty, .. } => {
+            collect_place_projection_terms(base, terms);
+            terms.types.push(ty);
+        }
+        CorePlace::Error => {}
+    }
+}
+
+fn collect_pattern_projection_terms<'a>(
+    pattern: &'a CorePattern,
+    terms: &mut FrozenProjectionTerms<'a>,
+) {
+    match pattern {
+        CorePattern::Tuple(values) => {
+            for value in values {
+                collect_pattern_projection_terms(value, terms);
+            }
+        }
+        CorePattern::Array { element, elements } => {
+            terms.types.push(element);
+            for element in elements {
+                collect_pattern_projection_terms(element, terms);
+            }
+        }
+        CorePattern::Record {
+            field_types,
+            fields,
+            ..
+        }
+        | CorePattern::Enum {
+            field_types,
+            fields,
+            ..
+        } => {
+            terms.types.extend(field_types);
+            for field in fields {
+                terms.types.push(&field.ty);
+                collect_pattern_projection_terms(&field.pattern, terms);
+            }
+        }
+        CorePattern::Any
+        | CorePattern::Bind { .. }
+        | CorePattern::Literal(_)
+        | CorePattern::Error => {}
     }
 }
 

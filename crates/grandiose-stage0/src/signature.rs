@@ -985,9 +985,40 @@ impl ElaboratedInterface {
         types: &[Type],
         ambient: &[(Type, ElaboratedTraitReference)],
     ) -> Vec<SignatureDiagnostic> {
+        self.projection_obligation_diagnostics_for_frozen_terms(
+            types.iter(),
+            std::iter::empty(),
+            std::iter::empty(),
+            ambient,
+        )
+    }
+
+    /// Validate every kinded term retained by a frozen semantic product.
+    ///
+    /// A projection can be nested in a declaration substitution or effect
+    /// row without appearing inside a value `Type`.  Core and persisted
+    /// metadata use this entry point so those carriers receive exactly the
+    /// same lexical-evidence check as declaration signatures.
+    pub fn projection_obligation_diagnostics_for_frozen_terms<'a>(
+        &self,
+        types: impl IntoIterator<Item = &'a Type>,
+        arguments: impl IntoIterator<Item = &'a GenericArgument>,
+        effect_rows: impl IntoIterator<Item = &'a EffectRow>,
+        ambient: &[(Type, ElaboratedTraitReference)],
+    ) -> Vec<SignatureDiagnostic> {
         let mut diagnostics = Vec::new();
         for ty in types {
             self.validate_type_projection_obligations(ty, ambient, &mut diagnostics);
+        }
+        for argument in arguments {
+            self.validate_generic_argument_projection_obligations(
+                argument,
+                ambient,
+                &mut diagnostics,
+            );
+        }
+        for row in effect_rows {
+            self.validate_effect_row_projection_obligations(row, ambient, &mut diagnostics);
         }
         diagnostics
             .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));

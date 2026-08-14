@@ -2091,6 +2091,14 @@ fn service_monomorphizes_symbolic_associated_effect_row_forwarding() {
 }
 
 #[test]
+fn service_preserves_hrtb_callback_identity_through_symbolic_effect_forwarding() {
+    let source = "trait Capability { type Effects: EffectRow; } struct Value { value: i64 } impl Capability for Value { type Effects = {}; } pub fn worker<T>(callback: for<'a> (&'a i64) -> &'a i64, value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { let number = 41; callback(&number); number } pub fn relay<T>(callback: for<'a> (&'a i64) -> &'a i64, value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { worker(callback, value) } pub fn main() -> i64 { 41 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
 fn service_opens_higher_ranked_callback_lifetimes_without_leaking_them() {
     let accepted = "pub fn apply(callback: for<'a> (&'a i64) -> &'a i64) -> i64 { let value = 42; let loan = &value; callback(loan); value } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
