@@ -5001,12 +5001,29 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     }
 }
 
+/// Validate the effect-identity metadata that survives into bytecode.
+///
+/// VM value types intentionally erase source regions and higher-ranked
+/// callable binders.  A declaration generic lifetime is still a meaningful
+/// protocol identity, but a `for<'a>` placeholder is not: there is no VM
+/// binder scope in which a `Lifetime::Bound` term could be interpreted.  Such
+/// a term therefore proves that a rigid HRTB universe escaped Core/MIR rather
+/// than becoming an executable contract.  Check this recursively through row
+/// projections as well as nested named effects; previously the projection
+/// arguments were not visited at all, giving forged bytecode a path around
+/// the higher-ranked leak boundary.
 fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmArtifactError> {
     for value in values {
         match value {
-            VmGenericArgument::Type(_)
-            | VmGenericArgument::Lifetime(_)
-            | VmGenericArgument::ConstU32(_) => {}
+            VmGenericArgument::Type(_) | VmGenericArgument::ConstU32(_) => {}
+            VmGenericArgument::Lifetime(Lifetime::Bound { .. }) => {
+                return Err(VmArtifactError::MalformedEncoding {
+                    message: "VM effect identity retains an escaped higher-ranked lifetime",
+                });
+            }
+            VmGenericArgument::Lifetime(
+                Lifetime::Static | Lifetime::Generic(_) | Lifetime::Elided,
+            ) => {}
             VmGenericArgument::ConstQuantity { lower, upper } => {
                 if upper.is_some_and(|upper| *lower > upper) {
                     return Err(VmArtifactError::MalformedEncoding {
@@ -5015,24 +5032,34 @@ fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmA
                 }
             }
             VmGenericArgument::ConstGeneric { .. } => {}
-            VmGenericArgument::EffectRow(row) => {
-                if matches!(row.tail, Some(EffectTail::Infer(_))) {
-                    return Err(VmArtifactError::MalformedEncoding {
-                        message: "VM effect row retains inference tail",
-                    });
-                }
-                if row.effects.windows(2).any(|pair| {
-                    vm_effect_instance_key(&pair[0]) >= vm_effect_instance_key(&pair[1])
-                }) || row.projections.windows(2).any(|pair| {
-                    vm_effect_row_projection_key(&pair[0]) >= vm_effect_row_projection_key(&pair[1])
-                }) {
-                    return Err(VmArtifactError::NonCanonicalEncoding);
-                }
-                for effect in &row.effects {
-                    validate_vm_generic_arguments(&effect.arguments)?;
-                }
-            }
+            VmGenericArgument::EffectRow(row) => validate_vm_effect_row(row)?,
         }
+    }
+    Ok(())
+}
+
+fn validate_vm_effect_row(row: &VmEffectRow) -> Result<(), VmArtifactError> {
+    if matches!(row.tail, Some(EffectTail::Infer(_))) {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "VM effect row retains inference tail",
+        });
+    }
+    if row
+        .effects
+        .windows(2)
+        .any(|pair| vm_effect_instance_key(&pair[0]) >= vm_effect_instance_key(&pair[1]))
+        || row.projections.windows(2).any(|pair| {
+            vm_effect_row_projection_key(&pair[0]) >= vm_effect_row_projection_key(&pair[1])
+        })
+    {
+        return Err(VmArtifactError::NonCanonicalEncoding);
+    }
+    for effect in &row.effects {
+        validate_vm_generic_arguments(&effect.arguments)?;
+    }
+    for projection in &row.projections {
+        validate_vm_generic_arguments(&projection.trait_arguments)?;
+        validate_vm_generic_arguments(&projection.item_arguments)?;
     }
     Ok(())
 }

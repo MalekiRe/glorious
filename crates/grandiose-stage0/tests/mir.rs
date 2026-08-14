@@ -556,6 +556,26 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
             .is_err_and(|error| error.contains("unresolved inference")),
         "nested generic call metadata must not bypass MIR program validation"
     );
+
+    let mut escaped_effect_lifetime = graph();
+    escaped_effect_lifetime.blocks[0]
+        .instructions
+        .push(MirInstruction::Perform {
+            dst: MirLocal(1),
+            effect: DefKey(Digest::of_bytes(b"mir-escaped-hrtb-effect")),
+            effect_arguments: vec![GenericArgument::Lifetime(Lifetime::Bound {
+                depth: 0,
+                index: 0,
+            })],
+            operation: 0,
+            arguments: vec![],
+        });
+    assert!(
+        escaped_effect_lifetime
+            .validate()
+            .is_err_and(|error| error.contains("absent higher-ranked binder")),
+        "MIR effect metadata must reject an HRTB placeholder before VM erases binder scopes"
+    );
 }
 
 #[test]

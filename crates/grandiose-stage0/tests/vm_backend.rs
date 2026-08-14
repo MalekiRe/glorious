@@ -83,6 +83,80 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
 }
 
 #[test]
+fn vm_rejects_higher_ranked_lifetime_leaks_in_nested_effect_identity_metadata() {
+    use grandiose_stage0::{Lifetime, VmEffectRow, VmEffectRowProjection};
+
+    let entry = DefKey(Digest::of_bytes(b"vm-hrtb-effect-metadata-entry"));
+    let effect = DefKey(Digest::of_bytes(b"vm-hrtb-effect-metadata-effect"));
+    let trait_definition = DefKey(Digest::of_bytes(b"vm-hrtb-effect-metadata-trait"));
+    let arguments = vec![VmGenericArgument::EffectRow(VmEffectRow {
+        effects: vec![],
+        projections: vec![VmEffectRowProjection {
+            subject: VmType::I64,
+            trait_definition,
+            // Bytecode has no HRTB binder namespace.  This placeholder is
+            // deliberately buried in projection metadata to prove recursive
+            // validation cannot be bypassed through an associated row.
+            trait_arguments: vec![VmGenericArgument::Lifetime(Lifetime::Bound {
+                depth: 0,
+                index: 0,
+            })],
+            name: "Escaped".into(),
+            item_arguments: vec![],
+        }],
+        tail: None,
+    })];
+    let function = VmFunction {
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::Perform {
+                dst: 0,
+                effect,
+                effect_arguments: arguments,
+                operation: 0,
+                arguments: vec![],
+            },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: function.clone(),
+        fingerprint: Digest::of_bytes(b"stale-vm-hrtb-effect-metadata-artifact"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    let encoded = encode_artifact(&artifact);
+    assert_eq!(decode_artifact(&encoded).unwrap(), artifact);
+    assert!(matches!(
+        verify_vm(artifact),
+        Err(VmArtifactError::MalformedEncoding { message })
+            if message.contains("escaped higher-ranked lifetime")
+    ));
+
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(entry, function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"stale-vm-hrtb-effect-metadata-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let encoded = encode_program(&program);
+    assert_eq!(decode_program(&encoded).unwrap(), program);
+    assert!(matches!(
+        verify_vm_program(program),
+        Err(VmArtifactError::MalformedEncoding { message })
+            if message.contains("escaped higher-ranked lifetime")
+    ));
+}
+
+#[test]
 fn program_host_capability_declarations_are_canonical_exact_and_fingerprinted() {
     let entry = DefKey(Digest::of_bytes(b"host-capability-entry"));
     let function = VmFunction {
@@ -587,7 +661,7 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
                         projections: vec![],
                         tail: Some(EffectTail::Generic(4)),
                     }),
-                    VmGenericArgument::Lifetime(Lifetime::Bound { depth: 2, index: 1 }),
+                    VmGenericArgument::Lifetime(Lifetime::Generic(1)),
                     VmGenericArgument::ConstU32(13),
                     VmGenericArgument::ConstQuantity {
                         lower: 1,
@@ -600,7 +674,7 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
                 ],
                 name: "Associated".into(),
                 item_arguments: vec![
-                    VmGenericArgument::Lifetime(Lifetime::Bound { depth: 0, index: 0 }),
+                    VmGenericArgument::Lifetime(Lifetime::Elided),
                     VmGenericArgument::EffectRow(VmEffectRow {
                         effects: vec![],
                         projections: vec![],
@@ -610,7 +684,7 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
             }],
             tail: Some(EffectTail::Generic(2)),
         }),
-        VmGenericArgument::Lifetime(Lifetime::Bound { depth: 1, index: 3 }),
+        VmGenericArgument::Lifetime(Lifetime::Generic(3)),
         VmGenericArgument::ConstU32(11),
         VmGenericArgument::ConstQuantity {
             lower: 4,
