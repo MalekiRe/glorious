@@ -28,6 +28,18 @@ pub enum EffectTail {
     Generic(u32),
 }
 
+/// A canonical source-level lifetime.  Region inference will later refine
+/// elided references into CFG-point sets, but frozen interfaces must already
+/// preserve whether a reference used `'static`, a declaration binder, or
+/// elision.  In particular, a lifetime may never be represented as a type
+/// generic slot.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum Lifetime {
+    Static,
+    Generic(u32),
+    Elided,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mutability {
     Shared,
@@ -144,6 +156,7 @@ pub enum Type {
     Array(Box<Type>),
     Reference {
         mutability: Mutability,
+        lifetime: Lifetime,
         referent: Box<Type>,
     },
     Callable {
@@ -269,16 +282,21 @@ impl InferContext {
             (
                 Type::Reference {
                     mutability: left_mutability,
+                    lifetime: left_lifetime,
                     referent: left,
                 },
                 Type::Reference {
                     mutability: right_mutability,
+                    lifetime: right_lifetime,
                     referent: right,
                 },
-            ) if left_mutability == right_mutability => Ok(Type::Reference {
-                mutability: left_mutability,
-                referent: Box::new(self.unify(*left, *right)?),
-            }),
+            ) if left_mutability == right_mutability && left_lifetime == right_lifetime => {
+                Ok(Type::Reference {
+                    mutability: left_mutability,
+                    lifetime: left_lifetime,
+                    referent: Box::new(self.unify(*left, *right)?),
+                })
+            }
             (
                 Type::Callable {
                     parameters: left_parameters,
@@ -349,9 +367,11 @@ impl InferContext {
             Type::Array(element) => Ok(Type::Array(Box::new(self.zonk(*element)?))),
             Type::Reference {
                 mutability,
+                lifetime,
                 referent,
             } => Ok(Type::Reference {
                 mutability,
+                lifetime,
                 referent: Box::new(self.zonk(*referent)?),
             }),
             Type::Callable {
@@ -708,13 +728,15 @@ impl InferContext {
             (
                 Type::Reference {
                     mutability: left_mutability,
+                    lifetime: left_lifetime,
                     referent: left_referent,
                 },
                 Type::Reference {
                     mutability: right_mutability,
+                    lifetime: right_lifetime,
                     referent: right_referent,
                 },
-            ) if left_mutability == right_mutability => {
+            ) if left_mutability == right_mutability && left_lifetime == right_lifetime => {
                 self.types_may_unify(&left_referent, &right_referent)
             }
             (left, right) => left == right,
@@ -866,6 +888,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
         }
         Type::Reference {
             mutability,
+            lifetime,
             referent,
         } => {
             output.push(6);
@@ -873,6 +896,14 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
                 Mutability::Shared => 0,
                 Mutability::Unique => 1,
             });
+            output.push(match lifetime {
+                Lifetime::Static => 0,
+                Lifetime::Generic(_) => 1,
+                Lifetime::Elided => 2,
+            });
+            if let Lifetime::Generic(index) = lifetime {
+                output.extend_from_slice(&index.to_le_bytes());
+            }
             encode_type(referent, output);
         }
         Type::Callable {

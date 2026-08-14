@@ -14,7 +14,7 @@ use crate::{
         TraitAnswer, TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer,
         TraitProjectionAnswer, TraitSolver,
     },
-    types::{EffectInstance, EffectRow, InferContext, Mutability, ScalarType, Type},
+    types::{EffectInstance, EffectRow, InferContext, Lifetime, Mutability, ScalarType, Type},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -878,6 +878,7 @@ impl Elaborator<'_> {
                         } else {
                             Mutability::Shared
                         },
+                        lifetime: Lifetime::Elided,
                         referent: Box::new(ty),
                     },
                     expression.span,
@@ -1085,12 +1086,17 @@ impl Elaborator<'_> {
                 effects: crate::types::EffectRow::empty(),
                 invocation: crate::quantity::Quantity::ONCE,
             },
-            HeaderType::Reference { unique, referent } => Type::Reference {
+            HeaderType::Reference {
+                unique,
+                lifetime: _,
+                referent,
+            } => Type::Reference {
                 mutability: if *unique {
                     Mutability::Unique
                 } else {
                     Mutability::Shared
                 },
+                lifetime: Lifetime::Elided,
                 referent: Box::new(self.header_type(referent)),
             },
             HeaderType::Projection {

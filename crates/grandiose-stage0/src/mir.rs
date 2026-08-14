@@ -6434,13 +6434,15 @@ fn collect_generic_substitutions(
         (
             Type::Reference {
                 mutability,
+                lifetime,
                 referent,
             },
             Type::Reference {
                 mutability: actual_mutability,
+                lifetime: actual_lifetime,
                 referent: actual_referent,
             },
-        ) if mutability == actual_mutability => {
+        ) if mutability == actual_mutability && lifetime == actual_lifetime => {
             collect_generic_substitutions(referent, actual_referent, substitutions)
         }
         // Callable parameters can carry independent generic effect rows. They
@@ -6495,9 +6497,11 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
         )?))),
         Type::Reference {
             mutability,
+            lifetime,
             referent,
         } => Some(Type::Reference {
             mutability,
+            lifetime,
             referent: Box::new(substitute_generic_type(*referent, substitutions)?),
         }),
         Type::Callable {

@@ -12,7 +12,7 @@ use crate::{
     interface::{Definition, DefinitionNamespace, PackageInterface},
     quantity::Quantity,
     resolution::{DefinitionIndex, ResolutionState},
-    types::{EffectInstance, EffectRow, EffectRowProjection, Mutability, Type},
+    types::{EffectInstance, EffectRow, EffectRowProjection, Lifetime, Mutability, Type},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -170,6 +170,7 @@ impl ElaboratedInterface {
                 module: &definition.module,
                 generics: BTreeMap::new(),
                 effect_row_generics: BTreeMap::new(),
+                lifetime_generics: BTreeMap::new(),
                 diagnostics: vec![],
             };
             let header = elaborator.definition(definition);
@@ -840,9 +841,14 @@ struct Elaborator<'a> {
     module: &'a ModuleKey,
     generics: BTreeMap<String, u32>,
     effect_row_generics: BTreeMap<String, u32>,
+    lifetime_generics: BTreeMap<String, u32>,
     diagnostics: Vec<SignatureDiagnostic>,
 }
 impl Elaborator<'_> {
+    fn generic_binder_count(&self) -> u32 {
+        (self.generics.len() + self.effect_row_generics.len() + self.lifetime_generics.len()) as u32
+    }
+
     fn definition(&mut self, definition: &Definition) -> ElaboratedHeader {
         match &definition.syntax.header {
             ParsedHeader::Function(header) => ElaboratedHeader::Callable(self.callable(header)),
@@ -906,7 +912,8 @@ impl Elaborator<'_> {
             .map(|method| {
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
-                let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
+                let outer_lifetime_generics = self.lifetime_generics.clone();
+                let base = self.generic_binder_count();
                 self.extend_generics(
                     &method.signature.generics,
                     base,
@@ -938,6 +945,7 @@ impl Elaborator<'_> {
                 };
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
+                self.lifetime_generics = outer_lifetime_generics;
                 (method.name.clone(), signature)
             })
             .collect();
@@ -983,7 +991,8 @@ impl Elaborator<'_> {
                 self.require_type_generics(&item.generics, "associated type definitions");
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
-                let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
+                let outer_lifetime_generics = self.lifetime_generics.clone();
+                let base = self.generic_binder_count();
                 self.extend_generics(
                     &item.generics,
                     base,
@@ -993,6 +1002,7 @@ impl Elaborator<'_> {
                 let value = self.ty(&item.value);
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
+                self.lifetime_generics = outer_lifetime_generics;
                 (
                     item.name.clone(),
                     ElaboratedAssociatedTypeDefinition {
@@ -1010,7 +1020,8 @@ impl Elaborator<'_> {
                 self.require_type_generics(&item.generics, "associated effect-row definitions");
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
-                let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
+                let outer_lifetime_generics = self.lifetime_generics.clone();
+                let base = self.generic_binder_count();
                 self.extend_generics(
                     &item.generics,
                     base,
@@ -1020,6 +1031,7 @@ impl Elaborator<'_> {
                 let value = self.effect_row(row);
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
+                self.lifetime_generics = outer_lifetime_generics;
                 Some((
                     item.name.clone(),
                     ElaboratedAssociatedEffectRowDefinition {
@@ -1035,7 +1047,8 @@ impl Elaborator<'_> {
             .map(|method| {
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
-                let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
+                let outer_lifetime_generics = self.lifetime_generics.clone();
+                let base = self.generic_binder_count();
                 self.extend_generics(
                     &method.signature.generics,
                     base,
@@ -1067,6 +1080,7 @@ impl Elaborator<'_> {
                 };
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
+                self.lifetime_generics = outer_lifetime_generics;
                 (method.name.clone(), signature)
             })
             .collect();
@@ -1086,13 +1100,15 @@ impl Elaborator<'_> {
         self.bind_generics(&header.generics);
         let declaration_generics = self.generics.clone();
         let declaration_effect_row_generics = self.effect_row_generics.clone();
+        let declaration_lifetime_generics = self.lifetime_generics.clone();
         let operations = header
             .operations
             .iter()
             .map(|operation| {
                 self.generics = declaration_generics.clone();
                 self.effect_row_generics = declaration_effect_row_generics.clone();
-                let base = (self.generics.len() + self.effect_row_generics.len()) as u32;
+                self.lifetime_generics = declaration_lifetime_generics.clone();
+                let base = self.generic_binder_count();
                 self.extend_generics(
                     &operation.generics,
                     base,
@@ -1123,6 +1139,7 @@ impl Elaborator<'_> {
             .collect();
         self.generics = declaration_generics;
         self.effect_row_generics = declaration_effect_row_generics;
+        self.lifetime_generics = declaration_lifetime_generics;
         ElaboratedEffect {
             generics: header.generics.len() as u32,
             operations,
@@ -1320,12 +1337,18 @@ impl Elaborator<'_> {
     fn bind_generics(&mut self, parameters: &GenericParameters) {
         self.generics.clear();
         self.effect_row_generics.clear();
+        self.lifetime_generics.clear();
         for (index, name) in parameters.iter().enumerate() {
-            if self.generics.contains_key(name) || self.effect_row_generics.contains_key(name) {
+            if self.generics.contains_key(name)
+                || self.effect_row_generics.contains_key(name)
+                || self.lifetime_generics.contains_key(name)
+            {
                 self.error("G3301", format!("duplicate generic parameter `{name}`"));
             }
             if parameters.is_effect_row(name) {
                 self.effect_row_generics.insert(name.clone(), index as u32);
+            } else if parameters.is_lifetime(name) {
+                self.lifetime_generics.insert(name.clone(), index as u32);
             } else {
                 self.generics.insert(name.clone(), index as u32);
             }
@@ -1350,7 +1373,10 @@ impl Elaborator<'_> {
         message: &'static str,
     ) {
         for (offset, name) in parameters.iter().enumerate() {
-            if self.generics.contains_key(name) || self.effect_row_generics.contains_key(name) {
+            if self.generics.contains_key(name)
+                || self.effect_row_generics.contains_key(name)
+                || self.lifetime_generics.contains_key(name)
+            {
                 self.diagnostics.push(SignatureDiagnostic {
                     code,
                     message: message.into(),
@@ -1359,9 +1385,25 @@ impl Elaborator<'_> {
             if parameters.is_effect_row(name) {
                 self.effect_row_generics
                     .insert(name.clone(), base + offset as u32);
+            } else if parameters.is_lifetime(name) {
+                self.lifetime_generics
+                    .insert(name.clone(), base + offset as u32);
             } else {
                 self.generics.insert(name.clone(), base + offset as u32);
             }
+        }
+    }
+    fn lifetime(&mut self, spelling: Option<&str>) -> Lifetime {
+        match spelling {
+            None | Some("'_") => Lifetime::Elided,
+            Some("'static") => Lifetime::Static,
+            Some(name) => match self.lifetime_generics.get(name) {
+                Some(index) => Lifetime::Generic(*index),
+                None => {
+                    self.error("G3315", format!("unbound lifetime `{name}`"));
+                    Lifetime::Elided
+                }
+            },
         }
     }
     fn ty(&mut self, value: &HeaderType) -> Type {
@@ -1378,12 +1420,17 @@ impl Elaborator<'_> {
                 effects: EffectRow::empty(),
                 invocation: Quantity::ONCE,
             },
-            HeaderType::Reference { unique, referent } => Type::Reference {
+            HeaderType::Reference {
+                unique,
+                lifetime,
+                referent,
+            } => Type::Reference {
                 mutability: if *unique {
                     Mutability::Unique
                 } else {
                     Mutability::Shared
                 },
+                lifetime: self.lifetime(lifetime.as_deref()),
                 referent: Box::new(self.ty(referent)),
             },
             HeaderType::Projection {
@@ -1439,6 +1486,13 @@ impl Elaborator<'_> {
                 self.error(
                     "G3313",
                     format!("effect-row generic `{name}` cannot be used as a type"),
+                );
+                return Type::Error;
+            }
+            if self.lifetime_generics.contains_key(name) {
+                self.error(
+                    "G3316",
+                    format!("lifetime generic `{name}` cannot be used as a type"),
                 );
                 return Type::Error;
             }
@@ -1610,9 +1664,11 @@ fn normalize_alias_type(
         ))),
         Type::Reference {
             mutability,
+            lifetime,
             referent,
         } => Type::Reference {
             mutability,
+            lifetime,
             referent: Box::new(normalize_alias_type(
                 *referent,
                 definitions,
@@ -1730,9 +1786,11 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
         Type::Array(value) => Type::Array(Box::new(substitute_alias_generics(*value, arguments))),
         Type::Reference {
             mutability,
+            lifetime,
             referent,
         } => Type::Reference {
             mutability,
+            lifetime,
             referent: Box::new(substitute_alias_generics(*referent, arguments)),
         },
         Type::Callable {

@@ -1,7 +1,101 @@
 use grandiose_stage0::{
     DeclarationScan, EffectTail, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout,
-    FileKey, InterfaceSet, LexedFile, LogicalPath, PackageKey, Quantity, ScalarType, Type,
+    FileKey, InterfaceSet, LexedFile, Lifetime, LogicalPath, PackageKey, Quantity, ScalarType,
+    Type,
 };
+
+#[test]
+fn interfaces_preserve_declared_reference_lifetimes_without_type_slots() {
+    let package = PackageKey("signature-reference-lifetimes@0.1.0".into());
+    let source = "pub fn borrow<'a>(value: &'a i64, fallback: &i64) -> &'static i64 { value }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface.definitions.first().expect("borrow definition");
+    let ElaboratedHeader::Callable(signature) =
+        signatures.definitions.get(&definition.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert_eq!(signature.generics, 1);
+    assert!(matches!(
+        signature.parameters[0],
+        Type::Reference {
+            lifetime: Lifetime::Generic(0),
+            ..
+        }
+    ));
+    assert!(matches!(
+        signature.parameters[1],
+        Type::Reference {
+            lifetime: Lifetime::Elided,
+            ..
+        }
+    ));
+    assert!(matches!(
+        signature.result,
+        Type::Reference {
+            lifetime: Lifetime::Static,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn interfaces_reject_unbound_or_type_position_lifetimes() {
+    let package = PackageKey("signature-invalid-lifetimes@0.1.0".into());
+    let source =
+        "pub fn missing(value: &'a i64) -> i64 { 0 } pub fn misuse<'a>(value: 'a) -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let codes = signatures
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    assert!(codes.contains(&"G3315"), "{:#?}", signatures.diagnostics);
+    assert!(codes.contains(&"G3316"), "{:#?}", signatures.diagnostics);
+}
+
+#[test]
+fn aliases_can_bind_a_lifetime_without_turning_it_into_a_type_argument() {
+    let package = PackageKey("signature-alias-lifetime@0.1.0".into());
+    let source = "type Ref<'a> = &'a i64;";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface.definitions.first().expect("Ref definition");
+    let ElaboratedHeader::Alias { generics, target } =
+        signatures.definitions.get(&definition.key).unwrap()
+    else {
+        panic!("expected alias")
+    };
+    assert_eq!(*generics, 1);
+    assert!(matches!(
+        target,
+        Type::Reference {
+            lifetime: Lifetime::Generic(0),
+            ..
+        }
+    ));
+}
 
 #[test]
 fn interfaces_elaborate_generic_callable_signatures_without_bodies() {

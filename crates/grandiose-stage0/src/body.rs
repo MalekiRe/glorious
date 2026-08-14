@@ -1092,12 +1092,21 @@ impl Parser<'_> {
         }
         if self.at_operator("&") {
             self.position += 1;
+            let lifetime = if self
+                .current()
+                .is_some_and(|token| self.text(token).starts_with('\''))
+            {
+                Some(self.expect_identifier()?)
+            } else {
+                None
+            };
             let unique = self.word() == Some("mut");
             if unique {
                 self.position += 1;
             }
             return Some(HeaderType::Reference {
                 unique,
+                lifetime,
                 referent: Box::new(self.closure_type()?),
             });
         }

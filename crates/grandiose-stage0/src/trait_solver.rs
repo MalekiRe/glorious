@@ -510,12 +510,14 @@ fn match_type(
         },
         Type::Reference {
             mutability,
+            lifetime,
             referent,
         } => match actual {
             Type::Reference {
                 mutability: actual_mutability,
+                lifetime: actual_lifetime,
                 referent: actual_referent,
-            } if mutability == actual_mutability => {
+            } if mutability == actual_mutability && lifetime == actual_lifetime => {
                 match_type(referent, actual_referent, substitution)
             }
             _ => None,
@@ -609,9 +611,11 @@ fn substitute_type(value: &Type, substitution: &BTreeMap<u32, Type>) -> Type {
         Type::Array(value) => Type::Array(Box::new(substitute_type(value, substitution))),
         Type::Reference {
             mutability,
+            lifetime,
             referent,
         } => Type::Reference {
             mutability: *mutability,
+            lifetime: *lifetime,
             referent: Box::new(substitute_type(referent, substitution)),
         },
         Type::Callable {

@@ -21,11 +21,16 @@ use crate::{
 pub struct GenericParameters {
     pub names: Vec<String>,
     pub effect_rows: BTreeSet<String>,
+    pub lifetimes: BTreeSet<String>,
 }
 
 impl GenericParameters {
     pub fn is_effect_row(&self, name: &str) -> bool {
         self.effect_rows.contains(name)
+    }
+
+    pub fn is_lifetime(&self, name: &str) -> bool {
+        self.lifetimes.contains(name)
     }
 }
 
@@ -72,6 +77,10 @@ pub enum HeaderType {
     },
     Reference {
         unique: bool,
+        /// The source lifetime attached to this reference, when one was
+        /// written.  Elision stays explicit as `None` until elaboration gives
+        /// it the canonical `Lifetime::Elided` identity.
+        lifetime: Option<String>,
         referent: Box<HeaderType>,
     },
     Never,
@@ -1245,8 +1254,12 @@ impl Parser<'_> {
         let mut generics = GenericParameters::default();
         while self.current().is_some() && !self.at_operator(">") {
             if let Some(name) = self.identifier() {
+                let is_lifetime = name.starts_with('\'');
                 let is_effect_row = if self.punctuation(':') {
-                    if self.word() == Some("EffectRow") {
+                    if is_lifetime {
+                        self.error("G3205", "lifetime binders cannot declare a kind");
+                        false
+                    } else if self.word() == Some("EffectRow") {
                         self.position += 1;
                         true
                     } else {
@@ -1258,6 +1271,9 @@ impl Parser<'_> {
                 };
                 if is_effect_row {
                     generics.effect_rows.insert(name.clone());
+                }
+                if is_lifetime {
+                    generics.lifetimes.insert(name.clone());
                 }
                 generics.names.push(name);
             } else {
@@ -1312,12 +1328,18 @@ impl Parser<'_> {
             return HeaderType::Never;
         }
         if self.operator("&") {
+            let lifetime = if self.word().is_some_and(|name| name.starts_with('\'')) {
+                self.identifier()
+            } else {
+                None
+            };
             let unique = self.word() == Some("mut");
             if unique {
                 self.position += 1;
             }
             return HeaderType::Reference {
                 unique,
+                lifetime,
                 referent: Box::new(self.ty()),
             };
         }

@@ -108,7 +108,7 @@ pub use trait_solver::{
 };
 pub use types::{
     EffectInstance, EffectRow, EffectRowProjection, EffectTail, EffectVar, InferContext, InferVar,
-    Mutability, ScalarType, Type, TypeError,
+    Lifetime, Mutability, ScalarType, Type, TypeError,
 };
 pub use vm_backend::{
     CandidateVmArtifact, CandidateVmProgram, STAGE0_VM_SCHEMA, VerifiedVmArtifact,

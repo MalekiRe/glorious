@@ -353,10 +353,12 @@ fn unify_type(
             HeaderType::Reference {
                 unique: left_unique,
                 referent: left_referent,
+                ..
             },
             HeaderType::Reference {
                 unique: right_unique,
                 referent: right_referent,
+                ..
             },
         ) => {
             left_unique == right_unique

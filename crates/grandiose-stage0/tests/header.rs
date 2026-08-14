@@ -57,6 +57,34 @@ fn callable_headers_retain_lifetime_binder_spellings() {
         panic!("expected callable header")
     };
     assert_eq!(header.generics, ["'a", "'_"]);
+    assert!(header.generics.is_lifetime("'a"));
+    assert!(header.generics.is_lifetime("'_"));
+}
+
+#[test]
+fn callable_headers_attach_lifetime_spellings_to_references() {
+    let package = PackageKey("header-reference-lifetime@0.1.0".into());
+    let source = "pub fn borrow<'a>(value: &'a i64, fallback: &i64) -> &'static i64 { value }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert!(matches!(
+        &header.parameters[0].ty,
+        HeaderType::Reference { lifetime: Some(lifetime), .. } if lifetime == "'a"
+    ));
+    assert!(matches!(
+        &header.parameters[1].ty,
+        HeaderType::Reference { lifetime: None, .. }
+    ));
+    assert!(matches!(
+        header.result,
+        Some(HeaderType::Reference { lifetime: Some(lifetime), .. }) if lifetime == "'static"
+    ));
 }
 
 #[test]
