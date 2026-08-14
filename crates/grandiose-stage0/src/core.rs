@@ -3865,6 +3865,67 @@ impl Elaborator<'_> {
             ExprKind::Block(values) => self.block_expected(values, expected, expression.span),
             ExprKind::Tuple(values) => self.tuple_expected(values, expected, expression.span),
             ExprKind::Array(values) => self.array_expected(values, expected, expression.span),
+            // A direct call can carry result evidence backwards into a
+            // generic callback argument.  This is essential for canonical
+            // `if(condition) { body } else { fallback }`: the outer declared
+            // result constrains `else`, which constrains the `if` result, and
+            // finally gives both contextual blocks their `Fn::Output` type.
+            // The ordinary expression path deliberately remains responsible
+            // for enum constructors, trait methods, and effects; this narrow
+            // path only handles a frozen direct function once its exact
+            // callable result is available.
+            ExprKind::Call { callee, arguments } if expected.is_some() => {
+                let ExprKind::Path(path) = &self.body.expression(callee).kind else {
+                    return self.expression(id);
+                };
+                let ResolutionState::Resolved(definition) =
+                    self.index
+                        .resolve_path(DefinitionNamespace::Value, self.module, path)
+                else {
+                    return self.expression(id);
+                };
+                if !matches!(
+                    self.signatures.definitions.get(&definition),
+                    Some(ElaboratedHeader::Callable(_))
+                ) {
+                    return self.expression(id);
+                }
+                let callee = self.expression(callee);
+                let Type::Callable {
+                    parameters, result, ..
+                } = self.expressions[callee.0 as usize].ty.clone()
+                else {
+                    unreachable!("frozen direct callable must elaborate to a callable type");
+                };
+                if self
+                    .inference
+                    .unify(*result, expected.clone().expect("guarded above"))
+                    .is_err()
+                {
+                    self.error(
+                        expression.span,
+                        "G4107",
+                        "call result does not match the contextual expected type",
+                    );
+                    self.recovered = true;
+                }
+                let arguments = arguments
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        let parameter = parameters.get(index);
+                        self.expression_expected(
+                            value,
+                            parameter
+                                .and_then(|parameter| {
+                                    self.direct_bound_callable_contract(callee, parameter)
+                                })
+                                .or_else(|| parameter.cloned()),
+                        )
+                    })
+                    .collect();
+                self.call(callee, arguments, expression.span)
+            }
             ExprKind::Closure { parameters, body } => self.closure(
                 parameters
                     .into_iter()

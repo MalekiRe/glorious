@@ -5579,6 +5579,14 @@ fn service_opens_a_direct_fn_bound_for_a_trailing_contextual_block() {
 }
 
 #[test]
+fn service_propagates_a_direct_call_result_into_nested_fn_bound_blocks() {
+    let source = "pub enum Result<T, E> { Ok(T), Err(E) } pub fn first<B, F>(body: F) -> Result<B, ()> where F: Fn<(), Output = B> { Result::Ok(body()) } pub fn fallback<A, F>(value: Result<A, ()>, body: F) -> A where F: Fn<(), Output = A> { handle value { Result::Ok(value) => value, Result::Err(_) => body() } } pub fn main() -> i64 { fallback(first() { 42 }) { 0 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_lowers_a_top_level_value_alias_to_its_callable_target() {
     let source = "pub fn add_one(value: i64) -> i64 { value + 1 } let increment = add_one; pub fn main() -> i64 { increment(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
