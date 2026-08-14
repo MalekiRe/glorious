@@ -101,6 +101,59 @@ fn encoded_leave_fixture() -> Vec<u8> {
     encode_artifact(&artifact)
 }
 
+/// The entry shape shared by the standalone and program envelopes below. The
+/// first instruction materializes the value transferred through the `Leave`:
+/// a literal in the standalone VM and a cross-function call in the program.
+fn cleanup_carrying_leave_entry(definition: DefKey, first: VmInstruction) -> VmFunction {
+    VmFunction {
+        definition,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, VmType::I64],
+        instructions: vec![
+            first,
+            VmInstruction::InstallHandler {
+                effect: DefKey(Digest::of_bytes(b"leave-parity-handler")),
+                effect_arguments: vec![],
+                operation: 0,
+                payload_destinations: vec![],
+                resume_type: VmType::I64,
+                target: 4,
+            },
+            VmInstruction::Leave {
+                brand_owner: definition,
+                brand_label: 3,
+                target: 3,
+                arguments: vec![0],
+                destinations: vec![1],
+                cleanup: VmCleanupProof {
+                    moved_places: vec![VmCleanupPlace {
+                        root: "result".into(),
+                        fields: vec![0],
+                    }],
+                    active_loans: vec![VmCleanupLoan {
+                        owner: Some("frame".into()),
+                        root: "result".into(),
+                        fields: vec![1],
+                        unique: true,
+                    }],
+                },
+            },
+            VmInstruction::Return { value: 1 },
+            // This is a private handler-clause entry. The Leave skips it and
+            // thereby proves that it unwinds the installed handler frame.
+            VmInstruction::Trap,
+        ],
+    }
+}
+
+fn make_leave_cleanup_noncanonical(function: &mut VmFunction) {
+    let VmInstruction::Leave { cleanup, .. } = &mut function.instructions[2] else {
+        panic!("cleanup parity fixture must contain a Leave at instruction 2");
+    };
+    cleanup.moved_places.push(cleanup.moved_places[0].clone());
+}
+
 #[test]
 fn schema_26_leave_bytes_reject_every_truncation_and_fingerprint_tampering() {
     let bytes = encoded_leave_fixture();
@@ -174,6 +227,112 @@ fn schema_26_leave_payload_mutations_reject_before_vm_execution() {
     assert!(matches!(
         decode_and_verify_artifact(&unknown_brand_owner),
         Err(VmArtifactError::FingerprintMismatch)
+    ));
+}
+
+#[test]
+fn cleanup_carrying_leave_has_standalone_and_multifunction_program_parity() {
+    let standalone_definition = DefKey(Digest::of_bytes(b"leave-parity-standalone"));
+    let standalone_function = cleanup_carrying_leave_entry(
+        standalone_definition,
+        VmInstruction::ConstI64 { dst: 0, value: 42 },
+    );
+    let mut standalone = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: standalone_function.clone(),
+        fingerprint: Digest::of_bytes(b"leave-parity-standalone-fingerprint"),
+    };
+    standalone.fingerprint = standalone.computed_fingerprint();
+    let standalone_bytes = encode_artifact(&standalone);
+    assert_eq!(decode_artifact(&standalone_bytes).unwrap(), standalone);
+    assert_eq!(
+        decode_and_verify_artifact(&standalone_bytes)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+
+    let entry = DefKey(Digest::of_bytes(b"leave-parity-program-entry"));
+    let helper = DefKey(Digest::of_bytes(b"leave-parity-program-helper"));
+    let entry_function = cleanup_carrying_leave_entry(
+        entry,
+        VmInstruction::Call {
+            dst: 0,
+            callee: helper,
+            arguments: vec![],
+        },
+    );
+    let helper_function = VmFunction {
+        definition: helper,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry,
+        functions: BTreeMap::from([
+            (entry, entry_function.clone()),
+            (helper, helper_function.clone()),
+        ]),
+        fingerprint: Digest::of_bytes(b"leave-parity-program-fingerprint"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let program_bytes = encode_program(&program);
+    assert_eq!(decode_program(&program_bytes).unwrap(), program);
+    assert_eq!(
+        decode_and_verify_program(&program_bytes)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+
+    // Both envelopes must reject a canonical but semantically malformed
+    // cleanup proof before execution. The program keeps its helper valid so
+    // this specifically exercises the multi-function program envelope.
+    let mut malformed_standalone_function = standalone_function;
+    make_leave_cleanup_noncanonical(&mut malformed_standalone_function);
+    let mut malformed_standalone = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: malformed_standalone_function,
+        fingerprint: Digest::of_bytes(b"leave-parity-malformed-standalone"),
+    };
+    malformed_standalone.fingerprint = malformed_standalone.computed_fingerprint();
+    let malformed_standalone_bytes = encode_artifact(&malformed_standalone);
+    assert!(decode_artifact(&malformed_standalone_bytes).is_ok());
+    assert!(matches!(
+        decode_and_verify_artifact(&malformed_standalone_bytes),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "leave cleanup proof is not canonical"
+        })
+    ));
+
+    let mut malformed_entry_function = entry_function;
+    make_leave_cleanup_noncanonical(&mut malformed_entry_function);
+    let mut malformed_program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry,
+        functions: BTreeMap::from([(entry, malformed_entry_function), (helper, helper_function)]),
+        fingerprint: Digest::of_bytes(b"leave-parity-malformed-program"),
+    };
+    malformed_program.fingerprint = malformed_program.computed_fingerprint();
+    let malformed_program_bytes = encode_program(&malformed_program);
+    assert!(decode_program(&malformed_program_bytes).is_ok());
+    assert!(matches!(
+        decode_and_verify_program(&malformed_program_bytes),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "leave cleanup proof is not canonical"
+        })
     ));
 }
 
