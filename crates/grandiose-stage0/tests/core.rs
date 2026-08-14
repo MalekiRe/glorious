@@ -3896,6 +3896,70 @@ fn handler_payload_reference_alias_preserves_its_parent_loan() {
 }
 
 #[test]
+fn placeflow_allows_and_tracks_a_reborrow_through_an_aggregate_reference_field() {
+    let core = core_for(
+        "core-aggregate-reference-reborrow@0.1.0",
+        "pub struct Holder { loan: &mut i64, tag: i64 } pub fn main() -> i64 { let value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; *child }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    assert!(
+        flow.events.iter().any(|event| matches!(
+            event.kind,
+            FlowEventKind::Reborrow(ref root) if root == "value"
+        )),
+        "aggregate-held reborrow did not retain its backing place: {flow:#?}"
+    );
+}
+
+#[test]
+fn placeflow_rejects_access_through_aggregate_parent_while_unique_child_reborrow_is_live() {
+    let core = core_for(
+        "core-aggregate-reference-reborrow-conflict@0.1.0",
+        "pub struct Holder { loan: &mut i64, tag: i64 } pub fn main() -> i64 { let value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; let observed = *holder.loan; *child + observed }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5004"),
+        "a live child reborrow did not suspend aggregate-held parent access: {flow:#?}"
+    );
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"aggregate-reference-reborrow-conflict")),
+        &core,
+        &flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6001"),
+        "MIR accepted the aggregate reborrow conflict that PlaceFlow rejected: {lowered:#?}"
+    );
+}
+
+#[test]
+fn placeflow_releases_aggregate_reborrows_after_their_last_handler_use() {
+    let core = core_for(
+        "core-aggregate-reference-reborrow-handler-join@0.1.0",
+        "pub struct Holder { loan: &mut i64, tag: i64 } effect Tick { [1, 1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let holder = Holder { loan: &mut value, tag: 0 }; let child = &mut *holder.loan; handle Tick::tick() { Tick::tick() => *child }; *holder.loan }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    assert!(
+        flow.events.iter().any(
+            |event| matches!(&event.kind, FlowEventKind::EndBorrow(owner) if owner == "child")
+        ),
+        "the aggregate reborrow was not released at its handler-join NLL frontier: {flow:#?}"
+    );
+}
+
+#[test]
 fn handler_payload_reference_survives_completion_and_return_escape_checks() {
     let core = core_for(
         "core-handler-payload-reference-escape@0.1.0",

@@ -440,16 +440,6 @@ impl Analyzer<'_> {
                 if self.projection(value).is_none() {
                     self.visit_with_live_after(value, live_after);
                 }
-                if let CoreKind::Deref(reference) = self.body.expression(value).kind
-                    && !matches!(self.body.expression(reference).kind, CoreKind::Local(_))
-                {
-                    self.error(
-                        e.span,
-                        "G5006",
-                        "reborrow through an aggregate-held reference requires an explicit local loan binding".into(),
-                    );
-                    return;
-                }
                 self.borrow_place(value, unique, e.span, None)
             }
             CoreKind::Deref(value) => {
@@ -1684,24 +1674,43 @@ impl Analyzer<'_> {
     }
 
     fn use_deref_reference(&mut self, id: CoreId, span: Span, mutation: bool) {
-        let CoreKind::Local(source_name) = &self.body.expression(id).kind else {
+        let Some(name) = self.reference_origin_key(id) else {
             return;
         };
-        let name = self.resolve_name(source_name);
         let Some(parent) = self
             .projection_loans
             .iter()
             .find(|loan| loan.owner.as_deref() == Some(name.as_str()))
             .cloned()
+            .or_else(|| self.reference_origins.get(&name).cloned())
         else {
             return;
         };
+        // A dereference may name a reference stored in an aggregate rather
+        // than a standalone local (`*holder.0`).  Follow the reborrow chain
+        // by identity and admit the exact frozen backing loan for each
+        // ancestor.  This permits a child reborrow to use its own suspended
+        // parent while still rejecting access through that parent while the
+        // child is live.
+        let mut allowed_owners = BTreeSet::from([name.clone()]);
+        let mut cursor = name.clone();
+        while let Some(parent) = self.reborrow_parents.get(&cursor) {
+            if !allowed_owners.insert(parent.clone()) {
+                break;
+            }
+            cursor = parent.clone();
+        }
+        let allowed_origin_loans = allowed_owners
+            .iter()
+            .filter_map(|owner| self.reference_origins.get(owner))
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let conflicts = self.projection_loans.iter().any(|loan| {
-            loan.owner.as_deref() != Some(name.as_str())
-                && self
-                    .reborrow_parents
-                    .get(&name)
-                    .is_none_or(|parent| loan.owner.as_deref() != Some(parent.as_str()))
+            !loan
+                .owner
+                .as_ref()
+                .is_some_and(|owner| allowed_owners.contains(owner))
+                && !allowed_origin_loans.contains(loan)
                 && loan.place.overlaps(&parent.place)
                 && (mutation || parent.unique || loan.unique)
         });
