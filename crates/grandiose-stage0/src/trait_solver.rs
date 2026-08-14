@@ -43,9 +43,30 @@ pub enum TraitCandidateExplanation {
     Applicable {
         implementation: DefKey,
         negative: bool,
+        where_bounds: Vec<TraitWhereBoundExplanation>,
     },
     Rejected {
         implementation: DefKey,
+        reason: TraitCandidateRejection,
+    },
+}
+
+/// One implementation where-bound after the candidate's head substitution.
+/// The nested goal and its canonical solver outcome are retained together so
+/// callers can explain a rejected candidate without reconstructing a second
+/// substitution environment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraitWhereBoundExplanation {
+    pub goal: TraitGoal,
+    pub outcome: TraitAnswer,
+}
+
+/// Why a trait implementation was not an applicable candidate for one goal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TraitCandidateRejection {
+    HeadMismatch,
+    WhereBound {
+        outcomes: Vec<TraitWhereBoundExplanation>,
     },
 }
 
@@ -257,24 +278,54 @@ impl TraitSolver {
     /// Inspect deterministic candidate shape alongside the ordinary tabled
     /// answer. This is diagnostic evidence only and never influences tables.
     pub fn explain(&mut self, goal: TraitGoal) -> TraitSelectionExplanation {
+        // Preserve the normal tabled selection exactly. Candidate evidence is
+        // evaluated by a fresh probe below, so asking for an explanation can
+        // neither pre-populate nor perturb this solver's cache or step budget.
+        let answer = self.solve(goal.clone());
+        let mut probe = Self {
+            rules: self.rules.clone(),
+            tables: BTreeMap::new(),
+            limits: self.limits.clone(),
+            steps: 0,
+        };
         let candidates = self
             .rules
             .iter()
             .filter(|rule| rule.implementation.relation.definition == goal.relation.definition)
             .map(|rule| {
-                if match_rule(&rule.implementation, &goal).is_some() {
-                    TraitCandidateExplanation::Applicable {
+                let Some(substitution) = match_rule(&rule.implementation, &goal) else {
+                    return TraitCandidateExplanation::Rejected {
                         implementation: rule.definition,
-                        negative: rule.implementation.negative,
+                        reason: TraitCandidateRejection::HeadMismatch,
+                    };
+                };
+                let mut outcomes = Vec::new();
+                for (subject, relation) in &rule.implementation.where_bounds {
+                    let goal = TraitGoal {
+                        relation: substitute_relation(relation, &substitution),
+                        subject: substitute_type(subject, &substitution),
+                    };
+                    // `solve_at` evaluates implementation obligations one
+                    // frame below their parent candidate. Preserve that
+                    // depth in the diagnostic probe so a reported overflow
+                    // matches the ordinary tabled selection exactly.
+                    let outcome = probe.solve_at(goal.clone(), 1).into();
+                    let proven = matches!(outcome, TraitAnswer::Proven { .. });
+                    outcomes.push(TraitWhereBoundExplanation { goal, outcome });
+                    if !proven {
+                        return TraitCandidateExplanation::Rejected {
+                            implementation: rule.definition,
+                            reason: TraitCandidateRejection::WhereBound { outcomes },
+                        };
                     }
-                } else {
-                    TraitCandidateExplanation::Rejected {
-                        implementation: rule.definition,
-                    }
+                }
+                TraitCandidateExplanation::Applicable {
+                    implementation: rule.definition,
+                    negative: rule.implementation.negative,
+                    where_bounds: outcomes,
                 }
             })
             .collect();
-        let answer = self.solve(goal);
         TraitSelectionExplanation { answer, candidates }
     }
 

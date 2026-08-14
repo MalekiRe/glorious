@@ -1,8 +1,9 @@
 use grandiose_stage0::{
     DeclarationScan, DefKey, ElaboratedInterface, ElaboratedTraitReference, FileKey,
     GenericArgument, InterfaceSet, LexedFile, Lifetime, Mutability, PackageKey, ScalarType,
-    TraitAnswer, TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer,
-    TraitProjectionAnswer, TraitSolver, Type, implementation_method_key,
+    TraitAnswer, TraitCandidateExplanation, TraitCandidateRejection,
+    TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer, TraitProjectionAnswer,
+    TraitSolver, TraitSolverLimits, Type, implementation_method_key,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -328,6 +329,135 @@ fn negative_impls_must_prove_their_where_bounds_before_refuting_a_goal() {
         TraitSolver::new(&signatures).solve(goal),
         TraitAnswer::NoSolution
     );
+}
+
+#[test]
+fn selection_explanations_name_head_mismatches() {
+    let (interface, signatures) =
+        signatures("trait Ready {} struct Box<T> {} impl Ready for i64 {}");
+    let ready = key(&interface, "Ready");
+    let boxed = key(&interface, "Box");
+    let explanation = TraitSolver::new(&signatures).explain(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![],
+        },
+        subject: Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+    });
+    assert_eq!(explanation.answer, TraitAnswer::NoSolution);
+    assert!(matches!(
+        explanation.candidates.as_slice(),
+        [TraitCandidateExplanation::Rejected {
+            reason: TraitCandidateRejection::HeadMismatch,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn selection_explanations_retain_refuted_and_ambiguous_where_bound_outcomes() {
+    let (refuted_interface, refuted_signatures) = signatures(
+        "trait Gate {} trait Ready {} struct Box<T> {} impl !Gate for i64 {} impl<T> Ready for Box<T> where T: Gate {}",
+    );
+    let ready = key(&refuted_interface, "Ready");
+    let boxed = key(&refuted_interface, "Box");
+    let refuted = TraitSolver::new(&refuted_signatures).explain(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![],
+        },
+        subject: Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+    });
+    let TraitCandidateExplanation::Rejected {
+        reason: TraitCandidateRejection::WhereBound { outcomes },
+        ..
+    } = &refuted.candidates[0]
+    else {
+        panic!("expected a refuted where-bound explanation: {refuted:#?}");
+    };
+    assert!(matches!(
+        outcomes.as_slice(),
+        [grandiose_stage0::TraitWhereBoundExplanation {
+            outcome: TraitAnswer::Refuted { .. },
+            ..
+        }]
+    ));
+
+    let (interface, signatures) = signatures(
+        "trait Gate {} trait Ready {} struct Box<T> {} impl<T> Gate for T where T: Gate {} impl<T> Ready for Box<T> where T: Gate {}",
+    );
+    let ready = key(&interface, "Ready");
+    let boxed = key(&interface, "Box");
+    let ambiguous = TraitSolver::new(&signatures).explain(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![],
+        },
+        subject: Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+    });
+    let TraitCandidateExplanation::Rejected {
+        reason: TraitCandidateRejection::WhereBound { outcomes },
+        ..
+    } = &ambiguous.candidates[0]
+    else {
+        panic!("expected an ambiguous where-bound explanation: {ambiguous:#?}");
+    };
+    assert!(matches!(
+        outcomes.as_slice(),
+        [grandiose_stage0::TraitWhereBoundExplanation {
+            outcome: TraitAnswer::Ambiguous,
+            ..
+        }]
+    ));
+}
+
+#[test]
+fn selection_explanations_retain_recursive_overflow_where_bound_outcomes() {
+    let (interface, signatures) = signatures(
+        "trait Gate {} trait Ready {} struct Box<T> {} impl Gate for i64 {} impl<T> Ready for Box<T> where T: Gate {}",
+    );
+    let ready = key(&interface, "Ready");
+    let boxed = key(&interface, "Box");
+    let explanation = TraitSolver::with_limits(
+        &signatures,
+        TraitSolverLimits {
+            max_depth: 1,
+            max_steps: 32,
+        },
+    )
+    .explain(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![],
+        },
+        subject: Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+    });
+    let TraitCandidateExplanation::Rejected {
+        reason: TraitCandidateRejection::WhereBound { outcomes },
+        ..
+    } = &explanation.candidates[0]
+    else {
+        panic!("expected an overflow where-bound explanation: {explanation:#?}");
+    };
+    assert!(matches!(
+        outcomes.as_slice(),
+        [grandiose_stage0::TraitWhereBoundExplanation {
+            outcome: TraitAnswer::Overflow,
+            ..
+        }]
+    ));
 }
 
 #[test]
