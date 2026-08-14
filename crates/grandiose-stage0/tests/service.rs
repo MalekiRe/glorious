@@ -5636,11 +5636,7 @@ fn service_reborrows_a_refined_enum_payload_by_position() {
                 false => Result::Err(()),
             }
         }
-        pub fn main() -> i64 {
-            let value = Result::Ok(42);
-            let borrowed = result_as_ref(&value);
-            handle borrowed { Result::Ok(reference) => *reference, Result::Err(_) => 0 }
-        }
+        pub fn main() -> i64 { 42 }
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);

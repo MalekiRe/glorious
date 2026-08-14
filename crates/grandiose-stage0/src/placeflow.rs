@@ -441,7 +441,7 @@ impl Analyzer<'_> {
                     // because only `child` is used after a handler boundary.
                     let mut borrow_live = live_after.clone();
                     self.collect_local_uses(value, &mut borrow_live);
-                    if let CoreKind::Deref(reference) = self.body.expression(value).kind {
+                    if let Some(reference) = self.reborrow_reference(value) {
                         self.visit_with_live_after(reference, &borrow_live);
                     } else {
                         self.visit_with_live_after(value, &borrow_live);
@@ -1451,7 +1451,7 @@ impl Analyzer<'_> {
     /// distinct NLL region and therefore keeps the parent suspended while it
     /// remains live.
     fn reborrow_place(&mut self, id: CoreId, unique: bool, span: Span, owner: String) -> bool {
-        let CoreKind::Deref(reference) = self.body.expression(id).kind else {
+        let Some(reference) = self.reborrow_reference(id) else {
             return false;
         };
         let Some(parent) = self.reference_origin_key(reference) else {
@@ -1505,6 +1505,17 @@ impl Analyzer<'_> {
         self.projection_loans.push(loan);
         self.reborrow_parents.insert(owner, parent);
         true
+    }
+
+    /// A projected field retains the reference carrier introduced by its
+    /// autoderef: `&parent.0` is a reborrow of `parent`, not a new temporary
+    /// loan detached from the caller-owned place.
+    fn reborrow_reference(&self, id: CoreId) -> Option<CoreId> {
+        match self.body.expression(id).kind {
+            CoreKind::Deref(reference) => Some(reference),
+            CoreKind::Field { base, .. } => self.reborrow_reference(base),
+            _ => None,
+        }
     }
 
     fn reference_origin_key(&self, id: CoreId) -> Option<String> {

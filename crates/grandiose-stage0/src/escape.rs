@@ -512,12 +512,7 @@ impl Analyzer<'_> {
         // for `&*external`; treating that absence as a temporary would reject
         // a valid reborrow merely because the reference first travelled
         // through an enum/array/refinement aggregate.
-        let external_reborrow = match self.body.expression(id).kind.clone() {
-            CoreKind::Deref(reference) => {
-                matches!(self.value(reference), Value::ExternalBorrowed)
-            }
-            _ => false,
-        };
+        let external_reborrow = self.reborrowed_from_external(id);
         let Some(root) = self.place_root(id) else {
             if external_reborrow {
                 return Value::ExternalBorrowed;
@@ -540,6 +535,18 @@ impl Analyzer<'_> {
             );
         }
         Value::Borrowed { root }
+    }
+
+    /// A projected enum/record payload still belongs to the incoming loan.
+    /// Field nodes sit between `&value.0` and the underlying `Deref(value)`,
+    /// so checking only the immediate Core node mistakes a valid reborrow for
+    /// a fresh temporary at the escape boundary.
+    fn reborrowed_from_external(&mut self, id: CoreId) -> bool {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Field { base, .. } => self.reborrowed_from_external(base),
+            CoreKind::Deref(reference) => matches!(self.value(reference), Value::ExternalBorrowed),
+            _ => false,
+        }
     }
 
     fn place_root(&mut self, id: CoreId) -> Option<String> {

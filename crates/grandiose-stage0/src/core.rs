@@ -3855,6 +3855,13 @@ impl Elaborator<'_> {
                         expression.span,
                     );
                 }
+                // A borrow of a projected dereference is a reborrow of the
+                // incoming loan, not a fresh body-local loan.  Preserve its
+                // lifetime in Core so `&value.0` can satisfy an outward
+                // `&'a T` contract and PlaceFlow/MIR retain the same owner.
+                let lifetime = self
+                    .projected_reborrow_lifetime(value)
+                    .unwrap_or(Lifetime::Elided);
                 self.alloc(
                     CoreKind::Borrow { unique, value },
                     Type::Reference {
@@ -3863,7 +3870,7 @@ impl Elaborator<'_> {
                         } else {
                             Mutability::Shared
                         },
-                        lifetime: Lifetime::Elided,
+                        lifetime,
                         referent: Box::new(ty),
                     },
                     expression.span,
@@ -3924,6 +3931,16 @@ impl Elaborator<'_> {
                 self.recovered = true;
                 self.alloc(CoreKind::Error, Type::Error, expression.span)
             }
+        }
+    }
+    fn projected_reborrow_lifetime(&self, value: CoreId) -> Option<Lifetime> {
+        match &self.expressions[value.0 as usize].kind {
+            CoreKind::Field { base, .. } => self.projected_reborrow_lifetime(*base),
+            CoreKind::Deref(reference) => match &self.expressions[reference.0 as usize].ty {
+                Type::Reference { lifetime, .. } => Some(*lifetime),
+                _ => None,
+            },
+            _ => None,
         }
     }
     fn expression_expected(&mut self, id: ExprId, expected: Option<Type>) -> CoreId {
@@ -7088,11 +7105,7 @@ impl Elaborator<'_> {
         // the explicit Core dereference so MIR can reborrow the selected
         // payload rather than materializing or moving the whole enum.
         let base = match self.expressions[base.0 as usize].ty.clone() {
-            Type::Reference { referent, .. } => self.alloc(
-                CoreKind::Deref(base),
-                *referent,
-                span,
-            ),
+            Type::Reference { referent, .. } => self.alloc(CoreKind::Deref(base), *referent, span),
             _ => base,
         };
         let base_ty = self.expressions[base.0 as usize].ty.clone();
@@ -7181,6 +7194,67 @@ impl Elaborator<'_> {
                         .collect()
                 })
             })
+    }
+    /// A negated enum test proves a payload layout only when exactly one
+    /// alternate variant remains.  This is the source-level dual of a
+    /// positive refinement; it is intentionally unavailable for larger
+    /// enums, where a negative test leaves multiple incompatible layouts.
+    fn complementary_enum_refinement(
+        &self,
+        subject: CoreId,
+        selected: &CorePattern,
+    ) -> Option<CorePattern> {
+        let CorePattern::Enum {
+            definition,
+            variant,
+            ..
+        } = selected
+        else {
+            return None;
+        };
+        let Type::Nominal {
+            definition: subject_definition,
+            arguments,
+        } = &self.expressions[subject.0 as usize].ty
+        else {
+            return None;
+        };
+        if subject_definition != definition {
+            return None;
+        }
+        let ElaboratedHeader::Nominal {
+            layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
+            ..
+        } = self.signatures.definitions.get(definition)?
+        else {
+            return None;
+        };
+        if variants.len() != 2 {
+            return None;
+        }
+        let (other_index, other) = variants
+            .iter()
+            .enumerate()
+            .find(|(index, _)| *index as u32 != *variant)?;
+        let (_, field_types) = self
+            .signatures
+            .instantiate_enum_variant_generic(*definition, arguments, &other.name)
+            .ok()?;
+        Some(CorePattern::Enum {
+            definition: *definition,
+            variant: other_index as u32,
+            field_count: field_types.len() as u32,
+            fields: field_types
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| CorePatternField {
+                    index: index as u32,
+                    ty: ty.clone(),
+                    pattern: CorePattern::Any,
+                })
+                .collect(),
+            field_types,
+        })
     }
     fn enum_constructor(
         &mut self,
@@ -8494,12 +8568,39 @@ impl Elaborator<'_> {
             let refinement = refinement
                 .as_ref()
                 .and_then(|(subject, pattern, environment)| {
-                    core_pattern_is_true(&core_pattern).then(|| CoreRefinementBranch {
-                        environment: environment.clone(),
-                        subject: *subject,
-                        pattern: pattern.clone(),
-                    })
+                    if core_pattern_is_true(&core_pattern) {
+                        return Some(CoreRefinementBranch {
+                            environment: environment.clone(),
+                            subject: *subject,
+                            pattern: pattern.clone(),
+                        });
+                    }
+                    // A negative `is Variant(..)` arm is equally precise for
+                    // a closed two-variant enum. Preserve the complementary
+                    // payload layout, but do not leak positive-pattern
+                    // binders into that opposite arm.
+                    core_pattern_is_false(&core_pattern).then(|| {
+                        self.complementary_enum_refinement(*subject, pattern)
+                            .map(|pattern| {
+                                let mut environment = environment.clone();
+                                environment.subject = None;
+                                environment.bindings.clear();
+                                environment.binding_types.clear();
+                                CoreRefinementBranch {
+                                    environment,
+                                    subject: *subject,
+                                    pattern,
+                                }
+                            })
+                    })?
                 });
+            // Persist only the positive refinement evidence.  The negative
+            // counterpart is an elaboration-scoped projection fact with no
+            // binders; it has already shaped the frozen Field node and does
+            // not need to be replayed by later Core consumers.
+            let persisted_refinement = core_pattern_is_true(&core_pattern)
+                .then(|| refinement.clone())
+                .flatten();
             if let Some(refinement) = &refinement {
                 for (name, ty) in &refinement.environment.binding_types {
                     if bindings.iter().any(|(existing, _)| existing == name) {
@@ -8562,7 +8663,7 @@ impl Elaborator<'_> {
             core_clauses.push(CoreCompletionClause {
                 pattern: core_pattern,
                 bindings,
-                refinement,
+                refinement: persisted_refinement,
                 body,
                 span: clause.span,
             });
@@ -10998,6 +11099,10 @@ fn scalar_is_numeric(scalar: ScalarType) -> bool {
 /// manufacture a positive binder.
 fn core_pattern_is_true(pattern: &CorePattern) -> bool {
     matches!(pattern, CorePattern::Literal(value) if value == "true")
+}
+
+fn core_pattern_is_false(pattern: &CorePattern) -> bool {
+    matches!(pattern, CorePattern::Literal(value) if value == "false")
 }
 
 fn core_pattern_irrefutable(pattern: &CorePattern) -> bool {
