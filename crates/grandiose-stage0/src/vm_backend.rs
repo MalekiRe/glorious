@@ -3658,8 +3658,16 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     VmContinuationPolicy::Consume => std::mem::take(&mut frame.continuations),
                     VmContinuationPolicy::Replay => frame.continuations.clone(),
                 };
+                let replaying = frame.continuation == VmContinuationPolicy::Replay;
                 for continuation in continuations {
                     let mut resumed_handlers = states.handlers.clone();
+                    if replaying {
+                        resumed_handlers
+                            .last_mut()
+                            .expect("active handler frame exists")
+                            .continuations
+                            .clear();
+                    }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
                         registers: continuation.registers,
@@ -3730,6 +3738,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     VmContinuationPolicy::Consume => std::mem::take(&mut frame.continuations),
                     VmContinuationPolicy::Replay => frame.continuations.clone(),
                 };
+                let replaying = frame.continuation == VmContinuationPolicy::Replay;
                 // A non-local snapshot transfer abandons frames installed
                 // after the captured frame, then reinstates precisely the
                 // frames saved with its continuation. This is the verifier
@@ -3737,6 +3746,13 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let prefix = states.handlers[..=index].to_vec();
                 for continuation in continuations {
                     let mut resumed_handlers = prefix.clone();
+                    if replaying {
+                        resumed_handlers
+                            .last_mut()
+                            .expect("captured handler frame exists")
+                            .continuations
+                            .clear();
+                    }
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
                         registers: continuation.registers,
@@ -5200,6 +5216,9 @@ fn execute(
                 let Some(continuation) = continuation else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                if frame.continuation == VmContinuationPolicy::Replay {
+                    frame.suspended = None;
+                }
                 let RuntimeContinuation {
                     target,
                     dst,
@@ -5255,6 +5274,9 @@ fn execute(
                     VmContinuationPolicy::Replay => handlers[index].suspended.clone(),
                 }
                 .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if handlers[index].continuation == VmContinuationPolicy::Replay {
+                    handlers[index].suspended = None;
+                }
                 // Resumption is a non-local transfer. Frames installed after
                 // the captured frame belong to the abandoned clause path;
                 // only the deep frames recorded at the original `Perform`
@@ -6618,6 +6640,9 @@ fn execute_with_arguments(
                 let Some(continuation) = continuation else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                if frame.continuation == VmContinuationPolicy::Replay {
+                    frame.suspended = None;
+                }
                 let RuntimeContinuation {
                     target,
                     dst,
@@ -6676,6 +6701,9 @@ fn execute_with_arguments(
                     VmContinuationPolicy::Replay => handlers[index].suspended.clone(),
                 }
                 .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if handlers[index].continuation == VmContinuationPolicy::Replay {
+                    handlers[index].suspended = None;
+                }
                 // See the standalone-artifact interpreter above: an explicit
                 // snapshot abandons dynamically newer frames before restoring
                 // the continuation's original deep-frame suffix.

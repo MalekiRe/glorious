@@ -5,9 +5,9 @@ use grandiose_stage0::{
     MirInstruction, MirLocal, MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey,
     PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace,
     VmCleanupProof, VmContinuationPolicy, VmExecutionLimits, VmFunction, VmGenericArgument,
-    VmInstruction, VmPattern,
-    VmType, decode_and_verify_artifact, decode_and_verify_program, decode_artifact, decode_program,
-    emit_vm, emit_vm_program, encode_artifact, encode_program, verify_vm, verify_vm_program,
+    VmInstruction, VmPattern, VmType, decode_and_verify_artifact, decode_and_verify_program,
+    decode_artifact, decode_program, emit_vm, emit_vm_program, encode_artifact, encode_program,
+    verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
 
@@ -1216,6 +1216,7 @@ fn handlers_match_the_exact_non_type_effect_instance() {
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 4,
                 },
                 VmInstruction::Perform {
@@ -1249,6 +1250,66 @@ fn handlers_match_the_exact_non_type_effect_instance() {
         Err(VmArtifactError::UnhandledEffect { effect: found, effect_arguments, .. })
             if found == effect && effect_arguments[0] == VmGenericArgument::ConstU32(2)
     ));
+}
+
+#[test]
+fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
+    let effect = DefKey(Digest::of_bytes(b"replay-ask"));
+    let definition = DefKey(Digest::of_bytes(b"replay-handler-frame"));
+    let function = VmFunction {
+        definition,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64; 5],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 41 },
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                payload_destinations: vec![1],
+                resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Replay,
+                target: 5,
+            },
+            VmInstruction::Perform {
+                dst: 2,
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                arguments: vec![0],
+            },
+            VmInstruction::UninstallHandler,
+            VmInstruction::Return { value: 2 },
+            VmInstruction::ConstI64 { dst: 3, value: 1 },
+            VmInstruction::AddI64 {
+                dst: 4,
+                left: 1,
+                right: 3,
+            },
+            VmInstruction::Resume { value: 4 },
+        ],
+    };
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: function.clone(),
+        fingerprint: Digest::of_bytes(b"replay-handler-artifact"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    let bytes = encode_artifact(&artifact);
+    assert_eq!(decode_artifact(&bytes).unwrap(), artifact);
+    assert_eq!(verify_vm(artifact).unwrap().run_i64().unwrap(), 42);
+
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: definition,
+        functions: BTreeMap::from([(definition, function)]),
+        fingerprint: Digest::of_bytes(b"replay-handler-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 42);
 }
 
 #[test]
