@@ -72,9 +72,9 @@ pub use interface::{
     InterfaceSet, PackageInterface,
 };
 pub use mir::{
-    MirBlock, MirBlockId, MirDiagnostic, MirEditor, MirFunction, MirInstruction, MirLocal,
-    MirLocalDecl, MirLowering, MirOptimizationReport, MirPattern, MirPatternField, MirProgram,
-    MirTerminator, optimize as optimize_mir,
+    MirBlock, MirBlockId, MirCleanupPlan, MirDiagnostic, MirEditor, MirFunction, MirInstruction,
+    MirLocal, MirLocalDecl, MirLowering, MirOptimizationReport, MirPattern, MirPatternField,
+    MirProgram, MirTerminator, optimize as optimize_mir,
 };
 pub use module_graph::{ModuleDiagnostic, ModuleGraph, ModuleNode};
 pub use operation::{Budget, BudgetError, CancellationToken, PublicationGuard};

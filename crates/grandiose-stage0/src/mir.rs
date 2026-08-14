@@ -412,6 +412,14 @@ pub enum MirTerminator {
         target: MirBlockId,
         arguments: Vec<MirLocal>,
     },
+    /// A branded nonlocal label edge.  The plan is explicit even when this
+    /// Stage-0 value runtime has no drop glue: validation and emission must
+    /// agree on the exact ownership facts crossed by the edge.
+    Leave {
+        target: MirBlockId,
+        arguments: Vec<MirLocal>,
+        cleanup: MirCleanupPlan,
+    },
     SwitchBool {
         condition: MirLocal,
         then_target: MirBlockId,
@@ -423,6 +431,11 @@ pub enum MirTerminator {
         value: MirLocal,
     },
     Unreachable,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirCleanupPlan {
+    pub moved_places: Vec<crate::MoveFact>,
+    pub active_loans: Vec<crate::LoanFact>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirBlock {
@@ -586,7 +599,10 @@ fn block_entry_constants(function: &MirFunction) -> Vec<Option<BTreeMap<MirLocal
             }
         };
         match &block.terminator {
-            MirTerminator::Goto { target, arguments } => propagate(*target, arguments),
+            MirTerminator::Goto { target, arguments }
+            | MirTerminator::Leave {
+                target, arguments, ..
+            } => propagate(*target, arguments),
             MirTerminator::SwitchBool {
                 condition,
                 then_target,
@@ -994,6 +1010,10 @@ impl MirLowering {
             lifted: BTreeMap::new(),
             instructions: vec![],
             diagnostics: vec![],
+            leave_cleanup: MirCleanupPlan {
+                moved_places: flow.moved_places.clone(),
+                active_loans: flow.active_loans.clone(),
+            },
             resumption_snapshots: BTreeMap::new(),
             direct_resumption: None,
         };
@@ -1595,6 +1615,24 @@ impl MirFunction {
     fn validate_terminator(&self, index: usize, terminator: &MirTerminator) -> Result<(), String> {
         match terminator {
             MirTerminator::Goto { target, arguments } => self.validate_edge(*target, arguments),
+            MirTerminator::Leave {
+                target,
+                arguments,
+                cleanup,
+            } => {
+                if cleanup
+                    .moved_places
+                    .windows(2)
+                    .any(|pair| pair[0] >= pair[1])
+                    || cleanup
+                        .active_loans
+                        .windows(2)
+                        .any(|pair| pair[0] >= pair[1])
+                {
+                    return Err("MIR leave cleanup plan is not canonical".into());
+                }
+                self.validate_edge(*target, arguments)
+            }
             MirTerminator::SwitchBool {
                 condition,
                 then_target,
@@ -1875,7 +1913,9 @@ fn handler_region_exits(function: &MirFunction, start: MirBlockId) -> HandlerReg
             }
         }
         match block.terminator {
-            MirTerminator::Goto { target, .. } => pending.push(target),
+            MirTerminator::Goto { target, .. } | MirTerminator::Leave { target, .. } => {
+                pending.push(target)
+            }
             MirTerminator::SwitchBool {
                 then_target,
                 else_target,
@@ -2013,6 +2053,10 @@ struct Lowerer<'a> {
     lifted: BTreeMap<DefKey, MirFunction>,
     instructions: Vec<MirInstruction>,
     diagnostics: Vec<MirDiagnostic>,
+    /// Ownership facts that survive to a nonlocal body exit. Stage 0 values
+    /// need no runtime drop glue yet, but keeping this plan on `Leave` makes
+    /// the erasure explicit and lets the validator reject noncanonical plans.
+    leave_cleanup: MirCleanupPlan,
     /// First-class snapshots materialized in the current handler clause.
     /// Multiple aliases of the same Core identity must share this register so
     /// a stale copy cannot silently target a different frame.
@@ -2091,9 +2135,13 @@ impl Lowerer<'_> {
                 MirBlock {
                     parameters: vec![],
                     instructions: self.instructions.clone(),
-                    terminator: MirTerminator::Goto {
+                    terminator: MirTerminator::Leave {
                         target: MirBlockId(1),
                         arguments: vec![value],
+                        cleanup: MirCleanupPlan {
+                            moved_places: self.leave_cleanup.moved_places.clone(),
+                            active_loans: self.leave_cleanup.active_loans.clone(),
+                        },
                     },
                 },
                 MirBlock {
@@ -6940,6 +6988,10 @@ impl Lowerer<'_> {
             lifted: BTreeMap::new(),
             instructions: vec![],
             diagnostics: vec![],
+            leave_cleanup: MirCleanupPlan {
+                moved_places: vec![],
+                active_loans: vec![],
+            },
             resumption_snapshots: BTreeMap::new(),
             direct_resumption: None,
         };

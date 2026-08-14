@@ -2708,8 +2708,9 @@ fn transfers_are_scoped_and_lower_to_a_verified_nonlocal_mir_edge() {
         )
     });
     assert!(matches!(
-        mir.blocks[0].terminator,
-        grandiose_stage0::MirTerminator::Goto { .. }
+        &mir.blocks[0].terminator,
+        grandiose_stage0::MirTerminator::Leave { cleanup, .. }
+            if cleanup.moved_places.is_empty() && cleanup.active_loans.is_empty()
     ));
     let artifact = grandiose_stage0::emit_vm(&mir).expect("emit label edge");
     let verified = grandiose_stage0::verify_vm(artifact).expect("verify label edge");
@@ -2754,4 +2755,32 @@ fn nested_labels_can_transfer_to_an_enclosing_brand_through_the_vm_edge() {
         grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).expect("emit nested transfer"))
             .expect("verify nested transfer");
     assert_eq!(verified.run_i64().expect("run nested transfer"), 42);
+}
+
+#[test]
+fn leave_edges_carry_canonical_placeflow_cleanup_evidence() {
+    let core = core_for(
+        "core-label-cleanup-plan@0.1.0",
+        "pub fn main() -> i64 { let value = 1; label done { move value; transfer done 42; 0 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("cleanup leave lowers");
+    let grandiose_stage0::MirTerminator::Leave { cleanup, .. } = &mir.blocks[0].terminator else {
+        panic!("label transfer must use a Leave terminator")
+    };
+    assert_eq!(cleanup.moved_places, flow.moved_places);
+    assert_eq!(cleanup.active_loans, flow.active_loans);
+    grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).expect("emit leave"))
+        .expect("verify proof-erased cleanup leave");
 }

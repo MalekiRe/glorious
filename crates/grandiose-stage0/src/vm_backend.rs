@@ -872,9 +872,10 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
         starts.push(next);
         let control_len = match &block.terminator {
             MirTerminator::Return { .. } => 1,
-            MirTerminator::Goto { target, arguments } => {
-                edge_length(arguments, &function.blocks[target.0 as usize])
-            }
+            MirTerminator::Goto { target, arguments }
+            | MirTerminator::Leave {
+                target, arguments, ..
+            } => edge_length(arguments, &function.blocks[target.0 as usize]),
             MirTerminator::SwitchBool {
                 then_target,
                 then_arguments,
@@ -903,7 +904,10 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
             MirTerminator::Return { value } => {
                 instructions.push(VmInstruction::Return { value: value.0 });
             }
-            MirTerminator::Goto { target, arguments } => {
+            MirTerminator::Goto { target, arguments }
+            | MirTerminator::Leave {
+                target, arguments, ..
+            } => {
                 let target = *starts
                     .get(target.0 as usize)
                     .ok_or(VmArtifactError::UnsupportedControlFlow)?;
