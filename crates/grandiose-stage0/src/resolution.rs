@@ -43,6 +43,16 @@ pub struct Occurrence {
     pub state: ResolutionState,
 }
 
+/// A source-level resolution failure discovered while validating an exported
+/// interface.  Unlike body diagnostics, these facts must be reported even if
+/// no local body happens to exercise the invalid re-export.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolutionDiagnostic {
+    pub code: &'static str,
+    pub span: Span,
+    pub message: String,
+}
+
 /// Deterministic module-level lookup table. A duplicate key remains an
 /// ambiguity instead of silently selecting source order; interface collection
 /// reports the original duplicate diagnostic and the resolver preserves it for
@@ -52,6 +62,12 @@ pub struct DefinitionIndex {
     entries: BTreeMap<(DefinitionNamespace, String), Vec<IndexedDefinition>>,
     qualified: BTreeMap<(DefinitionNamespace, ModuleKey, String), Vec<IndexedDefinition>>,
     modules: BTreeMap<ModuleKey, ()>,
+    /// Visibility is a property of the declaration which introduces a module,
+    /// not a property recovered from definitions nested below it.  Keeping the
+    /// edge in the same immutable index as definitions prevents a public item
+    /// inside a private module from becoming reachable merely by spelling its
+    /// fully-qualified path.
+    module_visibility: BTreeMap<ModuleKey, bool>,
     imports: BTreeMap<ModuleKey, Vec<ImportBinding>>,
     type_generic_arities: BTreeMap<DefKey, u32>,
     type_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
@@ -101,6 +117,21 @@ impl DefinitionIndex {
     fn extend(&mut self, interface: &PackageInterface) {
         self.modules.insert(interface.module.clone(), ());
         for definition in &interface.definitions {
+            if definition.namespace == Some(DefinitionNamespace::Module)
+                && let Some(name) = &definition.name
+            {
+                let child = ModuleKey {
+                    package: definition.module.package.clone(),
+                    path: module_child_path(&definition.module.path, name),
+                };
+                // A duplicate module declaration is already a deterministic
+                // interface error.  Never let a later recovered duplicate
+                // widen access while that error is present.
+                self.module_visibility
+                    .entry(child)
+                    .and_modify(|public| *public &= definition.public)
+                    .or_insert(definition.public);
+            }
             if definition.namespace == Some(DefinitionNamespace::Type) {
                 let (arity, kinds) = match &definition.syntax.header {
                     ParsedHeader::Nominal { generics, .. }
@@ -248,12 +279,76 @@ impl DefinitionIndex {
         let module = if path.len() == 1 {
             return self.resolve_member(namespace, owner, name, owner, false, &mut BTreeSet::new());
         } else {
-            let Some(module) = self.lexical_module(owner, &path[..path.len() - 1]) else {
-                return ResolutionState::Unresolved;
-            };
-            module
+            match self.lexical_module(owner, owner, &path[..path.len() - 1]) {
+                ModuleLookup::Found(module) => module,
+                ModuleLookup::Inaccessible => return ResolutionState::Inaccessible(vec![]),
+                ModuleLookup::Absent => return ResolutionState::Unresolved,
+            }
         };
         self.resolve_member(namespace, &module, name, owner, true, &mut BTreeSet::new())
+    }
+
+    /// Validate public import edges which are themselves reachable from the
+    /// package root.  A `pub use` is part of the exported interface, so it
+    /// cannot defer privacy checking until some unrelated local body happens
+    /// to name its alias.  Private facade modules are intentionally skipped:
+    /// their imports do not cross the package boundary and remain subject to
+    /// ordinary use-site resolution.
+    pub fn validate_exported_imports(&self) -> Vec<ResolutionDiagnostic> {
+        let mut diagnostics = vec![];
+        for imports in self.imports.values() {
+            for import in imports
+                .iter()
+                .filter(|import| import.public && self.module_path_is_public(&import.module))
+            {
+                let external_requester = ModuleKey {
+                    package: import.module.package.clone(),
+                    // This is intentionally not a graph node.  It models a
+                    // dependency consumer, which owns no private module edge
+                    // or definition in this package.
+                    path: "<dependency>".into(),
+                };
+                let mut any_public_target = false;
+                let mut saw_inaccessible = false;
+                for namespace in [
+                    DefinitionNamespace::Type,
+                    DefinitionNamespace::Value,
+                    DefinitionNamespace::Trait,
+                    DefinitionNamespace::Effect,
+                    DefinitionNamespace::Module,
+                    DefinitionNamespace::Operator,
+                ] {
+                    match self.resolve_direct_path(
+                        namespace,
+                        &import.module,
+                        &external_requester,
+                        &import.path,
+                        &mut BTreeSet::new(),
+                    ) {
+                        ResolutionState::Resolved(_) | ResolutionState::Ambiguous(_) => {
+                            any_public_target = true;
+                        }
+                        ResolutionState::Inaccessible(_) => saw_inaccessible = true,
+                        ResolutionState::Unresolved | ResolutionState::Recovered => {}
+                    }
+                }
+                if !any_public_target && saw_inaccessible {
+                    diagnostics.push(ResolutionDiagnostic {
+                        code: "G3317",
+                        span: import.span,
+                        message: format!(
+                            "public import `{}` exposes a private module path or definition",
+                            import.path.join("::")
+                        ),
+                    });
+                }
+            }
+        }
+        diagnostics.sort_by(|left, right| {
+            (left.code, left.span, &left.message).cmp(&(right.code, right.span, &right.message))
+        });
+        diagnostics.dedup();
+        diagnostics
     }
 
     fn resolve_member(
@@ -277,7 +372,14 @@ impl DefinitionIndex {
         if !visited.insert(cycle_key.clone()) {
             return ResolutionState::Unresolved;
         }
-        let result = self.resolve_import(namespace, module, name, require_public_import, visited);
+        let result = self.resolve_import(
+            namespace,
+            module,
+            name,
+            requester,
+            require_public_import,
+            visited,
+        );
         visited.remove(&cycle_key);
         result
     }
@@ -287,6 +389,7 @@ impl DefinitionIndex {
         namespace: DefinitionNamespace,
         owner: &ModuleKey,
         alias: &str,
+        requester: &ModuleKey,
         require_public: bool,
         visited: &mut BTreeSet<(DefinitionNamespace, ModuleKey, String)>,
     ) -> ResolutionState {
@@ -296,14 +399,25 @@ impl DefinitionIndex {
         let mut resolved = vec![];
         let mut ambiguous = vec![];
         let mut inaccessible = vec![];
+        let mut saw_inaccessible = false;
         for import in imports
             .iter()
             .filter(|import| import.alias == alias && (!require_public || import.public))
         {
-            match self.resolve_direct_path(namespace, owner, &import.path, visited) {
+            // Preserve the original requester across every re-export hop.
+            // Resolving a target as the facade module itself would grant its
+            // local authority to callers and leak private modules/items.
+            match self.resolve_direct_path(namespace, owner, requester, &import.path, visited) {
                 ResolutionState::Resolved(definition) => resolved.push(definition),
                 ResolutionState::Ambiguous(definitions) => ambiguous.extend(definitions),
-                ResolutionState::Inaccessible(definitions) => inaccessible.extend(definitions),
+                ResolutionState::Inaccessible(definitions) => {
+                    // A denied module segment has no final DefKey to retain,
+                    // but it must not be collapsed into `Unresolved` after
+                    // canonicalization.  Callers distinguish a typo from a
+                    // privacy failure for both diagnostics and tooling.
+                    saw_inaccessible = true;
+                    inaccessible.extend(definitions);
+                }
                 ResolutionState::Unresolved | ResolutionState::Recovered => {}
             }
         }
@@ -316,7 +430,7 @@ impl DefinitionIndex {
             ResolutionState::Ambiguous(resolved)
         } else if !ambiguous.is_empty() {
             ResolutionState::Ambiguous(ambiguous)
-        } else if !inaccessible.is_empty() {
+        } else if saw_inaccessible || !inaccessible.is_empty() {
             ResolutionState::Inaccessible(inaccessible)
         } else {
             ResolutionState::Unresolved
@@ -326,7 +440,8 @@ impl DefinitionIndex {
     fn resolve_direct_path(
         &self,
         namespace: DefinitionNamespace,
-        owner: &ModuleKey,
+        lexical_owner: &ModuleKey,
+        requester: &ModuleKey,
         path: &[String],
         visited: &mut BTreeSet<(DefinitionNamespace, ModuleKey, String)>,
     ) -> ResolutionState {
@@ -334,14 +449,15 @@ impl DefinitionIndex {
             return ResolutionState::Unresolved;
         };
         let module = if path.len() == 1 {
-            owner.clone()
+            lexical_owner.clone()
         } else {
-            let Some(module) = self.lexical_module(owner, &path[..path.len() - 1]) else {
-                return ResolutionState::Unresolved;
-            };
-            module
+            match self.lexical_module(lexical_owner, requester, &path[..path.len() - 1]) {
+                ModuleLookup::Found(module) => module,
+                ModuleLookup::Inaccessible => return ResolutionState::Inaccessible(vec![]),
+                ModuleLookup::Absent => return ResolutionState::Unresolved,
+            }
         };
-        self.resolve_member(namespace, &module, name, owner, true, visited)
+        self.resolve_member(namespace, &module, name, requester, true, visited)
     }
 
     fn classify(
@@ -367,53 +483,151 @@ impl DefinitionIndex {
         }
     }
 
-    fn lexical_module(&self, owner: &ModuleKey, segments: &[String]) -> Option<ModuleKey> {
-        let (first, rest) = segments.split_first()?;
+    fn lexical_module(
+        &self,
+        lexical_owner: &ModuleKey,
+        requester: &ModuleKey,
+        segments: &[String],
+    ) -> ModuleLookup {
+        let Some((first, rest)) = segments.split_first() else {
+            return ModuleLookup::Absent;
+        };
         if first == "crate" {
-            return self.module_key(owner, "crate", rest);
+            return self.module_key(lexical_owner, requester, "crate", rest);
         }
         if first == "self" {
-            return self.module_key(owner, &owner.path, rest);
+            return self.module_key(lexical_owner, requester, &lexical_owner.path, rest);
         }
         if first == "super" {
-            let mut base = owner.path.clone();
+            let mut base = lexical_owner.path.clone();
             let mut remaining = segments;
             while matches!(remaining.first(), Some(segment) if segment == "super") {
-                base = parent_module_path(&base)?;
+                let Some(parent) = parent_module_path(&base) else {
+                    return ModuleLookup::Absent;
+                };
+                base = parent;
                 remaining = &remaining[1..];
             }
-            return self.module_key(owner, &base, remaining);
+            return self.module_key(lexical_owner, requester, &base, remaining);
         }
 
         // Ordinary qualified paths are lexical.  Prefer the nearest enclosing
         // module that actually owns the requested child; this supports a
         // nested module referring to a sibling while keeping resolution
         // deterministic in the presence of similarly named descendants.
-        let mut base = owner.path.clone();
+        let mut base = lexical_owner.path.clone();
         loop {
-            if let Some(module) = self.module_key(owner, &base, segments) {
-                return Some(module);
+            match self.module_key(lexical_owner, requester, &base, segments) {
+                ModuleLookup::Found(module) => return ModuleLookup::Found(module),
+                ModuleLookup::Inaccessible => return ModuleLookup::Inaccessible,
+                ModuleLookup::Absent => {}
             }
-            base = parent_module_path(&base)?;
+            let Some(parent) = parent_module_path(&base) else {
+                return ModuleLookup::Absent;
+            };
+            base = parent;
         }
     }
 
-    fn module_key(&self, owner: &ModuleKey, base: &str, suffix: &[String]) -> Option<ModuleKey> {
+    fn module_key(
+        &self,
+        lexical_owner: &ModuleKey,
+        requester: &ModuleKey,
+        base: &str,
+        suffix: &[String],
+    ) -> ModuleLookup {
         let path = if suffix.is_empty() {
             base.to_owned()
         } else {
             format!("{base}::{}", suffix.join("::"))
         };
         let module = ModuleKey {
-            package: owner.package.clone(),
+            package: lexical_owner.package.clone(),
             path,
         };
-        self.modules.contains_key(&module).then_some(module)
+        if !self.modules.contains_key(&module) {
+            return ModuleLookup::Absent;
+        }
+        if self.module_path_visible_to(&module, requester) {
+            ModuleLookup::Found(module)
+        } else {
+            ModuleLookup::Inaccessible
+        }
     }
+
+    /// Every module edge on a qualified path is independently checked.  A
+    /// private module is visible in the module that declared it and that
+    /// module's descendants; it is not visible merely because a nested item
+    /// happens to be `pub`.
+    fn module_path_visible_to(&self, module: &ModuleKey, requester: &ModuleKey) -> bool {
+        if module.package != requester.package {
+            return false;
+        }
+        let mut prefix = String::from("crate");
+        if module.path == prefix {
+            return true;
+        }
+        for segment in module.path.split("::").skip(1) {
+            let parent = prefix.clone();
+            prefix.push_str("::");
+            prefix.push_str(segment);
+            let child = ModuleKey {
+                package: module.package.clone(),
+                path: prefix.clone(),
+            };
+            let public = self.module_visibility.get(&child).copied().unwrap_or(false);
+            if !public && !module_is_descendant_of(requester, &parent) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn module_path_is_public(&self, module: &ModuleKey) -> bool {
+        if module.path == "crate" {
+            return true;
+        }
+        let mut prefix = String::from("crate");
+        for segment in module.path.split("::").skip(1) {
+            prefix.push_str("::");
+            prefix.push_str(segment);
+            let child = ModuleKey {
+                package: module.package.clone(),
+                path: prefix.clone(),
+            };
+            if !self.module_visibility.get(&child).copied().unwrap_or(false) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ModuleLookup {
+    Found(ModuleKey),
+    Inaccessible,
+    Absent,
 }
 
 fn parent_module_path(path: &str) -> Option<String> {
     path.rsplit_once("::").map(|(parent, _)| parent.to_owned())
+}
+
+fn module_child_path(parent: &str, child: &str) -> String {
+    if parent == "crate" {
+        format!("crate::{child}")
+    } else {
+        format!("{parent}::{child}")
+    }
+}
+
+fn module_is_descendant_of(module: &ModuleKey, ancestor: &str) -> bool {
+    module.path == ancestor
+        || module
+            .path
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with("::"))
 }
 
 fn canonicalize_keys(keys: &mut Vec<DefKey>) {

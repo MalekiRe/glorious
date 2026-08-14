@@ -87,8 +87,8 @@ pub use request::{
     STAGE0_QUERY_GENERATION, STAGE0_VERIFIER_GENERATION, SourceInput,
 };
 pub use resolution::{
-    DefinitionIndex, ImportBinding, Occurrence, OccurrenceRole, ReferenceIndex, ResolutionState,
-    ScopeMap,
+    DefinitionIndex, ImportBinding, Occurrence, OccurrenceRole, ReferenceIndex,
+    ResolutionDiagnostic, ResolutionState, ScopeMap,
 };
 pub use revision::{
     CompilerDatabase, DatabaseSnapshot, RequestSession, RetentionReport, RevisionError,

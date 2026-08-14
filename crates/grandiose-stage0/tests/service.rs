@@ -57,6 +57,19 @@ fn request_with_modules(root: &str, modules: &[(&str, &str)]) -> CompilationRequ
     request
 }
 
+fn request_with_logical_sources(root: &str, sources: &[(&str, &str)]) -> CompilationRequest {
+    let package = PackageKey("app@0.1.0".into());
+    let mut request = request(root);
+    for (path, source) in sources {
+        request.sources.push(SourceInput::new(
+            package.clone(),
+            LogicalPath::parse(*path).unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    request
+}
+
 #[test]
 fn service_exposes_malformed_requests_as_structured_diagnostics() {
     let mut malformed = request("pub fn main() -> i64 { 0 }");
@@ -2408,6 +2421,104 @@ fn private_imports_cannot_be_used_as_module_reexports() {
         diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "G4104")
+    );
+}
+
+#[test]
+fn service_rejects_public_members_reached_through_a_private_nested_module() {
+    let root = "mod outer; pub fn main() -> i64 { outer::hidden::answer() }";
+    let error = StageZeroCompiler::new().compile(request_with_logical_sources(
+        root,
+        &[
+            ("src/outer/outer.glorious", "mod hidden;"),
+            (
+                "src/outer/hidden/hidden.glorious",
+                "pub fn answer() -> i64 { 42 }",
+            ),
+        ],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = error else {
+        panic!("private nested module unexpectedly leaked its public member")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4104"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_allows_public_nested_module_paths_end_to_end() {
+    let root = "mod outer; pub fn main() -> i64 { outer::hidden::answer() }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            root,
+            &[
+                ("src/outer/outer.glorious", "pub mod hidden;"),
+                (
+                    "src/outer/hidden/hidden.glorious",
+                    "pub fn answer() -> i64 { 42 }",
+                ),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_public_reexport_of_a_private_nested_module_member() {
+    let root = "mod outer; mod facade; pub fn main() -> i64 { facade::answer() }";
+    let error = StageZeroCompiler::new().compile(request_with_logical_sources(
+        root,
+        &[
+            ("src/outer/outer.glorious", "mod hidden;"),
+            (
+                "src/outer/hidden/hidden.glorious",
+                "pub fn answer() -> i64 { 42 }",
+            ),
+            (
+                "src/facade/facade.glorious",
+                "pub use crate::outer::hidden::answer;",
+            ),
+        ],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = error else {
+        panic!("public reexport unexpectedly leaked a private nested module member")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4104"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_exported_private_reexports_even_when_no_body_uses_them() {
+    let root = "pub mod outer; pub mod facade; pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new().compile(request_with_logical_sources(
+        root,
+        &[
+            ("src/outer/outer.glorious", "mod hidden;"),
+            (
+                "src/outer/hidden/hidden.glorious",
+                "pub fn answer() -> i64 { 42 }",
+            ),
+            (
+                "src/facade/facade.glorious",
+                "pub use crate::outer::hidden::answer;",
+            ),
+        ],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = error else {
+        panic!("invalid exported reexport unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "{diagnostics:#?}"
     );
 }
 

@@ -448,6 +448,18 @@ impl StageZeroCompiler {
         let index = DefinitionIndex::from_interfaces(
             graph.modules.values().map(|node| &node.interface.interface),
         );
+        diagnostics.extend(
+            index
+                .validate_exported_imports()
+                .into_iter()
+                .map(|diagnostic| {
+                    CompileDiagnostic::source(
+                        diagnostic.code,
+                        diagnostic.message,
+                        Some(diagnostic.span),
+                    )
+                }),
+        );
         let coherence = CoherenceSet::collect(
             graph.modules.values().map(|node| &node.interface.interface),
             &index,
