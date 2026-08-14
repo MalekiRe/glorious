@@ -234,7 +234,7 @@ impl InterfaceCollector for InterfaceCacheTransaction<'_> {
 
 fn interface_context_fingerprint(build: &CompilerBuildIdentity) -> Digest {
     Digest::of_parts([
-        b"grandiose-stage0-interface-cache-v1".as_slice(),
+        b"grandiose-stage0-interface-cache-v2".as_slice(),
         build.compiler.as_bytes().as_slice(),
         &build.language_generation.to_le_bytes(),
         &build.query_generation.to_le_bytes(),
@@ -483,14 +483,50 @@ fn definition_key(
 
 fn public_fingerprint(module: &ModuleKey, definitions: &[Definition]) -> Digest {
     let mut bytes = Vec::new();
-    append(&mut bytes, b"grandiose-stage0-interface-v1");
+    append(&mut bytes, b"grandiose-stage0-interface-v2");
     append(&mut bytes, module.package.0.as_bytes());
     append(&mut bytes, module.path.as_bytes());
-    for definition in definitions.iter().filter(|definition| definition.public) {
+    // `use` trees have no named declaration identity.  Their temporary
+    // interface key contains a source ordinal solely to anchor diagnostics,
+    // which must never leak into the exported ABI: splitting, grouping, or
+    // reordering equivalent public imports must not invalidate dependents.
+    // Freeze the normalized import *bindings* as a set instead.
+    for definition in definitions
+        .iter()
+        .filter(|definition| definition.public && definition.kind != DeclarationKind::Import)
+    {
+        append(&mut bytes, b"definition");
         append(&mut bytes, &definition.key.0.as_bytes());
         append(&mut bytes, &definition.header_fingerprint.as_bytes());
         if let Some(value) = definition.constant_value_fingerprint {
             append(&mut bytes, &value.as_bytes());
+        }
+    }
+    let mut imports = definitions
+        .iter()
+        .filter(|definition| definition.public)
+        .filter_map(|definition| match &definition.syntax.header {
+            ParsedHeader::Import(import) => Some(import.bindings.iter()),
+            _ => None,
+        })
+        .flatten()
+        .map(|binding| (binding.glob, binding.path.clone(), binding.alias.clone()))
+        .collect::<Vec<_>>();
+    imports.sort();
+    imports.dedup();
+    for (glob, path, alias) in imports {
+        append(&mut bytes, b"public-import");
+        append(&mut bytes, if glob { b"glob" } else { b"explicit" });
+        append(&mut bytes, &(path.len() as u64).to_le_bytes());
+        for segment in path {
+            append(&mut bytes, segment.as_bytes());
+        }
+        match alias {
+            Some(alias) => {
+                append(&mut bytes, b"alias");
+                append(&mut bytes, alias.as_bytes());
+            }
+            None => append(&mut bytes, b"no-alias"),
         }
     }
     Digest::of_bytes(&bytes)

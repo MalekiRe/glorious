@@ -176,6 +176,23 @@ fn service_resolves_public_module_aliases_inside_qualified_body_paths() {
 }
 
 #[test]
+fn service_resolves_multihop_public_module_reexports_inside_qualified_paths() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            "pub mod api; pub mod facade; pub mod outer; pub fn main() -> i64 { outer::public_facade::client::nested::answer() }",
+            &[
+                ("src/api/api.glorious", "pub mod nested;"),
+                ("src/api/nested/nested.glorious", "pub fn answer() -> i64 { 42 }"),
+                ("src/facade/facade.glorious", "pub use crate::api as client;"),
+                ("src/outer/outer.glorious", "pub use crate::facade as public_facade;"),
+            ],
+        ))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_keeps_private_module_aliases_lexical_to_their_declaring_module() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_modules(
@@ -5521,6 +5538,49 @@ fn service_rejects_ambiguous_glob_imported_values() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4103"),
         "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_reports_ambiguous_qualified_module_aliases_as_ambiguity() {
+    let error = StageZeroCompiler::new().compile(request_with_logical_sources(
+        "mod left; mod right; mod facade; pub fn main() -> i64 { facade::call() }",
+        &[
+            ("src/left/left.glorious", "pub mod api;"),
+            ("src/right/right.glorious", "pub mod api;"),
+            ("src/left/api/api.glorious", "pub fn answer() -> i64 { 1 }"),
+            ("src/right/api/api.glorious", "pub fn answer() -> i64 { 2 }"),
+            ("src/facade/facade.glorious", "use crate::left::api as client; use crate::right::api as client; pub fn call() -> i64 { client::answer() }"),
+        ],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = error else {
+        panic!("ambiguous qualified module aliases unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4103"),
+        "qualified module ambiguity must retain the same source diagnostic as value ambiguity: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_public_reexport_cycles_without_recursing_or_freezing_them() {
+    let error = StageZeroCompiler::new().compile(request_with_modules(
+        "pub mod alpha; pub mod beta; pub fn main() -> i64 { 42 }",
+        &[
+            ("alpha", "pub use crate::beta::looped;"),
+            ("beta", "pub use crate::alpha::looped;"),
+        ],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = error else {
+        panic!("cyclic public reexports unexpectedly froze as an interface")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "a re-export cycle with no declaration target must fail before body elaboration: {diagnostics:#?}"
     );
 }
 

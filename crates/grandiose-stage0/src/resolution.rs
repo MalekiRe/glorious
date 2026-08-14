@@ -316,6 +316,9 @@ impl DefinitionIndex {
         } else {
             match self.lexical_module(owner, owner, &path[..path.len() - 1]) {
                 ModuleLookup::Found(module) => module,
+                ModuleLookup::Ambiguous(modules) => {
+                    return self.ambiguous_modules(modules);
+                }
                 ModuleLookup::Inaccessible => return ResolutionState::Inaccessible(vec![]),
                 ModuleLookup::Absent => return ResolutionState::Unresolved,
             }
@@ -342,6 +345,14 @@ impl DefinitionIndex {
                 if import.glob {
                     match self.lexical_module(&import.module, requester, &import.path) {
                         ModuleLookup::Found(_) => {}
+                        ModuleLookup::Ambiguous(_) => diagnostics.push(ResolutionDiagnostic {
+                            code: "G3328",
+                            span: import.span,
+                            message: format!(
+                                "glob import `{}` traverses an ambiguous module path",
+                                import.path.join("::")
+                            ),
+                        }),
                         ModuleLookup::Inaccessible => diagnostics.push(ResolutionDiagnostic {
                             code: "G3326",
                             span: import.span,
@@ -393,6 +404,18 @@ impl DefinitionIndex {
                             import.path.join("::")
                         ),
                     });
+                } else if states
+                    .iter()
+                    .any(|state| matches!(state, ResolutionState::Ambiguous(_)))
+                {
+                    diagnostics.push(ResolutionDiagnostic {
+                        code: "G3328",
+                        span: import.span,
+                        message: format!(
+                            "import `{}` traverses an ambiguous module path or target",
+                            import.path.join("::")
+                        ),
+                    });
                 } else if states.iter().all(|state| {
                     matches!(
                         state,
@@ -424,17 +447,28 @@ impl DefinitionIndex {
         for imports in self.imports.values() {
             for import in imports {
                 if import.glob {
-                    let ModuleLookup::Found(target) =
-                        self.lexical_module(&import.module, &import.module, &import.path)
-                    else {
-                        occurrences.push(Occurrence {
-                            span: import.span,
-                            namespace: DefinitionNamespace::Module,
-                            role: OccurrenceRole::Import,
-                            state: ResolutionState::Unresolved,
-                        });
-                        continue;
-                    };
+                    let target =
+                        match self.lexical_module(&import.module, &import.module, &import.path) {
+                            ModuleLookup::Found(target) => target,
+                            ModuleLookup::Ambiguous(modules) => {
+                                occurrences.push(Occurrence {
+                                    span: import.span,
+                                    namespace: DefinitionNamespace::Module,
+                                    role: OccurrenceRole::Import,
+                                    state: self.ambiguous_modules(modules),
+                                });
+                                continue;
+                            }
+                            ModuleLookup::Inaccessible | ModuleLookup::Absent => {
+                                occurrences.push(Occurrence {
+                                    span: import.span,
+                                    namespace: DefinitionNamespace::Module,
+                                    role: OccurrenceRole::Import,
+                                    state: ResolutionState::Unresolved,
+                                });
+                                continue;
+                            }
+                        };
                     for namespace in all_namespaces() {
                         for name in
                             self.module_member_names(&target, namespace, &mut BTreeSet::new())
@@ -525,6 +559,17 @@ impl DefinitionIndex {
                 if import.glob {
                     match self.lexical_module(&import.module, &external_requester, &import.path) {
                         ModuleLookup::Found(_) => continue,
+                        ModuleLookup::Ambiguous(_) => {
+                            diagnostics.push(ResolutionDiagnostic {
+                                code: "G3318",
+                                span: import.span,
+                                message: format!(
+                                    "public glob import `{}` traverses an ambiguous module path",
+                                    import.path.join("::")
+                                ),
+                            });
+                            continue;
+                        }
                         ModuleLookup::Inaccessible | ModuleLookup::Absent => {
                             diagnostics.push(ResolutionDiagnostic {
                                 code: "G3317",
@@ -701,6 +746,7 @@ impl DefinitionIndex {
                     ModuleLookup::Found(module) => {
                         self.resolve_member(namespace, &module, alias, requester, true, visited)
                     }
+                    ModuleLookup::Ambiguous(modules) => self.ambiguous_modules(modules),
                     ModuleLookup::Inaccessible => ResolutionState::Inaccessible(vec![]),
                     ModuleLookup::Absent => ResolutionState::Unresolved,
                 }
@@ -753,6 +799,7 @@ impl DefinitionIndex {
         } else {
             match self.lexical_module(lexical_owner, requester, &path[..path.len() - 1]) {
                 ModuleLookup::Found(module) => module,
+                ModuleLookup::Ambiguous(modules) => return self.ambiguous_modules(modules),
                 ModuleLookup::Inaccessible => return ResolutionState::Inaccessible(vec![]),
                 ModuleLookup::Absent => return ResolutionState::Unresolved,
             }
@@ -781,6 +828,42 @@ impl DefinitionIndex {
         } else {
             ResolutionState::Ambiguous(visible)
         }
+    }
+
+    /// Preserve an ambiguity encountered while walking a module segment as a
+    /// normal source-resolution ambiguity.  Module declarations have stable
+    /// `DefKey`s just like value/type declarations, so callers and tooling do
+    /// not have to reinterpret a missing path as a collision after the fact.
+    fn ambiguous_modules(&self, modules: Vec<ModuleKey>) -> ResolutionState {
+        let mut definitions = modules
+            .iter()
+            .flat_map(|module| self.module_definition_keys(module))
+            .collect::<Vec<_>>();
+        canonicalize_keys(&mut definitions);
+        ResolutionState::Ambiguous(definitions)
+    }
+
+    fn module_definition_keys(&self, module: &ModuleKey) -> Vec<DefKey> {
+        let Some(parent_path) = parent_module_path(&module.path) else {
+            // Dependency-root ambiguity has no declaration in this package,
+            // but remains an ambiguity rather than being downgraded to a
+            // missing path.  The empty candidate list is intentionally only
+            // possible for that root-level spelling.
+            return vec![];
+        };
+        let Some(name) = module.path.rsplit("::").next() else {
+            return vec![];
+        };
+        let parent = ModuleKey {
+            package: module.package.clone(),
+            path: parent_path,
+        };
+        self.qualified
+            .get(&(DefinitionNamespace::Module, parent, name.to_owned()))
+            .into_iter()
+            .flatten()
+            .map(|definition| definition.key)
+            .collect()
     }
 
     fn lexical_module(
@@ -848,6 +931,7 @@ impl DefinitionIndex {
             };
             match self.walk_module_path(&start, requester, segments, visited_aliases) {
                 ModuleLookup::Found(module) => return ModuleLookup::Found(module),
+                ModuleLookup::Ambiguous(modules) => return ModuleLookup::Ambiguous(modules),
                 ModuleLookup::Inaccessible => return ModuleLookup::Inaccessible,
                 ModuleLookup::Absent => {}
             }
@@ -865,8 +949,9 @@ impl DefinitionIndex {
         };
         let [root] = roots.as_slice() else {
             // An ambiguous package spelling must not pick an arbitrary
-            // dependency by insertion order.
-            return ModuleLookup::Absent;
+            // dependency by insertion order, nor silently pretend the
+            // package is absent.
+            return ModuleLookup::Ambiguous(roots.clone());
         };
         self.walk_module_path(root, requester, rest, visited_aliases)
     }
@@ -904,6 +989,7 @@ impl DefinitionIndex {
             }
             match self.imported_module(&module, requester, segment, visited_aliases) {
                 ModuleLookup::Found(target) => module = target,
+                ModuleLookup::Ambiguous(modules) => return ModuleLookup::Ambiguous(modules),
                 ModuleLookup::Inaccessible => return ModuleLookup::Inaccessible,
                 ModuleLookup::Absent => return ModuleLookup::Absent,
             }
@@ -958,6 +1044,9 @@ impl DefinitionIndex {
                     ModuleLookup::Found(module) => {
                         candidates.insert(module);
                     }
+                    ModuleLookup::Ambiguous(modules) => {
+                        candidates.extend(modules);
+                    }
                     ModuleLookup::Inaccessible => inaccessible = true,
                     ModuleLookup::Absent => {}
                 }
@@ -987,9 +1076,13 @@ impl DefinitionIndex {
                         ModuleLookup::Found(module) => {
                             candidates.insert(module);
                         }
+                        ModuleLookup::Ambiguous(modules) => {
+                            candidates.extend(modules);
+                        }
                         ModuleLookup::Inaccessible => inaccessible = true,
                         ModuleLookup::Absent => {}
                     },
+                    ModuleLookup::Ambiguous(modules) => candidates.extend(modules),
                     ModuleLookup::Inaccessible => inaccessible = true,
                     ModuleLookup::Absent => {}
                 };
@@ -999,7 +1092,8 @@ impl DefinitionIndex {
         match candidates.len() {
             1 => ModuleLookup::Found(candidates.into_iter().next().expect("one candidate")),
             0 if inaccessible => ModuleLookup::Inaccessible,
-            _ => ModuleLookup::Absent,
+            0 => ModuleLookup::Absent,
+            _ => ModuleLookup::Ambiguous(candidates.into_iter().collect()),
         }
     }
 
@@ -1095,6 +1189,7 @@ fn package_name(package: &crate::identity::PackageKey) -> String {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ModuleLookup {
     Found(ModuleKey),
+    Ambiguous(Vec<ModuleKey>),
     Inaccessible,
     Absent,
 }

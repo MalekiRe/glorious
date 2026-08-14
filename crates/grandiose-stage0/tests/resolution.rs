@@ -244,7 +244,7 @@ fn exported_reexports_of_missing_targets_are_rejected_at_interface_freezing() {
 }
 
 #[test]
-fn competing_module_aliases_remain_ambiguous_instead_of_selecting_source_order() {
+fn competing_module_aliases_remain_resolution_ambiguities_instead_of_looking_missing() {
     let package = PackageKey("resolution-module-alias-collision@0.1.0".into());
     let collect = |module: &str, source: &str| {
         let file = FileKey::new(&package, &format!("src/{module}.glorious"));
@@ -274,8 +274,8 @@ fn competing_module_aliases_remain_ambiguous_instead_of_selecting_source_order()
         &["client".into(), "left".into()],
     );
     assert!(
-        matches!(state, ResolutionState::Unresolved),
-        "a conflicting module alias must not select one branch: {state:?}"
+        matches!(state, ResolutionState::Ambiguous(ref candidates) if candidates.len() == 2),
+        "a conflicting module alias must not select one branch or masquerade as missing: {state:?}"
     );
 }
 

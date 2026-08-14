@@ -70,6 +70,24 @@ fn exported_import_edges_participate_in_frozen_interface_identity() {
 }
 
 #[test]
+fn equivalent_public_import_tree_order_has_one_canonical_interface_fingerprint() {
+    let grouped = collect("pub use crate::api::{answer as result, helper};");
+    let reordered = collect("pub use crate::api::helper; pub use crate::api::answer as result;");
+    let duplicated = collect(
+        "pub use crate::api::answer as result; pub use crate::api::helper; pub use crate::api::helper;",
+    );
+
+    assert_eq!(
+        grouped.interface.public_fingerprint, reordered.interface.public_fingerprint,
+        "source grouping and declaration order are not exported interface facts"
+    );
+    assert_eq!(
+        grouped.interface.public_fingerprint, duplicated.interface.public_fingerprint,
+        "duplicate equivalent re-export edges cannot churn dependent invalidation"
+    );
+}
+
+#[test]
 fn public_nominal_layout_changes_invalidate_the_exported_interface() {
     let package = PackageKey("interface-nominal-layout@0.1.0".into());
     let first = "pub struct Pair { left: i64, right: i64 }";
