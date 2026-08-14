@@ -4,8 +4,9 @@ use grandiose_stage0::{
     ConstKind, DeclarationScan, DefKey, EffectRow, EffectTail, ElaboratedInterface,
     ElaboratedTraitReference, FileKey, GenericArgument, InterfaceSet, LexedFile, Lifetime,
     Mutability, PackageKey, Quantity, ScalarType, TraitAnswer, TraitCandidateExplanation,
-    TraitCandidateRejection, TraitConstProjectionAnswer, TraitEffectRowProjectionAnswer, TraitGoal,
-    TraitMethodAnswer, TraitProjectionAnswer, TraitSolver, TraitSolverLimits, Type,
+    TraitCandidateRejection, TraitConstProjectionAnswer, TraitCyclePolicy,
+    TraitEffectRowProjectionAnswer, TraitExplanationTerminal, TraitGoal, TraitMethodAnswer,
+    TraitProjectionAnswer, TraitSelectionExplanation, TraitSolver, TraitSolverLimits, Type,
     implementation_method_key,
 };
 
@@ -31,6 +32,27 @@ fn key(interface: &grandiose_stage0::PackageInterface, name: &str) -> DefKey {
         .find(|definition| definition.name.as_deref() == Some(name))
         .unwrap()
         .key
+}
+
+fn terminal(explanation: &TraitSelectionExplanation) -> Option<&TraitExplanationTerminal> {
+    explanation.terminal.as_ref().or_else(|| {
+        explanation.candidates.iter().find_map(|candidate| {
+            let (TraitCandidateExplanation::Applicable { where_bounds, .. }
+            | TraitCandidateExplanation::Rejected {
+                reason:
+                    TraitCandidateRejection::WhereBound {
+                        outcomes: where_bounds,
+                    },
+                ..
+            }) = candidate
+            else {
+                return None;
+            };
+            where_bounds
+                .iter()
+                .find_map(|bound| terminal(&bound.explanation))
+        })
+    })
 }
 
 #[test]
@@ -413,6 +435,115 @@ fn ordinary_recursive_goal_cycles_are_ambiguous_not_successful() {
         subject: Type::Scalar(ScalarType::I64),
     });
     assert_eq!(answer, TraitAnswer::Ambiguous);
+}
+
+#[test]
+fn recursive_where_bound_explanations_record_inductive_cycle_policy() {
+    let (interface, signatures) = signatures(
+        "trait Left {} trait Right {} impl<T> Left for T where T: Right {} impl<T> Right for T where T: Left {}",
+    );
+    let left = key(&interface, "Left");
+    let explanation = TraitSolver::new(&signatures).explain(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: left,
+            arguments: vec![],
+        },
+        subject: Type::Scalar(ScalarType::I64),
+    });
+    assert_eq!(
+        explanation.answer,
+        TraitAnswer::Ambiguous,
+        "{explanation:#?}"
+    );
+    assert!(matches!(
+        terminal(&explanation),
+        Some(TraitExplanationTerminal::OrdinaryCycle {
+            policy: TraitCyclePolicy::Inductive,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn structurally_decreasing_recursive_where_bounds_remain_productive() {
+    let (interface, signatures) = signatures(
+        "trait Ready {} struct Box<T> {} impl Ready for i64 {} impl<T> Ready for Box<T> where T: Ready {}",
+    );
+    let ready = key(&interface, "Ready");
+    let boxed = key(&interface, "Box");
+    let subject = Type::Nominal {
+        definition: boxed,
+        arguments: vec![GenericArgument::Type(Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        })],
+    };
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![],
+        },
+        subject,
+    });
+    assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
+}
+
+#[test]
+fn expanding_recursive_where_bounds_propagate_depth_overflow_not_ambiguity() {
+    let (interface, signatures) =
+        signatures("trait Grow {} struct Box<T> {} impl<T> Grow for T where Box<T>: Grow {}");
+    let grow = key(&interface, "Grow");
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: grow,
+            arguments: vec![],
+        },
+        subject: Type::Scalar(ScalarType::I64),
+    };
+    let limits = TraitSolverLimits {
+        max_depth: 3,
+        max_steps: 32,
+    };
+    let answer = TraitSolver::with_limits(&signatures, limits.clone()).solve(goal.clone());
+    assert_eq!(answer, TraitAnswer::Overflow);
+    let explanation = TraitSolver::with_limits(&signatures, limits).explain(goal);
+    assert_eq!(
+        explanation.answer,
+        TraitAnswer::Overflow,
+        "{explanation:#?}"
+    );
+    assert!(matches!(
+        terminal(&explanation),
+        Some(TraitExplanationTerminal::DepthLimit { limit: 3 })
+    ));
+}
+
+#[test]
+fn recursive_where_bounds_report_step_limit_deterministically() {
+    let (interface, signatures) =
+        signatures("trait Grow {} struct Box<T> {} impl<T> Grow for T where Box<T>: Grow {}");
+    let grow = key(&interface, "Grow");
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: grow,
+            arguments: vec![],
+        },
+        subject: Type::Scalar(ScalarType::I64),
+    };
+    let limits = TraitSolverLimits {
+        max_depth: 32,
+        max_steps: 2,
+    };
+    let explanation = TraitSolver::with_limits(&signatures, limits).explain(goal);
+    assert_eq!(
+        explanation.answer,
+        TraitAnswer::Overflow,
+        "{explanation:#?}"
+    );
+    assert!(matches!(
+        terminal(&explanation),
+        Some(TraitExplanationTerminal::StepLimit { limit: 2 })
+    ));
 }
 
 #[test]

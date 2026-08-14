@@ -61,6 +61,10 @@ pub enum TraitCandidateExplanation {
 pub struct TraitWhereBoundExplanation {
     pub goal: TraitGoal,
     pub outcome: TraitAnswer,
+    /// Recursive evidence for this obligation.  This keeps a cycle or limit
+    /// cause attached to the exact where-bound that produced it rather than
+    /// requiring a caller to reconstruct solver traversal from a flat list.
+    pub explanation: Box<TraitSelectionExplanation>,
 }
 
 /// Why a trait implementation was not an applicable candidate for one goal.
@@ -74,8 +78,36 @@ pub enum TraitCandidateRejection {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitSelectionExplanation {
+    pub goal: TraitGoal,
     pub answer: TraitAnswer,
     pub candidates: Vec<TraitCandidateExplanation>,
+    /// A terminal cause is present only when this tree leaf stopped before
+    /// candidate selection could complete normally.
+    pub terminal: Option<TraitExplanationTerminal>,
+}
+
+/// Cycle semantics available to the current source-trait kernel.  Ordinary
+/// traits are inductive: re-entering an active goal is ambiguous.  The parser
+/// does not yet expose auto/coinductive traits or structural field traversal,
+/// so this deliberately has no optimistic coinductive branch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TraitCyclePolicy {
+    Inductive,
+}
+
+/// A finite explanation-tree leaf produced by recursive goal evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TraitExplanationTerminal {
+    OrdinaryCycle {
+        reentered: TraitGoal,
+        policy: TraitCyclePolicy,
+    },
+    DepthLimit {
+        limit: u32,
+    },
+    StepLimit {
+        limit: u32,
+    },
 }
 
 /// The result of normalizing a zero-arity associated type through selected
@@ -247,6 +279,31 @@ impl From<TraitAnswerIndex> for TraitAnswer {
             TraitAnswerIndex::Ambiguous => Self::Ambiguous,
             TraitAnswerIndex::Overflow => Self::Overflow,
         }
+    }
+}
+
+/// Select from coherent candidates without letting an ordinary inductive
+/// cycle hide a hard resource exhaustion. A proven/refuted candidate remains
+/// sufficient evidence even when another candidate could not be explored.
+fn select_answer(
+    positives: &[DefKey],
+    negatives: &[DefKey],
+    saw_cycle: bool,
+    saw_overflow: bool,
+) -> TraitAnswerIndex {
+    match (positives, negatives) {
+        // A coherent interface has at most one applicable answer across both
+        // polarities. Treat contradictory input as ambiguity so an unchecked
+        // coherence failure cannot make selection order matter.
+        ([..], [..]) if !positives.is_empty() && !negatives.is_empty() => {
+            TraitAnswerIndex::Ambiguous
+        }
+        ([], []) if saw_overflow => TraitAnswerIndex::Overflow,
+        ([], []) if saw_cycle => TraitAnswerIndex::Ambiguous,
+        ([], []) => TraitAnswerIndex::NoSolution,
+        ([definition], []) => TraitAnswerIndex::Proven(*definition),
+        ([], [definition]) => TraitAnswerIndex::Refuted(*definition),
+        _ => TraitAnswerIndex::Ambiguous,
     }
 }
 
@@ -470,9 +527,9 @@ impl TraitSolver {
     /// Inspect deterministic candidate shape alongside the ordinary tabled
     /// answer. This is diagnostic evidence only and never influences tables.
     pub fn explain(&mut self, goal: TraitGoal) -> TraitSelectionExplanation {
-        // Preserve the normal tabled selection exactly. Candidate evidence is
-        // evaluated by a fresh probe below, so asking for an explanation can
-        // neither pre-populate nor perturb this solver's cache or step budget.
+        // Preserve the normal tabled selection exactly. A fresh structural
+        // probe builds a finite obligation tree, so asking for an explanation
+        // can neither pre-populate nor perturb this solver's cache or budget.
         let answer = self.solve(goal.clone());
         let mut probe = Self {
             rules: self.rules.clone(),
@@ -481,10 +538,79 @@ impl TraitSolver {
             limits: self.limits.clone(),
             steps: 0,
         };
-        let candidates = self
+        let mut active = BTreeMap::new();
+        let mut explanation = probe.explain_at(goal, 0, &mut active);
+        // Table reuse can only make the ordinary solver more precise within a
+        // fixed budget. Its answer remains authoritative for callers, while
+        // the fresh probe supplies the deterministic causal tree.
+        explanation.answer = answer;
+        explanation
+    }
+
+    fn explain_at(
+        &mut self,
+        goal: TraitGoal,
+        depth: u32,
+        active: &mut BTreeMap<Digest, TraitGoal>,
+    ) -> TraitSelectionExplanation {
+        if depth >= self.limits.max_depth {
+            return TraitSelectionExplanation {
+                goal,
+                answer: TraitAnswer::Overflow,
+                candidates: vec![],
+                terminal: Some(TraitExplanationTerminal::DepthLimit {
+                    limit: self.limits.max_depth,
+                }),
+            };
+        }
+        if self.steps >= self.limits.max_steps {
+            return TraitSelectionExplanation {
+                goal,
+                answer: TraitAnswer::Overflow,
+                candidates: vec![],
+                terminal: Some(TraitExplanationTerminal::StepLimit {
+                    limit: self.limits.max_steps,
+                }),
+            };
+        }
+        let goal = match self.normalize_goal(goal.clone()) {
+            Ok(goal) => goal,
+            Err(answer) => {
+                return TraitSelectionExplanation {
+                    goal,
+                    answer: answer.into(),
+                    candidates: vec![],
+                    terminal: None,
+                };
+            }
+        };
+        let key = goal_key(&goal);
+        if let Some(reentered) = active.get(&key) {
+            return TraitSelectionExplanation {
+                goal,
+                answer: TraitAnswer::Ambiguous,
+                candidates: vec![],
+                terminal: Some(TraitExplanationTerminal::OrdinaryCycle {
+                    reentered: reentered.clone(),
+                    policy: TraitCyclePolicy::Inductive,
+                }),
+            };
+        }
+        self.steps += 1;
+        active.insert(key, goal.clone());
+
+        let mut positives = vec![];
+        let mut negatives = vec![];
+        let mut saw_cycle = false;
+        let mut saw_overflow = false;
+        let rules = self
             .rules
             .iter()
             .filter(|rule| rule.implementation.relation.definition == goal.relation.definition)
+            .cloned()
+            .collect::<Vec<_>>();
+        let candidates = rules
+            .into_iter()
             .map(|rule| {
                 let Some(substitution) = match_rule(&rule.implementation, &goal) else {
                     return TraitCandidateExplanation::Rejected {
@@ -494,23 +620,36 @@ impl TraitSolver {
                 };
                 let mut outcomes = Vec::new();
                 for (subject, relation) in &rule.implementation.where_bounds {
-                    let goal = TraitGoal {
+                    let obligation = TraitGoal {
                         relation: substitute_relation(relation, &substitution),
                         subject: substitute_type(subject, &substitution),
                     };
-                    // `solve_at` evaluates implementation obligations one
-                    // frame below their parent candidate. Preserve that
-                    // depth in the diagnostic probe so a reported overflow
-                    // matches the ordinary tabled selection exactly.
-                    let outcome = probe.solve_at(goal.clone(), 1).into();
+                    let explanation = self.explain_at(obligation.clone(), depth + 1, active);
+                    let outcome = explanation.answer.clone();
+                    match outcome {
+                        TraitAnswer::Ambiguous => saw_cycle = true,
+                        TraitAnswer::Overflow => saw_overflow = true,
+                        TraitAnswer::Proven { .. }
+                        | TraitAnswer::Refuted { .. }
+                        | TraitAnswer::NoSolution => {}
+                    }
                     let proven = matches!(outcome, TraitAnswer::Proven { .. });
-                    outcomes.push(TraitWhereBoundExplanation { goal, outcome });
+                    outcomes.push(TraitWhereBoundExplanation {
+                        goal: obligation,
+                        outcome,
+                        explanation: Box::new(explanation),
+                    });
                     if !proven {
                         return TraitCandidateExplanation::Rejected {
                             implementation: rule.definition,
                             reason: TraitCandidateRejection::WhereBound { outcomes },
                         };
                     }
+                }
+                if rule.implementation.negative {
+                    negatives.push(rule.definition);
+                } else {
+                    positives.push(rule.definition);
                 }
                 TraitCandidateExplanation::Applicable {
                     implementation: rule.definition,
@@ -519,7 +658,14 @@ impl TraitSolver {
                 }
             })
             .collect();
-        TraitSelectionExplanation { answer, candidates }
+        active.remove(&key);
+        let answer = select_answer(&positives, &negatives, saw_cycle, saw_overflow).into();
+        TraitSelectionExplanation {
+            goal,
+            answer,
+            candidates,
+            terminal: None,
+        }
     }
 
     /// Select an implementation for `goal` and normalize one of its
@@ -1252,7 +1398,8 @@ impl TraitSolver {
             .collect::<Vec<_>>();
         let mut positives = vec![];
         let mut negatives = vec![];
-        let mut uncertain = false;
+        let mut saw_cycle = false;
+        let mut saw_overflow = false;
         for rule in rules {
             let Some(substitution) = match_rule(&rule.implementation, &goal) else {
                 continue;
@@ -1265,9 +1412,14 @@ impl TraitSolver {
                 };
                 match self.solve_at(obligation, depth + 1) {
                     TraitAnswerIndex::Proven(_) => {}
-                    TraitAnswerIndex::Ambiguous | TraitAnswerIndex::Overflow => {
+                    TraitAnswerIndex::Ambiguous => {
                         viable = false;
-                        uncertain = true;
+                        saw_cycle = true;
+                        break;
+                    }
+                    TraitAnswerIndex::Overflow => {
+                        viable = false;
+                        saw_overflow = true;
                         break;
                     }
                     TraitAnswerIndex::Refuted(_) | TraitAnswerIndex::NoSolution => {
@@ -1284,19 +1436,7 @@ impl TraitSolver {
                 }
             }
         }
-        let answer = match (positives.as_slice(), negatives.as_slice()) {
-            // A coherent interface has at most one applicable answer across
-            // both polarities.  Treat contradictory input as ambiguity so an
-            // unchecked coherence failure cannot make selection order matter.
-            ([..], [..]) if !positives.is_empty() && !negatives.is_empty() => {
-                TraitAnswerIndex::Ambiguous
-            }
-            ([], []) if uncertain => TraitAnswerIndex::Ambiguous,
-            ([], []) => TraitAnswerIndex::NoSolution,
-            ([definition], []) => TraitAnswerIndex::Proven(*definition),
-            ([], [definition]) => TraitAnswerIndex::Refuted(*definition),
-            _ => TraitAnswerIndex::Ambiguous,
-        };
+        let answer = select_answer(&positives, &negatives, saw_cycle, saw_overflow);
         self.tables.insert(key, TableState::Complete(answer));
         answer
     }

@@ -124,9 +124,10 @@ pub use signature::{
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{
     DEFAULT_MAX_TRAIT_DEPTH, DEFAULT_MAX_TRAIT_STEPS, TraitAnswer, TraitCandidateExplanation,
-    TraitCandidateRejection, TraitConstProjectionAnswer, TraitEffectRowProjectionAnswer, TraitGoal,
-    TraitGoalQuery, TraitMethodAnswer, TraitProjectionAnswer, TraitSelectionExplanation,
-    TraitSolver, TraitSolverLimits, TraitWhereBoundExplanation,
+    TraitCandidateRejection, TraitConstProjectionAnswer, TraitCyclePolicy,
+    TraitEffectRowProjectionAnswer, TraitExplanationTerminal, TraitGoal, TraitGoalQuery,
+    TraitMethodAnswer, TraitProjectionAnswer, TraitSelectionExplanation, TraitSolver,
+    TraitSolverLimits, TraitWhereBoundExplanation,
 };
 pub use types::{
     ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail, EffectVar,
