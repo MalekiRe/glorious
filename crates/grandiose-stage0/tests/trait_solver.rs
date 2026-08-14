@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     DeclarationScan, DefKey, ElaboratedInterface, ElaboratedTraitReference, FileKey, InterfaceSet,
-    LexedFile, PackageKey, ScalarType, TraitAnswer, TraitGoal, TraitMethodAnswer,
-    TraitProjectionAnswer, TraitSolver, Type, implementation_method_key,
+    LexedFile, PackageKey, ScalarType, TraitAnswer, TraitEffectRowProjectionAnswer, TraitGoal,
+    TraitMethodAnswer, TraitProjectionAnswer, TraitSolver, Type, implementation_method_key,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -278,6 +278,58 @@ fn recursive_associated_type_normalization_is_rejected() {
         "Item",
     );
     assert_eq!(answer, TraitProjectionAnswer::RecursiveProjection);
+}
+
+#[test]
+fn associated_effect_row_normalization_recurses_through_selected_projections() {
+    let (interface, signatures) = signatures(
+        "effect Trace { note(); } trait Source { type Effects: EffectRow; } trait Wrapper { type Effects: EffectRow; } struct Value {} impl Source for Value { type Effects = {Trace}; } impl Wrapper for Value { type Effects = {<Value as Source>::Effects}; }",
+    );
+    let wrapper = key(&interface, "Wrapper");
+    let value = key(&interface, "Value");
+    let trace = key(&interface, "Trace");
+    let answer = TraitSolver::new(&signatures).normalize_associated_effect_row_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: wrapper,
+                arguments: vec![],
+            },
+            subject: Type::Nominal {
+                definition: value,
+                arguments: vec![],
+            },
+        },
+        "Effects",
+        &[],
+    );
+    assert!(matches!(
+        answer,
+        TraitEffectRowProjectionAnswer::Normalized { row, .. }
+            if row == grandiose_stage0::EffectRow::closed([trace])
+    ));
+}
+
+#[test]
+fn recursive_associated_effect_row_normalization_is_rejected() {
+    let (interface, signatures) = signatures(
+        "trait Loop { type Effects: EffectRow; } struct Value {} impl Loop for Value { type Effects = {<Value as Loop>::Effects}; }",
+    );
+    let loop_trait = key(&interface, "Loop");
+    let answer = TraitSolver::new(&signatures).normalize_associated_effect_row_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: loop_trait,
+                arguments: vec![],
+            },
+            subject: Type::Nominal {
+                definition: key(&interface, "Value"),
+                arguments: vec![],
+            },
+        },
+        "Effects",
+        &[],
+    );
+    assert_eq!(answer, TraitEffectRowProjectionAnswer::RecursiveProjection,);
 }
 
 #[test]

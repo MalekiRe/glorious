@@ -86,6 +86,20 @@ pub enum TraitEffectRowProjectionAnswer {
         expected: u32,
         found: u32,
     },
+    /// A type projection nested in an associated effect-row head could not
+    /// be normalized.  A row answer cannot silently retain that failure:
+    /// doing so would make the row's effect identity depend on which caller
+    /// happened to inspect it first.
+    NestedTypeProjection {
+        answer: Box<TraitProjectionAnswer>,
+    },
+    /// An associated effect row reduced back to a projection already on the
+    /// active normalization stack.  As with associated value types, there is
+    /// no finite normal form to expose to a callable contract.
+    RecursiveProjection,
+    /// Substituting a nested row would create two distinct open tails. G1
+    /// rows have one canonical tail, so neither tail can be selected.
+    ConflictingRowTails,
 }
 
 /// Selected implementation method evidence with all implementation and method
@@ -450,6 +464,64 @@ impl TraitSolver {
         name: &str,
         arguments: &[Type],
     ) -> TraitEffectRowProjectionAnswer {
+        let mut type_active = vec![];
+        let subject = match self.normalize_type_projections(goal.subject, &mut type_active) {
+            Ok(subject) => subject,
+            Err(answer) => {
+                return TraitEffectRowProjectionAnswer::NestedTypeProjection { answer };
+            }
+        };
+        let trait_arguments = match goal
+            .relation
+            .arguments
+            .into_iter()
+            .map(|argument| self.normalize_type_projections(argument, &mut type_active))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(arguments) => arguments,
+            Err(answer) => {
+                return TraitEffectRowProjectionAnswer::NestedTypeProjection { answer };
+            }
+        };
+        let arguments = match arguments
+            .iter()
+            .cloned()
+            .map(|argument| self.normalize_type_projections(argument, &mut type_active))
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(arguments) => arguments,
+            Err(answer) => {
+                return TraitEffectRowProjectionAnswer::NestedTypeProjection { answer };
+            }
+        };
+        let goal = TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: goal.relation.definition,
+                arguments: trait_arguments,
+            },
+            subject,
+        };
+        let root_key = associated_effect_row_projection_key(&goal, name, &arguments);
+        let answer = self.select_associated_effect_row_application(goal, name, &arguments);
+        let TraitEffectRowProjectionAnswer::Normalized { evidence, row } = answer else {
+            return answer;
+        };
+        let mut active = vec![root_key];
+        match self.normalize_effect_row_projections(row, &mut active) {
+            Ok(row) => TraitEffectRowProjectionAnswer::Normalized { evidence, row },
+            Err(answer) => *answer,
+        }
+    }
+
+    /// Perform only selection and substitution for an associated effect row.
+    /// The public normalization boundary above owns recursive reduction, so
+    /// nested rows share one active stack and cannot evade cycle detection.
+    fn select_associated_effect_row_application(
+        &mut self,
+        goal: TraitGoal,
+        name: &str,
+        arguments: &[Type],
+    ) -> TraitEffectRowProjectionAnswer {
         match self.solve(goal.clone()) {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
@@ -486,6 +558,127 @@ impl TraitSolver {
             TraitAnswer::Ambiguous => TraitEffectRowProjectionAnswer::Ambiguous,
             TraitAnswer::Overflow => TraitEffectRowProjectionAnswer::Overflow,
         }
+    }
+
+    /// Normalize concrete associated effect-row projections introduced by an
+    /// implementation definition.  Symbolic projections remain intact: they
+    /// need lexical caller evidence and must never trigger a global impl
+    /// guess.  This mirrors `normalize_type_projections` for the row-kinded
+    /// projection family.
+    fn normalize_effect_row_projections(
+        &mut self,
+        value: EffectRow,
+        active: &mut Vec<Digest>,
+    ) -> Result<EffectRow, Box<TraitEffectRowProjectionAnswer>> {
+        let effects = value
+            .effects
+            .into_iter()
+            .map(|effect| {
+                let arguments = effect
+                    .arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_type_projections(argument, &mut vec![]))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|answer| {
+                        Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
+                    })?;
+                Ok(EffectInstance {
+                    definition: effect.definition,
+                    arguments,
+                })
+            })
+            .collect::<Result<_, Box<TraitEffectRowProjectionAnswer>>>()?;
+        let mut result = EffectRow {
+            effects,
+            projections: vec![],
+            tail: value.tail,
+        };
+        for projection in value.projections {
+            let subject = self
+                .normalize_type_projections(*projection.subject, &mut vec![])
+                .map_err(|answer| {
+                    Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
+                })?;
+            let trait_arguments = projection
+                .trait_arguments
+                .into_iter()
+                .map(|argument| self.normalize_type_projections(argument, &mut vec![]))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|answer| {
+                    Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
+                })?;
+            let item_arguments = projection
+                .item_arguments
+                .into_iter()
+                .map(|argument| self.normalize_type_projections(argument, &mut vec![]))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|answer| {
+                    Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
+                })?;
+            let projection = crate::EffectRowProjection {
+                subject: Box::new(subject),
+                trait_definition: projection.trait_definition,
+                trait_arguments,
+                name: projection.name,
+                item_arguments,
+            };
+            if !projection_is_concrete(&projection.subject)
+                || !projection
+                    .trait_arguments
+                    .iter()
+                    .all(projection_is_concrete)
+                || !projection.item_arguments.iter().all(projection_is_concrete)
+            {
+                result.projections.push(projection);
+                continue;
+            }
+            let goal = TraitGoal {
+                relation: ElaboratedTraitReference {
+                    definition: projection.trait_definition,
+                    arguments: projection.trait_arguments,
+                },
+                subject: *projection.subject,
+            };
+            let key = associated_effect_row_projection_key(
+                &goal,
+                &projection.name,
+                &projection.item_arguments,
+            );
+            if active.contains(&key) {
+                return Err(Box::new(
+                    TraitEffectRowProjectionAnswer::RecursiveProjection,
+                ));
+            }
+            if active.len() >= self.limits.max_depth as usize {
+                return Err(Box::new(TraitEffectRowProjectionAnswer::Overflow));
+            }
+            active.push(key);
+            let nested = self.select_associated_effect_row_application(
+                goal,
+                &projection.name,
+                &projection.item_arguments,
+            );
+            let nested = match nested {
+                TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
+                    self.normalize_effect_row_projections(row, active)
+                }
+                answer => Err(Box::new(answer)),
+            };
+            active.pop();
+            let nested = nested?;
+            result.effects.extend(nested.effects);
+            result.projections.extend(nested.projections);
+            match (result.tail, nested.tail) {
+                (None, tail) => result.tail = tail,
+                (Some(left), Some(right)) if left != right => {
+                    return Err(Box::new(
+                        TraitEffectRowProjectionAnswer::ConflictingRowTails,
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(result)
     }
 
     /// Select an implementation method and instantiate both the implementation
@@ -902,6 +1095,21 @@ fn goal_key(goal: &TraitGoal) -> Digest {
 fn associated_projection_key(goal: &TraitGoal, name: &str, arguments: &[Type]) -> Digest {
     Digest::of_parts([
         b"grandiose-stage0-associated-projection-v1".as_slice(),
+        goal.relation.definition.0.as_bytes().as_slice(),
+        format!("{:?}", goal.relation.arguments).as_bytes(),
+        format!("{:?}", goal.subject).as_bytes(),
+        name.as_bytes(),
+        format!("{:?}", arguments).as_bytes(),
+    ])
+}
+
+fn associated_effect_row_projection_key(
+    goal: &TraitGoal,
+    name: &str,
+    arguments: &[Type],
+) -> Digest {
+    Digest::of_parts([
+        b"grandiose-stage0-associated-effect-row-projection-v1".as_slice(),
         goal.relation.definition.0.as_bytes().as_slice(),
         format!("{:?}", goal.relation.arguments).as_bytes(),
         format!("{:?}", goal.subject).as_bytes(),
