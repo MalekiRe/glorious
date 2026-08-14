@@ -449,6 +449,32 @@ fn nominal_layouts_are_parsed_as_interface_facts() {
 }
 
 #[test]
+fn nominal_headers_accept_line_separated_variants_and_private_fields() {
+    let package = PackageKey("header-nominal-newline@0.1.0".into());
+    let source = "struct View<T> {\n private base: T\n private length: usize\n}\nenum Step<T> {\n Continue(T)\n Stop\n}";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{:#?}", scan.diagnostics);
+    let view = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(view.diagnostics.is_empty(), "{view:#?}");
+    let ParsedHeader::Nominal { layout, .. } = view.header else {
+        panic!("expected struct nominal header")
+    };
+    assert!(
+        matches!(layout, NominalLayoutHeader::Struct(fields) if fields.len() == 2 && fields[0].name == "base")
+    );
+    let step = HeaderParse::parse(&lexed, source, &scan.declarations[1]);
+    assert!(step.diagnostics.is_empty(), "{step:#?}");
+    let ParsedHeader::Nominal { layout, .. } = step.header else {
+        panic!("expected enum nominal header")
+    };
+    assert!(
+        matches!(layout, NominalLayoutHeader::Enum(variants) if variants.len() == 2 && variants[0].name == "Continue")
+    );
+}
+
+#[test]
 fn nominal_layouts_reject_duplicate_field_and_variant_identities() {
     let package = PackageKey("header-nominal-duplicates@0.1.0".into());
     let source = "struct Pair { value: i64, value: Bool } enum Choice { First, First(i64) }";

@@ -73,6 +73,32 @@ fn body_parser_retains_stacked_higher_ranked_closure_type_binders() {
 }
 
 #[test]
+fn body_parser_lowers_compact_label_binders_and_transfers_to_existing_syntax() {
+    let body = parse("{ @done: i64 { @done(42) } }");
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected block")
+    };
+    let ExprKind::Label {
+        name,
+        result,
+        body: label_body,
+    } = &body.expression(values[0]).kind
+    else {
+        panic!("expected compact label binder")
+    };
+    assert_eq!(name, "done");
+    assert!(matches!(result, Some(HeaderType::Path(path)) if path == &vec!["i64"]));
+    let ExprKind::Block(label_values) = &body.expression(*label_body).kind else {
+        panic!("expected label body")
+    };
+    assert!(matches!(
+        body.expression(label_values[0]).kind,
+        ExprKind::Transfer { ref name, .. } if name == "done"
+    ));
+}
+
+#[test]
 fn assignments_are_block_statements_with_a_required_terminator() {
     let body = parse("{ let value = 1; value = 2; value }");
     assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);

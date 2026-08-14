@@ -423,6 +423,22 @@ fn lifetime_identifiers_are_not_mislexed_as_unterminated_characters() {
 }
 
 #[test]
+fn label_sigil_is_a_lossless_operator_before_its_identifier() {
+    let snapshot = snapshot();
+    let file = snapshot.world().sources[0].key;
+    let source = "@done: i64 { @done(42) }";
+    let lexed = grandiose_stage0::LexedFile::lex(file, source);
+    assert!(lexed.diagnostics.is_empty(), "{:#?}", lexed.diagnostics);
+    let significant = lexed
+        .tokens
+        .iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::End))
+        .map(|token| (token.kind.clone(), lexed.text(source, token)))
+        .collect::<Vec<_>>();
+    assert!(significant.contains(&(TokenKind::Operator, "@")));
+}
+
+#[test]
 fn memo_publication_is_revision_qualified_and_records_dependencies() {
     let snapshot = snapshot();
     let memo = MemoTable::<String, u32>::new();

@@ -130,9 +130,12 @@ pub enum ExprKind {
         value: ExprId,
     },
     /// A lexical, owner-scoped nonlocal destination. Its identity is minted
-    /// during Core elaboration; the parser retains only the ordinary spelling.
+    /// during Core elaboration. Compact `@name: Type { ... }` binders retain
+    /// their result annotation so Core can constrain the same result variable
+    /// observed by every transfer.
     Label {
         name: String,
+        result: Option<HeaderType>,
         body: ExprId,
     },
     /// Transfer one value to a lexically visible label destination.
@@ -420,6 +423,45 @@ impl Parser<'_> {
     }
 
     fn parse_prefix(&mut self) -> Option<ExprId> {
+        // Canonical source uses a compact label spelling.  It is syntax sugar
+        // for the already-owned `label name { ... }` and `transfer name value`
+        // forms, so Core continues to mint and validate the lexical brand.
+        // The type after `:` is preserved so Core can constrain the lexical
+        // label result shared by its body and every transfer.
+        if self.at_operator("@") {
+            let start = self.advance()?;
+            let name = self.expect_identifier()?;
+            if self.at_punctuation(':') {
+                self.position += 1;
+                let result = self.closure_type()?;
+                if !self.at_punctuation('{') {
+                    self.error_current("G4031", "expected `{` after label binder");
+                    return None;
+                }
+                let body = self.parse_block(false)?;
+                return Some(self.alloc(
+                    ExprKind::Label {
+                        name,
+                        result: Some(result),
+                        body,
+                    },
+                    join(self.lexed.tokens[start].span, self.expression(body).span),
+                ));
+            }
+            if self.at_punctuation('(') {
+                self.position += 1;
+                let value = self
+                    .parse_expression()
+                    .unwrap_or_else(|| self.recover_expression());
+                self.expect_punctuation(')')?;
+                return Some(self.alloc(
+                    ExprKind::Transfer { name, value },
+                    join(self.lexed.tokens[start].span, self.expression(value).span),
+                ));
+            }
+            self.error_current("G4031", "expected `:` or `(` after label name");
+            return None;
+        }
         if self.word() == Some("label") {
             let start = self.advance()?;
             let name = self.expect_identifier()?;
@@ -429,7 +471,11 @@ impl Parser<'_> {
             }
             let body = self.parse_block(false)?;
             return Some(self.alloc(
-                ExprKind::Label { name, body },
+                ExprKind::Label {
+                    name,
+                    result: None,
+                    body,
+                },
                 join(self.lexed.tokens[start].span, self.expression(body).span),
             ));
         }

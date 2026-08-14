@@ -3280,13 +3280,20 @@ impl Elaborator<'_> {
                     expression.span,
                 )
             }
-            ExprKind::Label { name, body } => {
+            ExprKind::Label { name, result, body } => {
                 let brand = LabelBrand {
                     owner: self.definition,
                     label: self.next_label,
                 };
                 self.next_label += 1;
-                let result = self.inference.fresh();
+                // A compact source label annotation constrains the exact
+                // result variable shared with its body and all transfers. Do
+                // not defer this to a discarded parser-side hint: doing so
+                // would allow `@done: i64 { @done(true) }` to infer Bool.
+                let result = result
+                    .as_ref()
+                    .map(|annotation| self.header_type(annotation))
+                    .unwrap_or_else(|| self.inference.fresh());
                 self.active_labels.push(ActiveLabel {
                     name,
                     brand,

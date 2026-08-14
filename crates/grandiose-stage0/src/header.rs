@@ -1206,6 +1206,13 @@ impl Parser<'_> {
         let mut names = BTreeSet::new();
         while self.current().is_some() && !self.at_punctuation(closing) {
             let start = self.current().unwrap();
+            // Field visibility is a declaration-surface modifier. The Stage
+            // 0 nominal layout records field identity and type only, so retain
+            // the modifier's syntax boundary while visibility policy stays in
+            // interface collection.
+            if matches!(self.word(), Some("private" | "public")) {
+                self.position += 1;
+            }
             let name = self.identifier().unwrap_or_else(|| {
                 self.error("G3223", "expected nominal field name");
                 "<error>".into()
@@ -1227,7 +1234,10 @@ impl Parser<'_> {
                     end: self.lexed.tokens[end].span.end,
                 },
             });
-            if !self.punctuation(',') && !self.at_punctuation(closing) {
+            if !self.punctuation(',')
+                && !self.at_punctuation(closing)
+                && !self.line_break_before_current()
+            {
                 self.error("G3225", "expected `,` between nominal fields");
                 self.position += 1;
             }
@@ -1277,7 +1287,10 @@ impl Parser<'_> {
                     end: self.lexed.tokens[end].span.end,
                 },
             });
-            if !self.punctuation(',') && !self.at_punctuation('}') {
+            if !self.punctuation(',')
+                && !self.at_punctuation('}')
+                && !self.line_break_before_current()
+            {
                 self.error("G3229", "expected `,` between enum variants");
                 self.position += 1;
             }
@@ -2090,6 +2103,22 @@ impl Parser<'_> {
             .checked_sub(1)
             .and_then(|i| self.tokens.get(i))
             .copied()
+    }
+    /// Declaration members can be delimited either by `,` or by a physical
+    /// line break. The latter is significant only between already-tokenized
+    /// members; it never changes expression parsing or generic applications.
+    fn line_break_before_current(&self) -> bool {
+        let Some(previous) = self.previous() else {
+            return false;
+        };
+        let Some(current) = self.current() else {
+            return false;
+        };
+        let start = self.lexed.tokens[previous].span.end as usize;
+        let end = self.lexed.tokens[current].span.start as usize;
+        self.source
+            .get(start..end)
+            .is_some_and(|between| between.contains('\n') || between.contains('\r'))
     }
     fn word(&self) -> Option<&str> {
         let i = self.current()?;

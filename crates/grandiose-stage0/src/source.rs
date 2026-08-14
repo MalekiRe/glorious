@@ -668,6 +668,10 @@ fn is_operator(byte: u8) -> bool {
             | b'^'
             | b'~'
             | b'?'
+            // Labels use the compact `@name: Type { ... }` binder and
+            // `@name(value)` transfer spellings.  Keep the sigil in the
+            // operator family so it remains separate from its identifier.
+            | b'@'
     )
 }
 
