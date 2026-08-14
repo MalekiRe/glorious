@@ -53,6 +53,29 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
     ));
     let encoded = encode_artifact(&artifact);
     assert_eq!(decode_artifact(&encoded).unwrap(), artifact);
+    let decoded = decode_and_verify_artifact(&encoded).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint);
+    assert_eq!(
+        encode_artifact(&decode_artifact(&encoded).unwrap()),
+        encoded
+    );
+
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: artifact.function.definition,
+        functions: BTreeMap::from([(artifact.function.definition, artifact.function.clone())]),
+        fingerprint: Digest::of_bytes(b"vm-effect-argument-program-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let program_bytes = encode_program(&program);
+    assert_eq!(decode_program(&program_bytes).unwrap(), program);
+    assert_eq!(
+        decode_and_verify_program(&program_bytes)
+            .unwrap()
+            .fingerprint(),
+        program.fingerprint
+    );
 }
 
 #[test]
