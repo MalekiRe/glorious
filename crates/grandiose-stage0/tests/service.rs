@@ -214,6 +214,74 @@ fn int_runtime_manifest(role: PrimitiveRole, name: &str) -> RuntimeManifestInput
 }
 
 #[test]
+fn manifest_bound_float_finiteness_predicates_execute_through_unsigned_vm_paths() {
+    for (name, float, integer, to_bits, from_bits, infinity_bits) in [
+        (
+            "f32",
+            "f32",
+            "u32",
+            "__g1_f32_to_bits",
+            "__g1_f32_from_bits",
+            "2139095040",
+        ),
+        (
+            "f64",
+            "f64",
+            "u64",
+            "__g1_f64_to_bits",
+            "__g1_f64_from_bits",
+            "9218868437227405312",
+        ),
+    ] {
+        let source = format!(
+            "fn {to_bits}(value: {float}) -> {integer} {{ () }}\
+             fn {from_bits}(value: {integer}) -> {float} {{ () }}\
+             fn __g1_int_bit_and<T>(left: T, right: T) -> T {{ () }}\
+             finite(value: {float}) -> Bool {{\
+                 __g1_int_bit_and<{integer}>({to_bits}(move value), {infinity_bits}) != {infinity_bits}\
+             }}\
+             pub fn main() -> Bool {{ finite({from_bits}({infinity_bits})) }}",
+        );
+        let mut input = request(&source);
+        input.runtime_manifest = Some(RuntimeManifestInput {
+            standard_library: PackageKey("app@0.1.0".into()),
+            host_imports: vec![],
+            selectors: [
+                (format!("{name}-to-bits"), to_bits),
+                (format!("{name}-from-bits"), from_bits),
+                ("int-bit-and".into(), "__g1_int_bit_and"),
+            ]
+            .into_iter()
+            .map(|(selector, declaration)| PrimitiveSelector {
+                role: PrimitiveRole::parse_selector_name(&selector)
+                    .expect("canonical primitive role"),
+                module_path: "crate".into(),
+                name: declaration.into(),
+            })
+            .collect(),
+        });
+        let artifact = StageZeroCompiler::new()
+            .compile(input)
+            .unwrap_or_else(|diagnostics| panic!("{name}: {diagnostics:#?}"))
+            .artifact
+            .expect("build must publish a VM artifact");
+        assert!(
+            !artifact.run_bool().unwrap(),
+            "{name} infinity is not finite"
+        );
+        let program = decode_program(&artifact.canonical_bytes()).unwrap();
+        assert!(program.functions.values().any(|function| {
+            function.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction,
+                    VmInstruction::BitAndU32 { .. } | VmInstruction::BitAndU64 { .. }
+                )
+            })
+        }));
+    }
+}
+
+#[test]
 fn manifest_bound_generic_int_wrapping_add_uses_distinct_wrapping_vm_semantics() {
     let mut input = request(
         "fn __g1_int_wrapping_add<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_wrapping_add<i64>(9223372036854775807, 1) }",

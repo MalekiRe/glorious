@@ -98,6 +98,14 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: i64,
     },
+    ConstU32 {
+        dst: MirLocal,
+        value: u32,
+    },
+    ConstU64 {
+        dst: MirLocal,
+        value: u64,
+    },
     /// IEEE-754 values are stored by bit pattern so MIR remains Eq/Hash-safe
     /// and artifact fingerprints never depend on host float formatting.
     ConstF64 {
@@ -656,6 +664,19 @@ pub enum MirInstruction {
         left: MirLocal,
         right: MirLocal,
     },
+    /// Exact manifest-bound unsigned bitwise-and. The width remains part of
+    /// the instruction contract so a float bit-pattern helper cannot lose
+    /// its u32/u64 identity while crossing into the VM.
+    BitAndU32 {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    BitAndU64 {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
     /// Exact manifest-bound i64 bitwise-xor. This is never ordinary source
     /// arithmetic and remains distinct in the frozen MIR contract.
     BitXorI64 {
@@ -745,6 +766,16 @@ pub enum MirInstruction {
         right: MirLocal,
     },
     NeI64 {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    NeU32 {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
+    NeU64 {
         dst: MirLocal,
         left: MirLocal,
         right: MirLocal,
@@ -1277,6 +1308,8 @@ fn fold_block(
             | MirInstruction::IntLessI64 { .. }
             | MirInstruction::IntGreaterI64 { .. }
             | MirInstruction::BitAndI64 { .. }
+            | MirInstruction::BitAndU32 { .. }
+            | MirInstruction::BitAndU64 { .. }
             | MirInstruction::BitOrI64 { .. }
             | MirInstruction::BitXorI64 { .. }
             | MirInstruction::IntShrI64 { .. }
@@ -1303,6 +1336,10 @@ fn fold_block(
                 fold_reflexive_predicate(dst, left, right, false).or_else(|| {
                     fold_i64_predicate(dst, &constants, left, right, |left, right| left != right)
                 })
+            }
+            MirInstruction::NeU32 { dst, left, right }
+            | MirInstruction::NeU64 { dst, left, right } => {
+                fold_reflexive_predicate(dst, left, right, false)
             }
             MirInstruction::LtI64 { dst, left, right } => {
                 fold_reflexive_predicate(dst, left, right, false).or_else(|| {
@@ -1490,6 +1527,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
     match instruction {
         MirInstruction::ConstUnit { dst }
         | MirInstruction::ConstI64 { dst, .. }
+        | MirInstruction::ConstU32 { dst, .. }
+        | MirInstruction::ConstU64 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
         | MirInstruction::FloatIntrinsic { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
@@ -1519,6 +1558,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::IntLessI64 { dst, .. }
         | MirInstruction::IntGreaterI64 { dst, .. }
         | MirInstruction::BitAndI64 { dst, .. }
+        | MirInstruction::BitAndU32 { dst, .. }
+        | MirInstruction::BitAndU64 { dst, .. }
         | MirInstruction::BitXorI64 { dst, .. }
         | MirInstruction::IntShrI64 { dst, .. }
         | MirInstruction::BitOrI64 { dst, .. }
@@ -1536,6 +1577,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::RemF64 { dst, .. }
         | MirInstruction::EqI64 { dst, .. }
         | MirInstruction::NeI64 { dst, .. }
+        | MirInstruction::NeU32 { dst, .. }
+        | MirInstruction::NeU64 { dst, .. }
         | MirInstruction::LtI64 { dst, .. }
         | MirInstruction::LeI64 { dst, .. }
         | MirInstruction::GtI64 { dst, .. }
@@ -3570,6 +3613,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::I64ToI128Wrapping { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
+        | MirInstruction::ConstU32 { .. }
+        | MirInstruction::ConstU64 { .. }
         | MirInstruction::ConstF64 { .. }
         | MirInstruction::ConstBool { .. }
         | MirInstruction::ConstChar { .. }
@@ -3597,6 +3642,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::IntLessI64 { .. }
         | MirInstruction::IntGreaterI64 { .. }
         | MirInstruction::BitAndI64 { .. }
+        | MirInstruction::BitAndU32 { .. }
+        | MirInstruction::BitAndU64 { .. }
         | MirInstruction::BitXorI64 { .. }
         | MirInstruction::IntShrI64 { .. }
         | MirInstruction::BitOrI64 { .. }
@@ -3613,6 +3660,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::RemF64 { .. }
         | MirInstruction::EqI64 { .. }
         | MirInstruction::NeI64 { .. }
+        | MirInstruction::NeU32 { .. }
+        | MirInstruction::NeU64 { .. }
         | MirInstruction::LtI64 { .. }
         | MirInstruction::LeI64 { .. }
         | MirInstruction::GtI64 { .. }
@@ -4257,6 +4306,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
     match value {
         MirInstruction::ConstUnit { dst }
         | MirInstruction::ConstI64 { dst, .. }
+        | MirInstruction::ConstU32 { dst, .. }
+        | MirInstruction::ConstU64 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
@@ -4395,6 +4446,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::IntLessI64 { dst, left, right }
         | MirInstruction::IntGreaterI64 { dst, left, right }
         | MirInstruction::BitAndI64 { dst, left, right }
+        | MirInstruction::BitAndU32 { dst, left, right }
+        | MirInstruction::BitAndU64 { dst, left, right }
         | MirInstruction::BitXorI64 { dst, left, right }
         | MirInstruction::IntShrI64 { dst, left, right }
         | MirInstruction::BitOrI64 { dst, left, right }
@@ -4410,6 +4463,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::RemF64 { dst, left, right }
         | MirInstruction::EqI64 { dst, left, right }
         | MirInstruction::NeI64 { dst, left, right }
+        | MirInstruction::NeU32 { dst, left, right }
+        | MirInstruction::NeU64 { dst, left, right }
         | MirInstruction::LtI64 { dst, left, right }
         | MirInstruction::LeI64 { dst, left, right }
         | MirInstruction::GtI64 { dst, left, right }
@@ -13124,20 +13179,21 @@ impl Lowerer<'_> {
                         return None;
                     }
                 },
-                Type::Scalar(crate::types::ScalarType::U32) => match parse_i64_literal(&text) {
-                    Ok(value) => {
-                        // Source integer syntax is deliberately parsed once through
-                        // the frozen i64 literal ABI.  Materialize the contextual
-                        // u32 value through the checked VM conversion so an
-                        // out-of-range literal cannot silently wrap.
-                        let source = self.alloc(Type::Scalar(crate::types::ScalarType::I64), id);
-                        self.instructions
-                            .push(MirInstruction::ConstI64 { dst: source, value });
-                        self.instructions
-                            .push(MirInstruction::I64ToU32Checked { dst, value: source });
-                    }
+                Type::Scalar(crate::types::ScalarType::U32) => match parse_u32_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstU32 { dst, value }),
                     Err(_) => {
                         self.error("G6003", "invalid u32 literal at MIR lowering");
+                        return None;
+                    }
+                },
+                Type::Scalar(crate::types::ScalarType::U64) => match parse_u64_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstU64 { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid u64 literal at MIR lowering");
                         return None;
                     }
                 },
@@ -13500,6 +13556,12 @@ impl Lowerer<'_> {
                     }
                     (Type::Scalar(crate::types::ScalarType::I64), "!=") => {
                         MirInstruction::NeI64 { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), "!=") => {
+                        MirInstruction::NeU32 { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U64), "!=") => {
+                        MirInstruction::NeU64 { dst, left, right }
                     }
                     (Type::Scalar(crate::types::ScalarType::I64), "<") => {
                         MirInstruction::LtI64 { dst, left, right }
@@ -14618,6 +14680,60 @@ impl Lowerer<'_> {
                                     count: *count,
                                 });
                             }
+                            Some(PrimitiveRole::IntBitAnd) => {
+                                let [left, right] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic int bitwise-and requires two operands",
+                                    );
+                                    return None;
+                                };
+                                let scalar = match generic_arguments.as_slice() {
+                                    [GenericArgument::Type(Type::Scalar(scalar))] => *scalar,
+                                    _ => {
+                                        self.error(
+                                            "G6005",
+                                            "generic int bitwise-and requires one frozen scalar argument",
+                                        );
+                                        return None;
+                                    }
+                                };
+                                let expected = Type::Scalar(scalar);
+                                if self.locals[left.0 as usize].ty != expected
+                                    || self.locals[right.0 as usize].ty != expected
+                                    || self.body.expression(id).ty != expected
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "generic int bitwise-and operands do not match its frozen scalar contract",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(match scalar {
+                                    crate::types::ScalarType::I64 => MirInstruction::BitAndI64 {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    crate::types::ScalarType::U32 => MirInstruction::BitAndU32 {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    crate::types::ScalarType::U64 => MirInstruction::BitAndU64 {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    _ => {
+                                        self.error(
+                                            "G6005",
+                                            "generic int bitwise-and is not yet VM-specialized for this scalar",
+                                        );
+                                        return None;
+                                    }
+                                });
+                            }
                             Some(
                                 role @ (PrimitiveRole::IntCheckedAdd
                                 | PrimitiveRole::IntWrappingAdd
@@ -14626,7 +14742,6 @@ impl Lowerer<'_> {
                                 | PrimitiveRole::IntEqual
                                 | PrimitiveRole::IntLess
                                 | PrimitiveRole::IntGreater
-                                | PrimitiveRole::IntBitAnd
                                 | PrimitiveRole::IntBitXor
                                 | PrimitiveRole::IntBitOr),
                             ) => {
@@ -16674,17 +16789,31 @@ fn literal_type(text: &str) -> Option<Type> {
 /// checked conversion so an out-of-range source value cannot wrap while it is
 /// becoming the stage-zero VM's i64 representation.
 fn parse_i64_literal(text: &str) -> Result<i64, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    i64::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn parse_u32_literal(text: &str) -> Result<u32, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    u32::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn parse_u64_literal(text: &str) -> Result<u64, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    u64::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn normalized_integer_literal(text: &str) -> (u32, String) {
     let digits = text.replace('_', "");
-    let (radix, digits) = if let Some(value) = digits.strip_prefix("0b") {
-        (2, value)
+    if let Some(value) = digits.strip_prefix("0b") {
+        (2, value.into())
     } else if let Some(value) = digits.strip_prefix("0o") {
-        (8, value)
+        (8, value.into())
     } else if let Some(value) = digits.strip_prefix("0x") {
-        (16, value)
+        (16, value.into())
     } else {
-        (10, digits.as_str())
-    };
-    i64::from_str_radix(digits, radix).map_err(|_| ())
+        (10, digits)
+    }
 }
 
 pub(crate) fn parse_f64_literal(text: &str) -> Result<f64, ()> {

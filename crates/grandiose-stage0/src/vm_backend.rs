@@ -255,6 +255,14 @@ pub enum VmInstruction {
         dst: u32,
         value: i64,
     },
+    ConstU32 {
+        dst: u32,
+        value: u32,
+    },
+    ConstU64 {
+        dst: u32,
+        value: u64,
+    },
     ConstF64 {
         dst: u32,
         bits: u64,
@@ -784,6 +792,16 @@ pub enum VmInstruction {
         left: u32,
         right: u32,
     },
+    BitAndU32 {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
+    BitAndU64 {
+        dst: u32,
+        left: u32,
+        right: u32,
+    },
     /// Exact manifest-bound i64 bitwise-xor. This remains distinct from all
     /// source arithmetic in the frozen bytecode contract.
     BitXorI64 {
@@ -868,6 +886,18 @@ pub enum VmInstruction {
         right: u32,
     },
     CompareI64 {
+        dst: u32,
+        left: u32,
+        right: u32,
+        op: VmCompare,
+    },
+    CompareU32 {
+        dst: u32,
+        left: u32,
+        right: u32,
+        op: VmCompare,
+    },
+    CompareU64 {
         dst: u32,
         left: u32,
         right: u32,
@@ -3376,6 +3406,14 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.i64()?,
             }),
+            151 => Ok(VmInstruction::ConstU32 {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
+            152 => Ok(VmInstruction::ConstU64 {
+                dst: self.u32()?,
+                value: self.u64()?,
+            }),
             1 => {
                 let (dst, src) = self.register_pair()?;
                 Ok(VmInstruction::Copy { dst, src })
@@ -3606,6 +3644,34 @@ impl<'a> Decoder<'a> {
                 left,
                 right,
             }),
+            153 => self.u32_runtime_binary(|dst, left, right| VmInstruction::BitAndU32 {
+                dst,
+                left,
+                right,
+            }),
+            154 => self.u32_runtime_binary(|dst, left, right| VmInstruction::BitAndU64 {
+                dst,
+                left,
+                right,
+            }),
+            155 => {
+                let (dst, left, right) = self.register_triple()?;
+                Ok(VmInstruction::CompareU32 {
+                    dst,
+                    left,
+                    right,
+                    op: self.compare()?,
+                })
+            }
+            156 => {
+                let (dst, left, right) = self.register_triple()?;
+                Ok(VmInstruction::CompareU64 {
+                    dst,
+                    left,
+                    right,
+                    op: self.compare()?,
+                })
+            }
             112 => self.i64_arithmetic(|dst, left, right| VmInstruction::BitXorI64 {
                 dst,
                 left,
@@ -4739,6 +4805,14 @@ fn lower_instruction(
             dst: dst.0,
             value: *value,
         },
+        MirInstruction::ConstU32 { dst, value } => VmInstruction::ConstU32 {
+            dst: dst.0,
+            value: *value,
+        },
+        MirInstruction::ConstU64 { dst, value } => VmInstruction::ConstU64 {
+            dst: dst.0,
+            value: *value,
+        },
         MirInstruction::ConstF64 { dst, bits } => VmInstruction::ConstF64 {
             dst: dst.0,
             bits: *bits,
@@ -5382,6 +5456,16 @@ fn lower_instruction(
             left: left.0,
             right: right.0,
         },
+        MirInstruction::BitAndU32 { dst, left, right } => VmInstruction::BitAndU32 {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
+        MirInstruction::BitAndU64 { dst, left, right } => VmInstruction::BitAndU64 {
+            dst: dst.0,
+            left: left.0,
+            right: right.0,
+        },
         MirInstruction::BitXorI64 { dst, left, right } => VmInstruction::BitXorI64 {
             dst: dst.0,
             left: left.0,
@@ -5461,6 +5545,12 @@ fn lower_instruction(
         }
         MirInstruction::NeI64 { dst, left, right } => {
             compare_i64(dst.0, left.0, right.0, VmCompare::NotEqual)
+        }
+        MirInstruction::NeU32 { dst, left, right } => {
+            compare_u32(dst.0, left.0, right.0, VmCompare::NotEqual)
+        }
+        MirInstruction::NeU64 { dst, left, right } => {
+            compare_u64(dst.0, left.0, right.0, VmCompare::NotEqual)
         }
         MirInstruction::LtI64 { dst, left, right } => {
             compare_i64(dst.0, left.0, right.0, VmCompare::Less)
@@ -5673,6 +5763,22 @@ fn lower_pattern_fields(fields: &[MirPatternField]) -> Vec<VmPatternField> {
 }
 fn compare_i64(dst: u32, left: u32, right: u32, op: VmCompare) -> VmInstruction {
     VmInstruction::CompareI64 {
+        dst,
+        left,
+        right,
+        op,
+    }
+}
+fn compare_u32(dst: u32, left: u32, right: u32, op: VmCompare) -> VmInstruction {
+    VmInstruction::CompareU32 {
+        dst,
+        left,
+        right,
+        op,
+    }
+}
+fn compare_u64(dst: u32, left: u32, right: u32, op: VmCompare) -> VmInstruction {
+    VmInstruction::CompareU64 {
         dst,
         left,
         right,
@@ -5991,6 +6097,14 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::ConstI64 { dst, .. } => {
                 expect_type(function, *dst, VmType::I64)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::ConstU32 { dst, .. } => {
+                expect_type(function, *dst, VmType::U32)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::ConstU64 { dst, .. } => {
+                expect_type(function, *dst, VmType::U64)?;
                 write(&mut states, *dst)?
             }
             VmInstruction::ConstF64 { dst, bits } => {
@@ -7382,6 +7496,22 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 expect_type(function, *right, VmType::I64)?;
                 write(&mut states, *dst)?
             }
+            VmInstruction::BitAndU32 { dst, left, right } => {
+                read(&states, *left)?;
+                read(&states, *right)?;
+                expect_type(function, *dst, VmType::U32)?;
+                expect_type(function, *left, VmType::U32)?;
+                expect_type(function, *right, VmType::U32)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::BitAndU64 { dst, left, right } => {
+                read(&states, *left)?;
+                read(&states, *right)?;
+                expect_type(function, *dst, VmType::U64)?;
+                expect_type(function, *left, VmType::U64)?;
+                expect_type(function, *right, VmType::U64)?;
+                write(&mut states, *dst)?
+            }
             VmInstruction::IntShrI64 { dst, left, right } => {
                 read(&states, *left)?;
                 read(&states, *right)?;
@@ -7428,6 +7558,26 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 expect_type(function, *dst, VmType::Bool)?;
                 expect_type(function, *left, VmType::I64)?;
                 expect_type(function, *right, VmType::I64)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::CompareU32 {
+                dst, left, right, ..
+            } => {
+                read(&states, *left)?;
+                read(&states, *right)?;
+                expect_type(function, *dst, VmType::Bool)?;
+                expect_type(function, *left, VmType::U32)?;
+                expect_type(function, *right, VmType::U32)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::CompareU64 {
+                dst, left, right, ..
+            } => {
+                read(&states, *left)?;
+                read(&states, *right)?;
+                expect_type(function, *dst, VmType::Bool)?;
+                expect_type(function, *left, VmType::U64)?;
+                expect_type(function, *right, VmType::U64)?;
                 write(&mut states, *dst)?
             }
             VmInstruction::CompareF64 {
@@ -9351,6 +9501,26 @@ fn compare_i64_values(left: i64, right: i64, op: VmCompare) -> bool {
         VmCompare::GreaterEqual => left >= right,
     }
 }
+fn compare_u32_values(left: u32, right: u32, op: VmCompare) -> bool {
+    match op {
+        VmCompare::Equal => left == right,
+        VmCompare::NotEqual => left != right,
+        VmCompare::Less => left < right,
+        VmCompare::LessEqual => left <= right,
+        VmCompare::Greater => left > right,
+        VmCompare::GreaterEqual => left >= right,
+    }
+}
+fn compare_u64_values(left: u64, right: u64, op: VmCompare) -> bool {
+    match op {
+        VmCompare::Equal => left == right,
+        VmCompare::NotEqual => left != right,
+        VmCompare::Less => left < right,
+        VmCompare::LessEqual => left <= right,
+        VmCompare::Greater => left > right,
+        VmCompare::GreaterEqual => left >= right,
+    }
+}
 fn compare_f64_values(left: f64, right: f64, op: VmCompare) -> bool {
     match op {
         VmCompare::Equal => left == right,
@@ -9755,6 +9925,12 @@ fn execute(
             VmInstruction::ConstUnit { dst } => registers[dst as usize] = Some(VmValue::Unit),
             VmInstruction::ConstI64 { dst, value } => {
                 registers[dst as usize] = Some(VmValue::I64(value))
+            }
+            VmInstruction::ConstU32 { dst, value } => {
+                registers[dst as usize] = Some(VmValue::U32(value))
+            }
+            VmInstruction::ConstU64 { dst, value } => {
+                registers[dst as usize] = Some(VmValue::U64(value))
             }
             VmInstruction::ConstF64 { dst, bits } => {
                 registers[dst as usize] = Some(VmValue::F64(canonical_vm_f64(f64::from_bits(bits))))
@@ -10952,6 +11128,32 @@ fn execute(
                     )?,
                 ))
             }
+            VmInstruction::BitAndU32 { dst, left, right } => {
+                registers[dst as usize] = Some(VmValue::U32(
+                    expect_u32(
+                        registers[left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )? & expect_u32(
+                        registers[right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                ))
+            }
+            VmInstruction::BitAndU64 { dst, left, right } => {
+                registers[dst as usize] = Some(VmValue::U64(
+                    expect_u64(
+                        registers[left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )? & expect_u64(
+                        registers[right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                ))
+            }
             VmInstruction::BitXorI64 { dst, left, right } => {
                 registers[dst as usize] = Some(VmValue::I64(
                     expect_i64(
@@ -11212,6 +11414,46 @@ fn execute(
                     )?,
                 ))
             }
+            VmInstruction::CompareU32 {
+                dst,
+                left,
+                right,
+                op,
+            } => {
+                registers[dst as usize] = Some(VmValue::Bool(compare_u32_values(
+                    expect_u32(
+                        registers[left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                    expect_u32(
+                        registers[right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                    op,
+                )))
+            }
+            VmInstruction::CompareU64 {
+                dst,
+                left,
+                right,
+                op,
+            } => {
+                registers[dst as usize] = Some(VmValue::Bool(compare_u64_values(
+                    expect_u64(
+                        registers[left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                    expect_u64(
+                        registers[right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                    op,
+                )))
+            }
             VmInstruction::NeBool { dst, left, right } => {
                 registers[dst as usize] = Some(VmValue::Bool(
                     expect_bool(
@@ -11404,6 +11646,16 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         }
         VmInstruction::ConstI64 { dst, value } => {
             output.push(0);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes())
+        }
+        VmInstruction::ConstU32 { dst, value } => {
+            output.push(151);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes())
+        }
+        VmInstruction::ConstU64 { dst, value } => {
+            output.push(152);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes())
         }
@@ -11780,6 +12032,17 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 output.extend_from_slice(&register.to_le_bytes());
             }
         }
+        VmInstruction::BitAndU32 { dst, left, right }
+        | VmInstruction::BitAndU64 { dst, left, right } => {
+            output.push(if matches!(value, VmInstruction::BitAndU32 { .. }) {
+                153
+            } else {
+                154
+            });
+            for register in [dst, left, right] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+        }
         VmInstruction::CompareI64 {
             dst,
             left,
@@ -11807,6 +12070,35 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             for register in [dst, left, right] {
                 output.extend_from_slice(&register.to_le_bytes());
             }
+            output.push(match op {
+                VmCompare::Equal => 0,
+                VmCompare::NotEqual => 1,
+                VmCompare::Less => 2,
+                VmCompare::LessEqual => 3,
+                VmCompare::Greater => 4,
+                VmCompare::GreaterEqual => 5,
+            });
+        }
+        VmInstruction::CompareU32 {
+            dst,
+            left,
+            right,
+            op,
+        }
+        | VmInstruction::CompareU64 {
+            dst,
+            left,
+            right,
+            op,
+        } => {
+            output.push(if matches!(value, VmInstruction::CompareU32 { .. }) {
+                155
+            } else {
+                156
+            });
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&left.to_le_bytes());
+            output.extend_from_slice(&right.to_le_bytes());
             output.push(match op {
                 VmCompare::Equal => 0,
                 VmCompare::NotEqual => 1,
@@ -12409,6 +12701,12 @@ fn execute_with_arguments(
             VmInstruction::ConstUnit { dst } => registers[*dst as usize] = Some(VmValue::Unit),
             VmInstruction::ConstI64 { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::I64(*value))
+            }
+            VmInstruction::ConstU32 { dst, value } => {
+                registers[*dst as usize] = Some(VmValue::U32(*value))
+            }
+            VmInstruction::ConstU64 { dst, value } => {
+                registers[*dst as usize] = Some(VmValue::U64(*value))
             }
             VmInstruction::ConstF64 { dst, bits } => {
                 registers[*dst as usize] =
@@ -13665,6 +13963,32 @@ fn execute_with_arguments(
                     )?,
                 ))
             }
+            VmInstruction::BitAndU32 { dst, left, right } => {
+                registers[*dst as usize] = Some(VmValue::U32(
+                    expect_u32(
+                        registers[*left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )? & expect_u32(
+                        registers[*right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                ))
+            }
+            VmInstruction::BitAndU64 { dst, left, right } => {
+                registers[*dst as usize] = Some(VmValue::U64(
+                    expect_u64(
+                        registers[*left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )? & expect_u64(
+                        registers[*right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                ))
+            }
             VmInstruction::BitXorI64 { dst, left, right } => {
                 registers[*dst as usize] = Some(VmValue::I64(
                     expect_i64(
@@ -13924,6 +14248,46 @@ fn execute_with_arguments(
                             .expect("verified register"),
                     )?,
                 ))
+            }
+            VmInstruction::CompareU32 {
+                dst,
+                left,
+                right,
+                op,
+            } => {
+                registers[*dst as usize] = Some(VmValue::Bool(compare_u32_values(
+                    expect_u32(
+                        registers[*left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                    expect_u32(
+                        registers[*right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                    *op,
+                )))
+            }
+            VmInstruction::CompareU64 {
+                dst,
+                left,
+                right,
+                op,
+            } => {
+                registers[*dst as usize] = Some(VmValue::Bool(compare_u64_values(
+                    expect_u64(
+                        registers[*left as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                    expect_u64(
+                        registers[*right as usize]
+                            .as_ref()
+                            .expect("verified register"),
+                    )?,
+                    *op,
+                )))
             }
             VmInstruction::NeBool { dst, left, right } => {
                 registers[*dst as usize] = Some(VmValue::Bool(
