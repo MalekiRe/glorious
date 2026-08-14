@@ -117,7 +117,7 @@ pub use signature::{
     ElaboratedAssociatedTypeDefinition, ElaboratedEffect, ElaboratedEffectOperation,
     ElaboratedEnumVariant, ElaboratedEnumVariantPayload, ElaboratedHeader,
     ElaboratedImplementation, ElaboratedInterface, ElaboratedNominalLayout, ElaboratedTrait,
-    ElaboratedTraitReference, NominalField, SignatureDiagnostic,
+    ElaboratedTraitReference, InstantiationError, NominalField, SignatureDiagnostic,
 };
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{

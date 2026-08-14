@@ -1,7 +1,8 @@
 use grandiose_stage0::{
     ConstKind, DeclarationScan, DefinitionIndex, EffectRow, EffectTail, ElaboratedHeader,
     ElaboratedInterface, ElaboratedNominalLayout, FileKey, GenericArgument, GenericKind,
-    InterfaceSet, LexedFile, Lifetime, LogicalPath, PackageKey, Quantity, ScalarType, Type,
+    InstantiationError, InterfaceSet, LexedFile, Lifetime, LogicalPath, PackageKey, Quantity,
+    ScalarType, Type,
 };
 
 #[test]
@@ -38,6 +39,43 @@ fn callable_signatures_preserve_const_binder_kinds_and_reject_type_misuse() {
         "{:#?}",
         signatures.diagnostics
     );
+}
+
+#[test]
+fn generic_instantiation_validates_kinds_before_type_only_lowering() {
+    let package = PackageKey("signature-generic-instantiation-boundary@0.1.0".into());
+    let source = "pub fn typed<T>(value: T) -> T { value } pub fn region<'a>() -> i64 { 0 } pub fn row<e: EffectRow>() -> i64 { 0 } pub fn count<n: u32>() -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = |name: &str| {
+        interface
+            .definitions
+            .iter()
+            .find(|definition| definition.name.as_deref() == Some(name))
+            .unwrap()
+            .key
+    };
+    assert!(
+        signatures
+            .instantiate_callable_generic(
+                definition("typed"),
+                &[GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+            )
+            .is_ok()
+    );
+    for (name, argument) in [
+        ("region", GenericArgument::Lifetime(Lifetime::Static)),
+        ("row", GenericArgument::EffectRow(EffectRow::empty())),
+        ("count", GenericArgument::ConstU32(3)),
+    ] {
+        assert!(matches!(
+            signatures.instantiate_callable_generic(definition(name), std::slice::from_ref(&argument)),
+            Err(InstantiationError::RequiresType { slot: 0, argument: found }) if *found == argument
+        ));
+    }
 }
 
 #[test]

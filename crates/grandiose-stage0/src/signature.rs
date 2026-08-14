@@ -127,6 +127,9 @@ pub struct ElaboratedEffectOperation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedEffect {
     pub generics: u32,
+    /// Source-slot kinds are retained even though operation value signatures
+    /// use only their type-valued subset.
+    pub generic_kinds: Vec<GenericKind>,
     pub operations: Vec<ElaboratedEffectOperation>,
 }
 
@@ -171,6 +174,7 @@ pub enum ElaboratedHeader {
     /// before their bodies lower to runtime layouts.
     Nominal {
         generics: u32,
+        generic_kinds: Vec<GenericKind>,
         layout: ElaboratedNominalLayout,
     },
     Trait(ElaboratedTrait),
@@ -183,6 +187,28 @@ pub enum ElaboratedHeader {
 pub struct SignatureDiagnostic {
     pub code: &'static str,
     pub message: String,
+}
+
+/// A declaration substitution could not cross a type-only boundary without
+/// losing its source kind. Callers retain this error instead of turning a
+/// lifetime, row, or const into `Type::Error` by accident.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstantiationError {
+    MissingDefinition,
+    WrongArity {
+        expected: usize,
+        found: usize,
+    },
+    WrongKind {
+        slot: usize,
+        expected: GenericKind,
+    },
+    RequiresType {
+        slot: usize,
+        argument: Box<GenericArgument>,
+    },
+    WrongLayout,
+    MissingMember,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -501,12 +527,25 @@ impl ElaboratedInterface {
     /// This is the sole bridge from interface-owned generic fields into
     /// body-local inference; callers cannot manufacture a layout from source
     /// spelling or rely on declaration order outside this semantic product.
+    pub fn instantiate_struct_fields_generic(
+        &self,
+        definition: DefKey,
+        arguments: &[GenericArgument],
+    ) -> Result<Vec<NominalField>, InstantiationError> {
+        let kinds = self.nominal_kinds(definition)?;
+        let arguments = validated_type_arguments(kinds, arguments)?;
+        self.instantiate_struct_fields(definition, &arguments)
+            .ok_or(InstantiationError::WrongLayout)
+    }
+
     pub fn instantiate_struct_fields(
         &self,
         definition: DefKey,
         arguments: &[Type],
     ) -> Option<Vec<NominalField>> {
-        let ElaboratedHeader::Nominal { generics, layout } = self.definitions.get(&definition)?
+        let ElaboratedHeader::Nominal {
+            generics, layout, ..
+        } = self.definitions.get(&definition)?
         else {
             return None;
         };
@@ -531,6 +570,23 @@ impl ElaboratedInterface {
     /// interface-owned generic binders never escape into a caller: every
     /// reference gets a caller-owned inference variable which Typed Core
     /// freezes before MIR can observe it.
+    pub fn instantiate_callable_generic(
+        &self,
+        definition: DefKey,
+        arguments: &[GenericArgument],
+    ) -> Result<CallableSignature, InstantiationError> {
+        let ElaboratedHeader::Callable(signature) = self
+            .definitions
+            .get(&definition)
+            .ok_or(InstantiationError::MissingDefinition)?
+        else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        let arguments = validated_type_arguments(&signature.generic_kinds, arguments)?;
+        self.instantiate_callable(definition, &arguments)
+            .ok_or(InstantiationError::WrongLayout)
+    }
+
     pub fn instantiate_callable(
         &self,
         definition: DefKey,
@@ -572,6 +628,37 @@ impl ElaboratedInterface {
     /// occupy the leading substitution slots; the operation's own binders
     /// follow them, so runtime effect identity stays nominally tied only to
     /// the protocol arguments.
+    pub fn instantiate_effect_operation_generic(
+        &self,
+        definition: DefKey,
+        arguments: &[GenericArgument],
+        operation_arguments: &[GenericArgument],
+        name: &str,
+    ) -> Result<(u32, ElaboratedEffectOperation), InstantiationError> {
+        let ElaboratedHeader::Effect(effect) = self
+            .definitions
+            .get(&definition)
+            .ok_or(InstantiationError::MissingDefinition)?
+        else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        let declaration = validated_type_arguments(&effect.generic_kinds, arguments)?;
+        let operation_count = effect
+            .operations
+            .iter()
+            .find(|operation| operation.name == name)
+            .ok_or(InstantiationError::MissingMember)?
+            .generics
+            .checked_sub(effect.generics)
+            .ok_or(InstantiationError::WrongLayout)? as usize;
+        let operation = validated_type_arguments(
+            &vec![GenericKind::Type; operation_count],
+            operation_arguments,
+        )?;
+        self.instantiate_effect_operation(definition, &declaration, &operation, name)
+            .ok_or(InstantiationError::WrongLayout)
+    }
+
     pub fn instantiate_effect_operation(
         &self,
         definition: DefKey,
@@ -617,13 +704,27 @@ impl ElaboratedInterface {
     /// Resolve a unit or tuple enum variant at one concrete nominal
     /// application. Named payload variants use the record-construction path
     /// so their field names remain checked.
+    pub fn instantiate_enum_variant_generic(
+        &self,
+        definition: DefKey,
+        arguments: &[GenericArgument],
+        name: &str,
+    ) -> Result<(u32, Vec<Type>), InstantiationError> {
+        let kinds = self.nominal_kinds(definition)?;
+        let arguments = validated_type_arguments(kinds, arguments)?;
+        self.instantiate_enum_variant(definition, &arguments, name)
+            .ok_or(InstantiationError::MissingMember)
+    }
+
     pub fn instantiate_enum_variant(
         &self,
         definition: DefKey,
         arguments: &[Type],
         name: &str,
     ) -> Option<(u32, Vec<Type>)> {
-        let ElaboratedHeader::Nominal { generics, layout } = self.definitions.get(&definition)?
+        let ElaboratedHeader::Nominal {
+            generics, layout, ..
+        } = self.definitions.get(&definition)?
         else {
             return None;
         };
@@ -649,13 +750,27 @@ impl ElaboratedInterface {
         Some((index as u32, fields))
     }
 
+    pub fn instantiate_enum_record_variant_generic(
+        &self,
+        definition: DefKey,
+        arguments: &[GenericArgument],
+        name: &str,
+    ) -> Result<(u32, Vec<NominalField>), InstantiationError> {
+        let kinds = self.nominal_kinds(definition)?;
+        let arguments = validated_type_arguments(kinds, arguments)?;
+        self.instantiate_enum_record_variant(definition, &arguments, name)
+            .ok_or(InstantiationError::MissingMember)
+    }
+
     pub fn instantiate_enum_record_variant(
         &self,
         definition: DefKey,
         arguments: &[Type],
         name: &str,
     ) -> Option<(u32, Vec<NominalField>)> {
-        let ElaboratedHeader::Nominal { generics, layout } = self.definitions.get(&definition)?
+        let ElaboratedHeader::Nominal {
+            generics, layout, ..
+        } = self.definitions.get(&definition)?
         else {
             return None;
         };
@@ -689,13 +804,27 @@ impl ElaboratedInterface {
     /// than source names, so this is its layout bridge. Both tuple and named
     /// payloads deliberately become positional here: field-name authority was
     /// checked during pattern elaboration and is no longer a runtime concern.
+    pub fn instantiate_enum_fields_generic(
+        &self,
+        definition: DefKey,
+        arguments: &[GenericArgument],
+        index: u32,
+    ) -> Result<Vec<NominalField>, InstantiationError> {
+        let kinds = self.nominal_kinds(definition)?;
+        let arguments = validated_type_arguments(kinds, arguments)?;
+        self.instantiate_enum_fields(definition, &arguments, index)
+            .ok_or(InstantiationError::MissingMember)
+    }
+
     pub fn instantiate_enum_fields(
         &self,
         definition: DefKey,
         arguments: &[Type],
         index: u32,
     ) -> Option<Vec<NominalField>> {
-        let ElaboratedHeader::Nominal { generics, layout } = self.definitions.get(&definition)?
+        let ElaboratedHeader::Nominal {
+            generics, layout, ..
+        } = self.definitions.get(&definition)?
         else {
             return None;
         };
@@ -725,6 +854,17 @@ impl ElaboratedInterface {
                 .collect(),
         };
         Some(fields)
+    }
+
+    fn nominal_kinds(&self, definition: DefKey) -> Result<&[GenericKind], InstantiationError> {
+        let ElaboratedHeader::Nominal { generic_kinds, .. } = self
+            .definitions
+            .get(&definition)
+            .ok_or(InstantiationError::MissingDefinition)?
+        else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        Ok(generic_kinds)
     }
 
     fn normalize_aliases(&mut self) {
@@ -823,6 +963,51 @@ impl ElaboratedInterface {
 /// bound and effect argument. Trait and implementation methods live in frozen
 /// interfaces just like top-level callables, so aliases cannot be allowed to
 /// survive in only these declarations.
+fn validated_type_arguments(
+    kinds: &[GenericKind],
+    arguments: &[GenericArgument],
+) -> Result<Vec<Type>, InstantiationError> {
+    if kinds.len() != arguments.len() {
+        return Err(InstantiationError::WrongArity {
+            expected: kinds.len(),
+            found: arguments.len(),
+        });
+    }
+    kinds
+        .iter()
+        .zip(arguments)
+        .enumerate()
+        .map(|(slot, (kind, argument))| {
+            let valid = match (kind, argument) {
+                (GenericKind::Type, GenericArgument::Type(_))
+                | (GenericKind::EffectRow, GenericArgument::EffectRow(_))
+                | (GenericKind::Lifetime, GenericArgument::Lifetime(_))
+                | (GenericKind::Const(ConstKind::U32), GenericArgument::ConstU32(_))
+                | (GenericKind::Const(ConstKind::Quantity), GenericArgument::ConstQuantity(_)) => {
+                    true
+                }
+                (GenericKind::Const(kind), GenericArgument::ConstGeneric { kind: found, .. }) => {
+                    kind == found
+                }
+                _ => false,
+            };
+            if !valid {
+                return Err(InstantiationError::WrongKind {
+                    slot,
+                    expected: *kind,
+                });
+            }
+            match argument {
+                GenericArgument::Type(value) => Ok(value.clone()),
+                argument => Err(InstantiationError::RequiresType {
+                    slot,
+                    argument: Box::new(argument.clone()),
+                }),
+            }
+        })
+        .collect()
+}
+
 fn normalize_callable_signature(
     signature: &mut CallableSignature,
     definitions: &BTreeMap<DefKey, ElaboratedHeader>,
@@ -1509,6 +1694,7 @@ impl Elaborator<'_> {
                 self.bind_generics(generics);
                 ElaboratedHeader::Nominal {
                     generics: generics.len() as u32,
+                    generic_kinds: generics.kinds(),
                     layout: self.nominal_layout(layout),
                 }
             }
@@ -1806,6 +1992,7 @@ impl Elaborator<'_> {
         self.const_generics = declaration_const_generics;
         ElaboratedEffect {
             generics: header.generics.len() as u32,
+            generic_kinds: header.generics.kinds(),
             operations,
         }
     }
