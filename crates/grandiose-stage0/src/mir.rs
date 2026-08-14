@@ -102,6 +102,10 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: u8,
     },
+    ConstU16 {
+        dst: MirLocal,
+        value: u16,
+    },
     ConstU32 {
         dst: MirLocal,
         value: u32,
@@ -109,6 +113,34 @@ pub enum MirInstruction {
     ConstU64 {
         dst: MirLocal,
         value: u64,
+    },
+    ConstUsize {
+        dst: MirLocal,
+        value: u64,
+    },
+    ConstU128 {
+        dst: MirLocal,
+        value: u128,
+    },
+    ConstI8 {
+        dst: MirLocal,
+        value: i8,
+    },
+    ConstI16 {
+        dst: MirLocal,
+        value: i16,
+    },
+    ConstI32 {
+        dst: MirLocal,
+        value: i32,
+    },
+    ConstIsize {
+        dst: MirLocal,
+        value: i64,
+    },
+    ConstI128 {
+        dst: MirLocal,
+        value: i128,
     },
     /// IEEE-754 values are stored by bit pattern so MIR remains Eq/Hash-safe
     /// and artifact fingerprints never depend on host float formatting.
@@ -1571,8 +1603,16 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         MirInstruction::ConstUnit { dst }
         | MirInstruction::ConstI64 { dst, .. }
         | MirInstruction::ConstU8 { dst, .. }
+        | MirInstruction::ConstU16 { dst, .. }
         | MirInstruction::ConstU32 { dst, .. }
         | MirInstruction::ConstU64 { dst, .. }
+        | MirInstruction::ConstUsize { dst, .. }
+        | MirInstruction::ConstU128 { dst, .. }
+        | MirInstruction::ConstI8 { dst, .. }
+        | MirInstruction::ConstI16 { dst, .. }
+        | MirInstruction::ConstI32 { dst, .. }
+        | MirInstruction::ConstIsize { dst, .. }
+        | MirInstruction::ConstI128 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
         | MirInstruction::FloatIntrinsic { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
@@ -3721,8 +3761,16 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstU8 { .. }
+        | MirInstruction::ConstU16 { .. }
         | MirInstruction::ConstU32 { .. }
         | MirInstruction::ConstU64 { .. }
+        | MirInstruction::ConstUsize { .. }
+        | MirInstruction::ConstU128 { .. }
+        | MirInstruction::ConstI8 { .. }
+        | MirInstruction::ConstI16 { .. }
+        | MirInstruction::ConstI32 { .. }
+        | MirInstruction::ConstIsize { .. }
+        | MirInstruction::ConstI128 { .. }
         | MirInstruction::ConstF64 { .. }
         | MirInstruction::ConstBool { .. }
         | MirInstruction::ConstChar { .. }
@@ -4416,8 +4464,16 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::ConstUnit { dst }
         | MirInstruction::ConstI64 { dst, .. }
         | MirInstruction::ConstU8 { dst, .. }
+        | MirInstruction::ConstU16 { dst, .. }
         | MirInstruction::ConstU32 { dst, .. }
         | MirInstruction::ConstU64 { dst, .. }
+        | MirInstruction::ConstUsize { dst, .. }
+        | MirInstruction::ConstU128 { dst, .. }
+        | MirInstruction::ConstI8 { dst, .. }
+        | MirInstruction::ConstI16 { dst, .. }
+        | MirInstruction::ConstI32 { dst, .. }
+        | MirInstruction::ConstIsize { dst, .. }
+        | MirInstruction::ConstI128 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
@@ -13798,6 +13854,15 @@ impl Lowerer<'_> {
                         return None;
                     }
                 },
+                Type::Scalar(crate::types::ScalarType::U16) => match parse_u16_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstU16 { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid u16 literal at MIR lowering");
+                        return None;
+                    }
+                },
                 Type::Scalar(crate::types::ScalarType::U32) => match parse_u32_literal(&text) {
                     Ok(value) => self
                         .instructions
@@ -13813,6 +13878,69 @@ impl Lowerer<'_> {
                         .push(MirInstruction::ConstU64 { dst, value }),
                     Err(_) => {
                         self.error("G6003", "invalid u64 literal at MIR lowering");
+                        return None;
+                    }
+                },
+                Type::Scalar(crate::types::ScalarType::Usize) => match parse_u64_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstUsize { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid usize literal at MIR lowering");
+                        return None;
+                    }
+                },
+                Type::Scalar(crate::types::ScalarType::U128) => match parse_u128_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstU128 { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid u128 literal at MIR lowering");
+                        return None;
+                    }
+                },
+                Type::Scalar(crate::types::ScalarType::I8) => match parse_i8_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstI8 { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid i8 literal at MIR lowering");
+                        return None;
+                    }
+                },
+                Type::Scalar(crate::types::ScalarType::I16) => match parse_i16_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstI16 { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid i16 literal at MIR lowering");
+                        return None;
+                    }
+                },
+                Type::Scalar(crate::types::ScalarType::I32) => match parse_i32_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstI32 { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid i32 literal at MIR lowering");
+                        return None;
+                    }
+                },
+                Type::Scalar(crate::types::ScalarType::Isize) => match parse_i64_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstIsize { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid isize literal at MIR lowering");
+                        return None;
+                    }
+                },
+                Type::Scalar(crate::types::ScalarType::I128) => match parse_i128_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstI128 { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid i128 literal at MIR lowering");
                         return None;
                     }
                 },
@@ -17436,9 +17564,39 @@ fn parse_u8_literal(text: &str) -> Result<u8, ()> {
     u8::from_str_radix(&digits, radix).map_err(|_| ())
 }
 
+fn parse_u16_literal(text: &str) -> Result<u16, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    u16::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
 fn parse_u64_literal(text: &str) -> Result<u64, ()> {
     let (radix, digits) = normalized_integer_literal(text);
     u64::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn parse_u128_literal(text: &str) -> Result<u128, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    u128::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn parse_i8_literal(text: &str) -> Result<i8, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    i8::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn parse_i16_literal(text: &str) -> Result<i16, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    i16::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn parse_i32_literal(text: &str) -> Result<i32, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    i32::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn parse_i128_literal(text: &str) -> Result<i128, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    i128::from_str_radix(&digits, radix).map_err(|_| ())
 }
 
 fn normalized_integer_literal(text: &str) -> (u32, String) {

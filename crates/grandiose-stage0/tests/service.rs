@@ -8304,6 +8304,118 @@ fn service_lowers_validated_radix_integer_literals() {
 }
 
 #[test]
+fn service_lowers_every_remaining_typed_integer_literal_across_generic_calls() {
+    // Each case crosses a separately materialized generic call boundary.
+    macro_rules! literal_case {
+        ($ty:ident, $value:literal, $run:ident, $instruction:pat) => {{
+            let artifact = StageZeroCompiler::new()
+                .compile(request(&format!(
+                    "pub fn relay<T>(value: T) -> T {{ value }} pub fn literal() -> {} {{ {} }} pub fn main() -> {} {{ relay(literal()) }}",
+                    stringify!($ty),
+                    stringify!($value),
+                    stringify!($ty),
+                )))
+                .unwrap_or_else(|diagnostics| panic!("{} literal: {diagnostics:#?}", stringify!($ty)))
+                .artifact
+                .expect("build must publish a VM artifact");
+            assert_eq!(artifact.$run().unwrap(), $value);
+            let program = decode_program(&artifact.canonical_bytes()).unwrap();
+            assert!(program.functions.values().any(|function| {
+                function
+                    .instructions
+                    .iter()
+                    .any(|instruction| matches!(instruction, $instruction))
+            }));
+            artifact
+        }};
+    }
+
+    literal_case!(
+        u16,
+        65535,
+        run_u16,
+        VmInstruction::ConstU16 { value: 65535, .. }
+    );
+    literal_case!(
+        usize,
+        18446744073709551615,
+        run_usize,
+        VmInstruction::ConstUsize {
+            value: u64::MAX,
+            ..
+        }
+    );
+    literal_case!(
+        u128,
+        340282366920938463463374607431768211455,
+        run_u128,
+        VmInstruction::ConstU128 {
+            value: u128::MAX,
+            ..
+        }
+    );
+    literal_case!(i8, 127, run_i8, VmInstruction::ConstI8 { value: 127, .. });
+    literal_case!(
+        i16,
+        32767,
+        run_i16,
+        VmInstruction::ConstI16 { value: 32767, .. }
+    );
+    literal_case!(
+        i32,
+        2147483647,
+        run_i32,
+        VmInstruction::ConstI32 {
+            value: i32::MAX,
+            ..
+        }
+    );
+    literal_case!(
+        isize,
+        9223372036854775807,
+        run_isize,
+        VmInstruction::ConstIsize {
+            value: i64::MAX,
+            ..
+        }
+    );
+    let artifact = literal_case!(
+        i128,
+        170141183460469231731687303715884105727,
+        run_i128,
+        VmInstruction::ConstI128 {
+            value: i128::MAX,
+            ..
+        }
+    );
+
+    let mut forged = decode_program(&artifact.canonical_bytes()).unwrap();
+    let (function_key, constant) = forged
+        .functions
+        .iter()
+        .find_map(|(key, function)| {
+            function
+                .instructions
+                .iter()
+                .find_map(|instruction| match instruction {
+                    VmInstruction::ConstI128 { dst, .. } => Some((key.clone(), *dst)),
+                    _ => None,
+                })
+        })
+        .expect("typed i128 literal is present in the decoded artifact");
+    forged
+        .functions
+        .get_mut(&function_key)
+        .expect("selected constant belongs to the decoded artifact")
+        .registers[constant as usize] = VmType::I64;
+    forged.fingerprint = forged.computed_fingerprint();
+    assert!(
+        decode_and_verify_program(&encode_program(&forged)).is_err(),
+        "a typed integer immediate cannot publish into a register of another width"
+    );
+}
+
+#[test]
 fn service_parses_checks_and_executes_typed_constant_initializers() {
     let source = "const forty: i64 = 40; const two: i64 = 2; pub fn main() -> i64 { forty + two }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
