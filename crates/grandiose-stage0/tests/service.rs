@@ -1857,6 +1857,26 @@ fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
         outcome.artifact.unwrap().run_bool().unwrap(),
         "nested generic enum/record patterns must retain their field layout proof through the VM"
     );
+
+    let nested_array_source = "pub struct Pair { left: i64, right: i64 } pub enum Result { Ok(Pair), Err } pub fn main() -> Bool { [Result::Ok(Pair { left: 1, right: 42 })] is [Result::Ok(Pair { right: 42, left: 1 })] }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(nested_array_source))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert!(
+        outcome.artifact.unwrap().run_bool().unwrap(),
+        "nested array/enum/record patterns must lower through the verified VM"
+    );
+
+    let array_mismatch_source = "pub fn main() -> Bool { [1, 42] is [1] }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(array_mismatch_source))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert!(
+        !outcome.artifact.unwrap().run_bool().unwrap(),
+        "array patterns must compare exact length before selecting elements"
+    );
 }
 
 #[test]
@@ -1881,6 +1901,34 @@ fn service_executes_positive_is_refinements_through_completion_dispatch() {
         .unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let array_source =
+        "pub fn main() -> i64 { handle [1, 42] is [_, found] { true => found; false => 0 } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(array_source))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(
+        outcome.artifact.unwrap().run_i64().unwrap(),
+        42,
+        "positive array refinements must bind their exact selected element"
+    );
+}
+
+#[test]
+fn service_requires_a_fallback_after_an_exact_array_completion_pattern() {
+    let source = "pub fn main() -> i64 { handle [1] { [1] => 1 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("one exact array completion arm unexpectedly proved exhaustive")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4166"),
+        "array completion coverage must remain open without a fallback: {diagnostics:#?}"
+    );
 }
 
 #[test]

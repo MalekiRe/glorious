@@ -1638,6 +1638,7 @@ fn vm_verifier_rejects_nominal_pattern_fields_outside_frozen_arity() {
                     subject: 1,
                     pattern: VmPattern::Record {
                         definition,
+                        field_types: vec![VmType::I64],
                         field_count: 1,
                         fields: vec![VmPatternField {
                             index: 1,
@@ -1661,6 +1662,112 @@ fn vm_verifier_rejects_nominal_pattern_fields_outside_frozen_arity() {
             }
         )),
         "serialized bytecode must fail closed before an invalid pattern can execute"
+    );
+}
+
+#[test]
+fn vm_decoder_verifier_rejects_nominal_pattern_field_type_forgery() {
+    let definition = DefKey(Digest::of_bytes(b"vm-pattern-layout"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"vm-pattern-layout-function")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Nominal {
+                    definition,
+                    arguments: vec![],
+                },
+                VmType::Bool,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeRecord {
+                    dst: 1,
+                    definition,
+                    fields: vec![0],
+                    field_types: vec![VmType::I64],
+                },
+                VmInstruction::PatternTest {
+                    dst: 2,
+                    subject: 1,
+                    pattern: VmPattern::Record {
+                        definition,
+                        field_types: vec![VmType::Bool],
+                        field_count: 1,
+                        fields: vec![VmPatternField {
+                            index: 0,
+                            ty: VmType::I64,
+                            pattern: VmPattern::Any,
+                        }],
+                    },
+                },
+                VmInstruction::Return { value: 2 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"vm-pattern-layout-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+
+    assert!(
+        decode_and_verify_artifact(&bytes).is_err_and(|error| matches!(
+            error,
+            VmArtifactError::MalformedEncoding {
+                message: "pattern field type disagrees with its frozen layout"
+            }
+        )),
+        "a decoded artifact cannot forge an in-range nominal pattern field type"
+    );
+}
+
+#[test]
+fn vm_decoder_verifier_rejects_forged_array_pattern_element_metadata() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"vm-array-pattern-forgery")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Array(Box::new(VmType::I64)),
+                VmType::Bool,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeArray {
+                    dst: 1,
+                    fields: vec![0],
+                    element_type: VmType::I64,
+                },
+                VmInstruction::PatternTest {
+                    dst: 2,
+                    subject: 1,
+                    pattern: VmPattern::Array {
+                        element: VmType::Bool,
+                        elements: vec![VmPattern::Any],
+                    },
+                },
+                VmInstruction::Return { value: 2 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"vm-array-pattern-forgery-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(
+        decode_and_verify_artifact(&encode_artifact(&candidate)).is_err_and(|error| matches!(
+            error,
+            VmArtifactError::TypeMismatch {
+                expected: VmType::Array(_),
+                ..
+            }
+        )),
+        "decoded bytecode cannot relabel an array pattern element type"
     );
 }
 

@@ -48,6 +48,7 @@ pub enum PatternDecision {
     Bind(BinderKey),
     Literal(String),
     Tuple(Vec<PatternDecision>),
+    Array(Vec<PatternDecision>),
     Record {
         definition: DefKey,
         fields: Vec<(u32, PatternDecision)>,
@@ -158,6 +159,7 @@ fn decision_refutable(decision: &PatternDecision) -> bool {
         PatternDecision::Any | PatternDecision::Bind(_) => false,
         PatternDecision::Literal(_) | PatternDecision::Enum { .. } | PatternDecision::Error => true,
         PatternDecision::Tuple(values) => values.iter().any(decision_refutable),
+        PatternDecision::Array(_) => true,
         PatternDecision::Record { fields, .. } => fields
             .iter()
             .any(|(_, decision)| decision_refutable(decision)),
@@ -228,6 +230,22 @@ impl Elaborator<'_> {
                         .into_iter()
                         .zip(types)
                         .map(|(pattern, ty)| self.pattern(pattern, ty))
+                        .collect(),
+                )
+            }
+            PatternKind::Array(values) => {
+                let Type::Array(element) = subject else {
+                    self.error(
+                        pattern.span,
+                        "G4215",
+                        "array pattern requires an array subject",
+                    );
+                    return PatternDecision::Error;
+                };
+                PatternDecision::Array(
+                    values
+                        .into_iter()
+                        .map(|value| self.pattern(value, (*element).clone()))
                         .collect(),
                 )
             }

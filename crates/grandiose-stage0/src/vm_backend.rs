@@ -123,8 +123,16 @@ pub enum VmPattern {
     Any,
     Literal(String),
     Tuple(Vec<VmPattern>),
+    Array {
+        element: VmType,
+        elements: Vec<VmPattern>,
+    },
     Record {
         definition: DefKey,
+        /// Complete ordered field layout carried from MIR. This allows the
+        /// standalone verifier to reject an otherwise in-range projection
+        /// with stale or forged field metadata.
+        field_types: Vec<VmType>,
         /// Frozen aggregate arity. This lets the standalone verifier reject
         /// forged field projections without consulting compiler interfaces.
         field_count: u32,
@@ -133,6 +141,8 @@ pub enum VmPattern {
     Enum {
         definition: DefKey,
         variant: u32,
+        /// Complete ordered payload layout for this exact enum variant.
+        field_types: Vec<VmType>,
         /// Frozen payload arity for this exact variant.
         field_count: u32,
         fields: Vec<VmPatternField>,
@@ -204,6 +214,13 @@ pub enum VmInstruction {
         index: u32,
         field_count: u32,
         field_type: VmType,
+    },
+    ProjectArray {
+        dst: u32,
+        base: u32,
+        index: u32,
+        field_count: u32,
+        element_type: VmType,
     },
     UpdateRecord {
         dst: u32,
@@ -710,11 +727,9 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// 27 changed protocol identities to canonical tagged generic arguments.
 /// Older layouts cannot be decoded safely because `InstallHandler` changed
 /// in place.
-// Schema 29 carries the frozen nominal-pattern arity used by the standalone
-// verifier.  Older bytecode lacks that proof and must fail closed rather than
-// being decoded with shifted field data.
-/// Schema 31 adds the canonical program-level host capability declaration
-/// set. Older programs have no boundary proof and must fail closed.
+/// Schema 31 adds canonical program-level host capability declarations and
+/// complete nominal-pattern layouts. Older bytecode lacks these independent
+/// boundary proofs and must fail closed.
 pub const STAGE0_VM_SCHEMA: u32 = 31;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
@@ -1944,10 +1959,24 @@ impl<'a> Decoder<'a> {
                 }
                 Ok(VmPattern::Tuple(values))
             }
+            5 => {
+                let element = self.vm_type_at_depth(depth + 1)?;
+                let count = self.count("array pattern fields", MAX_DECODE_REGISTERS)?;
+                let mut elements = Vec::with_capacity(count);
+                for _ in 0..count {
+                    elements.push(self.pattern_at_depth(depth + 1)?);
+                }
+                Ok(VmPattern::Array { element, elements })
+            }
             tag @ (3 | 4) => {
                 let definition = self.def_key()?;
                 let variant = (tag == 4).then(|| self.u32()).transpose()?;
                 let field_count = self.u32()?;
+                let layout_count = self.count("nominal pattern layout", MAX_DECODE_REGISTERS)?;
+                let mut field_types = Vec::with_capacity(layout_count);
+                for _ in 0..layout_count {
+                    field_types.push(self.vm_type_at_depth(depth + 1)?);
+                }
                 let count = self.count("nominal pattern fields", MAX_DECODE_REGISTERS)?;
                 let mut fields = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -1961,11 +1990,13 @@ impl<'a> Decoder<'a> {
                     Some(variant) => Ok(VmPattern::Enum {
                         definition,
                         variant,
+                        field_types,
                         field_count,
                         fields,
                     }),
                     None => Ok(VmPattern::Record {
                         definition,
+                        field_types,
                         field_count,
                         fields,
                     }),
@@ -2172,6 +2203,13 @@ impl<'a> Decoder<'a> {
                 index: self.u32()?,
                 field_count: self.u32()?,
                 field_type: self.vm_type()?,
+            }),
+            57 => Ok(VmInstruction::ProjectArray {
+                dst: self.u32()?,
+                base: self.u32()?,
+                index: self.u32()?,
+                field_count: self.u32()?,
+                element_type: self.vm_type()?,
             }),
             43 => Ok(VmInstruction::Trap),
             44 => {
@@ -2906,6 +2944,20 @@ fn lower_instruction(
             field_type: vm_type(field_type)
                 .expect("validated MIR has VM-representable tuple projection type"),
         },
+        MirInstruction::ProjectArray {
+            dst,
+            base,
+            index,
+            field_count,
+            element_type,
+        } => VmInstruction::ProjectArray {
+            dst: dst.0,
+            base: base.0,
+            index: *index,
+            field_count: *field_count,
+            element_type: vm_type(element_type)
+                .expect("validated MIR has VM-representable array projection type"),
+        },
         MirInstruction::UpdateRecord {
             dst,
             base,
@@ -3212,23 +3264,42 @@ fn lower_pattern(value: &MirPattern) -> VmPattern {
         MirPattern::Any => VmPattern::Any,
         MirPattern::Literal(value) => VmPattern::Literal(value.clone()),
         MirPattern::Tuple(values) => VmPattern::Tuple(values.iter().map(lower_pattern).collect()),
+        MirPattern::Array { element, elements } => VmPattern::Array {
+            element: vm_type(element)
+                .expect("validated MIR has VM-representable array pattern element"),
+            elements: elements.iter().map(lower_pattern).collect(),
+        },
         MirPattern::Record {
             definition,
+            field_types,
             field_count,
             fields,
         } => VmPattern::Record {
             definition: *definition,
+            field_types: field_types
+                .iter()
+                .map(|field| {
+                    vm_type(field).expect("validated MIR has VM-representable pattern layout")
+                })
+                .collect(),
             field_count: *field_count,
             fields: lower_pattern_fields(fields),
         },
         MirPattern::Enum {
             definition,
             variant,
+            field_types,
             field_count,
             fields,
         } => VmPattern::Enum {
             definition: *definition,
             variant: *variant,
+            field_types: field_types
+                .iter()
+                .map(|field| {
+                    vm_type(field).expect("validated MIR has VM-representable pattern layout")
+                })
+                .collect(),
             field_count: *field_count,
             fields: lower_pattern_fields(fields),
         },
@@ -3291,20 +3362,32 @@ fn verify_pattern(pattern: &VmPattern, subject: &VmType) -> Result<(), VmArtifac
                 found: subject.clone(),
             }),
         },
+        VmPattern::Array { element, elements } => match subject {
+            VmType::Array(actual) if actual.as_ref() == element => elements
+                .iter()
+                .try_for_each(|pattern| verify_pattern(pattern, element)),
+            _ => Err(VmArtifactError::TypeMismatch {
+                register: 0,
+                expected: VmType::Array(Box::new(element.clone())),
+                found: subject.clone(),
+            }),
+        },
         VmPattern::Record {
             definition,
+            field_types,
             field_count,
             fields,
         }
         | VmPattern::Enum {
             definition,
+            field_types,
             field_count,
             fields,
             ..
         } => match subject {
             VmType::Nominal {
                 definition: actual, ..
-            } if actual == definition => verify_pattern_fields(fields, *field_count),
+            } if actual == definition => verify_pattern_fields(fields, field_types, *field_count),
             _ => Err(VmArtifactError::TypeMismatch {
                 register: 0,
                 expected: VmType::Nominal {
@@ -3318,8 +3401,14 @@ fn verify_pattern(pattern: &VmPattern, subject: &VmType) -> Result<(), VmArtifac
 }
 fn verify_pattern_fields(
     fields: &[VmPatternField],
+    field_types: &[VmType],
     field_count: u32,
 ) -> Result<(), VmArtifactError> {
+    if field_types.len() != field_count as usize {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "pattern layout length disagrees with its frozen arity",
+        });
+    }
     let mut previous = None;
     for field in fields {
         if previous.is_some_and(|previous| previous >= field.index) {
@@ -3330,6 +3419,11 @@ fn verify_pattern_fields(
         if field.index >= field_count {
             return Err(VmArtifactError::MalformedEncoding {
                 message: "pattern field is outside its structural arity",
+            });
+        }
+        if field.ty != field_types[field.index as usize] {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "pattern field type disagrees with its frozen layout",
             });
         }
         previous = Some(field.index);
@@ -3704,6 +3798,35 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
                         expected: field_type.clone(),
+                        found: register_type(function, *dst)?,
+                    });
+                }
+                write(&mut states, *dst)?
+            }
+            VmInstruction::ProjectArray {
+                dst,
+                base,
+                index,
+                field_count,
+                element_type,
+            } => {
+                if *index >= *field_count {
+                    return Err(VmArtifactError::InvalidRegister { register: *index });
+                }
+                read(&states, *base)?;
+                let VmType::Array(actual) = register_type(function, *base)? else {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *base,
+                        expected: VmType::Array(Box::new(element_type.clone())),
+                        found: register_type(function, *base)?,
+                    });
+                };
+                if actual.as_ref() != element_type
+                    || register_type(function, *dst)? != *element_type
+                {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *dst,
+                        expected: element_type.clone(),
                         found: register_type(function, *dst)?,
                     });
                 }
@@ -5253,8 +5376,23 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
                 .all(|(value, pattern)| matches_pattern(value, pattern)),
             _ => false,
         },
+        VmPattern::Array { element, elements } => match value {
+            VmValue::Array(values)
+                if values.len() == elements.len()
+                    && values
+                        .iter()
+                        .all(|value| value_matches_vm_type(value, element)) =>
+            {
+                values
+                    .iter()
+                    .zip(elements)
+                    .all(|(value, pattern)| matches_pattern(value, pattern))
+            }
+            _ => false,
+        },
         VmPattern::Record {
             definition,
+            field_types,
             field_count,
             fields,
         } => match value {
@@ -5262,7 +5400,10 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
                 definition: actual,
                 fields: values,
                 ..
-            } if actual == definition && values.len() == *field_count as usize => {
+            } if actual == definition
+                && values.len() == *field_count as usize
+                && aggregate_matches_layout(values, field_types) =>
+            {
                 matches_pattern_fields(values, fields)
             }
             _ => false,
@@ -5270,6 +5411,7 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
         VmPattern::Enum {
             definition,
             variant,
+            field_types,
             field_count,
             fields,
         } => match value {
@@ -5280,7 +5422,8 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
                 ..
             } if actual == definition
                 && actual_variant == variant
-                && values.len() == *field_count as usize =>
+                && values.len() == *field_count as usize
+                && aggregate_matches_layout(values, field_types) =>
             {
                 matches_pattern_fields(values, fields)
             }
@@ -5290,10 +5433,78 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
 }
 fn matches_pattern_fields(values: &[VmValue], fields: &[VmPatternField]) -> bool {
     fields.iter().all(|field| {
-        values
-            .get(field.index as usize)
-            .is_some_and(|value| matches_pattern(value, &field.pattern))
+        values.get(field.index as usize).is_some_and(|value| {
+            value_matches_vm_type(value, &field.ty) && matches_pattern(value, &field.pattern)
+        })
     })
+}
+
+/// Runtime rechecks the frozen layout against the constructed aggregate. This
+/// means an artifact cannot change a selected field's metadata while leaving
+/// its pattern as `Any` and gain a silently different match behavior.
+fn aggregate_matches_layout(values: &[VmValue], field_types: &[VmType]) -> bool {
+    values.len() == field_types.len()
+        && values
+            .iter()
+            .zip(field_types)
+            .all(|(value, ty)| value_matches_vm_type(value, ty))
+}
+
+/// A VM generic is a declaration-local wildcard at runtime; every other
+/// structural component must agree exactly with the value's concrete shape.
+fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
+    match expected {
+        VmType::Generic(_) => true,
+        VmType::Unit => matches!(value, VmValue::Unit),
+        VmType::I64 => matches!(value, VmValue::I64(_)),
+        VmType::F64 => matches!(value, VmValue::F64(_)),
+        VmType::Bool => matches!(value, VmValue::Bool(_)),
+        VmType::Char => matches!(value, VmValue::Char(_)),
+        VmType::Text => matches!(value, VmValue::Text(_)),
+        VmType::Tuple(expected) => {
+            matches!(value, VmValue::Tuple(values) if values.len() == expected.len() && values.iter().zip(expected).all(|(value, ty)| value_matches_vm_type(value, ty)))
+        }
+        VmType::Array(expected) => {
+            matches!(value, VmValue::Array(values) if values.iter().all(|value| value_matches_vm_type(value, expected)))
+        }
+        VmType::Nominal {
+            definition,
+            arguments,
+        } => {
+            matches!(value, VmValue::Record { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } | VmValue::Enum { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } if actual == definition && signature_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_type_matches(actual, expected)))
+        }
+        VmType::Callable { parameters, result } => {
+            matches!(value, VmValue::Callable { signature: VmType::Callable { parameters: actual_parameters, result: actual_result }, .. } if actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result))
+        }
+        VmType::Reference { unique, referent } => {
+            matches!(value, VmValue::Reference { unique: actual_unique, referent: actual_referent, .. } if actual_unique == unique && vm_type_matches(actual_referent, referent))
+        }
+    }
+}
+
+fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
+    match expected {
+        VmType::Generic(_) => true,
+        VmType::Array(expected) => {
+            matches!(actual, VmType::Array(actual) if vm_type_matches(actual, expected))
+        }
+        VmType::Tuple(expected) => {
+            matches!(actual, VmType::Tuple(actual) if actual.len() == expected.len() && actual.iter().zip(expected).all(|(actual, expected)| vm_type_matches(actual, expected)))
+        }
+        VmType::Nominal {
+            definition,
+            arguments,
+        } => {
+            matches!(actual, VmType::Nominal { definition: actual_definition, arguments: actual_arguments } if actual_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_type_matches(actual, expected)))
+        }
+        VmType::Callable { parameters, result } => {
+            matches!(actual, VmType::Callable { parameters: actual_parameters, result: actual_result } if actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result))
+        }
+        VmType::Reference { unique, referent } => {
+            matches!(actual, VmType::Reference { unique: actual_unique, referent: actual_referent } if actual_unique == unique && vm_type_matches(actual_referent, referent))
+        }
+        _ => actual == expected,
+    }
 }
 fn literal_matches(value: &VmValue, literal: &str) -> bool {
     match value {
@@ -5486,6 +5697,32 @@ fn execute(
                 {
                     VmValue::Record { fields, .. } | VmValue::Enum { fields, .. } => fields,
                     _ => return Err(VmArtifactError::InvalidRegister { register: base }),
+                };
+                if fields.len() != field_count as usize {
+                    return Err(VmArtifactError::CallArity {
+                        expected: field_count,
+                        found: fields.len() as u32,
+                    });
+                }
+                registers[dst as usize] = Some(
+                    fields
+                        .get(index as usize)
+                        .ok_or(VmArtifactError::InvalidRegister { register: index })?
+                        .clone(),
+                );
+            }
+            VmInstruction::ProjectArray {
+                dst,
+                base,
+                index,
+                field_count,
+                ..
+            } => {
+                let VmValue::Array(fields) = registers[base as usize]
+                    .as_ref()
+                    .expect("verified register")
+                else {
+                    return Err(VmArtifactError::InvalidRegister { register: base });
                 };
                 if fields.len() != field_count as usize {
                     return Err(VmArtifactError::CallArity {
@@ -6473,6 +6710,20 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&field_count.to_le_bytes());
             encode_type(field_type, output);
         }
+        VmInstruction::ProjectArray {
+            dst,
+            base,
+            index,
+            field_count,
+            element_type,
+        } => {
+            output.push(57);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&base.to_le_bytes());
+            output.extend_from_slice(&index.to_le_bytes());
+            output.extend_from_slice(&field_count.to_le_bytes());
+            encode_type(element_type, output);
+        }
         VmInstruction::UpdateRecord {
             dst,
             base,
@@ -6831,19 +7082,33 @@ fn encode_pattern(value: &VmPattern, output: &mut Vec<u8>) {
                 encode_pattern(value, output);
             }
         }
+        VmPattern::Array { element, elements } => {
+            output.push(5);
+            encode_type(element, output);
+            output.extend_from_slice(&(elements.len() as u64).to_le_bytes());
+            for value in elements {
+                encode_pattern(value, output);
+            }
+        }
         VmPattern::Record {
             definition,
+            field_types,
             field_count,
             fields,
         } => {
             output.push(3);
             output.extend_from_slice(&definition.0.as_bytes());
             output.extend_from_slice(&field_count.to_le_bytes());
+            output.extend_from_slice(&(field_types.len() as u64).to_le_bytes());
+            for field_type in field_types {
+                encode_type(field_type, output);
+            }
             encode_pattern_fields(fields, output);
         }
         VmPattern::Enum {
             definition,
             variant,
+            field_types,
             field_count,
             fields,
         } => {
@@ -6851,6 +7116,10 @@ fn encode_pattern(value: &VmPattern, output: &mut Vec<u8>) {
             output.extend_from_slice(&definition.0.as_bytes());
             output.extend_from_slice(&variant.to_le_bytes());
             output.extend_from_slice(&field_count.to_le_bytes());
+            output.extend_from_slice(&(field_types.len() as u64).to_le_bytes());
+            for field_type in field_types {
+                encode_type(field_type, output);
+            }
             encode_pattern_fields(fields, output);
         }
     }
@@ -7067,6 +7336,32 @@ fn execute_with_arguments(
                 ..
             } => {
                 let VmValue::Tuple(fields) = registers[*base as usize]
+                    .as_ref()
+                    .expect("verified register")
+                else {
+                    return Err(VmArtifactError::InvalidRegister { register: *base });
+                };
+                if fields.len() != *field_count as usize {
+                    return Err(VmArtifactError::CallArity {
+                        expected: *field_count,
+                        found: fields.len() as u32,
+                    });
+                }
+                registers[*dst as usize] = Some(
+                    fields
+                        .get(*index as usize)
+                        .ok_or(VmArtifactError::InvalidRegister { register: *index })?
+                        .clone(),
+                );
+            }
+            VmInstruction::ProjectArray {
+                dst,
+                base,
+                index,
+                field_count,
+                ..
+            } => {
+                let VmValue::Array(fields) = registers[*base as usize]
                     .as_ref()
                     .expect("verified register")
                 else {

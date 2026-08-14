@@ -382,6 +382,39 @@ fn typed_core_validation_rejects_out_of_range_nominal_pattern_fields() {
 }
 
 #[test]
+fn typed_core_validation_rejects_nominal_pattern_field_type_forgery() {
+    let mut body = core_for(
+        "core-pattern-layout-validation@0.1.0",
+        "pub struct Pair { left: i64, right: bool } pub fn main(value: Pair) -> bool { value is Pair { left: _, right: _ } }",
+    );
+    let pattern = body
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::PatternTest { pattern, .. } => Some(pattern),
+            _ => None,
+        })
+        .expect("source is-pattern must elaborate to Core");
+    let CorePattern::Record {
+        field_types,
+        fields,
+        ..
+    } = pattern
+    else {
+        panic!("source record pattern must preserve its nominal layout")
+    };
+    assert_eq!(field_types[0], Type::Scalar(ScalarType::I64));
+    fields[0].ty = Type::Scalar(ScalarType::Bool);
+
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4183"),
+        "an in-range Core field cannot be relabelled with another layout slot type"
+    );
+}
+
+#[test]
 fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
     let package = PackageKey("core-metadata-inference@0.1.0".into());
     let span = Span {

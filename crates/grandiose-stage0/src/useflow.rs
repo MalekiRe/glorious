@@ -210,6 +210,7 @@ fn core_pattern_is_irrefutable(pattern: &CorePattern) -> bool {
     match pattern {
         CorePattern::Any | CorePattern::Bind { .. } => true,
         CorePattern::Tuple(values) => values.iter().all(core_pattern_is_irrefutable),
+        CorePattern::Array { .. } => false,
         CorePattern::Record { fields, .. } => fields
             .iter()
             .all(|field| core_pattern_is_irrefutable(&field.pattern)),

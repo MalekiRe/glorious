@@ -147,14 +147,24 @@ pub enum CorePattern {
     },
     Literal(String),
     Tuple(Vec<CorePattern>),
+    Array {
+        element: Type,
+        elements: Vec<CorePattern>,
+    },
     Record {
         definition: DefKey,
+        /// Complete ordered instantiated layout.  Keeping this separately
+        /// from the selected fields freezes the identity and type of every
+        /// declaration slot, including omitted fields.
+        field_types: Vec<Type>,
         field_count: u32,
         fields: Vec<CorePatternField>,
     },
     Enum {
         definition: DefKey,
         variant: u32,
+        /// Complete ordered instantiated payload layout for `variant`.
+        field_types: Vec<Type>,
         field_count: u32,
         fields: Vec<CorePatternField>,
     },
@@ -779,13 +789,23 @@ impl CoreFingerprintEncoder<'_> {
                     self.pattern(value);
                 }
             }
+            CorePattern::Array { element, elements } => {
+                self.bytes(b"array");
+                self.ty(element);
+                self.bytes(&(elements.len() as u64).to_le_bytes());
+                for element in elements {
+                    self.pattern(element);
+                }
+            }
             CorePattern::Record {
                 definition,
+                field_types,
                 field_count,
                 fields,
             }
             | CorePattern::Enum {
                 definition,
+                field_types,
                 field_count,
                 fields,
                 ..
@@ -800,6 +820,10 @@ impl CoreFingerprintEncoder<'_> {
                     self.bytes(&variant.to_le_bytes());
                 }
                 self.bytes(&field_count.to_le_bytes());
+                self.bytes(&(field_types.len() as u64).to_le_bytes());
+                for field_type in field_types {
+                    self.ty(field_type);
+                }
                 self.bytes(&(fields.len() as u64).to_le_bytes());
                 for field in fields {
                     self.bytes(&field.index.to_le_bytes());
@@ -1480,16 +1504,25 @@ fn place_structural_error(place: &CorePlace) -> Option<String> {
 fn pattern_structural_error(pattern: &CorePattern) -> Option<String> {
     match pattern {
         CorePattern::Tuple(values) => values.iter().find_map(pattern_structural_error),
+        CorePattern::Array { elements, .. } => elements.iter().find_map(pattern_structural_error),
         CorePattern::Record {
+            field_types,
             field_count,
             fields,
             ..
         }
         | CorePattern::Enum {
+            field_types,
             field_count,
             fields,
             ..
         } => {
+            if *field_count != field_types.len() as u32 {
+                return Some(format!(
+                    "Typed Core pattern layout has {} fields but frozen arity is {field_count}",
+                    field_types.len()
+                ));
+            }
             let mut seen = std::collections::BTreeSet::new();
             for field in fields {
                 if field.index >= *field_count {
@@ -1501,6 +1534,12 @@ fn pattern_structural_error(pattern: &CorePattern) -> Option<String> {
                 if !seen.insert(field.index) {
                     return Some(format!(
                         "Typed Core pattern repeats structural field index {}",
+                        field.index
+                    ));
+                }
+                if field.ty != field_types[field.index as usize] {
+                    return Some(format!(
+                        "Typed Core pattern field {} does not match its frozen layout type",
                         field.index
                     ));
                 }
@@ -1521,6 +1560,7 @@ fn pattern_is_recovered(pattern: &CorePattern) -> bool {
     match pattern {
         CorePattern::Error => true,
         CorePattern::Tuple(values) => values.iter().any(pattern_is_recovered),
+        CorePattern::Array { elements, .. } => elements.iter().any(pattern_is_recovered),
         CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => fields
             .iter()
             .any(|field| pattern_is_recovered(&field.pattern)),
@@ -1924,11 +1964,27 @@ fn pattern_contains_noncanonical_type_identity(pattern: &CorePattern) -> bool {
         CorePattern::Tuple(values) => values
             .iter()
             .any(pattern_contains_noncanonical_type_identity),
-        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
-            fields.iter().any(|field| {
-                !is_canonical_type_identity(&field.ty)
-                    || pattern_contains_noncanonical_type_identity(&field.pattern)
-            })
+        CorePattern::Array { element, elements } => {
+            !is_canonical_type_identity(element)
+                || elements
+                    .iter()
+                    .any(pattern_contains_noncanonical_type_identity)
+        }
+        CorePattern::Record {
+            field_types,
+            fields,
+            ..
+        }
+        | CorePattern::Enum {
+            field_types,
+            fields,
+            ..
+        } => {
+            field_types.iter().any(|ty| !is_canonical_type_identity(ty))
+                || fields.iter().any(|field| {
+                    !is_canonical_type_identity(&field.ty)
+                        || pattern_contains_noncanonical_type_identity(&field.pattern)
+                })
         }
         CorePattern::Any
         | CorePattern::Bind { .. }
@@ -2079,10 +2135,23 @@ fn place_contains_out_of_scope_bound_lifetime(place: &CorePlace) -> bool {
 fn pattern_contains_inference(pattern: &CorePattern) -> bool {
     match pattern {
         CorePattern::Tuple(values) => values.iter().any(pattern_contains_inference),
-        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
-            fields.iter().any(|field| {
-                type_contains_inference(&field.ty) || pattern_contains_inference(&field.pattern)
-            })
+        CorePattern::Array { element, elements } => {
+            type_contains_inference(element) || elements.iter().any(pattern_contains_inference)
+        }
+        CorePattern::Record {
+            field_types,
+            fields,
+            ..
+        }
+        | CorePattern::Enum {
+            field_types,
+            fields,
+            ..
+        } => {
+            field_types.iter().any(type_contains_inference)
+                || fields.iter().any(|field| {
+                    type_contains_inference(&field.ty) || pattern_contains_inference(&field.pattern)
+                })
         }
         CorePattern::Any
         | CorePattern::Bind { .. }
@@ -2096,11 +2165,29 @@ fn pattern_contains_out_of_scope_bound_lifetime(pattern: &CorePattern) -> bool {
         CorePattern::Tuple(values) => values
             .iter()
             .any(pattern_contains_out_of_scope_bound_lifetime),
-        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
-            fields.iter().any(|field| {
-                type_contains_out_of_scope_bound_lifetime(&field.ty)
-                    || pattern_contains_out_of_scope_bound_lifetime(&field.pattern)
-            })
+        CorePattern::Array { element, elements } => {
+            type_contains_out_of_scope_bound_lifetime(element)
+                || elements
+                    .iter()
+                    .any(pattern_contains_out_of_scope_bound_lifetime)
+        }
+        CorePattern::Record {
+            field_types,
+            fields,
+            ..
+        }
+        | CorePattern::Enum {
+            field_types,
+            fields,
+            ..
+        } => {
+            field_types
+                .iter()
+                .any(type_contains_out_of_scope_bound_lifetime)
+                || fields.iter().any(|field| {
+                    type_contains_out_of_scope_bound_lifetime(&field.ty)
+                        || pattern_contains_out_of_scope_bound_lifetime(&field.pattern)
+                })
         }
         CorePattern::Any
         | CorePattern::Bind { .. }
@@ -5035,7 +5122,25 @@ impl Elaborator<'_> {
                     self.zonk_pattern(value, span);
                 }
             }
-            CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
+            CorePattern::Array { element, elements } => {
+                *element = self.zonk_type(element.clone(), span);
+                for value in elements {
+                    self.zonk_pattern(value, span);
+                }
+            }
+            CorePattern::Record {
+                field_types,
+                fields,
+                ..
+            }
+            | CorePattern::Enum {
+                field_types,
+                fields,
+                ..
+            } => {
+                for field_type in field_types {
+                    *field_type = self.zonk_type(field_type.clone(), span);
+                }
                 for field in fields {
                     field.ty = self.zonk_type(field.ty.clone(), span);
                     self.zonk_pattern(&mut field.pattern, span);
@@ -5222,6 +5327,24 @@ impl Elaborator<'_> {
                         .collect(),
                 )
             }
+            PatternDecision::Array(values) => {
+                let Type::Array(element) = subject else {
+                    self.error(
+                        span,
+                        "G4146",
+                        "pattern decision lost its array subject type",
+                    );
+                    self.recovered = true;
+                    return CorePattern::Error;
+                };
+                CorePattern::Array {
+                    element: (*element).clone(),
+                    elements: values
+                        .into_iter()
+                        .map(|value| self.core_pattern(value, (*element).clone(), span, bindings))
+                        .collect(),
+                }
+            }
             PatternDecision::Record { definition, fields } => {
                 let Some((actual, arguments)) = nominal_parts(&subject) else {
                     self.error(
@@ -5280,6 +5403,7 @@ impl Elaborator<'_> {
                 fields.sort_by_key(|field| field.index);
                 CorePattern::Record {
                     definition,
+                    field_types: layout.iter().map(|field| field.ty.clone()).collect(),
                     field_count: layout.len() as u32,
                     fields,
                 }
@@ -5347,6 +5471,7 @@ impl Elaborator<'_> {
                 CorePattern::Enum {
                     definition,
                     variant,
+                    field_types: layout.iter().map(|field| field.ty.clone()).collect(),
                     field_count: layout.len() as u32,
                     fields,
                 }
@@ -8162,6 +8287,11 @@ fn collect_pattern_bindings(pattern: &CorePattern, bindings: &mut Vec<String>) {
                 collect_pattern_bindings(value, bindings);
             }
         }
+        CorePattern::Array { elements, .. } => {
+            for element in elements {
+                collect_pattern_bindings(element, bindings);
+            }
+        }
         CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
             for field in fields {
                 collect_pattern_bindings(&field.pattern, bindings);
@@ -8814,6 +8944,7 @@ fn core_pattern_irrefutable(pattern: &CorePattern) -> bool {
     match pattern {
         CorePattern::Any | CorePattern::Bind { .. } => true,
         CorePattern::Tuple(values) => values.iter().all(core_pattern_irrefutable),
+        CorePattern::Array { .. } => false,
         CorePattern::Record { fields, .. } => fields
             .iter()
             .all(|field| core_pattern_irrefutable(&field.pattern)),

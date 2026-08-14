@@ -1695,6 +1695,13 @@ impl Analyzer<'_> {
                     self.record_pattern_reference_from_value(pattern, value, &child);
                 }
             }
+            CorePattern::Array { elements, .. } => {
+                for (index, pattern) in elements.iter().enumerate() {
+                    let mut child = fields.to_vec();
+                    child.push(index as u32);
+                    self.record_pattern_reference_from_value(pattern, value, &child);
+                }
+            }
             CorePattern::Record {
                 fields: patterns, ..
             }
@@ -2029,6 +2036,13 @@ fn collect_pattern_binders(
         CorePattern::Bind { name } => output.push((name.clone(), prefix.clone())),
         CorePattern::Tuple(patterns) => {
             for (index, pattern) in patterns.iter().enumerate() {
+                prefix.push(index as u32);
+                collect_pattern_binders(pattern, prefix, output);
+                prefix.pop();
+            }
+        }
+        CorePattern::Array { elements, .. } => {
+            for (index, pattern) in elements.iter().enumerate() {
                 prefix.push(index as u32);
                 collect_pattern_binders(pattern, prefix, output);
                 prefix.pop();

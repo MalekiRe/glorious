@@ -28,6 +28,9 @@ pub enum PatternKind {
     Binding(String),
     Literal(String),
     Tuple(Vec<PatternId>),
+    /// Exact-length structural array pattern. Array length is a runtime
+    /// property, so this is always refutable even when every element is `_`.
+    Array(Vec<PatternId>),
     Record {
         path: Vec<String>,
         arguments: Vec<HeaderGenericArgument>,
@@ -1625,6 +1628,22 @@ impl Parser<'_> {
                 let close = self.expect_punctuation(')')?;
                 Some(self.alloc_pattern(
                     PatternKind::Tuple(values),
+                    join(token.span, self.lexed.tokens[close].span),
+                ))
+            }
+            TokenKind::Punctuation('[') => {
+                self.position += 1;
+                let mut values = vec![];
+                while !self.at_punctuation(']') && self.current().is_some() {
+                    values.push(self.parse_pattern(binders)?);
+                    if !self.at_punctuation(',') {
+                        break;
+                    }
+                    self.position += 1;
+                }
+                let close = self.expect_punctuation(']')?;
+                Some(self.alloc_pattern(
+                    PatternKind::Array(values),
                     join(token.span, self.lexed.tokens[close].span),
                 ))
             }

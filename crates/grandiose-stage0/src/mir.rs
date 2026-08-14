@@ -28,8 +28,16 @@ pub enum MirPattern {
     Any,
     Literal(String),
     Tuple(Vec<MirPattern>),
+    /// Exact-length homogeneous array decision. `element` is frozen so a
+    /// forged MIR pattern cannot relabel an array payload on its way to VM.
+    Array {
+        element: Type,
+        elements: Vec<MirPattern>,
+    },
     Record {
         definition: DefKey,
+        /// Complete ordered field-layout proof, inherited from sealed Core.
+        field_types: Vec<Type>,
         /// Frozen structural layout proof inherited from Typed Core.  MIR
         /// cannot consult source interface tables, so every selected field
         /// must remain bounded by this arity at the hostile-MIR boundary.
@@ -39,6 +47,8 @@ pub enum MirPattern {
     Enum {
         definition: DefKey,
         variant: u32,
+        /// Complete ordered payload-layout proof for the selected variant.
+        field_types: Vec<Type>,
         /// Payload arity for this exact enum variant.
         field_count: u32,
         fields: Vec<MirPatternField>,
@@ -119,6 +129,14 @@ pub enum MirInstruction {
         index: u32,
         field_count: u32,
         field_type: Type,
+    },
+    /// Project an element from an exact-length array pattern.
+    ProjectArray {
+        dst: MirLocal,
+        base: MirLocal,
+        index: u32,
+        field_count: u32,
+        element_type: Type,
     },
     /// Rebuild a nominal record with one statically selected field replaced.
     /// A following `Store` commits it to the root source place.
@@ -842,6 +860,7 @@ fn pattern_is_mir_irrefutable(pattern: &MirPattern) -> bool {
         MirPattern::Any => true,
         MirPattern::Literal(_) | MirPattern::Enum { .. } => false,
         MirPattern::Tuple(fields) => fields.iter().all(pattern_is_mir_irrefutable),
+        MirPattern::Array { .. } => false,
         MirPattern::Record { fields, .. } => fields.is_empty(),
     }
 }
@@ -936,6 +955,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::MakeEnum { dst, .. }
         | MirInstruction::ProjectRecord { dst, .. }
         | MirInstruction::ProjectTuple { dst, .. }
+        | MirInstruction::ProjectArray { dst, .. }
         | MirInstruction::UpdateRecord { dst, .. }
         | MirInstruction::PatternTest { dst, .. }
         | MirInstruction::Perform { dst, .. }
@@ -2062,6 +2082,25 @@ impl MirFunction {
             }
             return Ok(());
         }
+        if let MirInstruction::ProjectArray {
+            dst,
+            base,
+            index,
+            field_count,
+            element_type,
+        } = instruction
+        {
+            let Type::Array(actual) = self.local_type(*base)? else {
+                return Err("MIR array projection base is not an array".into());
+            };
+            if *index >= *field_count || actual.as_ref() != element_type {
+                return Err("MIR array projection has inconsistent structural metadata".into());
+            }
+            if self.local_type(*dst)? != element_type {
+                return Err("MIR array projection result type does not match its element".into());
+            }
+            return Ok(());
+        }
         let (dst, definition, fields, field_types) = match instruction {
             MirInstruction::MakeRecord {
                 dst,
@@ -2309,6 +2348,10 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
             .try_for_each(|ty| validate_mir_type(ty, &mut lifetime_binders)),
         MirInstruction::ProjectRecord { field_type, .. }
         | MirInstruction::ProjectTuple { field_type, .. }
+        | MirInstruction::ProjectArray {
+            element_type: field_type,
+            ..
+        }
         | MirInstruction::UpdateRecord { field_type, .. } => {
             validate_mir_type(field_type, &mut lifetime_binders)
         }
@@ -2437,7 +2480,25 @@ fn validate_mir_pattern_semantic_types(
         MirPattern::Tuple(patterns) => patterns
             .iter()
             .try_for_each(|pattern| validate_mir_pattern_semantic_types(pattern, lifetime_binders)),
-        MirPattern::Record { fields, .. } | MirPattern::Enum { fields, .. } => {
+        MirPattern::Array { element, elements } => {
+            validate_mir_type(element, lifetime_binders)?;
+            elements.iter().try_for_each(|pattern| {
+                validate_mir_pattern_semantic_types(pattern, lifetime_binders)
+            })
+        }
+        MirPattern::Record {
+            field_types,
+            fields,
+            ..
+        }
+        | MirPattern::Enum {
+            field_types,
+            fields,
+            ..
+        } => {
+            for field_type in field_types {
+                validate_mir_type(field_type, lifetime_binders)?;
+            }
             for field in fields {
                 validate_mir_type(&field.ty, lifetime_binders)?;
                 validate_mir_pattern_semantic_types(&field.pattern, lifetime_binders)?;
@@ -2817,7 +2878,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
             .chain(fields.iter().copied())
             .collect(),
         MirInstruction::ProjectRecord { dst, base, .. }
-        | MirInstruction::ProjectTuple { dst, base, .. } => vec![*dst, *base],
+        | MirInstruction::ProjectTuple { dst, base, .. }
+        | MirInstruction::ProjectArray { dst, base, .. } => vec![*dst, *base],
         MirInstruction::UpdateRecord {
             dst, base, value, ..
         } => vec![*dst, *base, *value],
@@ -10570,6 +10632,20 @@ impl Lowerer<'_> {
                 self.named.insert(name.clone(), value);
                 Some(())
             }
+            CorePattern::Array { element, elements } => {
+                for (index, pattern) in elements.iter().enumerate() {
+                    let projected = self.alloc(element.clone(), CoreId(u32::MAX));
+                    self.instructions.push(MirInstruction::ProjectArray {
+                        dst: projected,
+                        base: value,
+                        index: index as u32,
+                        field_count: elements.len() as u32,
+                        element_type: element.clone(),
+                    });
+                    self.bind_handler_pattern(pattern, projected)?;
+                }
+                Some(())
+            }
             CorePattern::Record {
                 field_count,
                 fields,
@@ -11990,6 +12066,7 @@ fn pattern_is_irrefutable(pattern: &CorePattern) -> bool {
     match pattern {
         CorePattern::Any | CorePattern::Bind { .. } => true,
         CorePattern::Tuple(values) => values.iter().all(pattern_is_irrefutable),
+        CorePattern::Array { .. } => false,
         CorePattern::Record { fields, .. } => fields
             .iter()
             .all(|field| pattern_is_irrefutable(&field.pattern)),
@@ -12267,8 +12344,14 @@ fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
             .map(lower_pattern)
             .collect::<Option<Vec<_>>>()
             .map(MirPattern::Tuple),
+        CorePattern::Array { element, elements } => elements
+            .into_iter()
+            .map(lower_pattern)
+            .collect::<Option<Vec<_>>>()
+            .map(|elements| MirPattern::Array { element, elements }),
         CorePattern::Record {
             definition,
+            field_types,
             field_count,
             fields,
         } => fields
@@ -12283,12 +12366,14 @@ fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
             .collect::<Option<Vec<_>>>()
             .map(|fields| MirPattern::Record {
                 definition,
+                field_types,
                 field_count,
                 fields,
             }),
         CorePattern::Enum {
             definition,
             variant,
+            field_types,
             field_count,
             fields,
             ..
@@ -12305,6 +12390,7 @@ fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
             .map(|fields| MirPattern::Enum {
                 definition,
                 variant,
+                field_types,
                 field_count,
                 fields,
             }),
@@ -12326,31 +12412,46 @@ fn validate_pattern(pattern: &MirPattern, subject: &Type) -> Result<(), String> 
                 .try_for_each(|(pattern, ty)| validate_pattern(pattern, ty)),
             _ => Err("MIR tuple pattern has an incompatible subject type".into()),
         },
+        MirPattern::Array { element, elements } => match subject {
+            Type::Array(actual) if actual.as_ref() == element => elements
+                .iter()
+                .try_for_each(|pattern| validate_pattern(pattern, element)),
+            _ => Err("MIR array pattern has an incompatible subject type".into()),
+        },
         MirPattern::Record {
             definition,
+            field_types,
             field_count,
             fields,
         } => match subject {
             Type::Nominal {
                 definition: actual, ..
-            } if actual == definition => validate_pattern_fields(fields, *field_count),
+            } if actual == definition => validate_pattern_fields(fields, field_types, *field_count),
             _ => Err("MIR record pattern has an incompatible subject type".into()),
         },
         MirPattern::Enum {
             definition,
+            field_types,
             field_count,
             fields,
             ..
         } => match subject {
             Type::Nominal {
                 definition: actual, ..
-            } if actual == definition => validate_pattern_fields(fields, *field_count),
+            } if actual == definition => validate_pattern_fields(fields, field_types, *field_count),
             _ => Err("MIR enum pattern has an incompatible subject type".into()),
         },
     }
 }
 
-fn validate_pattern_fields(fields: &[MirPatternField], field_count: u32) -> Result<(), String> {
+fn validate_pattern_fields(
+    fields: &[MirPatternField],
+    field_types: &[Type],
+    field_count: u32,
+) -> Result<(), String> {
+    if field_types.len() != field_count as usize {
+        return Err("MIR pattern layout length disagrees with its frozen arity".into());
+    }
     let mut previous = None;
     for field in fields {
         if previous.is_some_and(|previous| previous >= field.index) {
@@ -12358,6 +12459,9 @@ fn validate_pattern_fields(fields: &[MirPatternField], field_count: u32) -> Resu
         }
         if field.index >= field_count {
             return Err("MIR pattern field is outside its structural arity".into());
+        }
+        if field.ty != field_types[field.index as usize] {
+            return Err("MIR pattern field type disagrees with its frozen layout".into());
         }
         previous = Some(field.index);
         validate_pattern(&field.pattern, &field.ty)?;

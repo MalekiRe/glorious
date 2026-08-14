@@ -438,6 +438,12 @@ impl Analyzer<'_> {
                     self.bind_pattern_value(pattern, child);
                 }
             }
+            crate::core::CorePattern::Array { elements, .. } => {
+                for (index, pattern) in elements.iter().enumerate() {
+                    let child = value_at_path(&value, &[index as u32]).unwrap_or(Value::None);
+                    self.bind_pattern_value(pattern, child);
+                }
+            }
             crate::core::CorePattern::Record { fields, .. }
             | crate::core::CorePattern::Enum { fields, .. } => {
                 for field in fields {

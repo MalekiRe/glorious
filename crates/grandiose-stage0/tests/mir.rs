@@ -87,6 +87,7 @@ fn mir_validation_rejects_nominal_pattern_fields_outside_frozen_arity() {
                 subject: MirLocal(0),
                 pattern: MirPattern::Record {
                     definition,
+                    field_types: vec![Type::Scalar(ScalarType::I64)],
                     field_count: 1,
                     fields: vec![MirPatternField {
                         index: 1,
@@ -105,6 +106,102 @@ fn mir_validation_rejects_nominal_pattern_fields_outside_frozen_arity() {
             .is_err_and(|error| error.contains("outside its structural arity")),
         "forged nominal field projections must not become executable MIR"
     );
+}
+
+#[test]
+fn mir_validation_rejects_nominal_pattern_field_type_forgery() {
+    let definition = DefKey(Digest::of_bytes(b"mir-pattern-layout"));
+    let nominal = Type::Nominal {
+        definition,
+        arguments: vec![],
+    };
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-pattern-layout-function")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(nominal), local(Type::Scalar(ScalarType::Bool))],
+        result: Type::Scalar(ScalarType::Bool),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![MirInstruction::PatternTest {
+                dst: MirLocal(1),
+                subject: MirLocal(0),
+                pattern: MirPattern::Record {
+                    definition,
+                    field_types: vec![Type::Scalar(ScalarType::I64)],
+                    field_count: 1,
+                    fields: vec![MirPatternField {
+                        index: 0,
+                        ty: Type::Scalar(ScalarType::Bool),
+                        pattern: MirPattern::Any,
+                    }],
+                },
+            }],
+            terminator: MirTerminator::Return { value: MirLocal(1) },
+        }],
+    };
+
+    let validation = function.validate();
+    assert!(
+        validation
+            .as_ref()
+            .is_err_and(|error| error.contains("disagrees with its frozen layout")),
+        "validation result: {validation:?}; MIR must reject an in-range field with forged type metadata"
+    );
+}
+
+#[test]
+fn mir_validation_rejects_forged_array_pattern_and_projection_element_types() {
+    let array = Type::Array(Box::new(Type::Scalar(ScalarType::I64)));
+    let pattern = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-array-pattern-forgery")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(array.clone()), local(Type::Scalar(ScalarType::Bool))],
+        result: Type::Scalar(ScalarType::Bool),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![MirInstruction::PatternTest {
+                dst: MirLocal(1),
+                subject: MirLocal(0),
+                pattern: MirPattern::Array {
+                    element: Type::Scalar(ScalarType::Bool),
+                    elements: vec![MirPattern::Any],
+                },
+            }],
+            terminator: MirTerminator::Return { value: MirLocal(1) },
+        }],
+    };
+    assert!(
+        pattern
+            .validate()
+            .is_err_and(|error| error.contains("array pattern has an incompatible subject type"))
+    );
+
+    let projection = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-array-projection-forgery")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(array), local(Type::Scalar(ScalarType::Bool))],
+        result: Type::Scalar(ScalarType::Bool),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![MirInstruction::ProjectArray {
+                dst: MirLocal(1),
+                base: MirLocal(0),
+                index: 0,
+                field_count: 1,
+                element_type: Type::Scalar(ScalarType::Bool),
+            }],
+            terminator: MirTerminator::Return { value: MirLocal(1) },
+        }],
+    };
+    assert!(projection.validate().is_err_and(|error| {
+        error.contains("array projection has inconsistent structural metadata")
+    }));
 }
 
 #[test]
