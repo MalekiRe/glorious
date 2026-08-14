@@ -844,6 +844,16 @@ impl TraitSolver {
                     return TraitProjectionAnswer::NoSolution;
                 };
                 match rule.implementation.associated_types.get(name) {
+                    Some(_)
+                        if !associated_type_contract_matches(
+                            self.traits.get(&goal.relation.definition),
+                            name,
+                            false,
+                            rule.implementation.associated_types.get(name),
+                        ) =>
+                    {
+                        TraitProjectionAnswer::NoSolution
+                    }
                     Some(item) if item.generics != arguments.len() as u32 => {
                         TraitProjectionAnswer::AssociatedTypeArity {
                             evidence,
@@ -878,6 +888,9 @@ impl TraitSolver {
                         let Some(declaration) = trait_header.associated_types.get(name) else {
                             return TraitProjectionAnswer::MissingAssociatedType { evidence };
                         };
+                        if declaration.effect_row {
+                            return TraitProjectionAnswer::NoSolution;
+                        }
                         if declaration.generics != arguments.len() as u32 {
                             return TraitProjectionAnswer::AssociatedTypeArity {
                                 evidence,
@@ -1208,6 +1221,15 @@ impl TraitSolver {
                     return TraitEffectRowProjectionAnswer::NoSolution;
                 };
                 match rule.implementation.associated_effect_rows.get(name) {
+                    Some(_)
+                        if !associated_effect_row_contract_matches(
+                            self.traits.get(&goal.relation.definition),
+                            name,
+                            rule.implementation.associated_effect_rows.get(name),
+                        ) =>
+                    {
+                        TraitEffectRowProjectionAnswer::NoSolution
+                    }
                     Some(item) if item.generics != arguments.len() as u32 => {
                         TraitEffectRowProjectionAnswer::AssociatedEffectRowArity {
                             evidence,
@@ -1243,6 +1265,9 @@ impl TraitSolver {
                                 evidence,
                             };
                         };
+                        if !declaration.effect_row {
+                            return TraitEffectRowProjectionAnswer::NoSolution;
+                        }
                         if declaration.generics != arguments.len() as u32 {
                             return TraitEffectRowProjectionAnswer::AssociatedEffectRowArity {
                                 evidence,
@@ -1781,6 +1806,43 @@ fn generic_arguments_match_kinds(
             .iter()
             .zip(kinds)
             .all(|(argument, kind)| generic_argument_matches_kind(argument, *kind))
+}
+
+/// Frozen interfaces may arrive from a dependency rather than this
+/// elaborator.  Do not let an implementation-side associated item redefine
+/// the declaration's arity, kind, or value/row category merely because its
+/// local shape happens to accept the caller's arguments.
+fn associated_type_contract_matches(
+    trait_header: Option<&ElaboratedTrait>,
+    name: &str,
+    effect_row: bool,
+    item: Option<&crate::ElaboratedAssociatedTypeDefinition>,
+) -> bool {
+    let (Some(trait_header), Some(item)) = (trait_header, item) else {
+        return false;
+    };
+    let Some(declaration) = trait_header.associated_types.get(name) else {
+        return false;
+    };
+    declaration.effect_row == effect_row
+        && declaration.generics == item.generics
+        && declaration.generic_kinds == item.generic_kinds
+}
+
+fn associated_effect_row_contract_matches(
+    trait_header: Option<&ElaboratedTrait>,
+    name: &str,
+    item: Option<&crate::ElaboratedAssociatedEffectRowDefinition>,
+) -> bool {
+    let (Some(trait_header), Some(item)) = (trait_header, item) else {
+        return false;
+    };
+    let Some(declaration) = trait_header.associated_types.get(name) else {
+        return false;
+    };
+    declaration.effect_row
+        && declaration.generics == item.generics
+        && declaration.generic_kinds == item.generic_kinds
 }
 
 fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::GenericKind) -> bool {
@@ -2596,18 +2658,7 @@ fn substitute_effect_row(
     value: &EffectRow,
     substitution: &ImplementationSubstitution,
 ) -> EffectRow {
-    // A row binder used as a whole row has a canonical empty prefix and one
-    // generic tail.  Replacing that exact shape preserves all effects and
-    // projections supplied by the selected trait argument rather than merely
-    // replacing its tail.
-    if value.effects.is_empty()
-        && value.projections.is_empty()
-        && let Some(crate::EffectTail::Generic(index)) = value.tail
-        && let Some(row) = substitution.effect_rows.get(&index)
-    {
-        return row.clone();
-    }
-    EffectRow {
+    let mut result = EffectRow {
         effects: value
             .effects
             .iter()
@@ -2641,8 +2692,21 @@ fn substitute_effect_row(
             })
             .collect(),
         tail: value.tail,
+    };
+    // A row variable denotes the complete residual row, not only its tail.
+    // In particular, substituting `e` in `{ Prefix, | e }` must retain both
+    // the caller's fixed effects/projections and its open tail.  The old
+    // pure-row fast path left `e` stale whenever it followed a prefix,
+    // causing defaulted and specialized associated rows to normalize to a
+    // declaration-local generic instead of the selected application.
+    if let Some(crate::EffectTail::Generic(index)) = value.tail
+        && let Some(row) = substitution.effect_rows.get(&index)
+    {
+        result.effects.extend(row.effects.iter().cloned());
+        result.projections.extend(row.projections.iter().cloned());
+        result.tail = row.tail;
     }
-    .canonicalized()
+    result.canonicalized()
 }
 
 fn substitute_callable_signature(

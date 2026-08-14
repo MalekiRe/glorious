@@ -1015,6 +1015,198 @@ fn associated_effect_row_defaults_normalize_when_a_positive_impl_omits_the_item(
             if row.effects.iter().any(|effect| effect.definition == key(&interface, "Trace"))
     ));
 }
+
+#[test]
+fn associated_effect_rows_compose_prefixed_defaults_and_specializations_with_mixed_arguments() {
+    let default_source = "effect Prefix<'a, e: EffectRow, T, n: u32> { note(); } effect Tail { note(); } trait Capability<'a, e: EffectRow, T, n: u32> { type Effects<'b, row: EffectRow, U, m: u32>: EffectRow = { Prefix<'b, row, U, m>, | e }; } struct Value {} impl<'a, e: EffectRow, T, n: u32> Capability<'a, e, T, n> for Value {}";
+    let (interface, default_signatures) = signatures(default_source);
+    let prefix = key(&interface, "Prefix");
+    let tail = key(&interface, "Tail");
+    let capability = key(&interface, "Capability");
+    let value = key(&interface, "Value");
+    let caller_row = EffectRow::closed_instances([grandiose_stage0::EffectInstance {
+        definition: tail,
+        arguments: vec![],
+    }]);
+    let answer = TraitSolver::new(&default_signatures).normalize_associated_effect_row_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: capability,
+                arguments: vec![
+                    GenericArgument::Lifetime(Lifetime::Static),
+                    GenericArgument::EffectRow(caller_row.clone()),
+                    GenericArgument::Type(Type::Scalar(ScalarType::Text)),
+                    GenericArgument::ConstU32(7),
+                ],
+            },
+            subject: Type::Nominal {
+                definition: value,
+                arguments: vec![],
+            },
+        },
+        "Effects",
+        &[
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::EffectRow(EffectRow::empty()),
+            GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+            GenericArgument::ConstU32(8),
+        ],
+    );
+    assert!(matches!(
+        answer,
+        TraitEffectRowProjectionAnswer::Normalized { row, .. }
+            if row.tail.is_none()
+                && row.effects.iter().any(|effect| {
+                    effect.definition == tail && effect.arguments.is_empty()
+                })
+                && row.effects.iter().any(|effect| {
+                    effect.definition == prefix
+                        && effect.arguments
+                            == vec![
+                                GenericArgument::Lifetime(Lifetime::Static),
+                                GenericArgument::EffectRow(EffectRow::empty()),
+                                GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+                                GenericArgument::ConstU32(8),
+                            ]
+                })
+    ));
+
+    let specialization_source = "effect Prefix<'a, e: EffectRow, T, n: u32> { note(); } effect Tail { note(); } trait Capability<'a, e: EffectRow, T, n: u32> { type Effects<'b, row: EffectRow, U, m: u32>: EffectRow = {}; } struct Value {} impl<'a, e: EffectRow, T, n: u32> Capability<'a, e, T, n> for Value { type Effects<'b, row: EffectRow, U, m: u32> = { Prefix<'b, row, U, m>, | e }; }";
+    let (interface, signatures) = signatures(specialization_source);
+    let prefix = key(&interface, "Prefix");
+    let tail = key(&interface, "Tail");
+    let capability = key(&interface, "Capability");
+    let value = key(&interface, "Value");
+    let answer = TraitSolver::new(&signatures).normalize_associated_effect_row_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: capability,
+                arguments: vec![
+                    GenericArgument::Lifetime(Lifetime::Static),
+                    GenericArgument::EffectRow(EffectRow::closed_instances([
+                        grandiose_stage0::EffectInstance {
+                            definition: tail,
+                            arguments: vec![],
+                        },
+                    ])),
+                    GenericArgument::Type(Type::Scalar(ScalarType::Text)),
+                    GenericArgument::ConstU32(7),
+                ],
+            },
+            subject: Type::Nominal {
+                definition: value,
+                arguments: vec![],
+            },
+        },
+        "Effects",
+        &[
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::EffectRow(EffectRow::empty()),
+            GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+            GenericArgument::ConstU32(8),
+        ],
+    );
+    assert!(matches!(
+        answer,
+        TraitEffectRowProjectionAnswer::Normalized { row, .. }
+            if row.tail.is_none()
+                && row.effects.iter().any(|effect| effect.definition == tail)
+                && row.effects.iter().any(|effect| effect.definition == prefix)
+    ));
+}
+
+#[test]
+fn mixed_gat_projections_normalize_inside_where_obligations() {
+    let (interface, signatures) = signatures(
+        "effect Tail { note(); } trait Source { type Output<'b, row: EffectRow, U, m: u32>; } trait Consume<T> {} trait Ready {} struct Value {} impl Source for Value { type Output<'b, row: EffectRow, U, m: u32> = U; } impl Consume<i64> for Value {} impl Ready for Value where Value: Consume<<Value as Source>::Output<'static, {Tail}, i64, 8>> {}",
+    );
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: key(&interface, "Ready"),
+            arguments: vec![],
+        },
+        subject: Type::Nominal {
+            definition: key(&interface, "Value"),
+            arguments: vec![],
+        },
+    });
+    assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
+}
+
+#[test]
+fn forged_interface_cannot_specialize_an_associated_row_with_different_kinds() {
+    let (interface, mut signatures) = signatures(
+        "trait Capability { type Effects<'a, row: EffectRow, T, n: u32>: EffectRow; } impl Capability for i64 { type Effects<'a, row: EffectRow, T, n: u32> = {}; }",
+    );
+    let implementation = signatures
+        .definitions
+        .values_mut()
+        .find_map(|header| match header {
+            grandiose_stage0::ElaboratedHeader::Implementation(implementation) => {
+                Some(implementation)
+            }
+            _ => None,
+        })
+        .expect("fixture must contain an implementation");
+    // This cannot be produced by source elaboration: it changes only the
+    // implementation's final GAT slot to `Quantity`, leaving the declaration
+    // at `u32`. A dependency interface must not gain a new specialization
+    // surface merely by forging that metadata.
+    implementation
+        .associated_effect_rows
+        .get_mut("Effects")
+        .expect("fixture must define the row")
+        .generic_kinds[3] = grandiose_stage0::GenericKind::Const(ConstKind::Quantity);
+
+    let answer = TraitSolver::new(&signatures).normalize_associated_effect_row_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: key(&interface, "Capability"),
+                arguments: vec![],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        },
+        "Effects",
+        &[
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::EffectRow(EffectRow::empty()),
+            GenericArgument::Type(Type::Scalar(ScalarType::Text)),
+            GenericArgument::ConstQuantity(Quantity::ONCE),
+        ],
+    );
+    assert_eq!(answer, TraitEffectRowProjectionAnswer::NoSolution);
+}
+
+#[test]
+fn forged_interface_cannot_reclassify_a_defaulted_effect_row_as_a_value_type() {
+    let (interface, mut signatures) =
+        signatures("trait Capability { type Effects: EffectRow = {}; } impl Capability for i64 {}");
+    let trait_header = signatures
+        .definitions
+        .get_mut(&key(&interface, "Capability"))
+        .expect("fixture trait must be frozen");
+    let grandiose_stage0::ElaboratedHeader::Trait(trait_header) = trait_header else {
+        panic!("fixture key must name a trait");
+    };
+    trait_header
+        .associated_types
+        .get_mut("Effects")
+        .expect("fixture must declare the row")
+        .effect_row = false;
+
+    let answer = TraitSolver::new(&signatures).normalize_associated_effect_row_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: key(&interface, "Capability"),
+                arguments: vec![],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        },
+        "Effects",
+        &[],
+    );
+    assert_eq!(answer, TraitEffectRowProjectionAnswer::NoSolution);
+}
 #[test]
 fn associated_type_application_normalizes_item_generic_arguments() {
     let (interface, signatures) =
