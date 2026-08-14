@@ -803,6 +803,26 @@ impl TraitSolver {
         self.normalize_type_projections(value, &mut vec![])
     }
 
+    /// Normalize the type and associated-const projections carried by one
+    /// trait argument.  Effect rows deliberately remain opaque here: their
+    /// associated projections use the row-specific normalizer below.
+    pub fn normalize_generic_argument(
+        &mut self,
+        argument: GenericArgument,
+    ) -> Result<GenericArgument, Box<TraitProjectionAnswer>> {
+        self.normalize_trait_argument(argument, &mut vec![])
+    }
+
+    /// Normalize concrete associated effect-row projections.  Like type
+    /// normalization, generic row projections stay symbolic so a declaration
+    /// cannot acquire implementation evidence before instantiation.
+    pub fn normalize_effect_row(
+        &mut self,
+        value: EffectRow,
+    ) -> Result<EffectRow, Box<TraitEffectRowProjectionAnswer>> {
+        self.normalize_effect_row_projections(value, &mut vec![])
+    }
+
     /// Normalize an associated type application through selected trait
     /// evidence. Item arguments occupy generic slots after the implementation
     /// binders, preserving a stable substitution layout for GAT-like items.

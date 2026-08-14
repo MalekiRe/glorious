@@ -1586,6 +1586,24 @@ fn recursive_associated_type_normalization_is_rejected() {
         "Item",
     );
     assert_eq!(answer, TraitProjectionAnswer::RecursiveProjection);
+
+    // A hostile frozen impl head can carry the projection directly rather
+    // than reaching it through the public associated-item query.  The
+    // coherence normalizer uses this boundary, so it must fail closed too.
+    assert!(matches!(
+        TraitSolver::new(&signatures).normalize_type(Type::Projection {
+            subject: Box::new(Type::Nominal {
+                definition: key(&interface, "Value"),
+                arguments: vec![],
+            }),
+            trait_definition: loop_trait,
+            trait_arguments: vec![],
+            name: "Item".into(),
+            item_generic_kinds: vec![],
+            item_arguments: vec![],
+        }),
+        Err(answer) if *answer == TraitProjectionAnswer::RecursiveProjection
+    ));
 }
 
 #[test]
@@ -1638,6 +1656,25 @@ fn recursive_associated_effect_row_normalization_is_rejected() {
         &[],
     );
     assert_eq!(answer, TraitEffectRowProjectionAnswer::RecursiveProjection,);
+
+    assert!(matches!(
+        TraitSolver::new(&signatures).normalize_effect_row(EffectRow {
+            effects: Default::default(),
+            projections: vec![grandiose_stage0::EffectRowProjection {
+                subject: Box::new(Type::Nominal {
+                    definition: key(&interface, "Value"),
+                    arguments: vec![],
+                }),
+                trait_definition: loop_trait,
+                trait_arguments: vec![],
+                name: "Effects".into(),
+                item_generic_kinds: vec![],
+                item_arguments: vec![],
+            }],
+            tail: None,
+        }),
+        Err(answer) if *answer == TraitEffectRowProjectionAnswer::RecursiveProjection
+    ));
 }
 
 #[test]

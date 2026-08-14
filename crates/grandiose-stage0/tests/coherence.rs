@@ -148,6 +148,56 @@ fn coherence_rejects_higher_ranked_heads_with_associated_type_arguments() {
 }
 
 #[test]
+fn coherence_normalizes_concrete_associated_type_projections_in_impl_heads() {
+    let coherence = collect(
+        "trait Source { type Output; } trait Marker {} impl Source for i64 { type Output = i64; } impl Marker for <i64 as Source>::Output {} impl Marker for i64 {}",
+    );
+    assert!(
+        coherence
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3404"),
+        "a concrete associated-type projection must overlap its normalized impl head: {coherence:#?}"
+    );
+}
+
+#[test]
+fn coherence_normalizes_concrete_associated_effect_rows_in_impl_heads() {
+    let coherence = collect(
+        "effect Trace { note(); } trait Source { type Effects: EffectRow; } trait Marker<e: EffectRow> {} impl Source for i64 { type Effects = {Trace}; } impl Marker<{<i64 as Source>::Effects}> for i64 {} impl Marker<{Trace}> for i64 {}",
+    );
+    assert!(
+        coherence
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3404"),
+        "a concrete associated-effect projection must overlap its normalized impl head: {coherence:#?}"
+    );
+}
+
+#[test]
+fn coherence_normalizes_dependency_associated_type_heads_for_local_traits() {
+    let provider = interface(
+        "provider@0.1.0",
+        "crate",
+        "pub trait Source { type Output; }",
+    );
+    let consumer = interface(
+        "consumer@0.1.0",
+        "crate",
+        "use provider::Source; trait Marker {} struct Local {} impl Source for Local { type Output = i64; } impl Marker for <Local as Source>::Output {} impl Marker for i64 {}",
+    );
+    let coherence = collect_linked(&[provider, consumer]);
+    assert!(
+        coherence
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3404"),
+        "linked interfaces must normalize a dependency trait projection before comparing local impl heads: {coherence:#?}"
+    );
+}
+
+#[test]
 fn coherence_uses_solver_satisfiability_for_where_bound_overlap() {
     let disjoint = collect(
         "trait Left {} trait Right {} trait Render {} impl Left for i64 {} impl Right for Text {} impl<T> Render for T where T: Left {} impl<T> Render for T where T: Right {}",

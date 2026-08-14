@@ -463,6 +463,9 @@ fn implementations_may_overlap(
     };
     let right_offset = left.generics;
     let right = rebase_implementation_generics(right, right_offset);
+    let mut solver = TraitSolver::new(signatures);
+    let left = normalize_overlap_implementation(left, &mut solver);
+    let right = normalize_overlap_implementation(&right, &mut solver);
     if left.relation.definition != right.relation.definition
         || left.relation.arguments.len() != right.relation.arguments.len()
     {
@@ -489,7 +492,6 @@ fn implementations_may_overlap(
         },
         subject,
     };
-    let mut solver = TraitSolver::new(signatures);
     left.where_bounds
         .iter()
         .chain(&right.where_bounds)
@@ -506,6 +508,58 @@ fn implementations_may_overlap(
         // guarantees all relation arguments were unified even if neither
         // implementation has a where-bound today.
         && witness.relation.definition == left.relation.definition
+}
+
+/// Coherence compares implementation heads in the same semantic domain used
+/// by trait selection.  In particular, `<i64 as Source>::Output` must not
+/// remain an opaque head when selection has already frozen it as `i64`.
+/// Projection failures keep their original structure so malformed or
+/// symbolic interfaces remain conservatively checked by the legacy matcher.
+fn normalize_overlap_implementation(
+    implementation: &ElaboratedImplementation,
+    solver: &mut TraitSolver,
+) -> ElaboratedImplementation {
+    let mut implementation = implementation.clone();
+    implementation.self_ty = solver
+        .normalize_type(implementation.self_ty.clone())
+        .unwrap_or(implementation.self_ty);
+    implementation.relation.arguments = implementation
+        .relation
+        .arguments
+        .clone()
+        .into_iter()
+        .map(|argument| normalize_overlap_argument(argument, solver))
+        .collect();
+    implementation.where_bounds = implementation
+        .where_bounds
+        .clone()
+        .into_iter()
+        .map(|(subject, mut relation)| {
+            let subject = solver.normalize_type(subject.clone()).unwrap_or(subject);
+            relation.arguments = relation
+                .arguments
+                .into_iter()
+                .map(|argument| normalize_overlap_argument(argument, solver))
+                .collect();
+            (subject, relation)
+        })
+        .collect();
+    implementation
+}
+
+fn normalize_overlap_argument(
+    argument: GenericArgument,
+    solver: &mut TraitSolver,
+) -> GenericArgument {
+    match argument {
+        GenericArgument::EffectRow(row) => solver
+            .normalize_effect_row(row.clone())
+            .map(GenericArgument::EffectRow)
+            .unwrap_or(GenericArgument::EffectRow(row)),
+        argument => solver
+            .normalize_generic_argument(argument.clone())
+            .unwrap_or(argument),
+    }
 }
 
 #[derive(Clone, Default)]
