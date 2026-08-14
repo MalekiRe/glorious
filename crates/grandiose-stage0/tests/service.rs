@@ -4089,6 +4089,39 @@ fn service_tracks_outlives_through_assigned_tuple_reference_projections() {
 }
 
 #[test]
+fn service_keeps_shared_lifetime_covariance_but_rejects_mutable_nested_coercions() {
+    let covariant = r#"
+        pub fn accepts_short(value: &i64) -> i64 { 0 }
+        pub fn passes_static(value: &'static i64) -> i64 { accepts_short(value) }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(covariant))
+        .expect("shared references must remain covariant in their lifetime");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+
+    let invariant = r#"
+        pub fn accepts_short(slot: &mut &i64) -> i64 { 0 }
+        pub fn cannot_shorten(value: &'static i64) -> i64 {
+            let long = value;
+            accepts_short(&mut long)
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(invariant))
+    else {
+        panic!("mutable nested reference coercion unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5017"),
+        "missing invariant mutable-reference diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_closure_and_effect_payload_lifetime_escapes() {
     let closure = r#"
         pub fn bad() -> () -> &i64 {
