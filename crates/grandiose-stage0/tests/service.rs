@@ -915,6 +915,22 @@ fn service_keeps_protocol_and_operation_generic_arguments_in_distinct_slots() {
 }
 
 #[test]
+fn service_rejects_wrong_generic_effect_operation_arity() {
+    let source = "effect Ask { ask<T>(value: T) -> T; } pub fn main() -> i64 { handle Ask::ask<i64, Text>(41) { Ask::ask<i64>(value) => value + 1 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("wrong operation generic arity unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4152"),
+        "missing generic operation arity diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_a_direct_one_resume_lowering_for_an_exact_two_shot_contract() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => k(42) } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
