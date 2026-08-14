@@ -61,9 +61,10 @@ pub use header::{
     AssociatedTypeDefinitionHeader, AssociatedTypeHeader, CallableHeader, EffectHeader,
     EffectOperationHeader, EffectRowHeader, EnumVariantHeader, EnumVariantPayloadHeader,
     FixityForm, FixityHeader, GenericParameters, HeaderDiagnostic, HeaderGenericArgument,
-    HeaderParameter, HeaderParse, HeaderType, ImplementationHeader, ImplementationMethodHeader,
-    ImportBindingHeader, ImportHeader, NominalFieldHeader, NominalLayoutHeader, ParsedHeader,
-    TraitHeader, TraitMethodHeader, TraitRefHeader, WhereBoundHeader,
+    HeaderParameter, HeaderParse, HeaderStructuralConst, HeaderStructuralU32Expr, HeaderType,
+    ImplementationHeader, ImplementationMethodHeader, ImportBindingHeader, ImportHeader,
+    NominalFieldHeader, NominalLayoutHeader, ParsedHeader, TraitHeader, TraitMethodHeader,
+    TraitRefHeader, WhereBoundHeader,
 };
 pub use identity::{
     DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId, implementation_method_key,
@@ -131,8 +132,8 @@ pub use trait_solver::{
 };
 pub use types::{
     ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail, EffectVar,
-    GenericArgument, GenericKind, InferContext, InferVar, Lifetime, Mutability, ScalarType, Type,
-    TypeError,
+    GenericArgument, GenericKind, InferContext, InferVar, Lifetime, Mutability, ScalarType,
+    StructuralConstError, StructuralU32Expr, Type, TypeError,
 };
 pub use useflow::{
     CallableEscapeBoundary, CallableEscapeFact, CallableUseFact, UseDiagnostic, UseFlow,

@@ -219,6 +219,7 @@ fn is_concrete_generic_argument(value: &GenericArgument) -> bool {
             matches!(value, Lifetime::Static | Lifetime::Bound { .. })
         }
         GenericArgument::ConstU32(_) | GenericArgument::ConstQuantity(_) => true,
+        GenericArgument::ConstU32Expr(_) => false,
         GenericArgument::ConstGeneric { .. } => false,
     }
 }

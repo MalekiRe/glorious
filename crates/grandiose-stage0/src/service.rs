@@ -1499,6 +1499,7 @@ fn instance_argument_kind(argument: &GenericArgument) -> crate::GenericKind {
         GenericArgument::EffectRow(_) => crate::GenericKind::EffectRow,
         GenericArgument::Lifetime(_) => crate::GenericKind::Lifetime,
         GenericArgument::ConstU32(_) => crate::GenericKind::Const(crate::ConstKind::U32),
+        GenericArgument::ConstU32Expr(_) => crate::GenericKind::Const(crate::ConstKind::U32),
         GenericArgument::ConstQuantity(_) => crate::GenericKind::Const(crate::ConstKind::Quantity),
         GenericArgument::ConstGeneric { kind, .. } => crate::GenericKind::Const(*kind),
     }

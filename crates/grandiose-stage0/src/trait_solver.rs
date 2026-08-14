@@ -1599,6 +1599,7 @@ fn install_item_argument(
             substitution.generic_arguments.insert(index, argument);
         }
         GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. } => {
             substitution.generic_arguments.insert(index, argument);
@@ -1673,6 +1674,7 @@ fn generic_argument_is_const_kind(argument: &GenericArgument, expected: crate::C
     matches!(
         (argument, expected),
         (GenericArgument::ConstU32(_), crate::ConstKind::U32)
+            | (GenericArgument::ConstU32Expr(_), crate::ConstKind::U32)
             | (
                 GenericArgument::ConstQuantity(_),
                 crate::ConstKind::Quantity
@@ -1991,6 +1993,13 @@ fn substitute_generic_argument(
             .filter(|argument| generic_argument_is_const_kind(argument, *kind))
             .cloned()
             .unwrap_or_else(|| argument.clone()),
+        GenericArgument::ConstU32Expr(value) => {
+            let value = substitute_structural_u32_expr(value, substitution);
+            match value {
+                crate::StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
+                value => GenericArgument::ConstU32Expr(value),
+            }
+        }
         GenericArgument::Lifetime(crate::Lifetime::Generic(index)) => GenericArgument::Lifetime(
             substitution
                 .lifetimes
@@ -2000,6 +2009,46 @@ fn substitute_generic_argument(
         ),
         argument => argument.clone(),
     }
+}
+
+fn substitute_structural_u32_expr(
+    value: &crate::StructuralU32Expr,
+    substitution: &ImplementationSubstitution,
+) -> crate::StructuralU32Expr {
+    use crate::StructuralU32Expr;
+    let value = match value {
+        StructuralU32Expr::Literal(value) => StructuralU32Expr::Literal(*value),
+        StructuralU32Expr::Param(index) => match substitution.generic_arguments.get(index) {
+            Some(GenericArgument::ConstU32(value)) => StructuralU32Expr::Literal(*value),
+            Some(GenericArgument::ConstU32Expr(value)) => value.clone(),
+            Some(GenericArgument::ConstGeneric {
+                index,
+                kind: crate::ConstKind::U32,
+            }) => StructuralU32Expr::Param(*index),
+            _ => StructuralU32Expr::Param(*index),
+        },
+        StructuralU32Expr::Add(left, right) => StructuralU32Expr::Add(
+            Box::new(substitute_structural_u32_expr(left, substitution)),
+            Box::new(substitute_structural_u32_expr(right, substitution)),
+        ),
+        StructuralU32Expr::Sub(left, right) => StructuralU32Expr::Sub(
+            Box::new(substitute_structural_u32_expr(left, substitution)),
+            Box::new(substitute_structural_u32_expr(right, substitution)),
+        ),
+        StructuralU32Expr::Mul(left, right) => StructuralU32Expr::Mul(
+            Box::new(substitute_structural_u32_expr(left, substitution)),
+            Box::new(substitute_structural_u32_expr(right, substitution)),
+        ),
+        StructuralU32Expr::Div(left, right) => StructuralU32Expr::Div(
+            Box::new(substitute_structural_u32_expr(left, substitution)),
+            Box::new(substitute_structural_u32_expr(right, substitution)),
+        ),
+        StructuralU32Expr::Rem(left, right) => StructuralU32Expr::Rem(
+            Box::new(substitute_structural_u32_expr(left, substitution)),
+            Box::new(substitute_structural_u32_expr(right, substitution)),
+        ),
+    };
+    value.clone().normalized().unwrap_or(value)
 }
 
 fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> Type {
@@ -2282,6 +2331,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided)
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstQuantity(_) => true,
+        GenericArgument::ConstU32Expr(_) => false,
         GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. })
         | GenericArgument::ConstGeneric { .. } => false,
     }

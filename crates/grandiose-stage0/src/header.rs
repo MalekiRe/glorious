@@ -132,6 +132,10 @@ pub enum HeaderGenericArgument {
     /// resolves named effects and declaration binders.
     EffectRow(EffectRowHeader),
     U32(u32),
+    /// A `u32` const expression whose operands may include declared const
+    /// binders. It remains source-shaped until the target generic slot has
+    /// established that a structural `u32` is required.
+    StructuralConst(HeaderStructuralConst),
     /// A structural quantity interval supplied to a `Quantity` const slot.
     /// Keeping this distinct from `HeaderType` makes the source kind boundary
     /// explicit before signature elaboration.
@@ -238,6 +242,20 @@ pub enum HeaderStructuralConst {
     U32(u32),
     Quantity(Quantity),
     Generic(String),
+    U32Expression(HeaderStructuralU32Expr),
+}
+
+/// Source-shaped structural arithmetic.  Names are intentionally preserved
+/// until elaboration maps them to owner-local generic slots.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HeaderStructuralU32Expr {
+    Literal(u32),
+    Param(String),
+    Add(Box<Self>, Box<Self>),
+    Sub(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>),
+    Div(Box<Self>, Box<Self>),
+    Rem(Box<Self>, Box<Self>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1653,6 +1671,13 @@ impl Parser<'_> {
                 arguments.push(HeaderGenericArgument::Quantity(
                     self.structural_quantity_argument(),
                 ));
+            } else if self.starts_symbolic_structural_u32_expression() {
+                arguments.push(HeaderGenericArgument::StructuralConst(
+                    self.structural_const_expression(
+                        "G3222",
+                        "structural u32 generic argument is out of range",
+                    ),
+                ));
             } else if let Some(index) = self.current()
                 && self.lexed.tokens[index].kind == TokenKind::Integer
             {
@@ -1722,6 +1747,10 @@ impl Parser<'_> {
         if self.at_punctuation('[') {
             return HeaderStructuralConst::Quantity(self.structural_quantity_argument());
         }
+        if self.starts_symbolic_structural_u32_expression() {
+            return self
+                .structural_const_expression("G3262", "associated u32 constant is out of range");
+        }
         if let Some(index) = self.current()
             && self.lexed.tokens[index].kind == TokenKind::Integer
         {
@@ -1745,6 +1774,147 @@ impl Parser<'_> {
                 HeaderStructuralConst::U32(0)
             }
         }
+    }
+
+    /// A bare path remains syntactically ambiguous between a type and a const
+    /// binder until signature elaboration knows the target slot.  An arithmetic
+    /// operator removes that ambiguity, letting the header retain a symbolic
+    /// const term without pretending it is a type application.
+    fn starts_symbolic_structural_u32_expression(&self) -> bool {
+        let Some(index) = self.current() else {
+            return false;
+        };
+        let token = &self.lexed.tokens[index];
+        if token.kind == TokenKind::Integer {
+            // The literal-only evaluator deliberately does not accept a
+            // binder.  When an integer-led expression contains one (`1 + N`)
+            // dispatch to the symbolic parser before it can recover as `1`.
+            return self.tokens[self.position + 1..]
+                .iter()
+                .take_while(|next| {
+                    let token = &self.lexed.tokens[**next];
+                    token.kind != TokenKind::Punctuation(',') && !self.at_operator_at(**next, ">")
+                })
+                .any(|next| self.lexed.tokens[*next].kind == TokenKind::Identifier);
+        }
+        if token.kind == TokenKind::Punctuation('(') {
+            // A parenthesized arithmetic stream cannot be a source type: a
+            // normal tuple/callable type has commas or an arrow, never one of
+            // these structural operators.  Keep parenthesized `N + 1` in the
+            // const parser while leaving ordinary `(T, U)` syntax untouched.
+            return self.tokens[self.position + 1..]
+                .iter()
+                .take_while(|next| self.lexed.tokens[**next].kind != TokenKind::Punctuation(','))
+                .any(|next| {
+                    matches!(
+                        self.lexed.text(self.source, &self.lexed.tokens[*next]),
+                        "+" | "-" | "*" | "/" | "%"
+                    )
+                });
+        }
+        token.kind == TokenKind::Identifier
+            && self.tokens.get(self.position + 1).is_some_and(|next| {
+                matches!(
+                    self.lexed.text(self.source, &self.lexed.tokens[*next]),
+                    "+" | "-" | "*" | "/" | "%"
+                )
+            })
+    }
+
+    fn at_operator_at(&self, index: usize, value: &str) -> bool {
+        self.lexed.tokens[index].kind == TokenKind::Operator
+            && self.lexed.text(self.source, &self.lexed.tokens[index]) == value
+    }
+
+    fn structural_const_expression(
+        &mut self,
+        value_code: &'static str,
+        value_message: &'static str,
+    ) -> HeaderStructuralConst {
+        match self.structural_u32_expression(value_code, value_message) {
+            Ok(HeaderStructuralU32Expr::Literal(value)) => HeaderStructuralConst::U32(value),
+            Ok(value) => HeaderStructuralConst::U32Expression(value),
+            Err(()) => {
+                self.error(value_code, value_message);
+                HeaderStructuralConst::U32(0)
+            }
+        }
+    }
+
+    fn structural_u32_expression(
+        &mut self,
+        value_code: &'static str,
+        value_message: &'static str,
+    ) -> Result<HeaderStructuralU32Expr, ()> {
+        let mut value = self.structural_u32_product(value_code, value_message)?;
+        while let Some(operator) = self
+            .at_operator("+")
+            .then_some('+')
+            .or_else(|| self.at_operator("-").then_some('-'))
+        {
+            self.position += 1;
+            let right = self.structural_u32_product(value_code, value_message)?;
+            value = match operator {
+                '+' => HeaderStructuralU32Expr::Add(Box::new(value), Box::new(right)),
+                '-' => HeaderStructuralU32Expr::Sub(Box::new(value), Box::new(right)),
+                _ => unreachable!(),
+            };
+        }
+        Ok(value)
+    }
+
+    fn structural_u32_product(
+        &mut self,
+        value_code: &'static str,
+        value_message: &'static str,
+    ) -> Result<HeaderStructuralU32Expr, ()> {
+        let mut value = self.structural_u32_primary(value_code, value_message)?;
+        while let Some(operator) = self
+            .at_operator("*")
+            .then_some('*')
+            .or_else(|| self.at_operator("/").then_some('/'))
+            .or_else(|| self.at_operator("%").then_some('%'))
+        {
+            self.position += 1;
+            let right = self.structural_u32_primary(value_code, value_message)?;
+            value = match operator {
+                '*' => HeaderStructuralU32Expr::Mul(Box::new(value), Box::new(right)),
+                '/' => HeaderStructuralU32Expr::Div(Box::new(value), Box::new(right)),
+                '%' => HeaderStructuralU32Expr::Rem(Box::new(value), Box::new(right)),
+                _ => unreachable!(),
+            };
+        }
+        Ok(value)
+    }
+
+    fn structural_u32_primary(
+        &mut self,
+        value_code: &'static str,
+        value_message: &'static str,
+    ) -> Result<HeaderStructuralU32Expr, ()> {
+        if self.punctuation('(') {
+            let value = self.structural_u32_expression(value_code, value_message)?;
+            if !self.punctuation(')') {
+                self.error(value_code, "expected `)` in structural constant expression");
+                return Err(());
+            }
+            return Ok(value);
+        }
+        if let Some(index) = self.current()
+            && self.lexed.tokens[index].kind == TokenKind::Integer
+        {
+            let value = self.integer(value_code, value_message);
+            return u32::try_from(value)
+                .map(HeaderStructuralU32Expr::Literal)
+                .map_err(|_| {
+                    self.error(value_code, value_message);
+                });
+        }
+        self.identifier()
+            .map(HeaderStructuralU32Expr::Param)
+            .ok_or_else(|| {
+                self.error(value_code, value_message);
+            })
     }
     /// Evaluate the intentionally tiny structural-integer language accepted
     /// inside generic arguments and quantity bounds.  This is not source

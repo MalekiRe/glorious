@@ -1331,6 +1331,7 @@ fn vm_nominal_argument(value: &GenericArgument) -> Result<VmType, Type> {
     match value {
         GenericArgument::Type(value) => vm_type(value),
         GenericArgument::ConstU32(value) => vm_type(&Type::ConstU32(*value)),
+        GenericArgument::ConstU32Expr(_) => Err(Type::Error),
         GenericArgument::ConstQuantity(value) => vm_type(&Type::ConstQuantity(*value)),
         GenericArgument::ConstGeneric { index, kind } => vm_type(&Type::ConstGeneric {
             index: *index,
@@ -1415,6 +1416,12 @@ fn vm_effect_argument(
         }
         GenericArgument::Lifetime(value) => VmGenericArgument::Lifetime(*value),
         GenericArgument::ConstU32(value) => VmGenericArgument::ConstU32(*value),
+        GenericArgument::ConstU32Expr(_) => {
+            return Err(VmArtifactError::UnsupportedEffectArgumentType {
+                effect,
+                ty: Box::new(Type::Error),
+            });
+        }
         GenericArgument::ConstQuantity(value) => VmGenericArgument::ConstQuantity {
             lower: value.lower,
             upper: value.upper,

@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use crate::{
     header::{
         CallableHeader, EffectHeader, EffectRowHeader, EnumVariantPayloadHeader, GenericParameters,
-        HeaderGenericArgument, HeaderStructuralConst, HeaderType, ImplementationHeader,
-        NominalLayoutHeader, ParsedHeader, TraitHeader, TraitRefHeader,
+        HeaderGenericArgument, HeaderStructuralConst, HeaderStructuralU32Expr, HeaderType,
+        ImplementationHeader, NominalLayoutHeader, ParsedHeader, TraitHeader, TraitRefHeader,
     },
     identity::{DefKey, ModuleKey},
     interface::{Definition, DefinitionNamespace, PackageInterface},
@@ -14,7 +14,7 @@ use crate::{
     resolution::{DefinitionIndex, ResolutionState},
     types::{
         ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail, GenericArgument,
-        GenericKind, Lifetime, Mutability, Type,
+        GenericKind, Lifetime, Mutability, StructuralU32Expr, Type,
     },
 };
 
@@ -1688,6 +1688,10 @@ fn substitute_trait_generic_argument(
                 index: u32::MAX,
                 kind,
             }),
+        GenericArgument::ConstU32Expr(value) => match value.substitute(arguments) {
+            StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
+            value => GenericArgument::ConstU32Expr(value),
+        },
         value => value,
     }
 }
@@ -1696,6 +1700,7 @@ fn generic_argument_matches_const_kind(argument: &GenericArgument, kind: ConstKi
     matches!(
         (argument, kind),
         (GenericArgument::ConstU32(_), ConstKind::U32)
+            | (GenericArgument::ConstU32Expr(_), ConstKind::U32)
             | (GenericArgument::ConstQuantity(_), ConstKind::Quantity)
             | (
                 GenericArgument::ConstGeneric {
@@ -2085,6 +2090,9 @@ impl Elaborator<'_> {
                             );
                             GenericArgument::ConstU32(0)
                         }),
+                    HeaderStructuralConst::U32Expression(value) => {
+                        self.elaborate_structural_u32_expression(value)
+                    }
                 };
                 (item.name.clone(), value)
             })
@@ -2149,6 +2157,7 @@ impl Elaborator<'_> {
                 .map(|(name, value)| {
                     let kind = match &value {
                         GenericArgument::ConstU32(_) => ConstKind::U32,
+                        GenericArgument::ConstU32Expr(_) => ConstKind::U32,
                         GenericArgument::ConstQuantity(_) => ConstKind::Quantity,
                         GenericArgument::ConstGeneric { kind, .. } => *kind,
                         _ => ConstKind::U32,
@@ -2249,12 +2258,75 @@ impl Elaborator<'_> {
                     fallback_structural_const(expected)
                 }
             },
+            HeaderStructuralConst::U32Expression(value) if expected == ConstKind::U32 => {
+                self.elaborate_structural_u32_expression(value)
+            }
             value => {
                 self.error(
                     "G4134",
                     format!("structural associated constant {value:?} has the wrong kind"),
                 );
                 fallback_structural_const(expected)
+            }
+        }
+    }
+
+    fn elaborate_structural_u32_expression(
+        &mut self,
+        value: &HeaderStructuralU32Expr,
+    ) -> GenericArgument {
+        fn elaborate(
+            elaborator: &mut Elaborator<'_>,
+            value: &HeaderStructuralU32Expr,
+        ) -> Result<StructuralU32Expr, ()> {
+            Ok(match value {
+                HeaderStructuralU32Expr::Literal(value) => StructuralU32Expr::Literal(*value),
+                HeaderStructuralU32Expr::Param(name) => {
+                    match elaborator.const_generics.get(name).copied() {
+                        Some((index, ConstKind::U32)) => StructuralU32Expr::Param(index),
+                        Some((_, found)) => {
+                            elaborator.error("G4134", format!("structural const binder `{name}` has kind {found:?}, expected U32"));
+                            return Err(());
+                        }
+                        None => {
+                            elaborator.error(
+                                "G4134",
+                                format!(
+                                    "structural constant refers to undeclared const binder `{name}`"
+                                ),
+                            );
+                            return Err(());
+                        }
+                    }
+                }
+                HeaderStructuralU32Expr::Add(left, right) => StructuralU32Expr::Add(
+                    Box::new(elaborate(elaborator, left)?),
+                    Box::new(elaborate(elaborator, right)?),
+                ),
+                HeaderStructuralU32Expr::Sub(left, right) => StructuralU32Expr::Sub(
+                    Box::new(elaborate(elaborator, left)?),
+                    Box::new(elaborate(elaborator, right)?),
+                ),
+                HeaderStructuralU32Expr::Mul(left, right) => StructuralU32Expr::Mul(
+                    Box::new(elaborate(elaborator, left)?),
+                    Box::new(elaborate(elaborator, right)?),
+                ),
+                HeaderStructuralU32Expr::Div(left, right) => StructuralU32Expr::Div(
+                    Box::new(elaborate(elaborator, left)?),
+                    Box::new(elaborate(elaborator, right)?),
+                ),
+                HeaderStructuralU32Expr::Rem(left, right) => StructuralU32Expr::Rem(
+                    Box::new(elaborate(elaborator, left)?),
+                    Box::new(elaborate(elaborator, right)?),
+                ),
+            })
+        }
+        match elaborate(self, value).and_then(|value| value.normalized().map_err(|_| ())) {
+            Ok(StructuralU32Expr::Literal(value)) => GenericArgument::ConstU32(value),
+            Ok(value) => GenericArgument::ConstU32Expr(value),
+            Err(()) => {
+                self.error("G4134", "structural u32 arithmetic overflowed, divided by zero, or exceeded its resource limit".into());
+                GenericArgument::ConstU32(0)
             }
         }
     }
@@ -2333,6 +2405,9 @@ impl Elaborator<'_> {
                     GenericArgument::EffectRow(self.effect_row(value))
                 }
                 HeaderGenericArgument::U32(value) => GenericArgument::ConstU32(*value),
+                HeaderGenericArgument::StructuralConst(value) => {
+                    self.structural_const(value, ConstKind::U32)
+                }
                 HeaderGenericArgument::Quantity(value) => GenericArgument::ConstQuantity(*value),
             })
             .collect()
@@ -2827,6 +2902,9 @@ impl Elaborator<'_> {
                 (HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
                     GenericArgument::ConstU32(*value)
                 }
+                (HeaderGenericArgument::StructuralConst(value), GenericKind::Const(ConstKind::U32)) => {
+                    self.structural_const(value, ConstKind::U32)
+                }
                 (
                     HeaderGenericArgument::Quantity(value),
                     GenericKind::Const(ConstKind::Quantity),
@@ -2852,6 +2930,7 @@ impl Elaborator<'_> {
                         }
                     },
                 (HeaderGenericArgument::U32(_), GenericKind::Type)
+                | (HeaderGenericArgument::StructuralConst(_), GenericKind::Type)
                 | (HeaderGenericArgument::Quantity(_), GenericKind::Type)
                 | (HeaderGenericArgument::Lifetime(_), GenericKind::Type)
                 | (HeaderGenericArgument::EffectRow(_), GenericKind::Type) => {
@@ -3172,6 +3251,7 @@ fn generic_argument_as_runtime_type(argument: GenericArgument) -> Type {
     match argument {
         GenericArgument::Type(value) => value,
         GenericArgument::ConstU32(value) => Type::ConstU32(value),
+        GenericArgument::ConstU32Expr(_) => Type::Error,
         GenericArgument::ConstQuantity(value) => Type::ConstQuantity(value),
         GenericArgument::ConstGeneric { index, kind } => Type::ConstGeneric { index, kind },
         GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_) => Type::Error,
@@ -3278,6 +3358,10 @@ fn substitute_alias_generic_identity_argument(
             .filter(|argument| generic_argument_matches_const_kind(argument, kind))
             .cloned()
             .unwrap_or(GenericArgument::ConstGeneric { index, kind }),
+        GenericArgument::ConstU32Expr(value) => match value.substitute(arguments) {
+            StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
+            value => GenericArgument::ConstU32Expr(value),
+        },
         argument => argument,
     }
 }

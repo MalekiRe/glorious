@@ -64,6 +64,168 @@ pub enum ConstKind {
     Quantity,
 }
 
+/// A symbolic, checked `u32` const term.  The language deliberately keeps
+/// const evaluation structural: this tree cannot call a function or inspect a
+/// runtime value.  Terms are normalized at every interface boundary, so the
+/// same arithmetic has one identity whether it was written in an alias,
+/// associated item default, or a direct nominal application.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StructuralU32Expr {
+    Literal(u32),
+    Param(u32),
+    Add(Box<Self>, Box<Self>),
+    Sub(Box<Self>, Box<Self>),
+    Mul(Box<Self>, Box<Self>),
+    Div(Box<Self>, Box<Self>),
+    Rem(Box<Self>, Box<Self>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StructuralConstError {
+    OverflowOrDivisionByZero,
+    ResourceLimit,
+}
+
+impl StructuralU32Expr {
+    /// Normalize arithmetic deterministically.  Addition and multiplication
+    /// are canonicalized in operand order after their checked literal folds;
+    /// this keeps `N + 1` and `1 + N` identical without admitting arbitrary
+    /// algebraic rewrites that could hide an overflow.
+    pub fn normalized(self) -> Result<Self, StructuralConstError> {
+        self.normalize_with_budget(&mut 1024)
+    }
+
+    fn normalize_with_budget(self, budget: &mut u32) -> Result<Self, StructuralConstError> {
+        if *budget == 0 {
+            return Err(StructuralConstError::ResourceLimit);
+        }
+        *budget -= 1;
+        let binary = |left: Box<Self>,
+                      right: Box<Self>,
+                      op: fn(Box<Self>, Box<Self>) -> Self,
+                      checked: fn(u32, u32) -> Option<u32>,
+                      commutative: bool,
+                      budget: &mut u32|
+         -> Result<Self, StructuralConstError> {
+            let mut left = left.normalize_with_budget(budget)?;
+            let mut right = right.normalize_with_budget(budget)?;
+            if let (Self::Literal(left), Self::Literal(right)) = (&left, &right) {
+                return checked(*left, *right)
+                    .map(Self::Literal)
+                    .ok_or(StructuralConstError::OverflowOrDivisionByZero);
+            }
+            if commutative && structural_u32_expr_key(&right) < structural_u32_expr_key(&left) {
+                std::mem::swap(&mut left, &mut right);
+            }
+            Ok(op(Box::new(left), Box::new(right)))
+        };
+        match self {
+            Self::Literal(_) | Self::Param(_) => Ok(self),
+            Self::Add(left, right) => {
+                binary(left, right, Self::Add, u32::checked_add, true, budget)
+            }
+            Self::Sub(left, right) => {
+                binary(left, right, Self::Sub, u32::checked_sub, false, budget)
+            }
+            Self::Mul(left, right) => {
+                binary(left, right, Self::Mul, u32::checked_mul, true, budget)
+            }
+            Self::Div(left, right) => {
+                binary(left, right, Self::Div, u32::checked_div, false, budget)
+            }
+            Self::Rem(left, right) => {
+                binary(left, right, Self::Rem, u32::checked_rem, false, budget)
+            }
+        }
+    }
+
+    /// Replace declaration-local const binders and fold newly-ground
+    /// arithmetic.  An unresolved binder remains symbolic, which is required
+    /// for generic aliases and associated defaults.
+    pub fn substitute(&self, arguments: &[GenericArgument]) -> Self {
+        let term = match self {
+            Self::Literal(value) => Self::Literal(*value),
+            Self::Param(index) => match arguments.get(*index as usize) {
+                Some(GenericArgument::ConstU32(value)) => Self::Literal(*value),
+                Some(GenericArgument::ConstU32Expr(value)) => value.clone(),
+                Some(GenericArgument::ConstGeneric {
+                    index,
+                    kind: ConstKind::U32,
+                }) => Self::Param(*index),
+                _ => Self::Param(*index),
+            },
+            Self::Add(left, right) => Self::Add(
+                Box::new(left.substitute(arguments)),
+                Box::new(right.substitute(arguments)),
+            ),
+            Self::Sub(left, right) => Self::Sub(
+                Box::new(left.substitute(arguments)),
+                Box::new(right.substitute(arguments)),
+            ),
+            Self::Mul(left, right) => Self::Mul(
+                Box::new(left.substitute(arguments)),
+                Box::new(right.substitute(arguments)),
+            ),
+            Self::Div(left, right) => Self::Div(
+                Box::new(left.substitute(arguments)),
+                Box::new(right.substitute(arguments)),
+            ),
+            Self::Rem(left, right) => Self::Rem(
+                Box::new(left.substitute(arguments)),
+                Box::new(right.substitute(arguments)),
+            ),
+        };
+        // Existing source has already received a diagnostic for invalid
+        // arithmetic.  Retaining the pre-normalized term here is preferable
+        // to inventing a different fallback identity during substitution.
+        term.clone().normalized().unwrap_or(term)
+    }
+}
+
+fn structural_u32_expr_key(value: &StructuralU32Expr) -> Vec<u8> {
+    let mut output = vec![];
+    encode_structural_u32_expr(value, &mut output);
+    output
+}
+
+fn encode_structural_u32_expr(value: &StructuralU32Expr, output: &mut Vec<u8>) {
+    match value {
+        StructuralU32Expr::Literal(value) => {
+            output.push(0);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        StructuralU32Expr::Param(value) => {
+            output.push(1);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        StructuralU32Expr::Add(left, right) => {
+            output.push(2);
+            encode_structural_u32_expr(left, output);
+            encode_structural_u32_expr(right, output);
+        }
+        StructuralU32Expr::Sub(left, right) => {
+            output.push(3);
+            encode_structural_u32_expr(left, output);
+            encode_structural_u32_expr(right, output);
+        }
+        StructuralU32Expr::Mul(left, right) => {
+            output.push(4);
+            encode_structural_u32_expr(left, output);
+            encode_structural_u32_expr(right, output);
+        }
+        StructuralU32Expr::Div(left, right) => {
+            output.push(5);
+            encode_structural_u32_expr(left, output);
+            encode_structural_u32_expr(right, output);
+        }
+        StructuralU32Expr::Rem(left, right) => {
+            output.push(6);
+            encode_structural_u32_expr(left, output);
+            encode_structural_u32_expr(right, output);
+        }
+    }
+}
+
 /// Kinds of source generic binders retained by callable signatures.  Keeping
 /// these in source-slot order prevents a later phase from treating consts,
 /// regions, or rows as ordinary type substitutions.
@@ -86,8 +248,14 @@ pub enum GenericArgument {
     EffectRow(EffectRow),
     Lifetime(Lifetime),
     ConstU32(u32),
+    /// A normalized symbolic `u32` term retained until all const binders have
+    /// been supplied.  Closed terms are always folded to `ConstU32`.
+    ConstU32Expr(StructuralU32Expr),
     ConstQuantity(Quantity),
-    ConstGeneric { index: u32, kind: ConstKind },
+    ConstGeneric {
+        index: u32,
+        kind: ConstKind,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1126,6 +1294,7 @@ impl InferContext {
             }
             GenericArgument::Lifetime(_)
             | GenericArgument::ConstU32(_)
+            | GenericArgument::ConstU32Expr(_)
             | GenericArgument::ConstQuantity(_)
             | GenericArgument::ConstGeneric { .. } => false,
         }
@@ -1392,6 +1561,10 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
         GenericArgument::ConstU32(value) => {
             output.push(3);
             output.extend_from_slice(&value.to_le_bytes());
+        }
+        GenericArgument::ConstU32Expr(value) => {
+            output.push(6);
+            encode_structural_u32_expr(value, output);
         }
         GenericArgument::ConstQuantity(value) => {
             output.push(4);

@@ -1211,7 +1211,7 @@ fn method_selection_substitutes_impl_and_method_generic_arguments() {
 #[test]
 fn associated_constants_normalize_overrides_defaults_and_const_generics() {
     let (interface, signatures) = signatures(
-        "trait Width<n: u32> { const Value: u32 = n; } struct Box<n: u32> {} impl<n: u32> Width<n> for Box<n> {} impl Width<9> for i64 { const Value = 12; }",
+        "trait Width<n: u32> { const Value: u32 = n + 1; } struct Box<n: u32> {} impl<n: u32> Width<n> for Box<n> {} impl Width<9> for i64 { const Value = 12; }",
     );
     let width = key(&interface, "Width");
     let boxed = key(&interface, "Box");
@@ -1233,7 +1233,7 @@ fn associated_constants_normalize_overrides_defaults_and_const_generics() {
     assert!(matches!(
         default,
         TraitConstProjectionAnswer::Normalized {
-            value: GenericArgument::ConstU32(7),
+            value: GenericArgument::ConstU32(8),
             ..
         }
     ));

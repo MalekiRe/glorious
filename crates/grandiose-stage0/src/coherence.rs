@@ -376,6 +376,7 @@ fn collect_generic_argument_names(
             }
         }
         HeaderGenericArgument::U32(_)
+        | HeaderGenericArgument::StructuralConst(_)
         | HeaderGenericArgument::Quantity(_)
         | HeaderGenericArgument::Lifetime(_) => {}
     }
@@ -684,6 +685,7 @@ fn contains_overlap_argument_generic(
         GenericArgument::EffectRow(_)
         | GenericArgument::Lifetime(_)
         | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. } => false,
     }

@@ -2818,6 +2818,18 @@ impl Elaborator<'_> {
                 (crate::header::HeaderGenericArgument::U32(value), _) => {
                     GenericArgument::ConstU32(*value)
                 }
+                (
+                    crate::header::HeaderGenericArgument::StructuralConst(value),
+                    crate::GenericKind::Const(crate::ConstKind::U32),
+                ) => self.body_structural_u32(value, span, code),
+                (crate::header::HeaderGenericArgument::StructuralConst(_), _) => {
+                    self.error(
+                        span,
+                        code,
+                        "structural u32 expression supplied to a non-u32 generic slot",
+                    );
+                    GenericArgument::ConstU32(0)
+                }
                 (crate::header::HeaderGenericArgument::Quantity(value), _) => {
                     GenericArgument::ConstQuantity(*value)
                 }
@@ -2825,6 +2837,76 @@ impl Elaborator<'_> {
             elaborated.push(value);
         }
         Some(elaborated)
+    }
+
+    fn body_structural_u32(
+        &mut self,
+        value: &crate::header::HeaderStructuralConst,
+        span: Span,
+        code: &'static str,
+    ) -> GenericArgument {
+        fn elaborate(
+            elaborator: &mut Elaborator<'_>,
+            value: &crate::header::HeaderStructuralU32Expr,
+            span: Span,
+            code: &'static str,
+        ) -> Option<crate::StructuralU32Expr> {
+            use crate::StructuralU32Expr as Expr;
+            use crate::header::HeaderStructuralU32Expr as Source;
+            Some(match value {
+                Source::Literal(value) => Expr::Literal(*value),
+                Source::Param(name) => match elaborator.const_parameters.get(name).copied() {
+                    Some((index, crate::ConstKind::U32)) => Expr::Param(index),
+                    _ => {
+                        elaborator.error(span, code, &format!("structural u32 expression refers to undeclared or wrong-kind binder `{name}`"));
+                        return None;
+                    }
+                },
+                Source::Add(left, right) => Expr::Add(
+                    Box::new(elaborate(elaborator, left, span, code)?),
+                    Box::new(elaborate(elaborator, right, span, code)?),
+                ),
+                Source::Sub(left, right) => Expr::Sub(
+                    Box::new(elaborate(elaborator, left, span, code)?),
+                    Box::new(elaborate(elaborator, right, span, code)?),
+                ),
+                Source::Mul(left, right) => Expr::Mul(
+                    Box::new(elaborate(elaborator, left, span, code)?),
+                    Box::new(elaborate(elaborator, right, span, code)?),
+                ),
+                Source::Div(left, right) => Expr::Div(
+                    Box::new(elaborate(elaborator, left, span, code)?),
+                    Box::new(elaborate(elaborator, right, span, code)?),
+                ),
+                Source::Rem(left, right) => Expr::Rem(
+                    Box::new(elaborate(elaborator, left, span, code)?),
+                    Box::new(elaborate(elaborator, right, span, code)?),
+                ),
+            })
+        }
+        let value = match value {
+            crate::header::HeaderStructuralConst::U32(value) => {
+                crate::StructuralU32Expr::Literal(*value)
+            }
+            crate::header::HeaderStructuralConst::U32Expression(value) => {
+                match elaborate(self, value, span, code) {
+                    Some(value) => value,
+                    None => return GenericArgument::ConstU32(0),
+                }
+            }
+            _ => {
+                self.error(span, code, "structural u32 expression has the wrong kind");
+                return GenericArgument::ConstU32(0);
+            }
+        };
+        match value.normalized() {
+            Ok(crate::StructuralU32Expr::Literal(value)) => GenericArgument::ConstU32(value),
+            Ok(value) => GenericArgument::ConstU32Expr(value),
+            Err(_) => {
+                self.error(span, code, "structural u32 arithmetic overflowed, divided by zero, or exceeded its resource limit");
+                GenericArgument::ConstU32(0)
+            }
+        }
     }
 
     /// Elaborate `<S as Trait<Args>>::CONST` only in a structural const slot.
@@ -6369,6 +6451,7 @@ impl Elaborator<'_> {
                 GenericArgument::EffectRow(_)
                 | GenericArgument::Lifetime(_)
                 | GenericArgument::ConstU32(_)
+                | GenericArgument::ConstU32Expr(_)
                 | GenericArgument::ConstQuantity(_)
                 | GenericArgument::ConstGeneric { .. } => Type::Error,
             })
@@ -7131,6 +7214,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         }
         GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided)
         | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::Lifetime(Lifetime::Generic(_) | Lifetime::Bound { .. })
         | GenericArgument::ConstGeneric { .. } => false,

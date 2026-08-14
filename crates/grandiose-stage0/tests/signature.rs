@@ -2,7 +2,7 @@ use grandiose_stage0::{
     ConstKind, DeclarationScan, DefinitionIndex, EffectRow, EffectTail, ElaboratedHeader,
     ElaboratedInterface, ElaboratedNominalLayout, FileKey, GenericArgument, GenericKind,
     InstantiationError, InterfaceSet, LexedFile, Lifetime, LogicalPath, PackageKey, Quantity,
-    ScalarType, Type,
+    ScalarType, StructuralU32Expr, Type,
 };
 
 #[test]
@@ -1874,5 +1874,89 @@ fn associated_const_contracts_preserve_defaults_and_reject_missing_or_wrong_over
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "G4161")
+    );
+}
+
+#[test]
+fn symbolic_u32_arithmetic_is_canonical_in_nominal_and_associated_const_contracts() {
+    let package = PackageKey("signature-symbolic-structural-const@0.1.0".into());
+    let source = "pub struct Tag<n: u32> {} pub fn advance<n: u32>(value: Tag<n + 1>) -> Tag<(1 + n)> { value } trait Sized<n: u32> { const Next: u32 = n + 1; }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let advance = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("advance"))
+        .expect("advance definition");
+    let ElaboratedHeader::Callable(advance) = signatures.definitions.get(&advance.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    let expected = GenericArgument::ConstU32Expr(StructuralU32Expr::Add(
+        Box::new(StructuralU32Expr::Literal(1)),
+        Box::new(StructuralU32Expr::Param(0)),
+    ));
+    let Type::Nominal { arguments, .. } = &advance.parameters[0] else {
+        panic!("expected nominal parameter")
+    };
+    assert_eq!(arguments, &vec![expected.clone()]);
+    let Type::Nominal { arguments, .. } = &advance.result else {
+        panic!("expected nominal result")
+    };
+    assert_eq!(arguments, &vec![expected.clone()]);
+    let sized = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Sized"))
+        .expect("trait definition");
+    let ElaboratedHeader::Trait(sized) = signatures.definitions.get(&sized.key).unwrap() else {
+        panic!("expected trait")
+    };
+    assert_eq!(sized.associated_consts["Next"].default, Some(expected));
+}
+
+#[test]
+fn structural_u32_arithmetic_folds_closed_terms_and_rejects_checked_errors() {
+    let package = PackageKey("signature-structural-const-errors@0.1.0".into());
+    let source = "pub struct Fold<n: u32> {} pub fn folded(value: Fold<(2 + 3) * 4>) -> Fold<20> { value } pub fn invalid(value: Fold<1 / 0>) -> Fold<0> { value }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let folded = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("folded"))
+        .unwrap();
+    let ElaboratedHeader::Callable(folded) = signatures.definitions.get(&folded.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    let Type::Nominal { arguments, .. } = &folded.parameters[0] else {
+        panic!("expected nominal")
+    };
+    assert_eq!(arguments, &vec![GenericArgument::ConstU32(20)]);
+    let invalid = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("invalid"))
+        .unwrap();
+    assert!(
+        invalid
+            .syntax
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3228"),
+        "{:#?}",
+        invalid.syntax.diagnostics
     );
 }
