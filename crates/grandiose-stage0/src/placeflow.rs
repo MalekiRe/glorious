@@ -1,6 +1,7 @@
 //! Ownership facts derived solely from Typed Core before MIR lowering.
 
 use crate::{
+    LabelBrand,
     core::{
         CallReferenceOrigin, CallReferenceShape, CaptureMode, CoreId, CoreKind, CorePattern,
         CorePlace, RefinementBrand, TypedBody,
@@ -18,6 +19,17 @@ use std::collections::{BTreeMap, BTreeSet};
 struct Projection {
     root: String,
     fields: Vec<u32>,
+}
+
+/// A strict child which never reaches the next source-ordered operand.  A
+/// label transfer is kept distinct from `Never`: a label consumes transfers to
+/// its own brand and turns them back into an ordinary result for the enclosing
+/// continuation, whereas a transfer targeting an outer label skips all
+/// siblings still inside the current label body.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AbruptExit {
+    Never,
+    Transfer(LabelBrand),
 }
 
 impl Projection {
@@ -408,6 +420,15 @@ impl Analyzer<'_> {
                 self.visit_with_live_after(body, live_after)
             }
             CoreKind::Let { name, value } => {
+                // A strict initializer which transfers out or evaluates to
+                // `Never` never creates the lexical owner. In particular,
+                // reserving the binding before the initializer would let a
+                // forged post-transfer suffix retarget later PlaceFlow facts
+                // through a local that cannot exist at runtime.
+                if Self::abrupt_exit(self.body, value).is_some() {
+                    self.visit_with_live_after(value, live_after);
+                    return;
+                }
                 let binding = self.reserve_binding(&name);
                 if let CoreKind::Borrow { unique, value } = self.body.expression(value).kind.clone()
                 {
@@ -455,6 +476,14 @@ impl Analyzer<'_> {
                 let mut rhs_live = live_after.clone();
                 self.collect_place_uses(&place, &mut rhs_live);
                 self.visit_with_live_after(value, &rhs_live);
+                // The destination is evaluated only after a normally
+                // completed RHS. A terminal RHS or escaping label transfer
+                // must not reinitialize a moved place, consume a destination
+                // loan, or record reference provenance on an unreachable
+                // store edge.
+                if Self::abrupt_exit(self.body, value).is_some() {
+                    return;
+                }
                 if let CorePlace::Deref { reference, .. } = &place {
                     self.use_deref_reference(*reference, e.span, true);
                 }
@@ -682,12 +711,15 @@ impl Analyzer<'_> {
     }
 
     fn visit_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {
-        // A direct transfer leaves the current lexical continuation. Core
-        // still retains the syntactic suffix for diagnostics and IDE tools,
-        // but ownership must not treat that dead suffix as a use of a loan or
-        // as a conflicting access. Nested labels rejoin their own expression
-        // and therefore remain ordinary values here; only the direct edge is
-        // terminal for this sequence.
+        // A strict child which cannot normally complete leaves the current
+        // lexical continuation. Core retains the syntactic suffix for
+        // diagnostics and IDE tools, but ownership must not treat that dead
+        // suffix as a use of a loan, a move, or a cleanup transition. This is
+        // broader than a top-level `Transfer`: `Never` and an outer-label
+        // transfer can be nested in a let, assignment, aggregate, or call.
+        // Conversely, a transfer consumed by its own `Label` is an ordinary
+        // value again, so `abrupt_exit` deliberately does not classify that
+        // enclosing label expression as terminal.
         let reachable = values
             .iter()
             .copied()
@@ -695,7 +727,7 @@ impl Analyzer<'_> {
                 if *terminated {
                     return None;
                 }
-                if matches!(self.body.expression(value).kind, CoreKind::Transfer { .. }) {
+                if Self::abrupt_exit(self.body, value).is_some() {
                     *terminated = true;
                 }
                 Some(value)
@@ -710,6 +742,64 @@ impl Analyzer<'_> {
         for (value, future) in reachable.iter().zip(suffixes) {
             self.visit_with_live_after(*value, &future);
         }
+    }
+
+    /// Determine whether evaluating `id` can reach the following strict
+    /// operand. The calculation is structural and source ordered; it does
+    /// not infer effects or reinterpret handler control. A completed label
+    /// consumes only its own brand, preserving its regular continuation while
+    /// allowing an inner label to propagate a transfer to an enclosing label.
+    fn abrupt_exit(body: &TypedBody, id: CoreId) -> Option<AbruptExit> {
+        let expression = body.expression(id);
+        match &expression.kind {
+            CoreKind::Transfer { brand, .. } => Some(AbruptExit::Transfer(*brand)),
+            _ if matches!(expression.ty, Type::Never) => Some(AbruptExit::Never),
+            CoreKind::Label { brand, body: child } => match Self::abrupt_exit(body, *child) {
+                Some(AbruptExit::Transfer(target)) if target == *brand => None,
+                exit => exit,
+            },
+            CoreKind::Let { value, .. }
+            | CoreKind::Unary { value, .. }
+            | CoreKind::Borrow { value, .. }
+            | CoreKind::Deref(value)
+            | CoreKind::Move(value)
+            | CoreKind::PatternTest { subject: value, .. }
+            | CoreKind::Field { base: value, .. } => Self::abrupt_exit(body, *value),
+            CoreKind::Assign { value, .. } => Self::abrupt_exit(body, *value),
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
+                Self::first_abrupt_exit(body, values)
+            }
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+                Self::first_abrupt_exit(body, fields)
+            }
+            CoreKind::Binary { left, right, .. } => {
+                Self::abrupt_exit(body, *left).or_else(|| Self::abrupt_exit(body, *right))
+            }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => Self::abrupt_exit(body, *callee)
+                .or_else(|| Self::first_abrupt_exit(body, arguments)),
+            CoreKind::Perform { arguments, .. } => Self::first_abrupt_exit(body, arguments),
+            // A handler can turn a terminal performance into an ordinary arm
+            // result. Its frozen result type, rather than the computation
+            // child, is authoritative at this boundary.
+            CoreKind::Handle { .. }
+            | CoreKind::Completion { .. }
+            | CoreKind::Closure { .. }
+            | CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant(_)
+            | CoreKind::Error => None,
+        }
+    }
+
+    fn first_abrupt_exit(body: &TypedBody, values: &[CoreId]) -> Option<AbruptExit> {
+        values
+            .iter()
+            .find_map(|value| Self::abrupt_exit(body, *value))
     }
 
     /// Source-free local-use collection over Typed Core. Names are deliberately
@@ -1993,6 +2083,15 @@ impl Analyzer<'_> {
             message,
         })
     }
+}
+
+/// Shared source-order control fact for ownership consumers which traverse
+/// Typed Core after PlaceFlow. A `true` result means evaluation of this strict
+/// expression cannot reach its following sibling; EscapeFlow and UseFlow must
+/// therefore not publish borrow, move, escape, or quantitative facts for that
+/// syntactic suffix.
+pub(crate) fn strict_expression_abrupt(body: &TypedBody, id: CoreId) -> bool {
+    Analyzer::abrupt_exit(body, id).is_some()
 }
 
 /// A generic body is checked once, before every VM instance materializes its

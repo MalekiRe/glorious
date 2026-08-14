@@ -12,7 +12,7 @@ use crate::{
         CallableId, CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
         CorePlace, TypedBody,
     },
-    placeflow::{FlowEventKind, MoveFact, PlaceFlow},
+    placeflow::{FlowEventKind, MoveFact, PlaceFlow, strict_expression_abrupt},
     quantity::{Quantity, QuantityError},
     source::Span,
     types::Type,
@@ -533,6 +533,9 @@ impl Analyzer<'_> {
             }
             CoreKind::Let { name, value } => {
                 let summary = self.expression(value, environment);
+                if strict_expression_abrupt(self.body, value) {
+                    return summary;
+                }
                 let binding = self.binding_for_value(value, environment);
                 if matches!(self.body.expression(value).kind, CoreKind::Move(_)) {
                     if let Some(place) = self.move_place_fact(self.body.expression(value).span) {
@@ -545,6 +548,9 @@ impl Analyzer<'_> {
             }
             CoreKind::Assign { place, value } => {
                 let summary = self.expression(value, environment);
+                if strict_expression_abrupt(self.body, value) {
+                    return summary;
+                }
                 // Assignment stores a capability beyond this expression's
                 // direct invocation site. Until place summaries model the
                 // destination's exact callable contract, treat it as an
@@ -587,6 +593,12 @@ impl Analyzer<'_> {
                 ..
             } => {
                 let summary = self.sequence(arguments.clone(), environment, expression.span);
+                if arguments
+                    .iter()
+                    .any(|argument| strict_expression_abrupt(self.body, *argument))
+                {
+                    return summary;
+                }
                 // Performing an operation is a typed ownership boundary just
                 // like an ordinary call.  In particular, a callable payload
                 // cannot disappear merely because its consumer is selected
@@ -780,12 +792,15 @@ impl Analyzer<'_> {
     where
         I: IntoIterator<Item = CoreId>,
     {
-        values
-            .into_iter()
-            .fold(Summary::default(), |summary, value| {
-                let next = self.expression(value, environment);
-                self.compose(span, summary, next)
-            })
+        let mut summary = Summary::default();
+        for value in values {
+            let next = self.expression(value, environment);
+            summary = self.compose(span, summary, next);
+            if strict_expression_abrupt(self.body, value) {
+                break;
+            }
+        }
+        summary
     }
 
     /// Evaluate the prefix of a straight-line Core fragment through its first
@@ -845,8 +860,17 @@ impl Analyzer<'_> {
         // Evaluating a callee value does not execute its closure body. Its
         // captures execute only below after direct invocation is known.
         let mut summary = self.expression(callee, environment);
+        if strict_expression_abrupt(self.body, callee) {
+            return summary;
+        }
         let evaluated_arguments = self.sequence(arguments.clone(), environment, span);
         summary = self.compose(span, summary, evaluated_arguments);
+        if arguments
+            .iter()
+            .any(|argument| strict_expression_abrupt(self.body, *argument))
+        {
+            return summary;
+        }
         match self.binding_for_value(callee, environment) {
             Binding::Contract(key) => {
                 self.escape_arguments(callee, &arguments, environment);

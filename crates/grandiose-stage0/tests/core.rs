@@ -1735,6 +1735,72 @@ fn placeflow_ignores_a_forged_conflicting_suffix_after_a_direct_transfer() {
 }
 
 #[test]
+fn terminal_strict_operand_does_not_publish_unreachable_move_or_cleanup_facts() {
+    let core = core_for(
+        "core-terminal-strict-ownership-suffix@0.1.0",
+        "effect Stop { stop() -> !; } pub fn main() -> i64 { let value = 7; handle (Stop::stop(), { let loan = &mut value; move value }) { Stop::stop() => 42 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert!(
+        !flow.events.iter().any(|event| {
+            matches!(&event.kind, FlowEventKind::Move(name) if name == "value")
+                || matches!(&event.kind, FlowEventKind::BorrowUnique(name) if name == "value")
+        }),
+        "unreachable strict suffix contributed ownership events: {:#?}",
+        flow.events
+    );
+    assert!(
+        flow.moved_places.iter().all(|place| place.root != "value")
+            && flow.active_loans.iter().all(|loan| loan.root != "value"),
+        "unreachable strict suffix leaked into terminal cleanup evidence: {flow:#?}"
+    );
+
+    let mir = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"terminal-strict-ownership-suffix")),
+        &core,
+        &flow,
+    )
+    .function
+    .expect("terminal handler must lower after unreachable ownership suffix is discarded");
+    let image = grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+        .expect("MIR cleanup proof must survive independent VM verification");
+    assert_eq!(image.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn label_consumed_transfer_preserves_following_strict_ownership_effects() {
+    let core = core_for(
+        "core-label-rejoining-strict-ownership@0.1.0",
+        "pub fn main() -> i64 { let value = 0; let result = label done { transfer done 40; 0 }; let loan = &mut value; *loan = 2; result + value }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert!(
+        flow.events.iter().any(
+            |event| matches!(&event.kind, FlowEventKind::BorrowUnique(name) if name == "value")
+        ) && flow
+            .events
+            .iter()
+            .any(|event| matches!(&event.kind, FlowEventKind::Read(name) if name == "value")),
+        "a label-rejoining transfer incorrectly suppressed following ownership effects: {:#?}",
+        flow.events
+    );
+    let mir = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"label-rejoining-strict-ownership")),
+        &core,
+        &flow,
+    )
+    .function
+    .expect("label rejoining path must lower");
+    let image = grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+        .expect("label rejoining cleanup path must verify");
+    assert_eq!(image.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn placeflow_releases_a_dead_let_bound_closure_capture() {
     let source = "pub fn main() -> i64 { let value = 1; let loan = &value; let saved = () -> &i64 { loan }; value = 2; 0 }";
     let flow = flow_for("core-nll-captured-reference@0.1.0", source);

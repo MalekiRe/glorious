@@ -12,7 +12,7 @@ use crate::{
         CallReferenceOrigin, CallReferenceShape, CoreId, CoreKind, CorePlace, EnvironmentBrand,
         TypedBody,
     },
-    placeflow::PlaceFlow,
+    placeflow::{PlaceFlow, strict_expression_abrupt},
     source::Span,
     types::{EffectRow, GenericArgument, Type},
 };
@@ -156,10 +156,10 @@ impl Analyzer<'_> {
             }
             CoreKind::Move(value) => self.value(value),
             CoreKind::Tuple(values) | CoreKind::Array(values) => {
-                Value::Aggregate(values.into_iter().map(|value| self.value(value)).collect())
+                Value::Aggregate(self.strict_values(values))
             }
             CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
-                Value::Aggregate(fields.into_iter().map(|value| self.value(value)).collect())
+                Value::Aggregate(self.strict_values(fields))
             }
             CoreKind::Field { base, index, .. } => match self.value(base) {
                 Value::Aggregate(fields) => {
@@ -179,22 +179,31 @@ impl Analyzer<'_> {
                 _ => Value::None,
             },
             CoreKind::Let { name, value } => {
-                let value = self.value(value);
-                self.values.insert(name, value);
+                let evaluated = self.value(value);
+                if strict_expression_abrupt(self.body, value) {
+                    return Value::None;
+                }
+                self.values.insert(name, evaluated);
                 Value::None
             }
             CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
                 self.value(body)
             }
             CoreKind::Assign { place, value } => {
-                let value = self.value(value);
-                self.assign(place, value, expression.span);
+                let evaluated = self.value(value);
+                if strict_expression_abrupt(self.body, value) {
+                    return Value::None;
+                }
+                self.assign(place, evaluated, expression.span);
                 Value::None
             }
             CoreKind::Block(values) => {
                 let mut result = Value::None;
                 for value in values {
                     result = self.value(value);
+                    if strict_expression_abrupt(self.body, value) {
+                        break;
+                    }
                 }
                 result
             }
@@ -239,10 +248,13 @@ impl Analyzer<'_> {
                 // it forwards, so relaying `&local` through a helper cannot
                 // erase a later return/suspension/drop-check obligation.
                 self.value(callee);
-                let values = arguments
-                    .into_iter()
-                    .map(|argument| self.value(argument))
-                    .collect::<Vec<_>>();
+                if strict_expression_abrupt(self.body, callee) {
+                    return Value::None;
+                }
+                let values = self.strict_values(arguments);
+                if strict_expression_abrupt(self.body, id) {
+                    return Value::None;
+                }
                 self.reference_result_value(
                     &reference_origin,
                     reference_shape,
@@ -391,6 +403,21 @@ impl Analyzer<'_> {
         }
     }
 
+    /// Evaluate strict children in source order through their first abrupt
+    /// exit.  The predicate comes from PlaceFlow's shared control classifier,
+    /// so unreachable aggregate fields and arguments cannot publish later
+    /// reference-escape facts.
+    fn strict_values(&mut self, values: Vec<CoreId>) -> Vec<Value> {
+        let mut evaluated = Vec::with_capacity(values.len());
+        for value in values {
+            evaluated.push(self.value(value));
+            if strict_expression_abrupt(self.body, value) {
+                break;
+            }
+        }
+        evaluated
+    }
+
     /// Evaluate a direct operation exactly once and retain both its payload
     /// values and frozen result provenance for the enclosing handler.
     fn performed_value(
@@ -409,10 +436,10 @@ impl Analyzer<'_> {
         else {
             return None;
         };
-        let values = arguments
-            .into_iter()
-            .map(|argument| self.value(argument))
-            .collect::<Vec<_>>();
+        let values = self.strict_values(arguments);
+        if strict_expression_abrupt(self.body, id) {
+            return None;
+        }
         for value in &values {
             self.report_suspension_escape(value, expression.span);
         }

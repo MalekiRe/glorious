@@ -2514,6 +2514,24 @@ fn service_propagates_terminal_operations_through_strict_expression_contexts() {
 }
 
 #[test]
+fn service_discards_unreachable_ownership_effects_after_terminal_strict_operands() {
+    // The second tuple operand is well-typed but would create a unique loan
+    // and then illegally move its referent if it ever executed. `stop` is the
+    // left-to-right first operand and never completes, so neither PlaceFlow
+    // nor MIR may manufacture the later move/cleanup state.
+    let source = "effect Stop { stop() -> !; } pub fn main() -> i64 { let value = 7; handle (Stop::stop(), { let loan = &mut value; move value }) { Stop::stop() => 42 } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("unreachable ownership suffix must not reject the terminal path");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(
+        outcome.artifact.unwrap().run_i64().unwrap(),
+        42,
+        "the VM must execute only the terminal handler path, not the unreachable ownership suffix"
+    );
+}
+
+#[test]
 fn service_binds_terminal_handler_payloads_before_executing_the_clause() {
     let source = "effect Stop { stop(value: i64) -> !; } pub fn main() -> i64 { handle Stop::stop(42) { Stop::stop(value) => value } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
