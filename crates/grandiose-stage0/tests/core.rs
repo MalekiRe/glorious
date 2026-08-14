@@ -863,9 +863,9 @@ fn typed_core_resolves_deep_handler_operations_payloads_and_resumptions() {
 }
 
 #[test]
-fn handler_coverage_is_protocol_total_and_terminal_arms_have_no_resumption() {
+fn handler_coverage_tracks_direct_operations_but_calls_require_total_protocol_coverage() {
     let package = PackageKey("core-handler-coverage@0.1.0".into());
-    let source = "effect Console { read() -> i64; write(value: i64) -> i64; } effect Stop { abort() -> !; } pub fn partial() -> i64 { handle Console::read() { Console::read() => 1 } } pub fn terminal() -> i64 { handle Stop::abort() { Stop::abort() with resume => 42 } }";
+    let source = "effect Console { read() -> i64; write(value: i64) -> i64; } effect Stop { abort() -> !; } pub fn worker() -> i64 / Console { Console::write(0) } pub fn partial() -> i64 { handle Console::read() { Console::read() => 1 } } pub fn partial_call() -> i64 { handle worker() { Console::read() => 1 } } pub fn terminal() -> i64 { handle Stop::abort() { Stop::abort() with resume => 42 } }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -884,12 +884,26 @@ fn handler_coverage_is_protocol_total_and_terminal_arms_have_no_resumption() {
     let partial_body = BodySyntax::parse(&lexed, source, partial.body.unwrap());
     let partial_core = TypedBody::elaborate(partial, &partial_body, &index, &signatures);
     assert!(
-        partial_core
+        partial_core.diagnostics.is_empty(),
+        "{:#?}",
+        partial_core.diagnostics
+    );
+
+    let partial_call = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("partial_call"))
+        .unwrap();
+    let partial_call_body = BodySyntax::parse(&lexed, source, partial_call.body.unwrap());
+    let partial_call_core =
+        TypedBody::elaborate(partial_call, &partial_call_body, &index, &signatures);
+    assert!(
+        partial_call_core
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "G4155"),
-        "partial handler unexpectedly discharged Console: {:#?}",
-        partial_core.diagnostics
+        "partial handler unexpectedly discharged a whole-protocol callable: {:#?}",
+        partial_call_core.diagnostics
     );
 
     let terminal = interface

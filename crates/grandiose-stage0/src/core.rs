@@ -345,6 +345,7 @@ impl TypedBody {
                 .map(|signature| signature.effects.clone())
                 .unwrap_or_else(EffectRow::empty),
             handled_effects: std::collections::BTreeSet::new(),
+            handled_operations: std::collections::BTreeSet::new(),
         };
         let expected_result = signatures
             .definitions
@@ -474,6 +475,7 @@ impl TypedBody {
             },
             declared_effects: context.signature.effects.clone(),
             handled_effects: std::collections::BTreeSet::new(),
+            handled_operations: std::collections::BTreeSet::new(),
         };
         let mut parameters = vec![];
         for (parameter, ty) in context
@@ -541,6 +543,7 @@ impl TypedBody {
             lifetime_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
             handled_effects: std::collections::BTreeSet::new(),
+            handled_operations: std::collections::BTreeSet::new(),
         };
         let expected = match signatures.definitions.get(&definition.key) {
             Some(ElaboratedHeader::Constant(Some(ty))) => Some(ty.clone()),
@@ -658,6 +661,11 @@ struct Elaborator<'a> {
     /// handlers.  A partial handler never enters this set, so forwarding still
     /// requires the enclosing callable's outward effect declaration.
     handled_effects: std::collections::BTreeSet<EffectInstance>,
+    /// Individually exhaustive operation clauses of a partial active handler.
+    /// An effect row names a whole protocol, so this fact can discharge a
+    /// direct `perform` but never a callable boundary that may invoke any
+    /// operation of the protocol.
+    handled_operations: std::collections::BTreeSet<(EffectInstance, u32)>,
 }
 impl Elaborator<'_> {
     fn expression(&mut self, id: ExprId) -> CoreId {
@@ -1002,12 +1010,14 @@ impl Elaborator<'_> {
         // be captured as though they would still be active when it runs.
         let previous_effects = std::mem::replace(&mut self.declared_effects, effects.clone());
         let previous_handled = std::mem::take(&mut self.handled_effects);
+        let previous_handled_operations = std::mem::take(&mut self.handled_operations);
         let values = values
             .into_iter()
             .map(|value| self.expression(value))
             .collect::<Vec<_>>();
         self.declared_effects = previous_effects;
         self.handled_effects = previous_handled;
+        self.handled_operations = previous_handled_operations;
         let body_ty = values
             .last()
             .map(|value| self.expressions[value.0 as usize].ty.clone())
@@ -1071,9 +1081,11 @@ impl Elaborator<'_> {
         // discharge effects that may escape with the closure value.
         let previous_effects = std::mem::replace(&mut self.declared_effects, effects.clone());
         let previous_handled = std::mem::take(&mut self.handled_effects);
+        let previous_handled_operations = std::mem::take(&mut self.handled_operations);
         let body = self.expression(body);
         self.declared_effects = previous_effects;
         self.handled_effects = previous_handled;
+        self.handled_operations = previous_handled_operations;
         self.locals.leave();
         let actual_result = self.expressions[body.0 as usize].ty.clone();
         let result = declared_result
@@ -2664,7 +2676,7 @@ impl Elaborator<'_> {
             definition: effect_definition,
             arguments: effect_arguments,
         };
-        self.check_effect_instance(&instance, span);
+        self.check_effect_instance(&instance, Some(operation_index), span);
         Some(self.alloc(
             CoreKind::Perform {
                 effect: instance,
@@ -2723,10 +2735,15 @@ impl Elaborator<'_> {
         // irrefutable arm.  This deliberately conservative rule preserves the
         // required forwarding behaviour of partial handlers until the shared
         // pattern-matrix pass proves more precise coverage.
-        let covered = self.exhaustively_handled_effects(&resolved);
+        let covered_operations = self.exhaustively_handled_operations(&resolved);
+        let covered = self.exhaustively_handled_effects(&covered_operations);
         let mut active = self.handled_effects.clone();
         active.extend(covered);
         let previous = std::mem::replace(&mut self.handled_effects, active);
+        let mut active_operations = self.handled_operations.clone();
+        active_operations.extend(covered_operations);
+        let previous_operations =
+            std::mem::replace(&mut self.handled_operations, active_operations);
         let result = self.inference.fresh();
         let computation = self.expression(computation);
         let computation_ty = self.expressions[computation.0 as usize].ty.clone();
@@ -2852,6 +2869,7 @@ impl Elaborator<'_> {
             });
         }
         self.handled_effects = previous;
+        self.handled_operations = previous_operations;
         let handler = self.alloc(
             CoreKind::Handle {
                 computation,
@@ -3211,10 +3229,10 @@ impl Elaborator<'_> {
             failed: false,
         }
     }
-    fn exhaustively_handled_effects(
+    fn exhaustively_handled_operations(
         &self,
         clauses: &[ResolvedHandlerClause],
-    ) -> std::collections::BTreeSet<EffectInstance> {
+    ) -> std::collections::BTreeSet<(EffectInstance, u32)> {
         let mut operation_rows =
             std::collections::BTreeMap::<(EffectInstance, u32), Vec<&ResolvedHandlerClause>>::new();
         for clause in clauses {
@@ -3225,22 +3243,36 @@ impl Elaborator<'_> {
                     .push(clause);
             }
         }
-        let mut irrefutable =
-            std::collections::BTreeMap::<EffectInstance, std::collections::BTreeSet<u32>>::new();
+        let mut handled = std::collections::BTreeSet::new();
         for ((effect, operation), rows) in operation_rows {
             if self.handler_operation_is_exhaustive(&rows) {
-                irrefutable.entry(effect).or_default().insert(operation);
+                handled.insert((effect, operation));
             }
         }
-        irrefutable
+        handled
+    }
+    fn exhaustively_handled_effects(
+        &self,
+        handled_operations: &std::collections::BTreeSet<(EffectInstance, u32)>,
+    ) -> std::collections::BTreeSet<EffectInstance> {
+        handled_operations
+            .iter()
+            .map(|(effect, _)| effect.clone())
+            .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
-            .filter_map(|(effect, handled)| {
+            .filter(|effect| {
                 let Some(ElaboratedHeader::Effect(declaration)) =
                     self.signatures.definitions.get(&effect.definition)
                 else {
-                    return None;
+                    return false;
                 };
-                (handled.len() == declaration.operations.len()).then_some(effect)
+                declaration
+                    .operations
+                    .iter()
+                    .enumerate()
+                    .all(|(operation, _)| {
+                        handled_operations.contains(&(effect.clone(), operation as u32))
+                    })
             })
             .collect()
     }
@@ -3401,11 +3433,22 @@ impl Elaborator<'_> {
             }
         }
         for effect in &effects.effects {
-            self.check_effect_instance(effect, span);
+            self.check_effect_instance(effect, None, span);
         }
     }
-    fn check_effect_instance(&mut self, effect: &EffectInstance, span: Span) {
-        if !self.declared_effects.effects.contains(effect) && !self.handled_effects.contains(effect)
+    fn check_effect_instance(
+        &mut self,
+        effect: &EffectInstance,
+        operation: Option<u32>,
+        span: Span,
+    ) {
+        let handled_operation = operation.is_some_and(|operation| {
+            self.handled_operations
+                .contains(&(effect.clone(), operation))
+        });
+        if !self.declared_effects.effects.contains(effect)
+            && !self.handled_effects.contains(effect)
+            && !handled_operation
         {
             self.error(
                 span,

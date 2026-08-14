@@ -96,6 +96,40 @@ fn service_compiles_and_runs_a_verified_vm_artifact_from_an_immutable_request() 
 }
 
 #[test]
+fn service_finalizes_main_as_a_closed_zero_argument_effect_boundary() {
+    for (source, message) in [
+        (
+            "pub fn main(value: i64) -> i64 { value }",
+            "executable entry `main` must not declare parameters",
+        ),
+        (
+            "pub fn main<T>() -> i64 { 0 }",
+            "executable entry `main` cannot declare generic binders",
+        ),
+        (
+            "pub fn main<e: EffectRow>() -> i64 / {| e} { 0 }",
+            "executable entry `main` cannot declare generic binders",
+        ),
+        (
+            "effect Trace { note(); } pub fn main() -> i64 / {Trace} { 0 }",
+            "executable entry `main` must have a closed empty outward effect row",
+        ),
+    ] {
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+            StageZeroCompiler::new().compile(request(source))
+        else {
+            panic!("invalid executable entry unexpectedly compiled: {source}");
+        };
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| { diagnostic.code == "G7028" && diagnostic.message == message }),
+            "missing executable-boundary diagnostic for {source}: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
 fn service_compiles_explicit_parent_and_child_revisions_without_world_mixing() {
     let compiler = StageZeroCompiler::new();
     let parent = compiler
@@ -1111,7 +1145,7 @@ fn service_lowers_a_direct_one_shot_handler_through_vm_handler_frames() {
 
 #[test]
 fn service_forwards_a_nested_partial_one_shot_handler_through_vm_frames() {
-    let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; } pub fn main() -> i64 / Choice { handle { handle Choice::second(40) { Choice::first(seed) => seed } } { Choice::second(seed) => seed + 2 } }";
+    let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle Choice::second(40) { Choice::first(seed) => seed } } { Choice::second(seed) => seed + 2 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -1173,7 +1207,7 @@ fn service_tries_ordered_refutable_clauses_at_every_deep_one_shot_handler_layer(
 
 #[test]
 fn service_specializes_refutable_direct_dispatch_with_multiple_sibling_groups() {
-    let source = "effect Choice { [1,1] direct(seed: i64) -> i64; [1,1] alpha(seed: i64) -> i64; [1,1] beta(seed: i64) -> i64; } pub fn main() -> i64 / Choice { handle { handle Choice::direct(40) { Choice::direct(0) with k => k(0), Choice::direct(1) with k => k(1), Choice::alpha(0) with k => k(0), Choice::beta(seed) with k => k(seed) } } { Choice::direct(seed) with k => k(seed + 2) } }";
+    let source = "effect Choice { [1,1] direct(seed: i64) -> i64; [1,1] alpha(seed: i64) -> i64; [1,1] beta(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle Choice::direct(40) { Choice::direct(0) with k => k(0), Choice::direct(1) with k => k(1), Choice::alpha(0) with k => k(0), Choice::beta(seed) with k => k(seed) } } { Choice::direct(seed) with k => k(seed + 2) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
@@ -1265,7 +1299,7 @@ fn service_keeps_inner_computation_setup_inside_its_inner_frame_scope() {
 
 #[test]
 fn service_installs_sibling_operation_frames_for_nested_handler_setup() {
-    let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; } pub fn main() -> i64 / Choice { handle { handle { let first = Choice::first(40); Choice::second(first) } { Choice::first(value) => value + 1, Choice::second(0) => 0 } } { Choice::second(value) => value + 1 } }";
+    let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle { let first = Choice::first(40); Choice::second(first) } { Choice::first(value) => value + 1, Choice::second(0) => 0 } } { Choice::second(value) => value + 1 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -1289,7 +1323,7 @@ fn service_uses_ordered_refutable_clauses_for_distinct_sibling_operation_frames(
 
 #[test]
 fn service_uses_ordered_sibling_handler_clauses_during_nested_setup() {
-    let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; } pub fn main() -> i64 / Choice { handle { handle { let first = Choice::first(40); Choice::second(first) } { Choice::first(0) => 0, Choice::first(value) => value + 1, Choice::second(0) => 0 } } { Choice::second(value) => value + 1 } }";
+    let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle { let first = Choice::first(40); Choice::second(first) } { Choice::first(0) => 0, Choice::first(value) => value + 1, Choice::second(0) => 0 } } { Choice::second(value) => value + 1 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);

@@ -501,6 +501,52 @@ impl StageZeroCompiler {
             ));
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         };
+        // The VM invokes `main` without arguments and without an ambient
+        // source-level effect environment.  Validate that dynamic boundary
+        // while the frozen callable signature and the declaration span are
+        // both available; otherwise a generic or open-row entry could reach
+        // code generation merely because its body happens not to use the
+        // unresolved binder.
+        match signatures.definitions.get(&entry.key) {
+            Some(ElaboratedHeader::Callable(signature)) => {
+                if signature.generics != 0 {
+                    diagnostics.push(CompileDiagnostic::source(
+                        "G7028",
+                        "executable entry `main` cannot declare generic binders",
+                        Some(entry.span),
+                    ));
+                }
+                if !signature.parameters.is_empty() {
+                    diagnostics.push(CompileDiagnostic::source(
+                        "G7028",
+                        "executable entry `main` must not declare parameters",
+                        Some(entry.span),
+                    ));
+                }
+                if !signature.effects.effects.is_empty()
+                    || !signature.effects.projections.is_empty()
+                    || signature.effects.tail.is_some()
+                {
+                    diagnostics.push(CompileDiagnostic::source(
+                        "G7028",
+                        "executable entry `main` must have a closed empty outward effect row",
+                        Some(entry.span),
+                    ));
+                }
+            }
+            Some(_) => diagnostics.push(CompileDiagnostic::source(
+                "G7028",
+                "executable entry `main` must be a callable declaration",
+                Some(entry.span),
+            )),
+            None => diagnostics.push(CompileDiagnostic::invariant(
+                "G7028",
+                "root entry declaration lost its frozen signature",
+            )),
+        }
+        if !diagnostics.is_empty() {
+            return Err(failed(input_fingerprint, diagnostics, &source_lengths));
+        }
         let entry = entry.key;
         let mut functions = BTreeMap::new();
         let mut constants = BTreeSet::new();
