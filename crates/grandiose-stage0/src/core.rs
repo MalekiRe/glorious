@@ -4752,7 +4752,13 @@ impl Elaborator<'_> {
         clauses: &[HandlerClause],
         span: Span,
     ) -> CoreId {
-        let subject_ty = self.expressions[subject.0 as usize].ty.clone();
+        // Operation-arm inference has already established the handler result
+        // by the time normal-completion dispatch is built.  Resolve that
+        // result before elaborating literal or structural patterns: the
+        // pattern elaborator deliberately compares concrete subjects and
+        // would otherwise reject a valid refutable arm against an unresolved
+        // inference variable.
+        let subject_ty = self.zonk_type(self.expressions[subject.0 as usize].ty.clone(), span);
         let result = self.inference.fresh();
         let mut core_clauses = Vec::with_capacity(clauses.len());
         for clause in clauses {

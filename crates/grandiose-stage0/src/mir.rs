@@ -2286,14 +2286,23 @@ impl Lowerer<'_> {
         else {
             return None;
         };
-        let [completion_clause] = completion_clauses.as_slice() else {
-            return None;
+        let (completion_clause, fallback_clause) = match completion_clauses.as_slice() {
+            [clause]
+                if pattern_is_irrefutable(&clause.pattern)
+                    && self.contains_label_transfer(clause.body, brand) =>
+            {
+                (clause, None)
+            }
+            [clause, fallback]
+                if !pattern_is_irrefutable(&clause.pattern)
+                    && pattern_is_irrefutable(&fallback.pattern)
+                    && self.contains_label_transfer(clause.body, brand)
+                    && !self.contains_label_transfer(fallback.body, brand) =>
+            {
+                (clause, Some(fallback))
+            }
+            _ => return None,
         };
-        if !pattern_is_irrefutable(&completion_clause.pattern)
-            || !self.contains_label_transfer(completion_clause.body, brand)
-        {
-            return None;
-        }
         let CoreKind::Handle {
             computation: protected,
             clauses: operation_clauses,
@@ -2343,13 +2352,14 @@ impl Lowerer<'_> {
             .map(|id| self.value(*id))
             .collect::<Option<Vec<_>>>()?;
         let mut entry = std::mem::take(&mut self.instructions);
+        let handler_target = if fallback_clause.is_some() { 4 } else { 2 };
         entry.push(MirInstruction::InstallHandler {
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
             payload_destinations: payloads.clone(),
             resume_type: self.body.expression(protected).ty.clone(),
-            target: MirBlockId(2),
+            target: MirBlockId(handler_target),
         });
         entry.push(MirInstruction::Perform {
             dst: performed,
@@ -2375,6 +2385,23 @@ impl Lowerer<'_> {
         let completed = self.lower_label_transfer_path(completion_clause.body, brand)?;
         let completion_instructions = std::mem::take(&mut self.instructions);
 
+        let fallback = if let Some(fallback_clause) = fallback_clause {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(
+                std::slice::from_ref(&fallback_clause.pattern),
+                &[completion_subject],
+            )?;
+            let value = self.value(fallback_clause.body)?;
+            let instructions = std::mem::take(&mut self.instructions);
+            let pattern = lower_pattern(completion_clause.pattern.clone())?;
+            let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+            Some((condition, pattern, instructions, value))
+        } else {
+            None
+        };
+
         self.instructions = Vec::new();
         self.named = boundary_named;
         self.values = boundary_values;
@@ -2383,6 +2410,98 @@ impl Lowerer<'_> {
         self.instructions
             .push(MirInstruction::Resume { value: resumed });
         let handler_instructions = std::mem::take(&mut self.instructions);
+        let blocks =
+            if let Some((condition, pattern, fallback_instructions, fallback_value)) = fallback {
+                vec![
+                    MirBlock {
+                        parameters: vec![],
+                        instructions: entry,
+                        terminator: MirTerminator::Goto {
+                            target: MirBlockId(1),
+                            arguments: vec![performed],
+                        },
+                    },
+                    MirBlock {
+                        parameters: vec![completion_subject],
+                        instructions: vec![MirInstruction::PatternTest {
+                            dst: condition,
+                            subject: completion_subject,
+                            pattern,
+                        }],
+                        terminator: MirTerminator::SwitchBool {
+                            condition,
+                            then_target: MirBlockId(2),
+                            then_arguments: vec![],
+                            else_target: MirBlockId(3),
+                            else_arguments: vec![],
+                        },
+                    },
+                    MirBlock {
+                        parameters: vec![],
+                        instructions: completion_instructions,
+                        terminator: MirTerminator::Leave {
+                            brand,
+                            target: MirBlockId(5),
+                            arguments: vec![completed],
+                            cleanup: MirCleanupPlan {
+                                moved_places: self.leave_cleanup.moved_places.clone(),
+                                active_loans: self.leave_cleanup.active_loans.clone(),
+                            },
+                        },
+                    },
+                    MirBlock {
+                        parameters: vec![],
+                        instructions: fallback_instructions,
+                        terminator: MirTerminator::Return {
+                            value: fallback_value,
+                        },
+                    },
+                    MirBlock {
+                        parameters: vec![],
+                        instructions: handler_instructions,
+                        terminator: MirTerminator::Unreachable,
+                    },
+                    MirBlock {
+                        parameters: vec![join],
+                        instructions: vec![],
+                        terminator: MirTerminator::Return { value: join },
+                    },
+                ]
+            } else {
+                vec![
+                    MirBlock {
+                        parameters: vec![],
+                        instructions: entry,
+                        terminator: MirTerminator::Goto {
+                            target: MirBlockId(1),
+                            arguments: vec![performed],
+                        },
+                    },
+                    MirBlock {
+                        parameters: vec![completion_subject],
+                        instructions: completion_instructions,
+                        terminator: MirTerminator::Leave {
+                            brand,
+                            target: MirBlockId(3),
+                            arguments: vec![completed],
+                            cleanup: MirCleanupPlan {
+                                moved_places: self.leave_cleanup.moved_places.clone(),
+                                active_loans: self.leave_cleanup.active_loans.clone(),
+                            },
+                        },
+                    },
+                    MirBlock {
+                        parameters: vec![],
+                        instructions: handler_instructions,
+                        terminator: MirTerminator::Unreachable,
+                    },
+                    MirBlock {
+                        parameters: vec![join],
+                        instructions: vec![],
+                        terminator: MirTerminator::Return { value: join },
+                    },
+                ]
+            };
         Some(MirFunction {
             definition: self.definition,
             captures: 0,
@@ -2390,39 +2509,7 @@ impl Lowerer<'_> {
             locals: self.locals.clone(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
-            blocks: vec![
-                MirBlock {
-                    parameters: vec![],
-                    instructions: entry,
-                    terminator: MirTerminator::Goto {
-                        target: MirBlockId(1),
-                        arguments: vec![performed],
-                    },
-                },
-                MirBlock {
-                    parameters: vec![completion_subject],
-                    instructions: completion_instructions,
-                    terminator: MirTerminator::Leave {
-                        brand,
-                        target: MirBlockId(3),
-                        arguments: vec![completed],
-                        cleanup: MirCleanupPlan {
-                            moved_places: self.leave_cleanup.moved_places.clone(),
-                            active_loans: self.leave_cleanup.active_loans.clone(),
-                        },
-                    },
-                },
-                MirBlock {
-                    parameters: vec![],
-                    instructions: handler_instructions,
-                    terminator: MirTerminator::Unreachable,
-                },
-                MirBlock {
-                    parameters: vec![join],
-                    instructions: vec![],
-                    terminator: MirTerminator::Return { value: join },
-                },
-            ],
+            blocks,
         })
     }
     /// Lower the first frame-aware label boundary: one directly selected,

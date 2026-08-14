@@ -3102,3 +3102,75 @@ fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
         42
     );
 }
+
+#[test]
+fn refutable_completion_label_transfer_has_explicit_match_and_fallback_cfg() {
+    let core = core_for(
+        "core-refutable-completion-label-transfer@0.1.0",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { label done { handle Ask::ask() { 41 => transfer done 100, value => value, Ask::ask() => 41 } } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("outer label owner");
+    let lowered = MirLowering::lower(owner, &core, &flow);
+    let mir = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "refutable completion transfer lowers through CFG: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    assert!(matches!(
+        mir.blocks[1].terminator,
+        grandiose_stage0::MirTerminator::SwitchBool { .. }
+    ));
+    assert!(matches!(
+        mir.blocks[2].terminator,
+        grandiose_stage0::MirTerminator::Leave { .. }
+    ));
+    assert!(matches!(
+        mir.blocks[3].terminator,
+        grandiose_stage0::MirTerminator::Return { .. }
+    ));
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        100
+    );
+}
+
+#[test]
+fn refutable_completion_label_transfer_preserves_unmatched_fallback() {
+    let core = core_for(
+        "core-refutable-completion-fallback@0.1.0",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { label done { handle Ask::ask() { 41 => transfer done 100, value => value, Ask::ask() => 42 } } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("outer label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("refutable completion fallback lowers");
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
