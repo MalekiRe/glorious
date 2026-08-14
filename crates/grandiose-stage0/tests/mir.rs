@@ -839,6 +839,39 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
         "VM emission must independently reject forged trait method metadata"
     );
 
+    let mut operation_effect_row = graph();
+    operation_effect_row.blocks[0]
+        .instructions
+        .push(MirInstruction::Perform {
+            dst: MirLocal(1),
+            effect: DefKey(Digest::of_bytes(b"operation-effect-row-target")),
+            effect_arguments: vec![GenericArgument::EffectRow(EffectRow {
+                effects: BTreeSet::new(),
+                projections: vec![],
+                tail: Some(grandiose_stage0::EffectTail::Infer(
+                    grandiose_stage0::EffectVar(4),
+                )),
+            })],
+            operation: 0,
+            arguments: vec![],
+        });
+    let entry = operation_effect_row.definition;
+    let program = MirProgram {
+        entry,
+        functions: BTreeMap::from([(entry, operation_effect_row)]),
+        instances: BTreeMap::new(),
+    };
+    assert!(
+        program
+            .validate()
+            .is_err_and(|error| error.contains("unresolved inference")),
+        "performed operation effect metadata must reject a leaked row hole"
+    );
+    assert!(
+        emit_vm_program(&program).is_err(),
+        "VM emission must independently reject a leaked performed-operation row hole"
+    );
+
     let mut escaped_effect_lifetime = graph();
     escaped_effect_lifetime.blocks[0]
         .instructions

@@ -7047,8 +7047,9 @@ impl Elaborator<'_> {
         ))
     }
     /// Supply operation-generic arguments independently from the enclosing
-    /// effect instance. Omitted arguments become caller-owned inference
-    /// variables; explicit applications must have the exact operation arity.
+    /// effect instance.  Operation binders retain their native semantic kind:
+    /// an effect row or structural constant must not be coerced into a type
+    /// hole before the operation contract is instantiated.
     fn operation_generic_arguments(
         &mut self,
         effect: &ElaboratedEffect,
@@ -7060,17 +7061,31 @@ impl Elaborator<'_> {
             .operations
             .iter()
             .find(|operation| operation.name == name)?;
-        let count = operation.generics.checked_sub(effect.generics)? as usize;
-        if supplied.is_empty() && count != 0 {
+        let kinds = operation.generic_kinds.get(effect.generics as usize..)?;
+        if supplied.is_empty() && !kinds.is_empty() {
             return Some(
-                (0..count)
-                    .map(|_| GenericArgument::Type(self.inference.fresh()))
+                kinds
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, kind)| match kind {
+                        crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
+                        crate::GenericKind::EffectRow => {
+                            GenericArgument::EffectRow(self.inference.fresh_effects())
+                        }
+                        // The declaration-owned operation slot remains rigid
+                        // until the selected operation contract opens it at
+                        // the perform/handler boundary.
+                        crate::GenericKind::Lifetime => GenericArgument::Lifetime(
+                            Lifetime::Generic(effect.generics + offset as u32),
+                        ),
+                        crate::GenericKind::Const(kind) => self.inference.fresh_const(*kind),
+                    })
                     .collect(),
             );
         }
         self.body_generic_arguments(
             supplied,
-            &vec![crate::GenericKind::Type; count],
+            kinds,
             span,
             "G4152",
             "effect operation arguments do not match its declaration",

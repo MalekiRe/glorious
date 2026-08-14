@@ -3354,6 +3354,14 @@ fn service_keeps_protocol_and_operation_generic_arguments_in_distinct_slots() {
 }
 
 #[test]
+fn service_preserves_mixed_effect_operation_generics_at_perform_and_handler() {
+    let source = "effect Pulse { stop<'a, e: EffectRow, n: u32, q: Quantity>() -> !; } pub fn main() -> i64 { handle Pulse::stop<'static, {}, 7, [1, 1]>() { Pulse::stop<'static, {}, 7, [1, 1]>() => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_wrong_generic_effect_operation_arity() {
     let source = "effect Ask { ask<T>(value: T) -> T; } pub fn main() -> i64 { handle Ask::ask<i64, Text>(41) { Ask::ask<i64>(value) => value + 1 } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

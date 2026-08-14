@@ -2,10 +2,11 @@ use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
     ClosureCapture, ConstInferVar, ConstKind, CoreExpr, CoreHandlerResumption, CoreId, CoreKind,
     CorePattern, CorePlace, DeclarationScan, DefKey, DefinitionIndex, Digest, EffectInstance,
-    EffectRow, EffectRowProjection, EffectTail, ElaboratedInterface, EnvironmentBrand, EscapeFlow,
-    FileKey, FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime,
-    LogicalPath, MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity,
-    ScalarType, Span, StructuralU32Expr, Type, TypedBody, UseFlow, implementation_method_key,
+    EffectRow, EffectRowProjection, EffectTail, EffectVar, ElaboratedInterface, EnvironmentBrand,
+    EscapeFlow, FileKey, FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile,
+    Lifetime, LogicalPath, MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow,
+    Quantity, ScalarType, Span, StructuralU32Expr, Type, TypedBody, UseFlow,
+    implementation_method_key,
 };
 use std::collections::BTreeSet;
 
@@ -4492,6 +4493,48 @@ fn performed_operations_freeze_generic_reference_provenance() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G5013"),
         "performed reference result hid a body-local return: {escapes:#?}"
+    );
+}
+
+#[test]
+fn forged_perform_effect_row_inference_cannot_cross_the_core_boundary() {
+    let mut core = core_for(
+        "core-forged-perform-effect-row-inference@0.1.0",
+        "effect Relay<e: EffectRow> { [0, 1] relay(value: i64) -> i64; } pub fn main() -> i64 / {Relay<{}>} { Relay<{}>::relay(42) }",
+    );
+    let perform = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Perform { effect, .. } => Some(effect),
+            _ => None,
+        })
+        .expect("generic effect operation did not reach Core");
+    perform.arguments[0] = GenericArgument::EffectRow(EffectRow {
+        effects: BTreeSet::new(),
+        projections: vec![],
+        tail: Some(EffectTail::Infer(EffectVar(0))),
+    });
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4181"),
+        "an unresolved effect row in performed-operation metadata reached frozen Core: {:#?}",
+        core.validate()
+    );
+    let flow = PlaceFlow::analyze(&core);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-perform-effect-row-inference")),
+        &core,
+        &flow,
+    );
+    assert!(lowered.function.is_none());
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR lowering must independently reject a forged performed-operation row"
     );
 }
 
