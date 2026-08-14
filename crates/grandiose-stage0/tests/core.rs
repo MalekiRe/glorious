@@ -1,10 +1,10 @@
 use grandiose_stage0::{
-    BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, ClosureCapture,
-    CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan, DefKey, DefinitionIndex,
-    Digest, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind,
-    GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction,
-    MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span, Type, TypedBody,
-    implementation_method_key,
+    BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
+    ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan, DefKey,
+    DefinitionIndex, Digest, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey,
+    FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath,
+    MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span,
+    Type, TypedBody, implementation_method_key,
 };
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
@@ -348,6 +348,10 @@ fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
                             name: "captured".into(),
                             mode: CaptureMode::SharedBorrow,
                             ty: Type::Infer(InferVar(7)),
+                        }],
+                        post_states: vec![CapturePostState {
+                            name: "captured".into(),
+                            mode: CaptureMode::SharedBorrow,
                         }],
                         sealed: true,
                     },
@@ -3125,6 +3129,7 @@ fn typed_core_rejects_replayed_capture_environment_brand() {
                             callable: CallableId(0),
                         },
                         captures: vec![],
+                        post_states: vec![],
                         sealed: true,
                     },
                     body: CoreId(1),
@@ -3146,6 +3151,63 @@ fn typed_core_rejects_replayed_capture_environment_brand() {
         body.validate()
             .iter()
             .any(|diagnostic| diagnostic.code == "G4183")
+    );
+}
+
+#[test]
+fn capture_environments_seal_and_validate_mode_derived_post_states() {
+    let mut core = core_for(
+        "core-capture-post-state@0.1.0",
+        "pub fn main() -> i64 { let value = 42; let read = () -> i64 { value }; read() }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let valid_flow = PlaceFlow::analyze(&core);
+    assert!(valid_flow.diagnostics.is_empty(), "{valid_flow:#?}");
+    let environment = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Closure { environment, .. } => Some(environment),
+            _ => None,
+        })
+        .expect("closure environment");
+    assert_eq!(environment.captures.len(), 1);
+    assert_eq!(environment.post_states.len(), 1);
+    assert_eq!(
+        environment.captures[0].name,
+        environment.post_states[0].name
+    );
+    assert_eq!(
+        environment.captures[0].mode,
+        environment.post_states[0].mode
+    );
+
+    environment.post_states[0].mode = CaptureMode::Move;
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4183"),
+        "forged capture post-state passed Typed Core validation"
+    );
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5020"),
+        "PlaceFlow accepted a forged capture post-state: {flow:#?}"
+    );
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-capture-post-state")),
+        &core,
+        &valid_flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6011"),
+        "MIR accepted a forged capture post-state: {lowered:#?}"
     );
 }
 

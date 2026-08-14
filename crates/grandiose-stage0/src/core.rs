@@ -80,6 +80,15 @@ pub struct ClosureCapture {
     pub mode: CaptureMode,
     pub ty: Type,
 }
+/// The mode-derived ownership state of one outer place immediately after its
+/// environment has been captured. Keeping this separate from the capture
+/// layout makes the callable's `RunsIn` post-state a frozen Core fact rather
+/// than an inference-only convention.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapturePostState {
+    pub name: String,
+    pub mode: CaptureMode,
+}
 /// A closure's complete, post-inference environment.  Capture mode selection
 /// remains the responsibility of PlaceFlow; this record seals that selected
 /// layout together with the callable that is allowed to consume it.
@@ -87,6 +96,7 @@ pub struct ClosureCapture {
 pub struct CaptureEnvironment {
     pub brand: EnvironmentBrand,
     pub captures: Vec<ClosureCapture>,
+    pub post_states: Vec<CapturePostState>,
     pub sealed: bool,
 }
 /// Positive evidence produced by `is`. Bindings remain facts rather than
@@ -107,6 +117,13 @@ impl CaptureEnvironment {
     fn seal(owner: DefKey, callable: CallableId, captures: Vec<ClosureCapture>) -> Self {
         Self {
             brand: EnvironmentBrand { owner, callable },
+            post_states: captures
+                .iter()
+                .map(|capture| CapturePostState {
+                    name: capture.name.clone(),
+                    mode: capture.mode,
+                })
+                .collect(),
             captures,
             sealed: true,
         }
@@ -972,6 +989,15 @@ fn capture_environment_error(
                 capture.name
             ));
         }
+    }
+    if environment.post_states.len() != environment.captures.len()
+        || environment
+            .captures
+            .iter()
+            .zip(&environment.post_states)
+            .any(|(capture, state)| capture.name != state.name || capture.mode != state.mode)
+    {
+        return Some("Typed Core closure environment has inconsistent capture post-states".into());
     }
     None
 }

@@ -1523,6 +1523,10 @@ mod tests {
                                 mode: CaptureMode::SharedBorrow,
                                 ty: function.clone(),
                             }],
+                            post_states: vec![crate::core::CapturePostState {
+                                name: "function".into(),
+                                mode: CaptureMode::SharedBorrow,
+                            }],
                             sealed: true,
                         },
                         body: CoreId(2),

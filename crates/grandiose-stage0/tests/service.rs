@@ -3337,6 +3337,30 @@ fn lexical_closure_captures_are_stable_across_later_shadowing() {
 }
 
 #[test]
+fn service_executes_sealed_capture_post_states_and_rejects_their_moved_source_use() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request(
+            "pub fn main() -> i64 { let value = 42; let take = () -> i64 { move value }; take() }",
+        ))
+        .expect("sealed move capture must lower through the VM");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
+        .compile(request(
+            "pub fn main() -> i64 { let value = 42; let take = () -> i64 { move value }; value }",
+        ))
+    else {
+        panic!("use after a moved capture unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5001"),
+        "missing moved-capture post-state diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn callables_cross_direct_call_boundaries_and_remain_indirectly_invocable() {
     let source = "pub fn make(value: i64) -> (i64) -> i64 { (extra: i64) -> i64 { value + extra } } pub fn main() -> i64 { make(40)(2) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

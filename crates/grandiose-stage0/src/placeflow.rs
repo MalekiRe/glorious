@@ -225,13 +225,32 @@ impl Analyzer<'_> {
             | CoreKind::Constant(_)
             | CoreKind::Error => {}
             CoreKind::Closure { environment, .. } => {
-                for capture in &environment.captures {
+                if environment.post_states.len() != environment.captures.len()
+                    || environment
+                        .captures
+                        .iter()
+                        .zip(&environment.post_states)
+                        .any(|(capture, state)| {
+                            capture.name != state.name || capture.mode != state.mode
+                        })
+                {
+                    self.error(
+                        e.span,
+                        "G5020",
+                        "closure environment capture post-state disagrees with its sealed layout"
+                            .into(),
+                    );
+                    return;
+                }
+                for (capture, post_state) in
+                    environment.captures.iter().zip(&environment.post_states)
+                {
                     self.capture_reference_loan(&capture.name, e.span);
                     let place = Projection {
                         root: capture.name.clone(),
                         fields: vec![],
                     };
-                    match capture.mode {
+                    match post_state.mode {
                         CaptureMode::SharedBorrow => {
                             self.borrow(&capture.name, false, e.span);
                             self.place_event(

@@ -9027,8 +9027,25 @@ impl Lowerer<'_> {
             );
             return None;
         }
+        if capture_environment.post_states.len() != capture_environment.captures.len()
+            || capture_environment
+                .captures
+                .iter()
+                .zip(&capture_environment.post_states)
+                .any(|(capture, state)| capture.name != state.name || capture.mode != state.mode)
+        {
+            self.error(
+                "G6011",
+                "MIR lowering received a callable environment with inconsistent capture post-states",
+            );
+            return None;
+        }
         let mut environment = Vec::with_capacity(capture_environment.captures.len());
-        for capture in &capture_environment.captures {
+        for (capture, post_state) in capture_environment
+            .captures
+            .iter()
+            .zip(&capture_environment.post_states)
+        {
             let Some(local) = self.named.get(&capture.name).copied() else {
                 self.error("G6007", "closure capture has no MIR local");
                 return None;
@@ -9038,7 +9055,7 @@ impl Lowerer<'_> {
             // have not reached Stage 0's value representation yet, and the
             // currently immutable scalar values are copied into the closure
             // environment.
-            let local = if capture.mode == CaptureMode::Move {
+            let local = if post_state.mode == CaptureMode::Move {
                 let moved = self.alloc(capture.ty.clone(), CoreId(u32::MAX));
                 self.instructions.push(MirInstruction::Move {
                     dst: moved,
