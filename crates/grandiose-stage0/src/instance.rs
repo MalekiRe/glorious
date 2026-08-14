@@ -374,59 +374,66 @@ impl InstanceGraph {
     }
 
     pub fn strongly_connected_components(&self) -> Vec<Vec<InstanceKey>> {
-        let mut index = 0;
-        let mut stack = vec![];
-        let mut on = BTreeSet::new();
-        let mut ids = BTreeMap::new();
-        let mut low = BTreeMap::new();
-        let mut out = vec![];
-        fn visit(
-            g: &InstanceGraph,
-            k: InstanceKey,
-            i: &mut usize,
-            s: &mut Vec<InstanceKey>,
-            on: &mut BTreeSet<InstanceKey>,
-            ids: &mut BTreeMap<InstanceKey, usize>,
-            low: &mut BTreeMap<InstanceKey, usize>,
-            out: &mut Vec<Vec<InstanceKey>>,
-        ) {
-            ids.insert(k.clone(), *i);
-            low.insert(k.clone(), *i);
-            *i += 1;
-            s.push(k.clone());
-            on.insert(k.clone());
-            for n in g.callees(&k).into_iter().flatten().cloned() {
-                if !ids.contains_key(&n) {
-                    visit(g, n.clone(), i, s, on, ids, low, out);
-                    *low.get_mut(&k).unwrap() = low[&k].min(low[&n]);
-                } else if on.contains(&n) {
-                    *low.get_mut(&k).unwrap() = low[&k].min(ids[&n]);
-                }
-            }
-            if low[&k] == ids[&k] {
-                let mut c = vec![];
-                loop {
-                    let n = s.pop().unwrap();
-                    on.remove(&n);
-                    let done = n == k;
-                    c.push(n);
-                    if done {
-                        break;
+        struct Tarjan<'graph> {
+            graph: &'graph InstanceGraph,
+            index: usize,
+            stack: Vec<InstanceKey>,
+            on_stack: BTreeSet<InstanceKey>,
+            ids: BTreeMap<InstanceKey, usize>,
+            low: BTreeMap<InstanceKey, usize>,
+            components: Vec<Vec<InstanceKey>>,
+        }
+        impl Tarjan<'_> {
+            fn visit(&mut self, key: InstanceKey) {
+                self.ids.insert(key.clone(), self.index);
+                self.low.insert(key.clone(), self.index);
+                self.index += 1;
+                self.stack.push(key.clone());
+                self.on_stack.insert(key.clone());
+                for callee in self.graph.callees(&key).into_iter().flatten() {
+                    if !self.ids.contains_key(callee) {
+                        self.visit(callee.clone());
+                        *self.low.get_mut(&key).expect("current key has lowlink") =
+                            self.low[&key].min(self.low[callee]);
+                    } else if self.on_stack.contains(callee) {
+                        *self.low.get_mut(&key).expect("current key has lowlink") =
+                            self.low[&key].min(self.ids[callee]);
                     }
                 }
-                c.sort();
-                out.push(c);
+                if self.low[&key] == self.ids[&key] {
+                    let mut component = vec![];
+                    loop {
+                        let member = self.stack.pop().expect("root owns a stack member");
+                        self.on_stack.remove(&member);
+                        let complete = member == key;
+                        component.push(member);
+                        if complete {
+                            break;
+                        }
+                    }
+                    component.sort();
+                    self.components.push(component);
+                }
             }
         }
-        for k in self.ordered() {
-            if !ids.contains_key(&k) {
-                visit(
-                    self, k, &mut index, &mut stack, &mut on, &mut ids, &mut low, &mut out,
-                );
+        let mut tarjan = Tarjan {
+            graph: self,
+            index: 0,
+            stack: vec![],
+            on_stack: BTreeSet::new(),
+            ids: BTreeMap::new(),
+            low: BTreeMap::new(),
+            components: vec![],
+        };
+        for key in self.ordered() {
+            if !tarjan.ids.contains_key(&key) {
+                tarjan.visit(key);
             }
         }
-        out.sort_by(|a, b| a[0].cmp(&b[0]));
-        out
+        tarjan
+            .components
+            .sort_by(|left, right| left[0].cmp(&right[0]));
+        tarjan.components
     }
 }
 
@@ -667,5 +674,116 @@ mod tests {
             Err(InstanceGraphError::TotalLimit { .. })
         ));
         assert!(graph.callees(&first).unwrap().is_empty());
+    }
+
+    #[test]
+    fn sccs_are_deterministic_and_keep_recursive_instances_together() {
+        let kinds = [GenericKind::Type];
+        let instance = |name| {
+            InstanceKey::new(
+                definition(name),
+                &kinds,
+                vec![InstanceArgument::Type(Type::Scalar(ScalarType::I64))],
+            )
+            .unwrap()
+        };
+        let first = instance(b"first");
+        let second = instance(b"second");
+        let terminal = instance(b"terminal");
+        let mut graph = InstanceGraph::default();
+        let limits = InstanceLimits::default();
+        graph
+            .discover_root(
+                InstanceRoot {
+                    key: first.clone(),
+                    reason: "entry".into(),
+                },
+                limits,
+            )
+            .unwrap();
+        graph
+            .discover_callee(&first, second.clone(), limits)
+            .unwrap();
+        graph
+            .discover_callee(&second, first.clone(), limits)
+            .unwrap();
+        graph
+            .discover_callee(&second, terminal.clone(), limits)
+            .unwrap();
+        let components = graph.strongly_connected_components();
+        assert_eq!(components, graph.strongly_connected_components());
+        assert!(components.iter().any(|component| {
+            component.len() == 2 && component.contains(&first) && component.contains(&second)
+        }));
+        assert!(
+            components
+                .iter()
+                .any(|component| component.first() == Some(&terminal) && component.len() == 1)
+        );
+    }
+
+    #[test]
+    fn recursive_summary_fixed_point_propagates_callee_facts() {
+        let kinds = [GenericKind::Type];
+        let instance = |name| {
+            InstanceKey::new(
+                definition(name),
+                &kinds,
+                vec![InstanceArgument::Type(Type::Scalar(ScalarType::I64))],
+            )
+            .unwrap()
+        };
+        let first = instance(b"first");
+        let second = instance(b"second");
+        let mut graph = InstanceGraph::default();
+        let limits = InstanceLimits::default();
+        graph
+            .discover_root(
+                InstanceRoot {
+                    key: first.clone(),
+                    reason: "entry".into(),
+                },
+                limits,
+            )
+            .unwrap();
+        graph
+            .discover_callee(&first, second.clone(), limits)
+            .unwrap();
+        graph
+            .discover_callee(&second, first.clone(), limits)
+            .unwrap();
+        let first_effect = definition(b"first-effect");
+        let second_effect = definition(b"second-effect");
+        let summaries = solve_call_summaries(&graph, |key, known| {
+            let direct = if key == &first {
+                CallSummary {
+                    effects: EffectRow::closed([first_effect]),
+                    invocation: Quantity::ONCE,
+                    may_abort: true,
+                    may_control: false,
+                    may_escape: false,
+                }
+            } else {
+                CallSummary {
+                    effects: EffectRow::closed([second_effect]),
+                    invocation: Quantity::ONCE,
+                    may_abort: false,
+                    may_control: true,
+                    may_escape: true,
+                }
+            };
+            graph
+                .callees(key)
+                .into_iter()
+                .flatten()
+                .fold(direct, |summary, callee| {
+                    summary.join(known.get(callee).expect("SCC member has a seed summary"))
+                })
+        });
+        for key in [&first, &second] {
+            let summary = &summaries[key];
+            assert_eq!(summary.effects.effects.len(), 2);
+            assert!(summary.may_abort && summary.may_control && summary.may_escape);
+        }
     }
 }
