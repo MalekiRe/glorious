@@ -1,6 +1,6 @@
 //! Header elaboration into canonical, body-independent semantic signatures.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     header::{
@@ -286,6 +286,88 @@ fn fallback_structural_const(kind: ConstKind) -> GenericArgument {
     }
 }
 
+/// Instantiate a nominal's own layout under rigid identity arguments. This
+/// preserves which generic field occurrences actually contribute to layout
+/// while avoiding body-local inference at the declaration boundary.
+fn nominal_identity_arguments(kinds: &[GenericKind]) -> Vec<GenericArgument> {
+    kinds
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| match kind {
+            GenericKind::Type => GenericArgument::Type(Type::Generic(index as u32)),
+            GenericKind::EffectRow => GenericArgument::EffectRow(EffectRow {
+                effects: BTreeSet::new(),
+                projections: vec![],
+                tail: Some(EffectTail::Generic(index as u32)),
+            }),
+            GenericKind::Lifetime => GenericArgument::Lifetime(Lifetime::Generic(index as u32)),
+            GenericKind::Const(kind) => GenericArgument::ConstGeneric {
+                index: index as u32,
+                kind: *kind,
+            },
+        })
+        .collect()
+}
+
+fn owned_nominal_layout_cycle(
+    value: &Type,
+    definitions: &BTreeMap<DefKey, ElaboratedHeader>,
+    active: &mut Vec<DefKey>,
+) -> Option<Vec<DefKey>> {
+    match value {
+        Type::Nominal {
+            definition,
+            arguments,
+        } => {
+            let ElaboratedHeader::Nominal { layout, .. } = definitions.get(definition)? else {
+                return None;
+            };
+            if let Some(index) = active.iter().position(|seen| seen == definition) {
+                return Some(active[index..].to_vec());
+            }
+            active.push(*definition);
+            let cycle = match layout {
+                ElaboratedNominalLayout::Struct(fields) => fields.iter().find_map(|field| {
+                    let field = substitute_alias_generic_identity(field.ty.clone(), arguments);
+                    owned_nominal_layout_cycle(&field, definitions, active)
+                }),
+                ElaboratedNominalLayout::Enum(variants) => variants.iter().find_map(|variant| {
+                    let fields = match &variant.payload {
+                        ElaboratedEnumVariantPayload::Unit => vec![],
+                        ElaboratedEnumVariantPayload::Tuple(fields) => fields.clone(),
+                        ElaboratedEnumVariantPayload::Struct(fields) => {
+                            fields.iter().map(|field| field.ty.clone()).collect()
+                        }
+                    };
+                    fields.into_iter().find_map(|field| {
+                        let field = substitute_alias_generic_identity(field, arguments);
+                        owned_nominal_layout_cycle(&field, definitions, active)
+                    })
+                }),
+                ElaboratedNominalLayout::Opaque => None,
+            };
+            active.pop();
+            cycle
+        }
+        Type::Tuple(elements) => elements
+            .iter()
+            .find_map(|element| owned_nominal_layout_cycle(element, definitions, active)),
+        // Arrays are heap-backed in the Stage 0 VM. The remaining forms are
+        // references or executable contracts, never inline nominal storage.
+        Type::Array(_) | Type::Reference { .. } | Type::Callable { .. } => None,
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Generic(_)
+        | Type::Projection { .. }
+        | Type::Infer(_)
+        | Type::Error => None,
+    }
+}
+
 impl ElaboratedInterface {
     pub fn elaborate(interface: &PackageInterface) -> Self {
         let index = DefinitionIndex::from_interface(interface);
@@ -311,6 +393,7 @@ impl ElaboratedInterface {
             result.diagnostics.extend(elaborator.diagnostics);
         }
         result.normalize_aliases();
+        result.validate_owned_nominal_layout_recursion();
         result.validate_associated_type_definitions();
         result.validate_trait_supertrait_cycles();
         result.validate_implementation_supertraits();
@@ -327,6 +410,7 @@ impl ElaboratedInterface {
             merged.diagnostics.extend(part.diagnostics);
         }
         merged.normalize_aliases();
+        merged.validate_owned_nominal_layout_recursion();
         merged.validate_associated_type_definitions();
         merged.validate_trait_supertrait_cycles();
         merged.validate_implementation_supertraits();
@@ -342,6 +426,46 @@ impl ElaboratedInterface {
     /// for aliases written inside a body.
     pub fn normalize_type_aliases(&self, value: Type) -> Type {
         normalize_alias_type(value, &self.definitions, &mut vec![], &mut vec![])
+    }
+
+    /// Reject layouts that would require an infinitely-sized owned value.
+    /// Alias normalization runs first, so this graph is expressed solely in
+    /// nominal identity rather than source spelling. References, callables,
+    /// and Stage 0 arrays are runtime handles and therefore terminate an
+    /// owned-layout path; tuples and nominal fields remain inline.
+    fn validate_owned_nominal_layout_recursion(&mut self) {
+        let definitions = self.definitions.clone();
+        let mut reported = BTreeSet::<Vec<DefKey>>::new();
+        let mut diagnostics = vec![];
+        for (definition, header) in &definitions {
+            let ElaboratedHeader::Nominal { generic_kinds, .. } = header else {
+                continue;
+            };
+            let root = Type::Nominal {
+                definition: *definition,
+                arguments: nominal_identity_arguments(generic_kinds),
+            };
+            let mut active = vec![];
+            if let Some(cycle) = owned_nominal_layout_cycle(&root, &definitions, &mut active) {
+                let mut members = cycle;
+                members.sort();
+                members.dedup();
+                if reported.insert(members.clone()) {
+                    diagnostics.push(SignatureDiagnostic {
+                        code: "G3320",
+                        message: format!(
+                            "owned nominal layout recursion includes {}",
+                            members
+                                .iter()
+                                .map(|definition| format!("{definition:?}"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    });
+                }
+            }
+        }
+        self.diagnostics.extend(diagnostics);
     }
 
     fn validate_associated_type_definitions(&mut self) {

@@ -1347,7 +1347,7 @@ fn auto_traits_structurally_traverse_source_nominals_and_type_forms() {
 #[test]
 fn auto_trait_recursive_nominals_are_coinductive_but_explicit_negatives_win() {
     let (interface, signatures) = signatures(
-        "auto trait Sendish {} struct Link { next: Link } struct Denied {} impl !Sendish for Denied {}",
+        "auto trait Sendish {} struct Link { next: &Link } struct Denied {} impl !Sendish for Denied {}",
     );
     let sendish = key(&interface, "Sendish");
     let relation = ElaboratedTraitReference {
@@ -1386,7 +1386,7 @@ fn auto_trait_recursive_nominals_are_coinductive_but_explicit_negatives_win() {
 #[test]
 fn ordinary_trait_cycles_remain_inductive() {
     let (interface, signatures) = signatures(
-        "trait Ordinary {} struct Link { next: Link } impl Ordinary for Link where Link: Ordinary {}",
+        "trait Ordinary {} struct Link { next: &Link } impl Ordinary for Link where Link: Ordinary {}",
     );
     let ordinary = key(&interface, "Ordinary");
     let answer = TraitSolver::new(&signatures).solve(TraitGoal {

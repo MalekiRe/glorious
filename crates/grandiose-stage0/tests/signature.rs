@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
+
 use grandiose_stage0::{
-    ConstKind, DeclarationScan, DefinitionIndex, EffectRow, EffectTail, ElaboratedHeader,
-    ElaboratedInterface, ElaboratedNominalLayout, FileKey, GenericArgument, GenericKind,
-    InstantiationError, InterfaceSet, LexedFile, Lifetime, LogicalPath, PackageKey, Quantity,
-    ScalarType, StructuralU32Expr, Type,
+    ConstKind, DeclarationScan, DefKey, DefinitionIndex, Digest, EffectRow, EffectTail,
+    ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout, FileKey, GenericArgument,
+    GenericKind, InstantiationError, InterfaceSet, LexedFile, Lifetime, LogicalPath, NominalField,
+    PackageKey, Quantity, ScalarType, StructuralU32Expr, Type,
 };
 
 #[test]
@@ -2001,5 +2003,56 @@ fn structural_u32_arithmetic_folds_closed_terms_and_rejects_checked_errors() {
             .any(|diagnostic| diagnostic.code == "G3228"),
         "{:#?}",
         invalid.syntax.diagnostics
+    );
+}
+
+#[test]
+fn source_nominal_layouts_reject_owned_recursion_after_alias_normalization() {
+    let package = PackageKey("signature-owned-layout-recursion@0.1.0".into());
+    let source = "type Alias = Direct; pub struct Direct { next: Alias } pub struct Wrap<T> { value: T } pub struct ThroughGeneric { next: Wrap<ThroughGeneric> } pub enum ThroughVariant { Again(ThroughVariant), Done } pub struct Linked { next: &Linked }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert_eq!(
+        signatures
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "G3320")
+            .count(),
+        3,
+        "aliases, generic fields, and enum payloads must all participate in owned-layout recursion checking: {:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
+fn forged_interface_nominal_layout_cycle_is_rejected_before_core_or_mir() {
+    let node = DefKey(Digest::of_bytes(b"forged-owned-layout-node"));
+    let forged = ElaboratedInterface {
+        definitions: BTreeMap::from([(
+            node,
+            ElaboratedHeader::Nominal {
+                generics: 0,
+                generic_kinds: vec![],
+                layout: ElaboratedNominalLayout::Struct(vec![NominalField {
+                    name: "next".into(),
+                    ty: Type::Nominal {
+                        definition: node,
+                        arguments: vec![],
+                    },
+                }]),
+            },
+        )]),
+        diagnostics: vec![],
+    };
+    let checked = ElaboratedInterface::merge([forged]);
+    assert!(
+        checked
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3320"),
+        "a forged interface may not inject an infinite owned layout into Core or MIR"
     );
 }
