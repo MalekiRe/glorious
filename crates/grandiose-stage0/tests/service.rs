@@ -2,8 +2,8 @@ use grandiose_stage0::{
     BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError, BootstrapLimits, BootstrapManifest,
     BootstrapManifestError, BootstrapStage, Budget, CancellationToken, CompilationMode,
     CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus,
-    DiagnosticClass, Digest, LogicalPath, ModuleKey, PackageKey, RetentionReport, Severity,
-    SourceInput, StageZeroCompiler, VmArtifactError, VmExecutionLimits, VmInstruction,
+    DiagnosticClass, Digest, InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport,
+    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmExecutionLimits, VmInstruction,
     decode_and_verify_program, decode_program,
 };
 use std::collections::BTreeMap;
@@ -107,6 +107,26 @@ fn service_compiles_and_runs_a_verified_vm_artifact_from_an_immutable_request() 
         .unwrap();
     assert!(outcome.diagnostics.is_empty());
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_applies_host_instance_discovery_limits_before_lowering() {
+    let compiler = StageZeroCompiler::with_instance_limits(InstanceLimits {
+        total: 1,
+        per_definition: 1,
+    });
+    let error = compiler
+        .compile(request(
+            "pub fn helper() -> i64 { 41 } pub fn main() -> i64 { helper() + 1 }",
+        ))
+        .unwrap_err();
+
+    let diagnostics = error.diagnostics();
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "G7031"
+            && diagnostic.class == DiagnosticClass::Resource
+            && diagnostic.message.contains("TotalLimit { limit: 1")
+    }));
 }
 
 #[test]

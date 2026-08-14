@@ -403,10 +403,22 @@ impl From<RequestControlError> for ServiceError {
 #[derive(Debug, Default)]
 pub struct StageZeroCompiler {
     database: CompilerDatabase,
+    instance_limits: InstanceLimits,
 }
 impl StageZeroCompiler {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a compiler with an explicit bound for demand-driven
+    /// executable-instance discovery. This is a host resource policy, not a
+    /// semantic option: it may reject an otherwise-valid request, but cannot
+    /// change the identity of an admitted instance.
+    pub fn with_instance_limits(instance_limits: InstanceLimits) -> Self {
+        Self {
+            database: CompilerDatabase::default(),
+            instance_limits,
+        }
     }
 
     /// Report validated frozen-interface reuse accumulated by this compiler
@@ -1019,7 +1031,7 @@ impl StageZeroCompiler {
         // direct callable dependencies, leaving generic substitutions for the
         // later instance materializer.
         let mut instance_graph = InstanceGraph::default();
-        let limits = InstanceLimits::default();
+        let limits = self.instance_limits;
         let entry_kinds = match signatures.definitions.get(&entry) {
             Some(ElaboratedHeader::Callable(signature)) => signature.generic_kinds.clone(),
             _ => Vec::new(),
