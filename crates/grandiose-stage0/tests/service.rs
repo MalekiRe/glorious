@@ -1180,6 +1180,27 @@ fn service_proves_and_enforces_direct_callable_trait_bounds() {
 }
 
 #[test]
+fn service_uses_declared_auto_traits_at_callable_boundaries() {
+    let accepted = "auto trait Sendish {} struct Pair { value: i64 } pub fn require<T>(value: T) -> i64 where T: Sendish { 7 } pub fn main() -> i64 { require(Pair { value: 1 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 7);
+
+    let rejected = "auto trait Sendish {} impl !Sendish for Text {} pub fn require<T>(value: T) -> i64 where T: Sendish { 7 } pub fn main() -> i64 { require(\"denied\") }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(rejected))
+    else {
+        panic!("an explicitly negative auto-trait bound unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4142"),
+        "missing explicit auto-trait rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_uses_implementation_where_bounds_while_type_checking_method_bodies() {
     let source = "trait Mark {} pub fn requires_mark<T>(value: T) -> T where T: Mark { value } trait Relay<T> { fn relay(value: T) -> T; } impl<T> Relay<T> for i64 where T: Mark { fn relay(value: T) -> T { requires_mark(value) } } impl Mark for i64 {} pub fn main() -> i64 { Relay<i64>::relay(42) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
