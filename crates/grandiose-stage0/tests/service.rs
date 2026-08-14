@@ -1227,6 +1227,38 @@ fn service_selects_and_executes_explicit_trait_method_calls() {
 }
 
 #[test]
+fn service_rejects_direct_qualified_trait_calls_without_a_selected_implementation() {
+    let source = "trait Increment { fn increment(value: i64) -> i64; } pub fn main() -> i64 { Increment::increment(41) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("trait call without an implementation unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4169"),
+        "missing selected-trait diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_overlapping_direct_qualified_trait_call_candidates_at_coherence() {
+    let source = "trait Increment { fn increment(value: i64) -> i64; } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 1 } } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 2 } } pub fn main() -> i64 { Increment::increment(40) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("overlapping trait implementations unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3404"),
+        "missing trait coherence diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_trait_methods_using_the_implicit_self_receiver_type() {
     let source = "trait Increment { fn increment(value: Self) -> Self; } impl Increment for i64 { fn increment(value: Self) -> Self { value + 1 } } pub fn main() -> i64 { Increment::increment(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
