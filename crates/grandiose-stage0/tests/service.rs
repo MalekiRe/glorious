@@ -2914,7 +2914,8 @@ fn verified_vm_program_enforces_explicit_runtime_call_depth_limits() {
         artifact.run_i64_with_limits(VmExecutionLimits {
             max_call_depth: 4,
             max_handler_depth: 4_096,
-            max_instructions: 100
+            max_instructions: 100,
+            ..VmExecutionLimits::default()
         }),
         Err(VmArtifactError::CallDepthLimit { limit: 4 })
     ));
@@ -2933,6 +2934,7 @@ fn verified_vm_program_enforces_explicit_handler_depth_limits() {
             max_call_depth: 100,
             max_handler_depth: 1,
             max_instructions: 100,
+            ..VmExecutionLimits::default()
         }),
         Err(VmArtifactError::HandlerDepthLimit { limit: 1 })
     ));
@@ -2950,7 +2952,8 @@ fn verified_vm_program_enforces_explicit_instruction_limits() {
         artifact.run_i64_with_limits(VmExecutionLimits {
             max_call_depth: 100,
             max_handler_depth: 4_096,
-            max_instructions: 2
+            max_instructions: 2,
+            ..VmExecutionLimits::default()
         }),
         Err(VmArtifactError::InstructionLimit { limit: 2 })
     ));

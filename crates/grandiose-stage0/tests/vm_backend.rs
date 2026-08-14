@@ -193,6 +193,50 @@ fn cleanup_leave_budget_loop(definition: DefKey) -> VmFunction {
     }
 }
 
+fn aggregate_allocation_fixture(definition: DefKey) -> VmFunction {
+    VmFunction {
+        definition,
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::I64,
+            VmType::I64,
+            VmType::Array(Box::new(VmType::I64)),
+        ],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 7 },
+            VmInstruction::ConstI64 { dst: 1, value: 8 },
+            VmInstruction::MakeArray {
+                dst: 2,
+                fields: vec![0, 1],
+                element_type: VmType::I64,
+            },
+            VmInstruction::Return { value: 0 },
+        ],
+    }
+}
+
+fn handler_payload_allocation_fixture(definition: DefKey) -> VmFunction {
+    VmFunction {
+        definition,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 7 },
+            VmInstruction::ConstI64 { dst: 1, value: 8 },
+            VmInstruction::Perform {
+                dst: 2,
+                effect: DefKey(Digest::of_bytes(b"allocation-payload-effect")),
+                effect_arguments: vec![],
+                operation: 0,
+                arguments: vec![0, 1],
+            },
+            VmInstruction::Return { value: 2 },
+        ],
+    }
+}
+
 #[test]
 fn schema_26_leave_bytes_reject_every_truncation_and_fingerprint_tampering() {
     let bytes = encoded_leave_fixture();
@@ -391,6 +435,7 @@ fn cleanup_carrying_leave_cannot_evict_artifact_or_program_execution_limits() {
         max_call_depth: 1,
         max_handler_depth: 1,
         max_instructions: 4,
+        ..VmExecutionLimits::default()
     };
     assert!(matches!(
         artifact.run_i64_with_limits(step_limit),
@@ -458,8 +503,105 @@ fn program_call_depth_limit_classifies_recursive_execution() {
                 max_call_depth: 2,
                 max_handler_depth: 1,
                 max_instructions: 100,
+                ..VmExecutionLimits::default()
             }),
         Err(VmArtifactError::CallDepthLimit { limit: 2 })
+    ));
+}
+
+#[test]
+fn aggregate_and_handler_payload_allocation_limits_cover_both_vm_engines() {
+    let aggregate_definition = DefKey(Digest::of_bytes(b"aggregate-allocation-limits"));
+    let aggregate_function = aggregate_allocation_fixture(aggregate_definition);
+    let mut aggregate_artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: aggregate_function.clone(),
+        fingerprint: Digest::of_bytes(b"aggregate-allocation-artifact"),
+    };
+    aggregate_artifact.fingerprint = aggregate_artifact.computed_fingerprint();
+    let aggregate_artifact = verify_vm(aggregate_artifact).unwrap();
+    let size_limit = VmExecutionLimits {
+        max_value_elements: 1,
+        ..VmExecutionLimits::default()
+    };
+    assert!(matches!(
+        aggregate_artifact.run_i64_with_limits(size_limit),
+        Err(VmArtifactError::ValueSizeLimit {
+            kind: "array elements",
+            limit: 1,
+            found: 2,
+        })
+    ));
+    let allocation_limit = VmExecutionLimits {
+        max_value_elements: 2,
+        // Three register slots plus the two-element array exceed this cap.
+        max_allocation_elements: 4,
+        ..VmExecutionLimits::default()
+    };
+    assert!(matches!(
+        aggregate_artifact.run_i64_with_limits(allocation_limit),
+        Err(VmArtifactError::AllocationLimit { limit: 4 })
+    ));
+
+    let mut aggregate_program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: aggregate_definition,
+        functions: BTreeMap::from([(aggregate_definition, aggregate_function)]),
+        fingerprint: Digest::of_bytes(b"aggregate-allocation-program"),
+    };
+    aggregate_program.fingerprint = aggregate_program.computed_fingerprint();
+    let aggregate_program = verify_vm_program(aggregate_program).unwrap();
+    assert!(matches!(
+        aggregate_program.run_i64_with_limits(size_limit),
+        Err(VmArtifactError::ValueSizeLimit {
+            kind: "array elements",
+            limit: 1,
+            found: 2,
+        })
+    ));
+    assert!(matches!(
+        aggregate_program.run_i64_with_limits(allocation_limit),
+        Err(VmArtifactError::AllocationLimit { limit: 4 })
+    ));
+
+    let payload_definition = DefKey(Digest::of_bytes(b"handler-payload-allocation-limits"));
+    let payload_function = handler_payload_allocation_fixture(payload_definition);
+    let mut payload_artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: payload_function.clone(),
+        fingerprint: Digest::of_bytes(b"handler-payload-allocation-artifact"),
+    };
+    payload_artifact.fingerprint = payload_artifact.computed_fingerprint();
+    let payload_artifact = verify_vm(payload_artifact).unwrap();
+    assert!(matches!(
+        payload_artifact.run_i64_with_limits(size_limit),
+        Err(VmArtifactError::ValueSizeLimit {
+            kind: "handler payload",
+            limit: 1,
+            found: 2,
+        })
+    ));
+
+    let mut payload_program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: payload_definition,
+        functions: BTreeMap::from([(payload_definition, payload_function)]),
+        fingerprint: Digest::of_bytes(b"handler-payload-allocation-program"),
+    };
+    payload_program.fingerprint = payload_program.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(payload_program)
+            .unwrap()
+            .run_i64_with_limits(size_limit),
+        Err(VmArtifactError::ValueSizeLimit {
+            kind: "handler payload",
+            limit: 1,
+            found: 2,
+        })
     ));
 }
 

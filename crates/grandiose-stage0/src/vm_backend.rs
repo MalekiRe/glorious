@@ -521,6 +521,19 @@ pub enum VmArtifactError {
     InstructionLimit {
         limit: u64,
     },
+    /// A single aggregate or handler payload exceeded the configured number
+    /// of runtime value elements before it was materialized.
+    ValueSizeLimit {
+        kind: &'static str,
+        limit: u64,
+        found: u64,
+    },
+    /// The sum of materialized runtime value elements exceeded its execution
+    /// budget. This prevents an instruction-bounded loop from allocating an
+    /// unbounded sequence of individually small aggregates.
+    AllocationLimit {
+        limit: u64,
+    },
     TypeMismatch {
         register: u32,
         expected: VmType,
@@ -554,6 +567,10 @@ pub struct VmExecutionLimits {
     pub max_call_depth: u32,
     pub max_handler_depth: u32,
     pub max_instructions: u64,
+    /// Largest materialized aggregate or handler payload, in value elements.
+    pub max_value_elements: u64,
+    /// Total materialized runtime value elements for one execution.
+    pub max_allocation_elements: u64,
 }
 impl Default for VmExecutionLimits {
     fn default() -> Self {
@@ -561,6 +578,8 @@ impl Default for VmExecutionLimits {
             max_call_depth: 4_096,
             max_handler_depth: 4_096,
             max_instructions: 10_000_000,
+            max_value_elements: 1 << 20,
+            max_allocation_elements: 1 << 24,
         }
     }
 }
@@ -719,6 +738,7 @@ impl VerifiedVmArtifact {
         let mut budget = ExecutionBudget {
             limits,
             instructions: 0,
+            allocated_elements: 0,
         };
         execute(&self.artifact.function, &mut budget)
     }
@@ -773,6 +793,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits: VmExecutionLimits::default(),
             instructions: 0,
+            allocated_elements: 0,
         };
         Ok(format_vm_value(&execute_with_arguments(
             &self.program,
@@ -792,6 +813,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits: VmExecutionLimits::default(),
             instructions: 0,
+            allocated_elements: 0,
         };
         expect_tuple_i64(execute_with_arguments(
             &self.program,
@@ -805,6 +827,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits: VmExecutionLimits::default(),
             instructions: 0,
+            allocated_elements: 0,
         };
         expect_array_i64(execute_with_arguments(
             &self.program,
@@ -818,6 +841,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits: VmExecutionLimits::default(),
             instructions: 0,
+            allocated_elements: 0,
         };
         expect_record_i64(execute_with_arguments(
             &self.program,
@@ -831,6 +855,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits: VmExecutionLimits::default(),
             instructions: 0,
+            allocated_elements: 0,
         };
         expect_enum_i64(execute_with_arguments(
             &self.program,
@@ -847,6 +872,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits,
             instructions: 0,
+            allocated_elements: 0,
         };
         expect_unit(execute_with_arguments(
             &self.program,
@@ -860,6 +886,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits,
             instructions: 0,
+            allocated_elements: 0,
         };
         expect_i64(execute_with_arguments(
             &self.program,
@@ -876,6 +903,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits,
             instructions: 0,
+            allocated_elements: 0,
         };
         expect_f64(execute_with_arguments(
             &self.program,
@@ -892,6 +920,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits,
             instructions: 0,
+            allocated_elements: 0,
         };
         expect_bool(execute_with_arguments(
             &self.program,
@@ -908,6 +937,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits,
             instructions: 0,
+            allocated_elements: 0,
         };
         expect_char(execute_with_arguments(
             &self.program,
@@ -927,6 +957,7 @@ impl VerifiedVmProgram {
         let mut budget = ExecutionBudget {
             limits,
             instructions: 0,
+            allocated_elements: 0,
         };
         Ok(expect_text(execute_with_arguments(
             &self.program,
@@ -4003,25 +4034,28 @@ fn store_reference(
     value: &VmValue,
     fields: &[u32],
     replacement: VmValue,
+    budget: &mut ExecutionBudget,
 ) -> Result<VmValue, VmArtifactError> {
     let Some((field, rest)) = fields.split_first() else {
         return Ok(replacement);
     };
     match value {
         VmValue::Tuple(values) => {
+            budget.reserve_value("reference update fields", values.len())?;
             let mut values = values.to_vec();
             let slot = values
                 .get_mut(*field as usize)
                 .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
-            *slot = store_reference(slot, rest, replacement)?;
+            *slot = store_reference(slot, rest, replacement, budget)?;
             Ok(VmValue::Tuple(values.into()))
         }
         VmValue::Array(values) => {
+            budget.reserve_value("reference update fields", values.len())?;
             let mut values = values.to_vec();
             let slot = values
                 .get_mut(*field as usize)
                 .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
-            *slot = store_reference(slot, rest, replacement)?;
+            *slot = store_reference(slot, rest, replacement, budget)?;
             Ok(VmValue::Array(values.into()))
         }
         VmValue::Record {
@@ -4029,11 +4063,12 @@ fn store_reference(
             fields: old,
             signature,
         } => {
+            budget.reserve_value("reference update fields", old.len())?;
             let mut fields = old.to_vec();
             let slot = fields
                 .get_mut(*field as usize)
                 .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
-            *slot = store_reference(slot, rest, replacement)?;
+            *slot = store_reference(slot, rest, replacement, budget)?;
             Ok(VmValue::Record {
                 definition: *definition,
                 fields: fields.into(),
@@ -4046,11 +4081,12 @@ fn store_reference(
             fields: old,
             signature,
         } => {
+            budget.reserve_value("reference update fields", old.len())?;
             let mut fields = old.to_vec();
             let slot = fields
                 .get_mut(*field as usize)
                 .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
-            *slot = store_reference(slot, rest, replacement)?;
+            *slot = store_reference(slot, rest, replacement, budget)?;
             Ok(VmValue::Enum {
                 definition: *definition,
                 variant: *variant,
@@ -4418,6 +4454,7 @@ fn execute(
             limit: budget.limits.max_call_depth,
         });
     }
+    budget.reserve_allocation(function.registers.len())?;
     let mut registers = vec![None; function.registers.len()];
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
     let mut next_handler_id = 0u64;
@@ -4443,6 +4480,7 @@ fn execute(
                 registers[dst as usize] = Some(VmValue::Text(Arc::from(value)));
             }
             VmInstruction::MakeTuple { dst, fields } => {
+                budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| {
@@ -4455,6 +4493,7 @@ fn execute(
                 registers[dst as usize] = Some(VmValue::Tuple(Arc::from(values)));
             }
             VmInstruction::MakeArray { dst, fields, .. } => {
+                budget.reserve_value("array elements", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| {
@@ -4472,6 +4511,7 @@ fn execute(
                 fields,
                 ..
             } => {
+                budget.reserve_value("record fields", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| {
@@ -4495,6 +4535,7 @@ fn execute(
                 fields,
                 ..
             } => {
+                budget.reserve_value("enum fields", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| {
@@ -4589,6 +4630,7 @@ fn execute(
                         found: fields.len() as u32,
                     });
                 }
+                budget.reserve_value("record update fields", fields.len())?;
                 let mut fields = fields.to_vec();
                 let index = index as usize;
                 let Some(field) = fields.get_mut(index) else {
@@ -4625,6 +4667,7 @@ fn execute(
                 operation,
                 arguments,
             } => {
+                budget.reserve_value("handler payload", arguments.len())?;
                 let values = arguments
                     .iter()
                     .map(|argument| {
@@ -4655,6 +4698,7 @@ fn execute(
                         found: values.len() as u32,
                     });
                 }
+                budget.reserve_allocation(registers.len())?;
                 let saved = registers.clone();
                 for (destination, value) in frame
                     .payload_destinations
@@ -4816,6 +4860,7 @@ fn execute(
                         found: continuation.performed.payloads.len() as u32,
                     });
                 }
+                budget.reserve_allocation(continuation.registers.len())?;
                 registers = continuation.registers.clone();
                 for (destination, payload) in frame
                     .payload_destinations
@@ -4906,6 +4951,7 @@ fn execute(
                         .expect("live reference target"),
                     &fields,
                     replacement,
+                    budget,
                 )?;
                 registers[target as usize] = Some(updated);
             }
@@ -5790,6 +5836,7 @@ fn execute_with_arguments(
             found: arguments.len() as u32,
         });
     }
+    budget.reserve_allocation(function.registers.len())?;
     let mut registers = vec![None; function.registers.len()];
     for (index, value) in arguments.iter().enumerate() {
         registers[index] = Some(value.clone());
@@ -5819,6 +5866,7 @@ fn execute_with_arguments(
                 registers[*dst as usize] = Some(VmValue::Text(Arc::from(value.as_str())));
             }
             VmInstruction::MakeTuple { dst, fields } => {
+                budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| {
@@ -5831,6 +5879,7 @@ fn execute_with_arguments(
                 registers[*dst as usize] = Some(VmValue::Tuple(Arc::from(values)));
             }
             VmInstruction::MakeArray { dst, fields, .. } => {
+                budget.reserve_value("array elements", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| {
@@ -5848,6 +5897,7 @@ fn execute_with_arguments(
                 fields,
                 ..
             } => {
+                budget.reserve_value("record fields", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| {
@@ -5871,6 +5921,7 @@ fn execute_with_arguments(
                 fields,
                 ..
             } => {
+                budget.reserve_value("enum fields", fields.len())?;
                 let values = fields
                     .iter()
                     .map(|field| {
@@ -5965,6 +6016,7 @@ fn execute_with_arguments(
                         found: fields.len() as u32,
                     });
                 }
+                budget.reserve_value("record update fields", fields.len())?;
                 let mut fields = fields.to_vec();
                 let index = *index as usize;
                 let Some(field) = fields.get_mut(index) else {
@@ -6001,6 +6053,7 @@ fn execute_with_arguments(
                 operation,
                 arguments,
             } => {
+                budget.reserve_value("handler payload", arguments.len())?;
                 let values = arguments
                     .iter()
                     .map(|argument| {
@@ -6031,6 +6084,7 @@ fn execute_with_arguments(
                         found: values.len() as u32,
                     });
                 }
+                budget.reserve_allocation(registers.len())?;
                 let saved = registers.clone();
                 for (destination, value) in frame
                     .payload_destinations
@@ -6194,6 +6248,7 @@ fn execute_with_arguments(
                         found: continuation.performed.payloads.len() as u32,
                     });
                 }
+                budget.reserve_allocation(continuation.registers.len())?;
                 registers = continuation.registers.clone();
                 for (destination, payload) in frame
                     .payload_destinations
@@ -6286,6 +6341,7 @@ fn execute_with_arguments(
                         .expect("live reference target"),
                     &fields,
                     replacement,
+                    budget,
                 )?;
                 registers[target as usize] = Some(updated);
             }
@@ -6574,6 +6630,7 @@ fn execute_with_arguments(
                 callee,
                 arguments,
             } => {
+                budget.reserve_value("call arguments", arguments.len())?;
                 let values = arguments
                     .iter()
                     .map(|argument| {
@@ -6597,6 +6654,7 @@ fn execute_with_arguments(
                 callee,
                 captures,
             } => {
+                budget.reserve_value("callable captures", captures.len())?;
                 let values = captures
                     .iter()
                     .map(|capture| {
@@ -6626,6 +6684,12 @@ fn execute_with_arguments(
                 else {
                     return Err(VmArtifactError::NotCallable { register: *callee });
                 };
+                let value_count = captures.len().checked_add(arguments.len()).ok_or(
+                    VmArtifactError::AllocationLimit {
+                        limit: budget.limits.max_allocation_elements,
+                    },
+                )?;
+                budget.reserve_value("indirect call arguments", value_count)?;
                 let mut values = captures.as_ref().to_vec();
                 values.extend(arguments.iter().map(|argument| {
                     registers[*argument as usize]
@@ -6701,6 +6765,7 @@ fn execute_with_arguments(
 struct ExecutionBudget {
     limits: VmExecutionLimits,
     instructions: u64,
+    allocated_elements: u64,
 }
 impl ExecutionBudget {
     fn tick(&mut self) -> Result<(), VmArtifactError> {
@@ -6717,5 +6782,31 @@ impl ExecutionBudget {
         } else {
             Ok(())
         }
+    }
+    fn reserve_allocation(&mut self, count: usize) -> Result<(), VmArtifactError> {
+        let count = count as u64;
+        let Some(next) = self.allocated_elements.checked_add(count) else {
+            return Err(VmArtifactError::AllocationLimit {
+                limit: self.limits.max_allocation_elements,
+            });
+        };
+        if next > self.limits.max_allocation_elements {
+            return Err(VmArtifactError::AllocationLimit {
+                limit: self.limits.max_allocation_elements,
+            });
+        }
+        self.allocated_elements = next;
+        Ok(())
+    }
+    fn reserve_value(&mut self, kind: &'static str, count: usize) -> Result<(), VmArtifactError> {
+        let count = count as u64;
+        if count > self.limits.max_value_elements {
+            return Err(VmArtifactError::ValueSizeLimit {
+                kind,
+                limit: self.limits.max_value_elements,
+                found: count,
+            });
+        }
+        self.reserve_allocation(count as usize)
     }
 }
