@@ -71,6 +71,7 @@ impl Analyzer<'_> {
         match e.kind {
             CoreKind::Literal(_)
             | CoreKind::Function(_)
+            | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => {}
             CoreKind::Closure { captures, .. } => {

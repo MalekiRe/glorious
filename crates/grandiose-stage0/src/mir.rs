@@ -4047,11 +4047,13 @@ impl Lowerer<'_> {
             // Named callables are first-class values just like anonymous
             // closures. Their environment is statically empty, while the
             // function identity selects the verified code target.
-            CoreKind::Function(callee) => self.instructions.push(MirInstruction::MakeCallable {
-                dst,
-                callee,
-                captures: vec![],
-            }),
+            CoreKind::Function(callee) | CoreKind::TraitMethod { method: callee, .. } => {
+                self.instructions.push(MirInstruction::MakeCallable {
+                    dst,
+                    callee,
+                    captures: vec![],
+                })
+            }
             CoreKind::Constant(callee) => {
                 self.instructions.push(MirInstruction::Call {
                     dst,
@@ -4379,11 +4381,13 @@ impl Lowerer<'_> {
                     .map(|argument| self.value(argument))
                     .collect::<Option<Vec<_>>>()?;
                 match self.body.expression(callee).kind.clone() {
-                    CoreKind::Function(callee) => self.instructions.push(MirInstruction::Call {
-                        dst,
-                        callee,
-                        arguments,
-                    }),
+                    CoreKind::Function(callee) | CoreKind::TraitMethod { method: callee, .. } => {
+                        self.instructions.push(MirInstruction::Call {
+                            dst,
+                            callee,
+                            arguments,
+                        })
+                    }
                     _ => {
                         let callee = self.value(callee)?;
                         self.instructions.push(MirInstruction::CallIndirect {
@@ -4502,12 +4506,18 @@ impl Lowerer<'_> {
                 self.direct_operation(*last)
             }
             CoreKind::Call { callee, arguments } => {
-                let CoreKind::Function(definition) = self.body.expression(callee).kind else {
-                    self.error(
+                let definition = match self.body.expression(callee).kind {
+                    CoreKind::Function(definition)
+                    | CoreKind::TraitMethod {
+                        method: definition, ..
+                    } => definition,
+                    _ => {
+                        self.error(
                         "G6005",
                         "handler-stack lowering is required for an indirect handler computation",
                     );
-                    return None;
+                        return None;
+                    }
                 };
                 self.direct_known_perform(definition, arguments)
             }
@@ -4609,7 +4619,8 @@ impl Lowerer<'_> {
                 .is_some_and(|value| self.has_direct_perform(*value)),
             CoreKind::Call { callee, arguments } => {
                 matches!(self.body.expression(callee).kind, CoreKind::Function(definition)
-                    if self.direct_known_perform(definition, arguments).is_some())
+                    | CoreKind::TraitMethod { method: definition, .. }
+                    if self.direct_known_perform(definition, arguments.clone()).is_some())
             }
             _ => false,
         }
@@ -4620,7 +4631,10 @@ impl Lowerer<'_> {
     /// effect-free. This is not a replacement for dynamic handler lowering.
     fn core_is_effect_free(&self, id: CoreId) -> bool {
         match self.body.expression(id).kind.clone() {
-            CoreKind::Literal(_) | CoreKind::Local(_) | CoreKind::Function(_) => true,
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Function(_)
+            | CoreKind::TraitMethod { .. } => true,
             CoreKind::Constant(_)
             | CoreKind::Error
             | CoreKind::Perform { .. }

@@ -148,6 +148,13 @@ pub enum CoreKind {
     Literal(String),
     Local(String),
     Function(DefKey),
+    /// A direct function value selected from a trait implementation. Retain
+    /// proof evidence alongside the callable key until MIR consumes this
+    /// source-free selection, rather than reconstructing lookup from a name.
+    TraitMethod {
+        evidence: DefKey,
+        method: DefKey,
+    },
     Constant(DefKey),
     Tuple(Vec<CoreId>),
     Array(Vec<CoreId>),
@@ -1245,6 +1252,7 @@ impl Elaborator<'_> {
             CoreKind::Closure { .. }
             | CoreKind::Literal(_)
             | CoreKind::Function(_)
+            | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => {}
             CoreKind::Local(_) => {}
@@ -2025,10 +2033,12 @@ impl Elaborator<'_> {
             name,
             &method_arguments,
         );
-        let (method, signature) = match answer {
+        let (evidence, method, signature) = match answer {
             TraitMethodAnswer::Selected {
-                method, signature, ..
-            } => (method, signature),
+                evidence,
+                method,
+                signature,
+            } => (evidence, method, signature),
             TraitMethodAnswer::Refuted { .. } => {
                 return Some(self.fail(
                     span,
@@ -2073,7 +2083,7 @@ impl Elaborator<'_> {
             }
         };
         let callee = self.alloc(
-            CoreKind::Function(method),
+            CoreKind::TraitMethod { evidence, method },
             Type::Callable {
                 parameters: signature.parameters.clone(),
                 result: Box::new(signature.result.clone()),

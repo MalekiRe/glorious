@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     BodySyntax, CaptureMode, CoreHandlerResumption, CoreKind, DeclarationScan, DefinitionIndex,
     ElaboratedInterface, FileKey, InterfaceSet, LexedFile, LogicalPath, MirInstruction,
-    MirLowering, PackageKey, PlaceFlow, TypedBody,
+    MirLowering, PackageKey, PlaceFlow, TypedBody, implementation_method_key,
 };
 
 #[test]
@@ -59,6 +59,43 @@ fn typed_core_checks_a_function_body_against_its_declared_result() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4110")
     );
+}
+
+#[test]
+fn typed_core_retains_selected_trait_method_evidence() {
+    let package = PackageKey("core-trait-method-evidence@0.1.0".into());
+    let source = "trait Increment { fn increment(value: i64) -> i64; } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 1 } } pub fn main() -> i64 { Increment::increment(41) }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let main = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, main.body.unwrap());
+    let core = TypedBody::elaborate(
+        main,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let implementation = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.kind == grandiose_stage0::DeclarationKind::Implementation)
+        .expect("implementation definition");
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            expression.kind,
+            CoreKind::TraitMethod { evidence, method }
+                if evidence == implementation.key
+                    && method == implementation_method_key(implementation.key, "increment")
+        )
+    }));
 }
 
 #[test]
