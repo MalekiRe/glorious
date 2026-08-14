@@ -1298,6 +1298,29 @@ fn verify_artifact(
 }
 
 fn verify_function_metadata(a: &Artifact) -> Result<(), VerifyError> {
+    // `Artifact::decode` checks these wire-table rules while decoding, but
+    // `verify` also accepts a directly assembled in-memory Artifact. Keep the
+    // trusted boundary identical for both routes: exports are part of the
+    // public callable surface, so a stale or forged signature must not be
+    // able to disagree with its target descriptor after verification.
+    let mut previous_export_name: Option<&[u8]> = None;
+    for export in &a.exports {
+        if previous_export_name.is_some_and(|previous| previous >= export.name.as_bytes()) {
+            return Err(VerifyError::InvalidFunction(export.function));
+        }
+        previous_export_name = Some(export.name.as_bytes());
+        let function = a
+            .functions
+            .get(export.function as usize)
+            .ok_or(VerifyError::InvalidFunction(export.function))?;
+        if export.signature.params != function.params
+            || export.signature.result != function.return_type
+            || export.signature.outward_protocols != function.outward_protocols
+        {
+            return Err(VerifyError::InvalidFunction(export.function));
+        }
+    }
+
     let valid_flags = EXPORTED | DROP_HOOK | NO_RETURN;
     for (id, function) in a.functions.iter().enumerate() {
         let id = id as u32;
@@ -18326,6 +18349,51 @@ mod tests {
             required_features: 1,
             entry_function: None,
         }
+    }
+
+    #[test]
+    fn direct_verification_enforces_the_export_table_contract() {
+        let mut valid = base(vec![Instruction::Return { src: Some(1) }], vec![UNIT, I64]);
+        valid.functions[0].flags = EXPORTED;
+        valid.exports = vec![Export {
+            name: "main".into(),
+            function: 0,
+            signature: Signature {
+                params: vec![],
+                result: I64,
+                outward_protocols: vec![],
+            },
+        }];
+        verify(valid.clone()).expect("a canonical direct export must verify");
+
+        let mut wrong_signature = valid.clone();
+        wrong_signature.exports[0].signature.result = UNIT;
+        assert!(matches!(
+            verify(wrong_signature),
+            Err(VerifyError::InvalidFunction(0))
+        ));
+
+        let mut unknown_target = valid.clone();
+        unknown_target.exports[0].function = 1;
+        assert!(matches!(
+            verify(unknown_target),
+            Err(VerifyError::InvalidFunction(1))
+        ));
+
+        let mut unordered_names = valid;
+        unordered_names.exports.push(Export {
+            name: "another".into(),
+            function: 0,
+            signature: Signature {
+                params: vec![],
+                result: I64,
+                outward_protocols: vec![],
+            },
+        });
+        assert!(matches!(
+            verify(unordered_names),
+            Err(VerifyError::InvalidFunction(0))
+        ));
     }
 
     #[test]
