@@ -4812,20 +4812,22 @@ fn opaque_generic_result_shapes_distinguish_concrete_scalars_from_enum_reference
             _ => None,
         })
         .expect("opaque enum result call did not reach frozen Core");
-    assert!(matches!(
-        origin,
-        grandiose_stage0::CallReferenceOrigin::Opaque
-    ));
-    assert_eq!(
-        *shape,
-        grandiose_stage0::CallReferenceShape::OpaquePotentiallyReference
-    );
+    let grandiose_stage0::CallReferenceOrigin::Paths(paths) = origin else {
+        panic!("variant-invariant enum payload lost frozen provenance: {origin:#?}");
+    };
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].result_fields, [0]);
+    assert_eq!(paths[0].argument, 0);
+    assert_eq!(paths[0].argument_fields, [0]);
+    assert_eq!(*shape, grandiose_stage0::CallReferenceShape::CallerPaths);
+    let flow = PlaceFlow::analyze(&opaque);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
     assert!(
-        PlaceFlow::analyze(&opaque)
+        EscapeFlow::analyze(&opaque, &flow)
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G5023"),
-        "opaque enum reference payload escaped the frozen ownership boundary"
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "a variant-invariant reference payload still must not escape a body-local loan"
     );
 }
 

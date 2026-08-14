@@ -11598,6 +11598,7 @@ fn call_reference_origin(
     for (result_fields, result_ty) in result_leaves {
         let Type::Reference {
             lifetime: result_lifetime,
+            referent: result_referent,
             ..
         } = result_ty
         else {
@@ -11622,6 +11623,23 @@ fn call_reference_origin(
                 matches!(candidate, Type::Reference { lifetime, .. } if lifetime == &result_lifetime)
             })
             .collect::<Vec<_>>();
+        // Erasing declaration lifetimes can make two unrelated arguments
+        // appear to share `Elided`. Prefer the exact referent when that
+        // retains a unique candidate (`Pair<&i64>` versus `Pair<&Bool>`),
+        // but keep the lifetime-only relation as a fallback for sound
+        // aggregate-to-field projections (`&'a Pair` to `&'a Field`).
+        let matching_referents = candidates
+            .iter()
+            .filter(|(_, _, candidate)| {
+                matches!(candidate, Type::Reference { referent, .. } if referent.as_ref() == result_referent.as_ref())
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        let candidates = if matching_referents.is_empty() {
+            candidates
+        } else {
+            matching_referents
+        };
         let [(argument, argument_fields, _)] = candidates.as_slice() else {
             return CallReferenceOrigin::Opaque;
         };
@@ -11688,6 +11706,7 @@ fn callable_reference_origin_from_contract(
         }
         let Type::Reference {
             lifetime: result_lifetime,
+            referent: result_referent,
             ..
         } = result_ty
         else {
@@ -11702,6 +11721,22 @@ fn callable_reference_origin_from_contract(
                 matches!(candidate, Type::Reference { lifetime, .. } if lifetime == &result_lifetime)
             })
             .collect::<Vec<_>>();
+        // See `call_reference_origin`: referent equality disambiguates
+        // sibling aliases after their distinct source regions have opened to
+        // `Elided`, without rejecting a structural projection whose referent
+        // is intentionally narrower than its source aggregate.
+        let matching_referents = candidates
+            .iter()
+            .filter(|(_, _, candidate)| {
+                matches!(candidate, Type::Reference { referent, .. } if referent.as_ref() == result_referent.as_ref())
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        let candidates = if matching_referents.is_empty() {
+            candidates
+        } else {
+            matching_referents
+        };
         let [(argument, argument_fields, _)] = candidates.as_slice() else {
             return CallReferenceOrigin::Opaque;
         };
