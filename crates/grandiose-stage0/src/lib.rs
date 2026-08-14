@@ -87,7 +87,7 @@ pub use module_graph::{ModuleDiagnostic, ModuleGraph, ModuleNode};
 pub use operation::{Budget, BudgetError, CancellationToken, PublicationGuard};
 pub use pattern::{
     BinderKey, BindingMode, PatternBinding, PatternDecision, PatternDiagnostic, PatternElaboration,
-    PatternPlan, elaborate_pattern,
+    PatternGenericScope, PatternPlan, elaborate_pattern, elaborate_pattern_with_scope,
 };
 pub use placeflow::{
     FlowDiagnostic, FlowEvent, FlowEventKind, LoanFact, LocalState, MoveFact, PlaceFlow,

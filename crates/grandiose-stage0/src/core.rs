@@ -6,7 +6,7 @@ use crate::{
     header::FixityForm,
     identity::{DefKey, Digest, ModuleKey},
     interface::{Definition, DefinitionNamespace},
-    pattern::{PatternDecision, elaborate_pattern},
+    pattern::{PatternDecision, PatternGenericScope, elaborate_pattern_with_scope},
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
     signature::{ElaboratedEffect, ElaboratedHeader, ElaboratedInterface},
     source::Span,
@@ -1733,6 +1733,15 @@ struct Elaborator<'a> {
     resumption_use_tracker: Option<ResumptionUseTracker>,
 }
 impl Elaborator<'_> {
+    fn pattern_generic_scope(&self) -> PatternGenericScope {
+        PatternGenericScope {
+            types: self.generic_parameters.clone(),
+            effect_rows: self.effect_row_parameters.clone(),
+            lifetimes: self.lifetime_parameters.clone(),
+            consts: self.const_parameters.clone(),
+        }
+    }
+
     fn expression(&mut self, id: ExprId) -> CoreId {
         let expression = self.body.expression(id).clone();
         match expression.kind {
@@ -1931,13 +1940,15 @@ impl Elaborator<'_> {
                     self.expressions[subject.0 as usize].ty.clone(),
                     expression.span,
                 );
-                let elaboration = elaborate_pattern(
+                let scope = self.pattern_generic_scope();
+                let elaboration = elaborate_pattern_with_scope(
                     self.body,
                     pattern,
                     subject_type.clone(),
                     self.index,
                     self.signatures,
                     self.module,
+                    &scope,
                 );
                 for diagnostic in elaboration.diagnostics {
                     self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
@@ -5379,13 +5390,15 @@ impl Elaborator<'_> {
                     "mixed completion and operation handler arms",
                 );
             };
-            let elaboration = elaborate_pattern(
+            let scope = self.pattern_generic_scope();
+            let elaboration = elaborate_pattern_with_scope(
                 self.body,
                 pattern,
                 subject_ty.clone(),
                 self.index,
                 self.signatures,
                 self.module,
+                &scope,
             );
             for diagnostic in &elaboration.diagnostics {
                 self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
@@ -5859,13 +5872,15 @@ impl Elaborator<'_> {
             .copied()
             .zip(operation.parameters.iter().cloned())
             .map(|(pattern, subject)| {
-                let elaboration = elaborate_pattern(
+                let scope = self.pattern_generic_scope();
+                let elaboration = elaborate_pattern_with_scope(
                     self.body,
                     pattern,
                     subject,
                     self.index,
                     self.signatures,
                     self.module,
+                    &scope,
                 );
                 for diagnostic in &elaboration.diagnostics {
                     self.error(diagnostic.span, diagnostic.code, &diagnostic.message);

@@ -6,9 +6,21 @@
 //! dispatch representation.
 
 use crate::{
-    BodySyntax, DefKey, DefinitionIndex, DefinitionNamespace, ElaboratedInterface, ModuleKey,
+    BodySyntax, ConstKind, DefKey, DefinitionIndex, DefinitionNamespace, EffectInstance, EffectRow,
+    EffectTail, ElaboratedInterface, GenericArgument, GenericKind, Lifetime, ModuleKey, Mutability,
     PatternId, PatternKind, ResolutionState, ScalarType, Span, Type,
 };
+
+/// Callable- or implementation-body generic binders visible while checking a
+/// source pattern application. Pattern syntax stays body-local, but explicit
+/// nominal arguments still need the same source-slot identity as the subject.
+#[derive(Clone, Debug, Default)]
+pub struct PatternGenericScope {
+    pub types: std::collections::BTreeMap<String, u32>,
+    pub effect_rows: std::collections::BTreeMap<String, u32>,
+    pub lifetimes: std::collections::BTreeMap<String, u32>,
+    pub consts: std::collections::BTreeMap<String, (u32, ConstKind)>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct BinderKey(pub u32);
@@ -86,11 +98,34 @@ pub fn elaborate_pattern(
     signatures: &ElaboratedInterface,
     module: &ModuleKey,
 ) -> PatternElaboration {
+    elaborate_pattern_with_scope(
+        body,
+        pattern,
+        subject,
+        index,
+        signatures,
+        module,
+        &PatternGenericScope::default(),
+    )
+}
+
+/// Scope-aware variant used by Typed Core when a pattern sits inside a
+/// generic callable or implementation body.
+pub fn elaborate_pattern_with_scope(
+    body: &BodySyntax,
+    pattern: PatternId,
+    subject: Type,
+    index: &DefinitionIndex,
+    signatures: &ElaboratedInterface,
+    module: &ModuleKey,
+    scope: &PatternGenericScope,
+) -> PatternElaboration {
     let mut elaborator = Elaborator {
         body,
         index,
         signatures,
         module,
+        scope,
         bindings: vec![],
         discarded: vec![],
         diagnostics: vec![],
@@ -134,6 +169,7 @@ struct Elaborator<'a> {
     index: &'a DefinitionIndex,
     signatures: &'a ElaboratedInterface,
     module: &'a ModuleKey,
+    scope: &'a PatternGenericScope,
     bindings: Vec<PatternBinding>,
     discarded: Vec<Type>,
     diagnostics: Vec<PatternDiagnostic>,
@@ -197,14 +233,14 @@ impl Elaborator<'_> {
             }
             PatternKind::Record {
                 path,
-                arguments: _,
+                arguments,
                 fields,
-            } => self.record(pattern.span, path, fields, subject),
+            } => self.record(pattern.span, path, arguments, fields, subject),
             PatternKind::Enum {
                 path,
-                arguments: _,
+                arguments,
                 fields,
-            } => self.enum_tuple(pattern.span, path, fields, subject),
+            } => self.enum_tuple(pattern.span, path, arguments, fields, subject),
             PatternKind::Recovered => {
                 self.recovered = true;
                 PatternDecision::Error
@@ -216,6 +252,7 @@ impl Elaborator<'_> {
         &mut self,
         span: Span,
         path: Vec<String>,
+        source_arguments: Vec<crate::HeaderGenericArgument>,
         fields: Vec<(String, PatternId)>,
         subject: Type,
     ) -> PatternDecision {
@@ -223,6 +260,7 @@ impl Elaborator<'_> {
             && !enum_path.is_empty()
             && let Some((definition, arguments)) = nominal_subject(&subject)
             && self.resolve_type(enum_path) == Some(definition)
+            && self.nominal_arguments_match(span, definition, &source_arguments, &arguments)
             && let Some((variant_index, layout)) = self
                 .signatures
                 .instantiate_enum_record_variant_generic(definition, &arguments, variant)
@@ -248,6 +286,9 @@ impl Elaborator<'_> {
                 "G4206",
                 "record pattern type differs from its subject",
             );
+            return PatternDecision::Error;
+        }
+        if !self.nominal_arguments_match(span, definition, &source_arguments, &arguments) {
             return PatternDecision::Error;
         }
         let Some(layout) = self
@@ -316,6 +357,7 @@ impl Elaborator<'_> {
         &mut self,
         span: Span,
         path: Vec<String>,
+        source_arguments: Vec<crate::HeaderGenericArgument>,
         fields: Vec<PatternId>,
         subject: Type,
     ) -> PatternDecision {
@@ -329,6 +371,9 @@ impl Elaborator<'_> {
         };
         if self.resolve_type(enum_path) != Some(definition) {
             self.error(span, "G4212", "enum pattern type differs from its subject");
+            return PatternDecision::Error;
+        }
+        if !self.nominal_arguments_match(span, definition, &source_arguments, &arguments) {
             return PatternDecision::Error;
         }
         let Some((variant_index, types)) = self
@@ -363,6 +408,273 @@ impl Elaborator<'_> {
             ResolutionState::Resolved(definition) => Some(definition),
             _ => None,
         }
+    }
+
+    fn nominal_arguments_match(
+        &mut self,
+        span: Span,
+        definition: DefKey,
+        source: &[crate::HeaderGenericArgument],
+        actual: &[GenericArgument],
+    ) -> bool {
+        if source.is_empty() {
+            return true;
+        }
+        let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
+        if source.len() != kinds.len() || actual.len() != kinds.len() {
+            self.error(span, "G4215", "nominal pattern has the wrong generic arity");
+            return false;
+        }
+        let mut supplied = Vec::with_capacity(source.len());
+        for (argument, kind) in source.iter().zip(kinds) {
+            let Some(argument) = self.generic_argument(span, argument, *kind) else {
+                return false;
+            };
+            supplied.push(argument);
+        }
+        if supplied != actual {
+            self.error(
+                span,
+                "G4216",
+                "nominal pattern generic arguments differ from its subject",
+            );
+            return false;
+        }
+        true
+    }
+
+    fn generic_argument(
+        &mut self,
+        span: Span,
+        argument: &crate::HeaderGenericArgument,
+        kind: GenericKind,
+    ) -> Option<GenericArgument> {
+        match (argument, kind) {
+            (crate::HeaderGenericArgument::Type(value), GenericKind::Type) => {
+                self.source_type(span, value).map(GenericArgument::Type)
+            }
+            (crate::HeaderGenericArgument::Lifetime(value), GenericKind::Lifetime) => self
+                .source_lifetime(span, value)
+                .map(GenericArgument::Lifetime),
+            (crate::HeaderGenericArgument::EffectRow(value), GenericKind::EffectRow) => self
+                .source_effect_row(span, value)
+                .map(GenericArgument::EffectRow),
+            (crate::HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
+                Some(GenericArgument::ConstU32(*value))
+            }
+            (
+                crate::HeaderGenericArgument::Quantity(value),
+                GenericKind::Const(ConstKind::Quantity),
+            ) => Some(GenericArgument::ConstQuantity(*value)),
+            (
+                crate::HeaderGenericArgument::Type(crate::HeaderType::Path(path)),
+                GenericKind::Const(kind),
+            ) if path.len() == 1 => self
+                .scope
+                .consts
+                .get(&path[0])
+                .filter(|(_, found)| *found == kind)
+                .map(|(index, kind)| GenericArgument::ConstGeneric {
+                    index: *index,
+                    kind: *kind,
+                })
+                .or_else(|| {
+                    self.error(
+                        span,
+                        "G4217",
+                        "nominal pattern const argument has the wrong kind",
+                    );
+                    None
+                }),
+            _ => {
+                self.error(
+                    span,
+                    "G4217",
+                    "nominal pattern generic argument has the wrong kind",
+                );
+                None
+            }
+        }
+    }
+
+    fn source_type(&mut self, span: Span, value: &crate::HeaderType) -> Option<Type> {
+        match value {
+            crate::HeaderType::Path(path) => {
+                if path.len() == 1 {
+                    if let Some(index) = self.scope.types.get(&path[0]) {
+                        return Some(Type::Generic(*index));
+                    }
+                    if let Some(scalar) = scalar(&path[0]) {
+                        return Some(Type::Scalar(scalar));
+                    }
+                }
+                let definition = self.resolve_type(path)?;
+                if !self
+                    .index
+                    .type_generic_kinds(definition)
+                    .unwrap_or(&[])
+                    .is_empty()
+                {
+                    self.error(
+                        span,
+                        "G4217",
+                        "nominal pattern type argument needs its generic arguments",
+                    );
+                    return None;
+                }
+                Some(Type::Nominal {
+                    definition,
+                    arguments: vec![],
+                })
+            }
+            crate::HeaderType::Application(base, arguments) => {
+                let crate::HeaderType::Path(path) = base.as_ref() else {
+                    self.error(span, "G4217", "nominal pattern type application is invalid");
+                    return None;
+                };
+                let definition = self.resolve_type(path)?;
+                let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
+                if arguments.len() != kinds.len() {
+                    self.error(
+                        span,
+                        "G4215",
+                        "nominal pattern type argument has the wrong arity",
+                    );
+                    return None;
+                }
+                let arguments = arguments
+                    .iter()
+                    .zip(kinds)
+                    .map(|(argument, kind)| self.generic_argument(span, argument, *kind))
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Type::Nominal {
+                    definition,
+                    arguments,
+                })
+            }
+            crate::HeaderType::Tuple(values) => values
+                .iter()
+                .map(|value| self.source_type(span, value))
+                .collect::<Option<Vec<_>>>()
+                .map(Type::Tuple),
+            crate::HeaderType::Reference {
+                unique,
+                lifetime,
+                referent,
+            } => Some(Type::Reference {
+                mutability: if *unique {
+                    Mutability::Unique
+                } else {
+                    Mutability::Shared
+                },
+                lifetime: match lifetime {
+                    Some(value) => self.source_lifetime(span, value)?,
+                    None => Lifetime::Elided,
+                },
+                referent: Box::new(self.source_type(span, referent)?),
+            }),
+            crate::HeaderType::Never => Some(Type::Never),
+            crate::HeaderType::Callable {
+                parameters, result, ..
+            } => Some(Type::Callable {
+                lifetime_binders: 0,
+                parameters: parameters
+                    .iter()
+                    .map(|value| self.source_type(span, value))
+                    .collect::<Option<Vec<_>>>()?,
+                result: Box::new(self.source_type(span, result)?),
+                effects: EffectRow::empty(),
+                invocation: crate::Quantity::AFFINE,
+            }),
+            crate::HeaderType::Projection { .. } | crate::HeaderType::Recovered => {
+                self.error(span, "G4217", "unsupported nominal pattern type argument");
+                None
+            }
+        }
+    }
+
+    fn source_lifetime(&mut self, span: Span, value: &str) -> Option<Lifetime> {
+        if value == "'static" {
+            return Some(Lifetime::Static);
+        }
+        self.scope
+            .lifetimes
+            .get(value)
+            .copied()
+            .map(Lifetime::Generic)
+            .or_else(|| {
+                self.error(span, "G4217", "nominal pattern lifetime is not in scope");
+                None
+            })
+    }
+
+    fn source_effect_row(
+        &mut self,
+        span: Span,
+        value: &crate::EffectRowHeader,
+    ) -> Option<EffectRow> {
+        let mut row = EffectRow::empty();
+        for effect in &value.effects {
+            let (path, arguments) = match effect {
+                crate::HeaderType::Path(path) => (path.as_slice(), vec![]),
+                crate::HeaderType::Application(base, arguments) => match base.as_ref() {
+                    crate::HeaderType::Path(path) => (path.as_slice(), arguments.clone()),
+                    _ => {
+                        self.error(
+                            span,
+                            "G4217",
+                            "nominal pattern effect application is invalid",
+                        );
+                        return None;
+                    }
+                },
+                _ => {
+                    self.error(span, "G4217", "nominal pattern effect row is invalid");
+                    return None;
+                }
+            };
+            let definition =
+                match self
+                    .index
+                    .resolve_path(DefinitionNamespace::Effect, self.module, path)
+                {
+                    ResolutionState::Resolved(definition) => definition,
+                    _ => {
+                        self.error(span, "G4217", "nominal pattern effect is unresolved");
+                        return None;
+                    }
+                };
+            let kinds = self.index.effect_generic_kinds(definition).unwrap_or(&[]);
+            if arguments.len() != kinds.len() {
+                self.error(
+                    span,
+                    "G4215",
+                    "nominal pattern effect has the wrong generic arity",
+                );
+                return None;
+            }
+            let arguments = arguments
+                .iter()
+                .zip(kinds)
+                .map(|(argument, kind)| self.generic_argument(span, argument, *kind))
+                .collect::<Option<Vec<_>>>()?;
+            row.effects.insert(EffectInstance {
+                definition,
+                arguments,
+            });
+        }
+        if let Some(tail) = &value.tail {
+            let Some(index) = self.scope.effect_rows.get(tail).copied() else {
+                self.error(
+                    span,
+                    "G4217",
+                    "nominal pattern effect-row tail is not in scope",
+                );
+                return None;
+            };
+            row.tail = Some(EffectTail::Generic(index));
+        }
+        Some(row.canonicalized())
     }
 
     fn error(&mut self, span: Span, code: &'static str, message: &'static str) {
@@ -406,4 +718,29 @@ fn literal_type(value: &str) -> Type {
     } else {
         Type::Scalar(ScalarType::I64)
     }
+}
+
+fn scalar(name: &str) -> Option<ScalarType> {
+    use ScalarType::*;
+    Some(match name {
+        "Bool" => Bool,
+        "u8" => U8,
+        "u16" => U16,
+        "u32" => U32,
+        "u64" => U64,
+        "u128" => U128,
+        "i8" => I8,
+        "i16" => I16,
+        "i32" => I32,
+        "i64" => I64,
+        "i128" => I128,
+        "usize" => Usize,
+        "isize" => Isize,
+        "f32" => F32,
+        "f64" => F64,
+        "char" => Char,
+        "Text" => Text,
+        "Bytes" => Bytes,
+        _ => return None,
+    })
 }

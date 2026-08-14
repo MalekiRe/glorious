@@ -106,6 +106,44 @@ fn typed_core_retains_explicit_nominal_arguments_on_record_and_enum_construction
 }
 
 #[test]
+fn mixed_nominal_constructor_arguments_reach_the_runtime_layout_boundary() {
+    let core = core_for(
+        "core-mixed-nominal-construction@0.1.0",
+        "effect Trace { note(); } pub struct Mixed<'a, e: EffectRow, n: u32, q: Quantity, T> {} pub fn main() -> i64 { Mixed<'static, {Trace}, 7, [1, 2], i64> {}; 0 }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4123"),
+        "mixed identity did not reach the type-only layout boundary: {:#?}",
+        core.diagnostics
+    );
+    assert!(
+        !core
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4185"),
+        "mixed nominal arguments were rejected before nominal kind validation: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
+fn mixed_nominal_pattern_arguments_are_checked_against_subject_identity() {
+    let core = core_for(
+        "core-mixed-nominal-pattern@0.1.0",
+        "effect Trace { note(); } pub struct Mixed<'a, e: EffectRow, n: u32, q: Quantity, T> {} pub fn main(value: Mixed<'static, {Trace}, 7, [1, 2], i64>) -> bool { value is Mixed<'static, {Trace}, 8, [1, 2], i64> {} }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4216"),
+        "mixed nominal pattern identity mismatch was not diagnosed: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn typed_core_retains_zonked_direct_call_specialization_arguments() {
     let core = core_for(
         "core-direct-instance@0.1.0",

@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     BindingMode, BodySyntax, DeclarationScan, DefinitionIndex, ElaboratedInterface, ExprKind,
-    FileKey, InterfaceSet, LexedFile, LogicalPath, PackageKey, PatternDecision, Type,
-    elaborate_pattern,
+    FileKey, GenericArgument, InterfaceSet, LexedFile, LogicalPath, PackageKey, PatternDecision,
+    ScalarType, Type, elaborate_pattern,
 };
 
 fn parsed(
@@ -132,4 +132,40 @@ fn named_enum_payload_patterns_keep_selected_field_indices() {
         PatternDecision::Enum { ref fields, .. } if fields.len() == 1 && fields[0].0 == 0
     ));
     assert_eq!(plan.plan.discarded.len(), 1);
+}
+
+#[test]
+fn explicit_nominal_pattern_arguments_must_match_the_subject_identity() {
+    let source = "pub enum Result<T> { Ok(T) } pub fn main(value: Result<i64>) -> () { value is Result<Text>::Ok(_) }";
+    let (interface, signatures, body) = parsed(source);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Result"))
+        .unwrap()
+        .key;
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected body block");
+    };
+    let ExprKind::Is { pattern, .. } = body.expression(values[0]).kind else {
+        panic!("expected structural test");
+    };
+    let plan = elaborate_pattern(
+        &body,
+        pattern,
+        Type::Nominal {
+            definition,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+        &interface.module,
+    );
+    assert!(
+        plan.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4216"),
+        "{:#?}",
+        plan.diagnostics
+    );
 }
