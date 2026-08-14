@@ -5888,6 +5888,75 @@ impl Lowerer<'_> {
                 None
             }
             CoreKind::Label { body, .. } => self.lower_label_transfer_path(body, target),
+            // These are strict, left-to-right expression forms.  A transfer
+            // in one of them abandons the enclosing form, but work in every
+            // preceding operand remains observable and must therefore be
+            // emitted before we construct the Leave edge.
+            CoreKind::Tuple(values) | CoreKind::Array(values) => {
+                for value in values {
+                    if self.contains_label_transfer(value, target) {
+                        return self.lower_label_transfer_path(value, target);
+                    }
+                    self.value(value)?;
+                }
+                self.error("G6012", "label scope has no transfer to its target brand");
+                None
+            }
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+                for field in fields {
+                    if self.contains_label_transfer(field, target) {
+                        return self.lower_label_transfer_path(field, target);
+                    }
+                    self.value(field)?;
+                }
+                self.error("G6012", "label scope has no transfer to its target brand");
+                None
+            }
+            CoreKind::Binary {
+                operator,
+                left,
+                right,
+            } if !matches!(operator.as_str(), "and" | "or") => {
+                if self.contains_label_transfer(left, target) {
+                    self.lower_label_transfer_path(left, target)
+                } else {
+                    self.value(left)?;
+                    self.lower_label_transfer_path(right, target)
+                }
+            }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
+                if self.contains_label_transfer(callee, target) {
+                    return self.lower_label_transfer_path(callee, target);
+                }
+                self.value(callee)?;
+                for argument in arguments {
+                    if self.contains_label_transfer(argument, target) {
+                        return self.lower_label_transfer_path(argument, target);
+                    }
+                    self.value(argument)?;
+                }
+                self.error("G6012", "label scope has no transfer to its target brand");
+                None
+            }
+            CoreKind::Perform { arguments, .. } => {
+                for argument in arguments {
+                    if self.contains_label_transfer(argument, target) {
+                        return self.lower_label_transfer_path(argument, target);
+                    }
+                    self.value(argument)?;
+                }
+                self.error("G6012", "label scope has no transfer to its target brand");
+                None
+            }
+            CoreKind::Field { base, .. }
+            | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Let { value: base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
+            | CoreKind::Move(base)
+            | CoreKind::Unary { value: base, .. } => self.lower_label_transfer_path(base, target),
             CoreKind::Transfer { brand, value } if brand == target => self.value(value),
             CoreKind::Transfer { .. } => {
                 self.error(
@@ -6090,12 +6159,39 @@ impl Lowerer<'_> {
             // label transfers are rejected by Core; transfers to labels it
             // declares itself cannot become an edge in this body.
             CoreKind::Closure { .. } => false,
-            CoreKind::Block(values) => values
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
                 .iter()
                 .any(|child| self.contains_label_transfer(*child, target)),
-            CoreKind::Label { body, .. } | CoreKind::Let { value: body, .. } => {
-                self.contains_label_transfer(*body, target)
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
+                .iter()
+                .any(|field| self.contains_label_transfer(*field, target)),
+            CoreKind::Label { body, .. }
+            | CoreKind::Let { value: body, .. }
+            | CoreKind::Field { base: body, .. }
+            | CoreKind::PatternTest { subject: body, .. }
+            | CoreKind::Borrow { value: body, .. }
+            | CoreKind::Deref(body)
+            | CoreKind::Move(body)
+            | CoreKind::Unary { value: body, .. } => self.contains_label_transfer(*body, target),
+            CoreKind::Binary {
+                operator,
+                left,
+                right,
+            } if !matches!(operator.as_str(), "and" | "or") => {
+                self.contains_label_transfer(*left, target)
+                    || self.contains_label_transfer(*right, target)
             }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
+                self.contains_label_transfer(*callee, target)
+                    || arguments
+                        .iter()
+                        .any(|argument| self.contains_label_transfer(*argument, target))
+            }
+            CoreKind::Perform { arguments, .. } => arguments
+                .iter()
+                .any(|argument| self.contains_label_transfer(*argument, target)),
             _ => false,
         }
     }

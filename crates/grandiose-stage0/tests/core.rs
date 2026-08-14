@@ -6769,6 +6769,47 @@ fn label_transfer_used_as_a_binary_operand_rejoins_through_typed_mir() {
 }
 
 #[test]
+fn binary_operand_transfer_emits_a_cleanup_carrying_leave_edge() {
+    let core = core_for(
+        "core-binary-label-transfer@0.1.0",
+        "pub fn main() -> i64 { label done { 1 + transfer done 42 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("strict binary transfer lowers");
+    assert!(matches!(
+        &mir.blocks[0].terminator,
+        grandiose_stage0::MirTerminator::Leave { cleanup, .. }
+            if cleanup.moved_places == flow.moved_places
+                && cleanup.active_loans == flow.active_loans
+    ));
+    assert!(matches!(
+        mir.blocks[0].instructions.as_slice(),
+        [
+            grandiose_stage0::MirInstruction::ConstI64 { value: 1, .. },
+            ..
+        ]
+    ));
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
 fn label_operand_transfer_preserves_preceding_left_to_right_computation() {
     let core = core_for(
         "core-operand-label-prefix@0.1.0",

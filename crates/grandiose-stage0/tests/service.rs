@@ -6170,6 +6170,31 @@ fn service_rejoins_nested_plain_completion_label_transfers() {
 }
 
 #[test]
+fn service_leaves_a_label_from_an_ordered_binary_operand() {
+    let source = r#"
+        pub fn main() -> i64 {
+            label done { 1 + transfer done 42 }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_leaves_a_label_from_a_later_call_argument() {
+    let source = r#"
+        pub fn ignored(left: i64, right: i64) -> i64 { left + right }
+        pub fn main() -> i64 {
+            label done { ignored(1, transfer done 42) }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_reborrows_each_nested_multi_variant_refinement_payload() {
     let source = r#"
         fn __g1_abort() -> ! { () }
