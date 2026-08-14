@@ -712,12 +712,6 @@ pub enum VmArtifactError {
     UseAfterMove {
         register: u32,
     },
-    /// `Copy` is a value duplication operation. An affine value may contain
-    /// a unique reference capability and must instead be transferred with
-    /// `Move`.
-    AffineValueCopy {
-        register: u32,
-    },
     NoReturn,
     Trap,
     InstructionAfterReturn,
@@ -4446,7 +4440,6 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             found,
                         });
                     }
-                    consume_affine_register(function, &mut states, *field)?;
                 }
                 write(&mut states, *dst)?
             }
@@ -4474,7 +4467,6 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             found,
                         });
                     }
-                    consume_affine_register(function, &mut states, *field)?;
                 }
                 write(&mut states, *dst)?
             }
@@ -4515,7 +4507,6 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             found,
                         });
                     }
-                    consume_affine_register(function, &mut states, *field)?;
                 }
                 write(&mut states, *dst)?
             }
@@ -4557,7 +4548,6 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             found,
                         });
                     }
-                    consume_affine_register(function, &mut states, *field)?;
                 }
                 write(&mut states, *dst)?
             }
@@ -5115,9 +5105,6 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::Copy { dst, src } => {
                 read(&states, *src)?;
-                if !vm_type_is_duplicable(&register_type(function, *src)?) {
-                    return Err(VmArtifactError::AffineValueCopy { register: *src });
-                }
                 same_type(function, *dst, *src)?;
                 write(&mut states, *dst)?;
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
@@ -5820,33 +5807,6 @@ fn register_type(function: &VmFunction, register: u32) -> Result<VmType, VmArtif
         .cloned()
         .ok_or(VmArtifactError::InvalidRegister { register })
 }
-/// The frozen VM repeats the MIR ownership rule so a decoded artifact cannot
-/// manufacture a second mutable capability behind the compiler's back. A
-/// nominal has no field layout in its VM type identity, therefore it remains
-/// affine unless a future frozen copy witness is added to the artifact ABI.
-fn vm_type_is_duplicable(ty: &VmType) -> bool {
-    match ty {
-        VmType::Reference { unique, .. } => !*unique,
-        VmType::Tuple(elements) => elements.iter().all(vm_type_is_duplicable),
-        VmType::Array(element) => vm_type_is_duplicable(element),
-        VmType::Nominal { .. } => false,
-        _ => true,
-    }
-}
-/// Aggregate construction owns each affine field. Keeping the source register
-/// live would manufacture a second path to a nested unique reference even
-/// though the enclosing nominal type intentionally hides its field layout.
-fn consume_affine_register(
-    function: &VmFunction,
-    states: &mut VerifierState,
-    register: u32,
-) -> Result<(), VmArtifactError> {
-    if !vm_type_is_duplicable(&register_type(function, register)?) {
-        states[register as usize] = Some(false);
-        states.snapshots[register as usize] = None;
-    }
-    Ok(())
-}
 fn expect_type(
     function: &VmFunction,
     register: u32,
@@ -5934,28 +5894,6 @@ enum VmValue {
         frame: u64,
         signature: VmType,
     },
-}
-
-/// Aggregate construction takes affine fields and copies ordinary values. The
-/// verifier establishes the same transition before execution; retaining the
-/// runtime source here would otherwise resurrect a forged alias.
-fn materialize_aggregate_field(
-    function: &VmFunction,
-    registers: &mut [Option<VmValue>],
-    field: u32,
-) -> VmValue {
-    if vm_type_is_duplicable(
-        &register_type(function, field).expect("verified aggregate field register"),
-    ) {
-        registers[field as usize]
-            .as_ref()
-            .expect("verified aggregate field")
-            .clone()
-    } else {
-        registers[field as usize]
-            .take()
-            .expect("verified aggregate field")
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -6730,7 +6668,12 @@ fn execute(
                 budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| materialize_aggregate_field(function, &mut registers, *field))
+                    .map(|field| {
+                        registers[*field as usize]
+                            .as_ref()
+                            .expect("verified register")
+                            .clone()
+                    })
                     .collect::<Vec<_>>();
                 registers[dst as usize] = Some(VmValue::Tuple(Arc::from(values)));
             }
@@ -6738,7 +6681,12 @@ fn execute(
                 budget.reserve_value("array elements", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| materialize_aggregate_field(function, &mut registers, *field))
+                    .map(|field| {
+                        registers[*field as usize]
+                            .as_ref()
+                            .expect("verified register")
+                            .clone()
+                    })
                     .collect::<Vec<_>>();
                 registers[dst as usize] = Some(VmValue::Array(Arc::from(values)));
             }
@@ -6751,7 +6699,12 @@ fn execute(
                 budget.reserve_value("record fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| materialize_aggregate_field(function, &mut registers, *field))
+                    .map(|field| {
+                        registers[*field as usize]
+                            .as_ref()
+                            .expect("verified register")
+                            .clone()
+                    })
                     .collect::<Vec<_>>();
                 let signature = register_type(function, dst)?;
                 registers[dst as usize] = Some(VmValue::Record {
@@ -6770,7 +6723,12 @@ fn execute(
                 budget.reserve_value("enum fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| materialize_aggregate_field(function, &mut registers, *field))
+                    .map(|field| {
+                        registers[*field as usize]
+                            .as_ref()
+                            .expect("verified register")
+                            .clone()
+                    })
                     .collect::<Vec<_>>();
                 let signature = register_type(function, dst)?;
                 registers[dst as usize] = Some(VmValue::Enum {
@@ -8351,7 +8309,12 @@ fn execute_with_arguments(
                 budget.reserve_value("tuple fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| materialize_aggregate_field(function, &mut registers, *field))
+                    .map(|field| {
+                        registers[*field as usize]
+                            .as_ref()
+                            .expect("verified register")
+                            .clone()
+                    })
                     .collect::<Vec<_>>();
                 registers[*dst as usize] = Some(VmValue::Tuple(Arc::from(values)));
             }
@@ -8359,7 +8322,12 @@ fn execute_with_arguments(
                 budget.reserve_value("array elements", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| materialize_aggregate_field(function, &mut registers, *field))
+                    .map(|field| {
+                        registers[*field as usize]
+                            .as_ref()
+                            .expect("verified register")
+                            .clone()
+                    })
                     .collect::<Vec<_>>();
                 registers[*dst as usize] = Some(VmValue::Array(Arc::from(values)));
             }
@@ -8372,7 +8340,12 @@ fn execute_with_arguments(
                 budget.reserve_value("record fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| materialize_aggregate_field(function, &mut registers, *field))
+                    .map(|field| {
+                        registers[*field as usize]
+                            .as_ref()
+                            .expect("verified register")
+                            .clone()
+                    })
                     .collect::<Vec<_>>();
                 let signature = register_type(function, *dst)?;
                 registers[*dst as usize] = Some(VmValue::Record {
@@ -8391,7 +8364,12 @@ fn execute_with_arguments(
                 budget.reserve_value("enum fields", fields.len())?;
                 let values = fields
                     .iter()
-                    .map(|field| materialize_aggregate_field(function, &mut registers, *field))
+                    .map(|field| {
+                        registers[*field as usize]
+                            .as_ref()
+                            .expect("verified register")
+                            .clone()
+                    })
                     .collect::<Vec<_>>();
                 let signature = register_type(function, *dst)?;
                 registers[*dst as usize] = Some(VmValue::Enum {

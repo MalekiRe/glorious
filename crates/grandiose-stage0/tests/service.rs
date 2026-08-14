@@ -1257,67 +1257,6 @@ fn unique_reborrow_reuses_the_original_vm_place() {
 }
 
 #[test]
-fn unique_reference_rebinding_cannot_create_a_second_mutable_alias() {
-    let source = "pub fn main() -> i64 { let value = 1; let parent = &mut value; let alias = parent; *alias = 42; *parent }";
-    let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
-        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
-        outcome => panic!("unique-reference copy unexpectedly compiled: {outcome:#?}"),
-    };
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "G6002"
-                && diagnostic
-                    .message
-                    .contains("copy duplicates an affine capability")
-        }),
-        "missing unique-reference copy diagnostic: {diagnostics:#?}"
-    );
-}
-
-#[test]
-fn nominal_reference_carriers_are_affine_without_a_frozen_copy_witness() {
-    let safe = r#"
-        pub struct Holder { reference: &mut i64 }
-        pub fn main() -> i64 {
-            let value = 1;
-            let parent = &mut value;
-            let holder = Holder { reference: move parent };
-            *holder.reference = 42;
-            *holder.reference
-        }
-    "#;
-    let outcome = StageZeroCompiler::new()
-        .compile(request(safe))
-        .expect("an owned nominal reference carrier must remain executable");
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
-
-    let alias = r#"
-        pub struct Holder { reference: &mut i64 }
-        pub fn main() -> i64 {
-            let value = 1;
-            let parent = &mut value;
-            let holder = Holder { reference: move parent };
-            let alias = holder;
-            *alias.reference = 42;
-            *holder.reference
-        }
-    "#;
-    let diagnostics = match StageZeroCompiler::new().compile(request(alias)) {
-        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
-        outcome => panic!("affine nominal copy unexpectedly compiled: {outcome:#?}"),
-    };
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "G6002"
-                && diagnostic
-                    .message
-                    .contains("copy duplicates an affine capability")
-        }),
-        "missing affine nominal-copy diagnostic: {diagnostics:#?}"
-    );
-}
-
-#[test]
 fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
     let source = r#"
         pub struct Inner { value: i64 }

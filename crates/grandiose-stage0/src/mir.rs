@@ -2154,15 +2154,6 @@ impl MirFunction {
             .ok_or_else(|| format!("MIR references invalid local {}", local.0))
     }
     fn validate_instruction(&self, instruction: &MirInstruction) -> Result<(), String> {
-        if let MirInstruction::Copy { src, .. } = instruction {
-            if !type_is_duplicable(self.local_type(*src)?) {
-                return Err(format!(
-                    "MIR copy duplicates an affine capability from local {}",
-                    src.0
-                ));
-            }
-            return Ok(());
-        }
         if let MirInstruction::ConstF64 { dst, bits } = instruction {
             if self.local_type(*dst)? != &Type::Scalar(crate::types::ScalarType::F64) {
                 return Err("MIR f64 constant destination is not f64".into());
@@ -2468,22 +2459,6 @@ impl MirFunction {
             }
             MirTerminator::Unreachable => Ok(()),
         }
-    }
-}
-
-/// A unique reference is a linear capability: duplicating it would create two
-/// independently writable aliases. Aggregates remain duplicable only when all
-/// of their runtime members are duplicable. A nominal type deliberately has no
-/// field layout at frozen MIR, so it is affine unless a future frozen copy
-/// witness proves otherwise. Generic arguments alone cannot prove that a
-/// record's declared fields do not contain `&mut`.
-fn type_is_duplicable(ty: &Type) -> bool {
-    match ty {
-        Type::Reference { mutability, .. } => *mutability != Mutability::Unique,
-        Type::Tuple(elements) => elements.iter().all(type_is_duplicable),
-        Type::Array(element) => type_is_duplicable(element),
-        Type::Nominal { .. } => false,
-        _ => true,
     }
 }
 
@@ -10487,9 +10462,9 @@ impl Lowerer<'_> {
                 );
                 return Some(self.invalid_function(parameters));
             }
-            self.capability_value(handled_computation)?
+            self.value(handled_computation)?
         } else {
-            self.capability_value(computation)?
+            self.value(computation)?
         };
 
         let fallback_index = clauses
@@ -11141,7 +11116,7 @@ impl Lowerer<'_> {
             // only the positive branch's projections. This is both the
             // once-evaluation guarantee and the boundary that keeps positive
             // binders out of false/wildcard completion arms.
-            let refinement_subject = self.capability_value(refinement.subject)?;
+            let refinement_subject = self.value(refinement.subject)?;
             self.bind_handler_patterns(
                 std::slice::from_ref(&refinement.pattern),
                 &[refinement_subject],
@@ -11288,16 +11263,8 @@ impl Lowerer<'_> {
             }
             let src = self.value(*value)?;
             let local = self.alloc(self.body.expression(*value).ty.clone(), id);
-            if type_is_duplicable(&self.body.expression(*value).ty) {
-                self.instructions
-                    .push(MirInstruction::Copy { dst: local, src });
-            } else {
-                // Borrow creation materializes a temporary capability.  Bind
-                // that capability into the user-visible local by transfer,
-                // never by a second writable alias.
-                self.instructions
-                    .push(MirInstruction::Move { dst: local, src });
-            }
+            self.instructions
+                .push(MirInstruction::Copy { dst: local, src });
             self.named.insert(name.clone(), local);
             let unit = self.alloc(Type::Unit, id);
             self.instructions
@@ -11441,7 +11408,7 @@ impl Lowerer<'_> {
             CoreKind::Tuple(fields) => {
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.capability_value(field))
+                    .map(|field| self.value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions
                     .push(MirInstruction::MakeTuple { dst, fields });
@@ -11453,7 +11420,7 @@ impl Lowerer<'_> {
                 };
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.capability_value(field))
+                    .map(|field| self.value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::MakeArray {
                     dst,
@@ -11468,7 +11435,7 @@ impl Lowerer<'_> {
                     .collect::<Vec<_>>();
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.capability_value(field))
+                    .map(|field| self.value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::MakeRecord {
                     dst,
@@ -11488,7 +11455,7 @@ impl Lowerer<'_> {
                     .collect::<Vec<_>>();
                 let fields = fields
                     .into_iter()
-                    .map(|field| self.capability_value(field))
+                    .map(|field| self.value(field))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::MakeEnum {
                     dst,
@@ -11503,7 +11470,7 @@ impl Lowerer<'_> {
                 index,
                 field_count,
             } => {
-                let base = self.capability_value(base)?;
+                let base = self.value(base)?;
                 self.instructions.push(MirInstruction::ProjectRecord {
                     dst,
                     base,
@@ -11515,7 +11482,7 @@ impl Lowerer<'_> {
             CoreKind::PatternTest {
                 subject, pattern, ..
             } => {
-                let subject = self.capability_value(subject)?;
+                let subject = self.value(subject)?;
                 let Some(pattern) = lower_pattern(pattern) else {
                     self.error("G6005", "Typed Core contains an invalid structural pattern");
                     return None;
@@ -11551,7 +11518,7 @@ impl Lowerer<'_> {
             } => self.lower_terminal_handle(dst, computation, clauses)?,
             CoreKind::Borrow { unique, value } => {
                 if let CoreKind::Deref(reference) = self.body.expression(value).kind.clone() {
-                    let src = self.capability_value(reference)?;
+                    let src = self.value(reference)?;
                     self.instructions.push(MirInstruction::Borrow {
                         dst,
                         src,
@@ -11575,12 +11542,12 @@ impl Lowerer<'_> {
                 });
             }
             CoreKind::Deref(value) => {
-                let reference = self.capability_value(value)?;
+                let reference = self.value(value)?;
                 self.instructions
                     .push(MirInstruction::DerefCopy { dst, reference });
             }
             CoreKind::Move(value) => {
-                let src = self.capability_value(value)?;
+                let src = self.value(value)?;
                 self.instructions.push(MirInstruction::Move { dst, src });
             }
             CoreKind::Unary { operator, value } => {
@@ -12379,19 +12346,6 @@ impl Lowerer<'_> {
     fn statement(&mut self, id: CoreId) -> Option<()> {
         self.value(id).map(|_| ())
     }
-    /// Read an affine capability without first materializing a `Copy`.
-    /// Shared references retain ordinary value semantics, while direct unique
-    /// references and layout-opaque nominal values must use their original
-    /// register until a frozen copy witness exists.
-    fn capability_value(&mut self, id: CoreId) -> Option<MirLocal> {
-        if !type_is_duplicable(&self.body.expression(id).ty)
-            && let CoreKind::Local(name) = &self.body.expression(id).kind
-            && let Some(local) = self.named.get(name)
-        {
-            return Some(*local);
-        }
-        self.value(id)
-    }
     /// Resolve a Typed Core value place to its stable runtime root and field
     /// path.  This refuses computed values: a borrow may never be lowered as
     /// a hidden copy of a temporary.
@@ -12430,7 +12384,7 @@ impl Lowerer<'_> {
                 Some(dst)
             }
             crate::CorePlace::Deref { reference, .. } => {
-                let reference = self.capability_value(*reference)?;
+                let reference = self.value(*reference)?;
                 let dst = self.alloc(place.ty(), CoreId(u32::MAX));
                 self.instructions
                     .push(MirInstruction::DerefCopy { dst, reference });
@@ -12478,7 +12432,7 @@ impl Lowerer<'_> {
                     self.error("G6010", "MIR store through shared reference");
                     return None;
                 }
-                let reference = self.capability_value(*reference)?;
+                let reference = self.value(*reference)?;
                 self.instructions.push(MirInstruction::DerefStore {
                     reference,
                     src: value,

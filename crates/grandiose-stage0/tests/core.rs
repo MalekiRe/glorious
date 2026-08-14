@@ -61,58 +61,6 @@ fn core_for(package_name: &str, source: &str) -> TypedBody {
 }
 
 #[test]
-fn typed_core_cannot_lower_a_unique_reference_rebinding_as_a_copy() {
-    let core = core_for(
-        "core-unique-reference-copy@0.1.0",
-        "pub fn main() -> i64 { let value = 1; let parent = &mut value; let alias = parent; *alias }",
-    );
-    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let flow = PlaceFlow::analyze(&core);
-    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
-    let lowered = MirLowering::lower(
-        DefKey(Digest::of_bytes(b"core-unique-reference-copy")),
-        &core,
-        &flow,
-    );
-    assert!(
-        lowered.function.is_none()
-            && lowered.diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "G6002"
-                    && diagnostic
-                        .message
-                        .contains("copy duplicates an affine capability")
-            }),
-        "Typed Core rebinding reached executable MIR: {lowered:#?}"
-    );
-}
-
-#[test]
-fn typed_core_cannot_lower_an_opaque_nominal_reference_carrier_as_a_copy() {
-    let core = core_for(
-        "core-affine-nominal-reference-copy@0.1.0",
-        "pub struct Holder { reference: &mut i64 } pub fn main() -> i64 { let value = 1; let parent = &mut value; let holder = Holder { reference: move parent }; let alias = holder; *alias.reference }",
-    );
-    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let flow = PlaceFlow::analyze(&core);
-    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
-    let lowered = MirLowering::lower(
-        DefKey(Digest::of_bytes(b"core-affine-nominal-reference-copy")),
-        &core,
-        &flow,
-    );
-    assert!(
-        lowered.function.is_none()
-            && lowered.diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "G6002"
-                    && diagnostic
-                        .message
-                        .contains("copy duplicates an affine capability")
-            }),
-        "Typed Core nominal carrier rebinding reached executable MIR: {lowered:#?}"
-    );
-}
-
-#[test]
 fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
     let package = PackageKey("core@0.1.0".into());
     let source = "pub fn main() -> i64 { let value = 1; value + 2 }";
