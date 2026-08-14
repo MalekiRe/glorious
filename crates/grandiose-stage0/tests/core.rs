@@ -2315,6 +2315,47 @@ fn typed_core_and_placeflow_lower_to_validated_mir() {
 }
 
 #[test]
+fn contextual_u32_comparisons_lower_to_typed_vm_primitives() {
+    let package = PackageKey("core-u32-comparison-mir@0.1.0".into());
+    let source =
+        "infixl 20 <=; pub fn main(value: u32) -> bool { value <= 1114111 }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let lowered = MirLowering::lower(definition.key, &core, &flow);
+    assert!(lowered.diagnostics.is_empty(), "{:#?}", lowered.diagnostics);
+    let mir = lowered.function.expect("u32 comparison should lower to MIR");
+    assert!(mir.entry_block().instructions.iter().any(
+        |instruction| matches!(instruction, MirInstruction::I64ToU32Checked { .. })
+    ));
+    assert!(mir
+        .entry_block()
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, MirInstruction::U32Le { .. })));
+    assert!(mir.validate().is_ok());
+}
+
+#[test]
 fn typed_closures_become_callable_core_values_with_explicit_capture_modes() {
     let package = PackageKey("core-closure@0.1.0".into());
     let source =

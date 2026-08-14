@@ -13124,6 +13124,26 @@ impl Lowerer<'_> {
                         return None;
                     }
                 },
+                Type::Scalar(crate::types::ScalarType::U32) => match parse_i64_literal(&text) {
+                    Ok(value) => {
+                        // Source integer syntax is deliberately parsed once through
+                        // the frozen i64 literal ABI.  Materialize the contextual
+                        // u32 value through the checked VM conversion so an
+                        // out-of-range literal cannot silently wrap.
+                        let source = self.alloc(
+                            Type::Scalar(crate::types::ScalarType::I64),
+                            id,
+                        );
+                        self.instructions
+                            .push(MirInstruction::ConstI64 { dst: source, value });
+                        self.instructions
+                            .push(MirInstruction::I64ToU32Checked { dst, value: source });
+                    }
+                    Err(_) => {
+                        self.error("G6003", "invalid u32 literal at MIR lowering");
+                        return None;
+                    }
+                },
                 Type::Scalar(crate::types::ScalarType::F64) => match parse_f64_literal(&text) {
                     Ok(value) => self.instructions.push(MirInstruction::ConstF64 {
                         dst,
@@ -13495,6 +13515,54 @@ impl Lowerer<'_> {
                     }
                     (Type::Scalar(crate::types::ScalarType::I64), ">=") => {
                         MirInstruction::GeI64 { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), "==") => {
+                        MirInstruction::U32Eq { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), "!=") => {
+                        let equal = self.alloc(
+                            Type::Scalar(crate::types::ScalarType::Bool),
+                            id,
+                        );
+                        self.instructions.push(MirInstruction::U32Eq {
+                            dst: equal,
+                            left,
+                            right,
+                        });
+                        MirInstruction::NotBool { dst, value: equal }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), "<") => {
+                        MirInstruction::U32Lt { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), "<=") => {
+                        MirInstruction::U32Le { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), ">") => {
+                        let less_equal = self.alloc(
+                            Type::Scalar(crate::types::ScalarType::Bool),
+                            id,
+                        );
+                        self.instructions.push(MirInstruction::U32Le {
+                            dst: less_equal,
+                            left,
+                            right,
+                        });
+                        MirInstruction::NotBool {
+                            dst,
+                            value: less_equal,
+                        }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), ">=") => {
+                        let less = self.alloc(
+                            Type::Scalar(crate::types::ScalarType::Bool),
+                            id,
+                        );
+                        self.instructions.push(MirInstruction::U32Lt {
+                            dst: less,
+                            left,
+                            right,
+                        });
+                        MirInstruction::NotBool { dst, value: less }
                     }
                     (Type::Scalar(crate::types::ScalarType::F64), "==") => {
                         MirInstruction::EqF64 { dst, left, right }
