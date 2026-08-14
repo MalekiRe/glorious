@@ -1098,7 +1098,10 @@ impl StageZeroCompiler {
             }
         }
         for instance in instance_graph.ordered() {
-            let mut instance_dependencies = vec![DependencyNode::Core(instance.callable)];
+            let mut instance_dependencies = vec![
+                DependencyNode::Core(instance.callable),
+                DependencyNode::Body(instance.callable),
+            ];
             if let Some(callees) = instance_graph.callees(&instance) {
                 instance_dependencies.extend(callees.iter().cloned().map(DependencyNode::Instance));
             }

@@ -224,6 +224,56 @@ fn service_tracks_private_body_edits_without_invalidating_public_products() {
 }
 
 #[test]
+fn service_traces_concrete_instances_and_invalidates_changed_callee_edges() {
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(
+            request("pub fn helper() -> i64 { 1 } pub fn main() -> i64 { helper() }"),
+            None,
+        )
+        .unwrap();
+    let parent_outcome = compiler.compile_revision(parent).unwrap();
+    let parent_graph = parent_outcome.instance_graph.expect("instance graph");
+    assert_eq!(parent_graph.ordered().len(), 2);
+    let main = parent_graph
+        .roots()
+        .keys()
+        .next()
+        .expect("entry instance")
+        .clone();
+    let helper = parent_graph
+        .callees(&main)
+        .unwrap()
+        .iter()
+        .next()
+        .unwrap()
+        .clone();
+    assert!(matches!(
+        compiler
+            .dependency_trace(parent, &DependencyNode::Instance(main.clone()))
+            .unwrap()
+            .status,
+        DependencyStatus::Cold
+    ));
+    let child = compiler
+        .import_revision(
+            request("pub fn helper() -> i64 { 2 } pub fn main() -> i64 { helper() }"),
+            Some(parent),
+        )
+        .unwrap();
+    compiler.compile_revision(child).unwrap();
+    let trace = compiler
+        .dependency_trace(child, &DependencyNode::Instance(helper))
+        .unwrap();
+    assert!(
+        trace
+            .dependencies
+            .iter()
+            .any(|dependency| matches!(dependency, DependencyNode::Body(_)))
+    );
+}
+
+#[test]
 fn service_tracks_public_interface_edits_without_invalidating_unaffected_bodies() {
     let compiler = StageZeroCompiler::new();
     let parent = compiler
