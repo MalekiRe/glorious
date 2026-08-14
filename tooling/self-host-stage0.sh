@@ -77,8 +77,8 @@ canonical_source="$temporary_directory/compiler.glorious"
 # hermetic regression usable in constrained CI/worktree environments without
 # silently rebuilding into a caller's checkout-local `target` tree.
 stage0_target="${CARGO_TARGET_DIR:-$repo_root/target}"
-(cd "$repo_root" && cargo build -q -p grandiose-stage0 --bin grc-stage0)
-stage0="$stage0_target/debug/grc-stage0"
+(cd "$repo_root" && cargo build -q --release -p grandiose-stage0 --bin grc-stage0)
+stage0="$stage0_target/release/grc-stage0"
 
 runtime_manifest=(
     --runtime-standard-library command@0.1.0
