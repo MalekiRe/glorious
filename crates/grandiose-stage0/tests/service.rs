@@ -774,6 +774,10 @@ fn service_sessions_pin_retired_revisions_without_mixing_live_worlds() {
         StageZeroCompiler::new().compile_session(&child_session),
         Err(error) if error.diagnostics()[0].code == "G7026"
     ));
+    assert!(matches!(
+        compiler.compile_session(&child_session),
+        Err(error) if error.diagnostics()[0].code == "G7034"
+    ));
 
     drop(parent_session);
     assert_eq!(
@@ -787,9 +791,10 @@ fn service_sessions_pin_retired_revisions_without_mixing_live_worlds() {
         compiler.open_session(parent),
         Err(error) if error.diagnostics()[0].code == "G7025"
     ));
+    let resumed_child_session = compiler.open_session(child).unwrap();
     assert_eq!(
         compiler
-            .compile_session(&child_session)
+            .compile_session(&resumed_child_session)
             .unwrap()
             .artifact
             .unwrap()
@@ -826,6 +831,14 @@ fn cancelled_service_sessions_discard_staged_cache_artifacts_and_release_pins() 
     assert_eq!(compiler.interface_cache_stats().misses, 0);
     assert!(compiler.dependency_traces(revision).is_empty());
     assert_eq!(budget.spent(), 0);
+    assert!(matches!(
+        compiler.compile_session(&session),
+        Err(error) if error.diagnostics()[0].code == "G7034"
+    ));
+    assert!(
+        compiler.dependency_traces(revision).is_empty(),
+        "a cancelled session cannot be replayed into a later publication"
+    );
 
     compiler.retire_revision(revision).unwrap();
     assert_eq!(compiler.collect_retired().retained_pinned, 1);

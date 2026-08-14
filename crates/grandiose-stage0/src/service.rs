@@ -466,6 +466,7 @@ pub struct CompilationOutcome {
 #[derive(Debug)]
 pub enum ServiceError {
     Revision(RevisionError),
+    SessionConsumed(RevisionId),
     Cancelled,
     Resource(BudgetError),
     Failed(Vec<CompileDiagnostic>),
@@ -501,6 +502,10 @@ impl ServiceError {
                     "requested compilation revision has been retired",
                 )]
             }
+            Self::SessionConsumed(_) => vec![CompileDiagnostic::request(
+                "G7034",
+                "compilation request session has already finished",
+            )],
             Self::Cancelled => vec![CompileDiagnostic::cancellation(
                 "G7029",
                 "compilation request was cancelled before publication",
@@ -666,6 +671,9 @@ impl StageZeroCompiler {
         session: &RequestSession,
     ) -> Result<CompilationOutcome, ServiceError> {
         self.database.validate_session(session)?;
+        if !session.claim_execution() {
+            return Err(ServiceError::SessionConsumed(session.revision()));
+        }
         // This lease is held through the final publication boundary and its
         // Drop settles request accounting on every error/cancellation path.
         let _request_lease = session.checkpoint(1)?;

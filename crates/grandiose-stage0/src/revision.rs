@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeSet, HashMap},
-    sync::{Arc, Mutex, Weak},
+    sync::{
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use crate::{
@@ -348,6 +351,11 @@ pub struct RequestSession {
     snapshot: DatabaseSnapshot,
     cancellation: CancellationToken,
     budget: Arc<Budget>,
+    /// A request session owns one cancellation/budget/publication lifetime.
+    /// It may be inspected while live, but exactly one compiler execution may
+    /// claim it; retries must admit a fresh session against an explicit
+    /// immutable revision rather than replaying an already-closed transaction.
+    execution_claimed: AtomicBool,
 }
 
 impl RequestSession {
@@ -360,6 +368,7 @@ impl RequestSession {
             snapshot,
             cancellation,
             budget,
+            execution_claimed: AtomicBool::new(false),
         }
     }
 
@@ -381,6 +390,14 @@ impl RequestSession {
 
     pub fn budget(&self) -> &Arc<Budget> {
         &self.budget
+    }
+
+    /// Atomically claim this affine session's sole execution slot. A failed,
+    /// cancelled, or resource-limited execution remains consumed: its staged
+    /// request products have been abandoned and cannot be replayed under a
+    /// possibly changed operational context.
+    pub(crate) fn claim_execution(&self) -> bool {
+        !self.execution_claimed.swap(true, Ordering::AcqRel)
     }
 
     pub(crate) fn checkpoint(&self, cost: u64) -> Result<BudgetLease, RequestControlError> {
