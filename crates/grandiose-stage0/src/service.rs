@@ -1162,6 +1162,7 @@ impl StageZeroCompiler {
                         crate::PrimitiveRole::IntCheckedAdd,
                         crate::PrimitiveRole::IntWrappingAdd,
                         crate::PrimitiveRole::IntWrappingSub,
+                        crate::PrimitiveRole::IntWrappingMul,
                         crate::PrimitiveRole::IntEqual,
                         crate::PrimitiveRole::IntLess,
                         crate::PrimitiveRole::IntGreater,

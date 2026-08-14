@@ -258,6 +258,30 @@ fn manifest_bound_generic_int_wrapping_sub_uses_distinct_wrapping_vm_semantics()
 }
 
 #[test]
+fn manifest_bound_generic_int_wrapping_mul_uses_distinct_wrapping_vm_semantics() {
+    let mut input = request(
+        "fn __g1_int_wrapping_mul<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_wrapping_mul<i64>(9223372036854775807, 2) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntWrappingMul,
+        "__g1_int_wrapping_mul",
+    ));
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("the exact generic int declaration must specialize for frozen i64")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_i64().unwrap(), -2);
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::WrappingMulI64 { .. }))
+    }));
+}
+
+#[test]
 fn manifest_bound_generic_int_predicates_preserve_their_u32_runtime_abi() {
     for (role, name, body) in [
         (
