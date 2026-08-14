@@ -8371,6 +8371,7 @@ fn store_reference(
 }
 
 fn borrow_value(
+    registers: &[Option<VmValue>],
     source: u32,
     value: &VmValue,
     fields: &[u32],
@@ -8392,15 +8393,20 @@ fn borrow_value(
         }
         let mut path = parent_fields.to_vec();
         path.extend_from_slice(fields);
+        let referent = if fields.is_empty() {
+            parent_referent.clone()
+        } else {
+            project_reference(reference_target(registers, target)?, &path)?.ty()
+        };
         return Ok(VmValue::Reference {
             target: target.clone(),
             fields: path.into(),
             unique,
-            referent: if fields.is_empty() {
-                parent_referent.clone()
-            } else {
-                project_reference(value, fields)?.ty()
-            },
+            // A reborrow projects from the referent behind the parent
+            // reference, never from the `VmValue::Reference` carrier
+            // itself.  The latter has no structural fields and used to make
+            // a valid `&value.0` fail at runtime.
+            referent,
         });
     }
     Ok(VmValue::Reference {
@@ -8746,7 +8752,13 @@ fn execute_array_primitive(
 /// creator must not retain a raw creator-register index. Rebase it to the
 /// immutable referent snapshot. Unique references are deliberately refused:
 /// snapshotting would silently lose their write-back alias.
-fn freeze_callable_capture(
+/// Rebase shared references at a VM frame boundary. Registers are frame-local,
+/// so a shared reference passed into a direct call (or returned from one) must
+/// not retain the producer frame's raw register index. Capturing its immutable
+/// referent preserves the source-level shared loan while making the runtime
+/// value independent of that dead frame. Unique references remain an explicit
+/// unsupported cross-frame boundary rather than silently losing write-back.
+fn freeze_frame_value(
     value: &VmValue,
     registers: &[Option<VmValue>],
 ) -> Result<VmValue, VmArtifactError> {
@@ -8767,6 +8779,49 @@ fn freeze_callable_capture(
             fields: Arc::from([]),
             unique: false,
             referent: referent.clone(),
+        }),
+        VmValue::Tuple(values) => Ok(VmValue::Tuple(
+            values
+                .iter()
+                .map(|value| freeze_frame_value(value, registers))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+        )),
+        VmValue::Array { values, capacity } => Ok(VmValue::Array {
+            values: values
+                .iter()
+                .map(|value| freeze_frame_value(value, registers))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+            capacity: *capacity,
+        }),
+        VmValue::Record {
+            definition,
+            fields,
+            signature,
+        } => Ok(VmValue::Record {
+            definition: *definition,
+            fields: fields
+                .iter()
+                .map(|value| freeze_frame_value(value, registers))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+            signature: signature.clone(),
+        }),
+        VmValue::Enum {
+            definition,
+            variant,
+            fields,
+            signature,
+        } => Ok(VmValue::Enum {
+            definition: *definition,
+            variant: *variant,
+            fields: fields
+                .iter()
+                .map(|value| freeze_frame_value(value, registers))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+            signature: signature.clone(),
         }),
         value => Ok(value.clone()),
     }
@@ -10375,11 +10430,12 @@ fn execute(
                 let values = arguments
                     .iter()
                     .map(|argument| {
-                        registers[*argument as usize].clone().ok_or(
-                            VmArtifactError::ReadBeforeWrite {
+                        registers[*argument as usize]
+                            .clone()
+                            .ok_or(VmArtifactError::ReadBeforeWrite {
                                 register: *argument,
-                            },
-                        )
+                            })
+                            .and_then(|value| freeze_frame_value(&value, &registers))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let Some(index) = handlers.iter().rposition(|frame| {
@@ -10726,6 +10782,7 @@ fn execute(
                 reborrow,
             } => {
                 registers[dst as usize] = Some(borrow_value(
+                    &registers,
                     src,
                     registers[src as usize].as_ref().expect("verified register"),
                     &fields,
@@ -13436,6 +13493,7 @@ fn execute_with_arguments(
                 reborrow,
             } => {
                 registers[*dst as usize] = Some(borrow_value(
+                    &registers,
                     *src,
                     registers[*src as usize]
                         .as_ref()
@@ -13943,11 +14001,12 @@ fn execute_with_arguments(
                 let values = arguments
                     .iter()
                     .map(|argument| {
-                        registers[*argument as usize].clone().ok_or(
-                            VmArtifactError::ReadBeforeWrite {
+                        registers[*argument as usize]
+                            .clone()
+                            .ok_or(VmArtifactError::ReadBeforeWrite {
                                 register: *argument,
-                            },
-                        )
+                            })
+                            .and_then(|value| freeze_frame_value(&value, &registers))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 if depth.saturating_add(callers.len() as u32).saturating_add(1)
@@ -13992,7 +14051,7 @@ fn execute_with_arguments(
                         registers[*capture as usize]
                             .as_ref()
                             .ok_or(VmArtifactError::ReadBeforeWrite { register: *capture })
-                            .and_then(|value| freeze_callable_capture(value, &registers))
+                            .and_then(|value| freeze_frame_value(value, &registers))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let signature = register_type(function, *dst)?;
@@ -14023,12 +14082,17 @@ fn execute_with_arguments(
                 )?;
                 budget.reserve_value("indirect call arguments", value_count)?;
                 let mut values = captures.as_ref().to_vec();
-                values.extend(arguments.iter().map(|argument| {
-                    registers[*argument as usize]
-                        .as_ref()
-                        .expect("verified register")
-                        .clone()
-                }));
+                values.extend(
+                    arguments
+                        .iter()
+                        .map(|argument| {
+                            registers[*argument as usize]
+                                .as_ref()
+                                .expect("verified register")
+                        })
+                        .map(|value| freeze_frame_value(value, &registers))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
                 if depth.saturating_add(callers.len() as u32).saturating_add(1)
                     >= budget.limits.max_call_depth
                 {
@@ -14112,6 +14176,7 @@ fn execute_with_arguments(
                     {
                         return Err(VmArtifactError::HandlerStillActive);
                     }
+                    let value = freeze_frame_value(&value, &registers)?;
                     let caller = callers.pop().expect("checked nonempty call stack");
                     definition = caller.definition;
                     registers = caller.registers;
