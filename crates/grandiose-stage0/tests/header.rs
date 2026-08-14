@@ -74,6 +74,61 @@ fn nominal_headers_retain_structural_quantity_arguments() {
 }
 
 #[test]
+fn nominal_headers_normalize_structural_const_arithmetic() {
+    let package = PackageKey("header-structural-const-arithmetic@0.1.0".into());
+    let source = "pub fn tag() -> Tag<1 + 2 * 3> { tag } pub fn budget() -> Budget<[1 + 2, 2 * 4]> { budget }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+
+    let first = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(first.diagnostics.is_empty(), "{first:#?}");
+    let ParsedHeader::Function(first) = first.header else {
+        panic!("expected callable header")
+    };
+    assert!(matches!(
+        first.result,
+        Some(HeaderType::Application(_, arguments))
+            if arguments == vec![HeaderGenericArgument::U32(7)]
+    ));
+
+    let second = HeaderParse::parse(&lexed, source, &scan.declarations[1]);
+    assert!(second.diagnostics.is_empty(), "{second:#?}");
+    let ParsedHeader::Function(second) = second.header else {
+        panic!("expected callable header")
+    };
+    assert!(matches!(
+        second.result,
+        Some(HeaderType::Application(_, arguments))
+            if arguments == vec![HeaderGenericArgument::Quantity(Quantity::new(3, Some(8)).unwrap())]
+    ));
+}
+
+#[test]
+fn structural_const_arithmetic_reports_overflow_and_division_by_zero() {
+    let package = PackageKey("header-structural-const-arithmetic-errors@0.1.0".into());
+    let source = "pub fn overflow() -> Tag<4294967295 + 1> { overflow } pub fn zero() -> Tag<8 / 0> { zero }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let overflow = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(
+        overflow
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3222"),
+        "{overflow:#?}"
+    );
+    let zero = HeaderParse::parse(&lexed, source, &scan.declarations[1]);
+    assert!(
+        zero.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3228"),
+        "{zero:#?}"
+    );
+}
+
+#[test]
 fn callable_headers_retain_generic_kind_metadata() {
     let package = PackageKey("header-generic-kinds@0.1.0".into());
     let source = "pub fn relay<T, e: EffectRow>(value: T) -> i64 / { | e } { 0 }";

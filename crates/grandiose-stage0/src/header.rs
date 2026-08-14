@@ -1434,9 +1434,12 @@ impl Parser<'_> {
             } else if let Some(index) = self.current()
                 && self.lexed.tokens[index].kind == TokenKind::Integer
             {
-                let text = self.text(index).to_owned();
-                self.position += 1;
-                match text.parse::<u32>() {
+                match u32::try_from(self.structural_integer_expression(
+                    "G3222",
+                    "structural u32 generic argument is out of range",
+                    "G3228",
+                    "structural constant arithmetic overflowed or divided by zero",
+                )) {
                     Ok(value) => arguments.push(HeaderGenericArgument::U32(value)),
                     Err(_) => {
                         self.error("G3222", "structural u32 generic argument is out of range");
@@ -1458,9 +1461,11 @@ impl Parser<'_> {
     fn structural_quantity_argument(&mut self) -> Quantity {
         debug_assert!(self.at_punctuation('['));
         self.position += 1;
-        let lower = self.integer(
+        let lower = self.structural_integer_expression(
             "G3223",
             "structural quantity lower bound must be a non-negative integer",
+            "G3228",
+            "structural constant arithmetic overflowed or divided by zero",
         );
         if !self.punctuation(',') {
             self.error("G3224", "expected `,` between structural quantity bounds");
@@ -1469,9 +1474,11 @@ impl Parser<'_> {
             self.position += 1;
             None
         } else {
-            Some(self.integer(
+            Some(self.structural_integer_expression(
                 "G3225",
                 "structural quantity upper bound must be a non-negative integer or `*`",
+                "G3228",
+                "structural constant arithmetic overflowed or divided by zero",
             ))
         };
         if !self.punctuation(']') {
@@ -1487,6 +1494,109 @@ impl Parser<'_> {
                 Quantity::ONCE
             }
         }
+    }
+    /// Evaluate the intentionally tiny structural-integer language accepted
+    /// inside generic arguments and quantity bounds.  This is not source
+    /// execution: all operands are literals and the evaluator is bounded by
+    /// the already-scanned declaration tokens.  Keeping normalization here
+    /// means every later phase sees a single canonical `u32` or `Quantity`
+    /// value suitable for type identity and hashing.
+    fn structural_integer_expression(
+        &mut self,
+        value_code: &'static str,
+        value_message: &'static str,
+        arithmetic_code: &'static str,
+        arithmetic_message: &'static str,
+    ) -> u64 {
+        let mut value = self.structural_integer_product(
+            value_code,
+            value_message,
+            arithmetic_code,
+            arithmetic_message,
+        );
+        while let Some(operator) = self
+            .at_operator("+")
+            .then_some('+')
+            .or_else(|| self.at_operator("-").then_some('-'))
+        {
+            self.position += 1;
+            let right = self.structural_integer_product(
+                value_code,
+                value_message,
+                arithmetic_code,
+                arithmetic_message,
+            );
+            value = match operator {
+                '+' => value.checked_add(right),
+                '-' => value.checked_sub(right),
+                _ => unreachable!("only additive structural operators are accepted"),
+            }
+            .unwrap_or_else(|| {
+                self.error(arithmetic_code, arithmetic_message);
+                0
+            });
+        }
+        value
+    }
+    fn structural_integer_product(
+        &mut self,
+        value_code: &'static str,
+        value_message: &'static str,
+        arithmetic_code: &'static str,
+        arithmetic_message: &'static str,
+    ) -> u64 {
+        let mut value = self.structural_integer_primary(
+            value_code,
+            value_message,
+            arithmetic_code,
+            arithmetic_message,
+        );
+        while let Some(operator) = self
+            .at_operator("*")
+            .then_some('*')
+            .or_else(|| self.at_operator("/").then_some('/'))
+            .or_else(|| self.at_operator("%").then_some('%'))
+        {
+            self.position += 1;
+            let right = self.structural_integer_primary(
+                value_code,
+                value_message,
+                arithmetic_code,
+                arithmetic_message,
+            );
+            value = match operator {
+                '*' => value.checked_mul(right),
+                '/' => value.checked_div(right),
+                '%' => value.checked_rem(right),
+                _ => unreachable!("only multiplicative structural operators are accepted"),
+            }
+            .unwrap_or_else(|| {
+                self.error(arithmetic_code, arithmetic_message);
+                0
+            });
+        }
+        value
+    }
+    fn structural_integer_primary(
+        &mut self,
+        value_code: &'static str,
+        value_message: &'static str,
+        arithmetic_code: &'static str,
+        arithmetic_message: &'static str,
+    ) -> u64 {
+        if self.punctuation('(') {
+            let value = self.structural_integer_expression(
+                value_code,
+                value_message,
+                arithmetic_code,
+                arithmetic_message,
+            );
+            if !self.punctuation(')') {
+                self.error(value_code, "expected `)` in structural constant expression");
+            }
+            return value;
+        }
+        self.integer(value_code, value_message)
     }
     fn path(&mut self) -> Vec<String> {
         let mut path = vec![];

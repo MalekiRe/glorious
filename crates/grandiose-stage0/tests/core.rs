@@ -585,6 +585,55 @@ fn typed_closures_preserve_enclosing_lifetime_binders() {
 }
 
 #[test]
+fn typed_closures_normalize_structural_const_arithmetic_in_type_contracts() {
+    let package = PackageKey("core-closure-const-arithmetic@0.1.0".into());
+    let source = "pub struct Tag<n: u32> {} pub fn main() -> i64 { let identity = (value: Tag<1 + 2>) -> Tag<6 / 2> { value }; 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    assert!(body.diagnostics.is_empty(), "{body:#?}");
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let closure = core
+        .expressions
+        .iter()
+        .find(|expression| matches!(expression.kind, CoreKind::Closure { .. }))
+        .expect("typed closure");
+    let Type::Callable {
+        parameters, result, ..
+    } = &closure.ty
+    else {
+        panic!("typed closure did not receive a callable type")
+    };
+    assert!(matches!(
+        parameters.as_slice(),
+        [Type::Nominal { arguments, .. }] if arguments == &vec![Type::ConstU32(3)]
+    ));
+    assert!(matches!(
+        result.as_ref(),
+        Type::Nominal { arguments, .. } if arguments == &vec![Type::ConstU32(3)]
+    ));
+}
+
+#[test]
 fn typed_closures_reject_unbound_lifetime_annotations() {
     let package = PackageKey("core-closure-unbound-lifetime@0.1.0".into());
     let source = "pub fn main() -> i64 { let identity = (item: &'a i64) -> i64 { 0 }; 0 }";

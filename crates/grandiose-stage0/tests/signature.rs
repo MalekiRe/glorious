@@ -105,6 +105,46 @@ fn nominal_const_applications_preserve_literals_and_binder_identity() {
 }
 
 #[test]
+fn nominal_const_applications_normalize_literal_arithmetic() {
+    let package = PackageKey("signature-const-generic-arithmetic@0.1.0".into());
+    let source = "pub struct Tag<n: u32> {} pub struct Budget<q: Quantity> {} pub fn tag() -> Tag<1 + 2 * 3> { panic } pub fn budget() -> Budget<[2 + 3, 3 * 4]> { panic }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let result = |name: &str| {
+        let definition = interface
+            .definitions
+            .iter()
+            .find(|definition| definition.name.as_deref() == Some(name))
+            .expect("callable definition");
+        let ElaboratedHeader::Callable(signature) = signatures
+            .definitions
+            .get(&definition.key)
+            .expect("signature")
+        else {
+            panic!("expected callable")
+        };
+        signature.result.clone()
+    };
+    assert!(matches!(
+        result("tag"),
+        Type::Nominal { arguments, .. } if arguments == vec![Type::ConstU32(7)]
+    ));
+    assert!(matches!(
+        result("budget"),
+        Type::Nominal { arguments, .. }
+            if arguments == vec![Type::ConstQuantity(Quantity::new(5, Some(12)).unwrap())]
+    ));
+}
+
+#[test]
 fn nominal_quantity_const_applications_preserve_intervals_and_binder_identity() {
     let package = PackageKey("signature-quantity-const-generic-applications@0.1.0".into());
     let source = "pub struct Budget<q: Quantity> {} pub type Alias<q: Quantity> = Budget<q>; pub fn exact() -> Budget<[1, 1]> { panic } pub fn open() -> Budget<[2, *]> { panic } pub fn inherited<q: Quantity>() -> Budget<q> { panic } pub fn through_alias() -> Alias<[0, 1]> { panic }";

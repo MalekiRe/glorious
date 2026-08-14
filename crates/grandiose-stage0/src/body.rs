@@ -1178,9 +1178,7 @@ impl Parser<'_> {
             } else if let Some(index) = self.current()
                 && self.lexed.tokens[index].kind == TokenKind::Integer
             {
-                let text = self.text(index).to_owned();
-                self.position += 1;
-                match text.parse::<u32>() {
+                match u32::try_from(self.closure_structural_integer_expression()) {
                     Ok(value) => arguments.push(HeaderGenericArgument::U32(value)),
                     Err(_) => {
                         self.error_current(
@@ -1209,7 +1207,7 @@ impl Parser<'_> {
     fn closure_structural_quantity_argument(&mut self) -> Option<Quantity> {
         debug_assert!(self.at_punctuation('['));
         self.position += 1;
-        let lower = self.closure_u32("expected a non-negative quantity lower bound")?;
+        let lower = self.closure_structural_integer_expression();
         if !self.at_punctuation(',') {
             self.error_current("G4009", "expected `,` in structural quantity argument");
             return None;
@@ -1219,14 +1217,14 @@ impl Parser<'_> {
             self.position += 1;
             None
         } else {
-            Some(self.closure_u32("expected a non-negative quantity upper bound")?)
+            Some(self.closure_structural_integer_expression())
         };
         if !self.at_punctuation(']') {
             self.error_current("G4009", "expected `]` after structural quantity argument");
             return None;
         }
         self.position += 1;
-        match Quantity::new(u64::from(lower), upper.map(u64::from)) {
+        match Quantity::new(lower, upper) {
             Ok(value) => Some(value),
             Err(_) => {
                 self.error_current("G4009", "quantity upper bound is below its lower bound");
@@ -1235,18 +1233,87 @@ impl Parser<'_> {
         }
     }
 
-    fn closure_u32(&mut self, message: &'static str) -> Option<u32> {
-        let index = self.current()?;
-        if self.lexed.tokens[index].kind != TokenKind::Integer {
-            self.error_current("G4009", message);
-            return None;
+    /// The body parser uses the same finite structural-constant subset as
+    /// declaration headers.  Normalize immediately so Typed Core receives
+    /// literal `HeaderGenericArgument`s regardless of whether the type came
+    /// from a header or an explicitly typed closure.
+    fn closure_structural_integer_expression(&mut self) -> u64 {
+        let mut value = self.closure_structural_integer_product();
+        while let Some(operator) = self
+            .at_operator("+")
+            .then_some('+')
+            .or_else(|| self.at_operator("-").then_some('-'))
+        {
+            self.position += 1;
+            let right = self.closure_structural_integer_product();
+            value = match operator {
+                '+' => value.checked_add(right),
+                '-' => value.checked_sub(right),
+                _ => unreachable!("only additive structural operators are accepted"),
+            }
+            .unwrap_or_else(|| {
+                self.error_current(
+                    "G4009",
+                    "structural constant arithmetic overflowed or divided by zero",
+                );
+                0
+            });
         }
-        let value = self.text(index).parse().ok();
+        value
+    }
+
+    fn closure_structural_integer_product(&mut self) -> u64 {
+        let mut value = self.closure_structural_integer_primary();
+        while let Some(operator) = self
+            .at_operator("*")
+            .then_some('*')
+            .or_else(|| self.at_operator("/").then_some('/'))
+            .or_else(|| self.at_operator("%").then_some('%'))
+        {
+            self.position += 1;
+            let right = self.closure_structural_integer_primary();
+            value = match operator {
+                '*' => value.checked_mul(right),
+                '/' => value.checked_div(right),
+                '%' => value.checked_rem(right),
+                _ => unreachable!("only multiplicative structural operators are accepted"),
+            }
+            .unwrap_or_else(|| {
+                self.error_current(
+                    "G4009",
+                    "structural constant arithmetic overflowed or divided by zero",
+                );
+                0
+            });
+        }
+        value
+    }
+
+    fn closure_structural_integer_primary(&mut self) -> u64 {
+        if self.at_punctuation('(') {
+            self.position += 1;
+            let value = self.closure_structural_integer_expression();
+            if !self.at_punctuation(')') {
+                self.error_current("G4009", "expected `)` in structural constant expression");
+            } else {
+                self.position += 1;
+            }
+            return value;
+        }
+        let Some(index) = self.current() else {
+            self.error_current("G4009", "expected a non-negative structural integer");
+            return 0;
+        };
+        if self.lexed.tokens[index].kind != TokenKind::Integer {
+            self.error_current("G4009", "expected a non-negative structural integer");
+            return 0;
+        }
+        let value = self.text(index).parse().unwrap_or_else(|_| {
+            self.error_current("G4009", "structural integer is out of range");
+            0
+        });
         self.position += 1;
-        value.or_else(|| {
-            self.error_current("G4009", message);
-            None
-        })
+        value
     }
 
     fn parse_call(&mut self, callee: ExprId) -> Option<ExprId> {
