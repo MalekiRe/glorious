@@ -3,10 +3,10 @@ use grandiose_stage0::{
     BootstrapConvergenceError, BootstrapLimits, BootstrapManifest, BootstrapManifestError,
     BootstrapStage, Budget, CancellationToken, CompilationMode, CompilationRequest,
     CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus, DiagnosticClass,
-    Digest, FileKey, InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport, Severity,
-    SourceInput, StageZeroCompiler, VmArtifactError, VmContinuationPolicy, VmExecutionLimits,
-    VmGenericArgument, VmInstruction, VmType, decode_and_verify_program, decode_program,
-    encode_program,
+    Digest, FileKey, InstanceLimits, LogicalPath, ModuleKey, PackageKey, PrimitiveRole,
+    PrimitiveSelector, RetentionReport, RuntimeManifestInput, Severity, SourceInput,
+    StageZeroCompiler, VmArtifactError, VmContinuationPolicy, VmExecutionLimits, VmGenericArgument,
+    VmInstruction, VmType, decode_and_verify_program, decode_program, encode_program,
     query::{Query, QueryCompleteness, QueryContext, QueryEngine, QueryFailure, QueryValue},
 };
 use std::{collections::BTreeMap, sync::Arc};
@@ -82,6 +82,47 @@ fn request_with_dependency(root: &str, package: &str, source: &str) -> Compilati
         source.as_bytes(),
     ));
     request
+}
+
+#[test]
+fn manifest_bound_text_byte_len_leaf_lowers_to_the_capability_free_vm_opcode() {
+    let mut input = request(
+        "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { let ignored = on_true(); on_false() } pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn main() -> usize { __g1_text_byte_len(\"a🦀\") }",
+    );
+    input.runtime_manifest = Some(RuntimeManifestInput {
+        standard_library: PackageKey("app@0.1.0".into()),
+        selectors: vec![
+            PrimitiveSelector {
+                role: PrimitiveRole::BranchBool,
+                module_path: "crate".into(),
+                name: "branch_bool".into(),
+            },
+            PrimitiveSelector {
+                role: PrimitiveRole::TextByteLen,
+                module_path: "crate".into(),
+                name: "__g1_text_byte_len".into(),
+            },
+        ],
+    });
+    let outcome = StageZeroCompiler::new().compile(input).unwrap();
+    let artifact = outcome.artifact.expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_usize().unwrap(), 5);
+}
+
+#[test]
+fn source_text_byte_len_spelling_is_not_opaque_without_manifest_identity() {
+    let source = "pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn main() -> usize { __g1_text_byte_len(\"abc\") }";
+    let error = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap_err();
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4110"),
+        "an unbound source leaf must receive normal result-body checking: {:#?}",
+        error.diagnostics()
+    );
 }
 
 #[derive(Debug)]

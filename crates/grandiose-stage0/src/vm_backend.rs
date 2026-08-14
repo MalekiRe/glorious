@@ -30,6 +30,10 @@ use crate::{
 pub enum VmType {
     Unit,
     I64,
+    /// A target-independent unsigned byte count. It is not represented as a
+    /// host pointer width, so frozen artifacts preserve the standard-library
+    /// `usize` ABI across hosts.
+    Usize,
     F64,
     Bool,
     Char,
@@ -253,6 +257,13 @@ pub enum VmInstruction {
     ConstText {
         dst: u32,
         value: String,
+    },
+    /// Opcode 64: trusted `Text -> usize` byte-length primitive. It carries
+    /// neither a symbol nor a capability because manifest authority was
+    /// consumed while lowering source identity to this sealed instruction.
+    TextByteLen {
+        dst: u32,
+        value: u32,
     },
     MakeTuple {
         dst: u32,
@@ -857,7 +868,9 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 38 adds recursively validated nominal copy descriptors to each VM
+/// Schema 39 adds a target-independent `usize` scalar and opcode 64 for the
+/// manifest-bound `TextByteLen` leaf. Schema 38 adds recursively validated
+/// nominal copy descriptors to each VM
 /// function. Earlier encodings lack the declaration-owned evidence required
 /// to distinguish a copyable record from one that carries a unique reference.
 /// Schema 32 adds sealed callable-environment brands, modes, and capture
@@ -870,7 +883,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 38;
+pub const STAGE0_VM_SCHEMA: u32 = 39;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -1055,6 +1068,9 @@ impl VerifiedVmArtifact {
     pub fn run_i64(&self) -> Result<i64, VmArtifactError> {
         self.run_i64_with_limits(VmExecutionLimits::default())
     }
+    pub fn run_usize(&self) -> Result<u64, VmArtifactError> {
+        expect_usize(self.execute_with_limits(VmExecutionLimits::default())?)
+    }
     pub fn run_i64_with_limits(&self, limits: VmExecutionLimits) -> Result<i64, VmArtifactError> {
         expect_i64(self.execute_with_limits(limits)?)
     }
@@ -1118,6 +1134,20 @@ impl VerifiedVmProgram {
     }
     pub fn run_i64(&self) -> Result<i64, VmArtifactError> {
         self.run_i64_with_limits(VmExecutionLimits::default())
+    }
+    pub fn run_usize(&self) -> Result<u64, VmArtifactError> {
+        let mut budget = ExecutionBudget {
+            limits: VmExecutionLimits::default(),
+            instructions: 0,
+            allocated_elements: 0,
+        };
+        expect_usize(execute_with_arguments(
+            &self.program,
+            self.program.entry,
+            &[],
+            0,
+            &mut budget,
+        )?)
     }
     pub fn run_tuple_i64(&self) -> Result<Vec<i64>, VmArtifactError> {
         let mut budget = ExecutionBudget {
@@ -1579,6 +1609,7 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
         // handler frame before the terminal clause cancels that frame.
         Type::Unit | Type::Never => Ok(VmType::Unit),
         Type::Scalar(ScalarType::I64) => Ok(VmType::I64),
+        Type::Scalar(ScalarType::Usize) => Ok(VmType::Usize),
         Type::Scalar(ScalarType::F64) => Ok(VmType::F64),
         Type::Scalar(ScalarType::Bool) => Ok(VmType::Bool),
         Type::Scalar(ScalarType::Char) => Ok(VmType::Char),
@@ -1805,6 +1836,7 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
     output.push(match value {
         VmType::Unit => 0,
         VmType::I64 => 1,
+        VmType::Usize => 16,
         VmType::F64 => 2,
         VmType::Bool => 3,
         VmType::Char => 4,
@@ -2230,6 +2262,7 @@ impl<'a> Decoder<'a> {
         match self.byte()? {
             0 => Ok(VmType::Unit),
             1 => Ok(VmType::I64),
+            16 => Ok(VmType::Usize),
             2 => Ok(VmType::F64),
             3 => Ok(VmType::Bool),
             4 => Ok(VmType::Char),
@@ -2957,6 +2990,10 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.text()?,
             }),
+            64 => Ok(VmInstruction::TextByteLen {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
             25 => self.bool_equality(|dst, left, right| VmInstruction::EqText { dst, left, right }),
             26 => self.bool_equality(|dst, left, right| VmInstruction::NeText { dst, left, right }),
             27 => self.i64_arithmetic(|dst, left, right| VmInstruction::ConcatText {
@@ -3678,6 +3715,10 @@ fn lower_instruction(
         MirInstruction::ConstText { dst, value } => VmInstruction::ConstText {
             dst: dst.0,
             value: value.clone(),
+        },
+        MirInstruction::TextByteLen { dst, value } => VmInstruction::TextByteLen {
+            dst: dst.0,
+            value: value.0,
         },
         MirInstruction::MakeTuple { dst, fields } => VmInstruction::MakeTuple {
             dst: dst.0,
@@ -4500,6 +4541,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::ConstText { dst, .. } => {
                 expect_type(function, *dst, VmType::Text)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::TextByteLen { dst, value } => {
+                expect_type(function, *dst, VmType::Usize)?;
+                expect_type(function, *value, VmType::Text)?;
+                read(&states, *value)?;
                 write(&mut states, *dst)?
             }
             VmInstruction::MakeTuple { dst, fields } => {
@@ -5662,6 +5709,7 @@ fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
         }),
         VmType::Unit
         | VmType::I64
+        | VmType::Usize
         | VmType::F64
         | VmType::Bool
         | VmType::Char
@@ -6017,6 +6065,7 @@ fn read(states: &[Option<bool>], register: u32) -> Result<(), VmArtifactError> {
 enum VmValue {
     Unit,
     I64(i64),
+    Usize(u64),
     F64(f64),
     Bool(bool),
     Char(char),
@@ -6135,6 +6184,7 @@ impl VmValue {
         match self {
             Self::Unit => VmType::Unit,
             Self::I64(_) => VmType::I64,
+            Self::Usize(_) => VmType::Usize,
             Self::F64(_) => VmType::F64,
             Self::Bool(_) => VmType::Bool,
             Self::Char(_) => VmType::Char,
@@ -6336,6 +6386,7 @@ fn format_vm_value(value: &VmValue) -> String {
     match value {
         VmValue::Unit => "()".into(),
         VmValue::I64(value) => value.to_string(),
+        VmValue::Usize(value) => value.to_string(),
         VmValue::F64(value) => value.to_string(),
         VmValue::Bool(value) => value.to_string(),
         VmValue::Char(value) => format!("{value:?}"),
@@ -6406,6 +6457,15 @@ fn expect_i64(value: impl Borrow<VmValue>) -> Result<i64, VmArtifactError> {
         VmValue::I64(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::I64,
+            found: value.ty(),
+        }),
+    }
+}
+fn expect_usize(value: impl Borrow<VmValue>) -> Result<u64, VmArtifactError> {
+    match value.borrow() {
+        VmValue::Usize(value) => Ok(*value),
+        value => Err(VmArtifactError::ResultType {
+            expected: VmType::Usize,
             found: value.ty(),
         }),
     }
@@ -6638,6 +6698,7 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         | VmType::ConstGeneric { .. } => false,
         VmType::Unit => matches!(value, VmValue::Unit),
         VmType::I64 => matches!(value, VmValue::I64(_)),
+        VmType::Usize => matches!(value, VmValue::Usize(_)),
         VmType::F64 => matches!(value, VmValue::F64(_)),
         VmType::Bool => matches!(value, VmValue::Bool(_)),
         VmType::Char => matches!(value, VmValue::Char(_)),
@@ -6820,6 +6881,14 @@ fn execute(
             }
             VmInstruction::ConstText { dst, value } => {
                 registers[dst as usize] = Some(VmValue::Text(Arc::from(value)));
+            }
+            VmInstruction::TextByteLen { dst, value } => {
+                let text = expect_text(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[dst as usize] = Some(VmValue::Usize(text.len() as u64));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
@@ -8252,6 +8321,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 output.extend_from_slice(&argument.to_le_bytes());
             }
         }
+        VmInstruction::TextByteLen { dst, value } => {
+            output.push(64);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::MakeCallable {
             dst,
             callee,
@@ -8461,6 +8535,14 @@ fn execute_with_arguments(
             }
             VmInstruction::ConstText { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::Text(Arc::from(value.as_str())));
+            }
+            VmInstruction::TextByteLen { dst, value } => {
+                let text = expect_text(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                registers[*dst as usize] = Some(VmValue::Usize(text.len() as u64));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;

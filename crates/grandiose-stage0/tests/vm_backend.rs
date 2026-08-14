@@ -13,6 +13,71 @@ use grandiose_stage0::{
 use std::collections::BTreeMap;
 
 #[test]
+fn text_byte_len_is_a_capability_free_verified_vm_primitive() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"text-byte-len-vm")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Text, VmType::Usize],
+        instructions: vec![
+            VmInstruction::ConstText {
+                dst: 0,
+                value: "a🦀".into(),
+            },
+            VmInstruction::TextByteLen { dst: 1, value: 0 },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"text-byte-len-vm-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    assert_eq!(
+        decode_and_verify_artifact(&encoded)
+            .unwrap()
+            .run_usize()
+            .unwrap(),
+        5,
+    );
+}
+
+#[test]
+fn verifier_rejects_text_byte_len_with_forged_operand_or_result_abi() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"forged-text-byte-len-vm")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 1 },
+            VmInstruction::TextByteLen { dst: 1, value: 0 },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"forged-text-byte-len-vm-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::TypeMismatch {
+            expected: VmType::Usize,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols() {
     use grandiose_stage0::{ConstKind, Quantity, StructuralU32Expr};
 

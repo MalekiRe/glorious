@@ -978,6 +978,17 @@ impl StageZeroCompiler {
                     }
                 }
             });
+        // The reverse table is the only authority passed to MIR lowering.
+        // Source names and package paths intentionally disappear here: a
+        // primitive leaf is selected exclusively by the frozen declaration
+        // identity produced by manifest binding.
+        let runtime_primitives = runtime_manifest.as_ref().map(|manifest| {
+            manifest
+                .primitives
+                .iter()
+                .map(|(role, definition)| (*definition, *role))
+                .collect::<BTreeMap<_, _>>()
+        });
         let Some(entry) = root
             .interface
             .interface
@@ -1115,6 +1126,16 @@ impl StageZeroCompiler {
                 })
             {
                 session.checkpoint(1)?;
+                if runtime_manifest.as_ref().is_some_and(|manifest| {
+                    manifest.primitives.get(&crate::PrimitiveRole::TextByteLen)
+                        == Some(&declaration.key)
+                }) {
+                    // This exact manifest-bound runtime leaf has an opaque
+                    // source body. Do not parse or elaborate it as `Unit`:
+                    // only a bound identity may bypass ordinary source-body
+                    // semantics, and calls lower to the sealed VM opcode.
+                    continue;
+                }
                 let Some(body_range) = declaration.body else {
                     diagnostics.push(CompileDiagnostic::source(
                         "G7002",
@@ -1575,12 +1596,13 @@ impl StageZeroCompiler {
             if !valid {
                 continue;
             }
-            let lowered = MirLowering::lower_with_bodies_and_signatures(
+            let lowered = MirLowering::lower_with_bodies_signatures_and_primitives(
                 definition,
                 &core,
                 &flow,
                 &typed_bodies,
                 Some(&signatures),
+                runtime_primitives.as_ref(),
             );
             diagnostics.extend(lowered.diagnostics.into_iter().map(|diagnostic| {
                 CompileDiagnostic::invariant(diagnostic.code, diagnostic.message)

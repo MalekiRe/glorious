@@ -16,18 +16,25 @@ fn interface(package: PackageKey, source: &str) -> grandiose_stage0::PackageInte
 fn manifest(standard_library: PackageKey) -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library,
-        selectors: vec![PrimitiveSelector {
-            role: PrimitiveRole::BranchBool,
-            module_path: "crate".into(),
-            name: "branch_bool".into(),
-        }],
+        selectors: vec![
+            PrimitiveSelector {
+                role: PrimitiveRole::BranchBool,
+                module_path: "crate".into(),
+                name: "branch_bool".into(),
+            },
+            PrimitiveSelector {
+                role: PrimitiveRole::TextByteLen,
+                module_path: "crate".into(),
+                name: "__g1_text_byte_len".into(),
+            },
+        ],
     }
 }
 
 #[test]
 fn primitive_authority_binds_only_the_exact_standard_library_declaration() {
     let standard = PackageKey("std@0.1.0".into());
-    let source = "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { ignored }";
+    let source = "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { ignored } pub fn __g1_text_byte_len(value: Text) -> usize { () }";
     let standard_interface = interface(standard.clone(), source);
     let signatures = ElaboratedInterface::elaborate(&standard_interface);
     assert!(
@@ -39,9 +46,15 @@ fn primitive_authority_binds_only_the_exact_standard_library_declaration() {
         .bind(vec![standard_interface.clone()], &signatures)
         .unwrap();
     let bound = bound_manifest.primitives[&PrimitiveRole::BranchBool];
+    let standard_branch = standard_interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("branch_bool"))
+        .expect("fixture declares branch_bool")
+        .key;
     assert_eq!(bound_manifest.standard_library, standard);
     assert_eq!(
-        bound, standard_interface.definitions[0].key,
+        bound, standard_branch,
         "the manifest binds a declaration identity, not its spelling"
     );
 
@@ -50,7 +63,15 @@ fn primitive_authority_binds_only_the_exact_standard_library_declaration() {
     let unchanged = manifest(standard)
         .bind(vec![standard_interface], &signatures)
         .unwrap();
-    assert_ne!(bound, user_interface.definitions[0].key);
+    assert_ne!(
+        bound,
+        user_interface
+            .definitions
+            .iter()
+            .find(|definition| definition.name.as_deref() == Some("branch_bool"))
+            .expect("fixture declares branch_bool")
+            .key
+    );
     assert_eq!(unchanged.primitives[&PrimitiveRole::BranchBool], bound);
 }
 
@@ -59,13 +80,30 @@ fn primitive_manifest_rejects_signature_mismatch_before_authority_freezes() {
     let standard = PackageKey("bad-std@0.1.0".into());
     let interface = interface(
         standard.clone(),
-        "pub fn branch_bool(condition: Bool) -> Bool { condition }",
+        "pub fn branch_bool(condition: Bool) -> Bool { condition } pub fn __g1_text_byte_len(value: Text) -> usize { () }",
     );
     let signatures = ElaboratedInterface::elaborate(&interface);
     assert!(matches!(
         manifest(standard).bind(vec![interface], &signatures),
         Err(ManifestError::IncompatibleSignature {
             role: PrimitiveRole::BranchBool,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn text_byte_len_requires_its_exact_monomorphic_abi() {
+    let standard = PackageKey("bad-std@0.1.0".into());
+    let interface = interface(
+        standard.clone(),
+        "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { ignored } pub fn __g1_text_byte_len(value: Text) -> i64 { () }",
+    );
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(matches!(
+        manifest(standard).bind(vec![interface], &signatures),
+        Err(ManifestError::IncompatibleSignature {
+            role: PrimitiveRole::TextByteLen,
             ..
         })
     ));

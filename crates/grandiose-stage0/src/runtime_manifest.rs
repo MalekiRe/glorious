@@ -20,6 +20,11 @@ pub enum PrimitiveRole {
     /// two zero-argument callables, so source spelling alone cannot become a
     /// branch primitive.
     BranchBool,
+    /// The capability-free byte-length operation for immutable UTF-8 `Text`.
+    /// It is deliberately bound to one standard-library declaration identity;
+    /// a source function named `text_byte_len` never receives primitive
+    /// authority merely by spelling.
+    TextByteLen,
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PrimitiveSelector {
@@ -85,51 +90,52 @@ impl RuntimeManifestInput {
             }
         }
         let mut primitives = BTreeMap::new();
-        let role = PrimitiveRole::BranchBool;
-        let selector = selectors
-            .get(&role)
-            .ok_or(ManifestError::MissingRole(role))?;
-        let candidates = interfaces
-            .iter()
-            .filter(|interface| interface.module.path == selector.module_path)
-            .flat_map(|interface| interface.definitions.iter())
-            .filter(|definition| definition.name.as_deref() == Some(selector.name.as_str()))
-            .collect::<Vec<_>>();
-        let definition = match candidates.as_slice() {
-            [] => {
-                return Err(ManifestError::MissingDeclaration {
-                    module_path: selector.module_path.clone(),
-                    name: selector.name.clone(),
+        for role in [PrimitiveRole::BranchBool, PrimitiveRole::TextByteLen] {
+            let selector = selectors
+                .get(&role)
+                .ok_or(ManifestError::MissingRole(role))?;
+            let candidates = interfaces
+                .iter()
+                .filter(|interface| interface.module.path == selector.module_path)
+                .flat_map(|interface| interface.definitions.iter())
+                .filter(|definition| definition.name.as_deref() == Some(selector.name.as_str()))
+                .collect::<Vec<_>>();
+            let definition = match candidates.as_slice() {
+                [] => {
+                    return Err(ManifestError::MissingDeclaration {
+                        module_path: selector.module_path.clone(),
+                        name: selector.name.clone(),
+                    });
+                }
+                [definition] => *definition,
+                _ => {
+                    return Err(ManifestError::AmbiguousDeclaration {
+                        module_path: selector.module_path.clone(),
+                        name: selector.name.clone(),
+                    });
+                }
+            };
+            if !definition.public {
+                return Err(ManifestError::NonPublicDeclaration {
+                    definition: definition.key,
                 });
             }
-            [definition] => *definition,
-            _ => {
-                return Err(ManifestError::AmbiguousDeclaration {
-                    module_path: selector.module_path.clone(),
-                    name: selector.name.clone(),
+            let Some(ElaboratedHeader::Callable(signature)) =
+                signatures.definitions.get(&definition.key)
+            else {
+                return Err(ManifestError::IncompatibleSignature {
+                    role,
+                    definition: definition.key,
+                });
+            };
+            if signature != &expected_signature(role) {
+                return Err(ManifestError::IncompatibleSignature {
+                    role,
+                    definition: definition.key,
                 });
             }
-        };
-        if !definition.public {
-            return Err(ManifestError::NonPublicDeclaration {
-                definition: definition.key,
-            });
+            primitives.insert(role, definition.key);
         }
-        let Some(ElaboratedHeader::Callable(signature)) =
-            signatures.definitions.get(&definition.key)
-        else {
-            return Err(ManifestError::IncompatibleSignature {
-                role,
-                definition: definition.key,
-            });
-        };
-        if signature != &expected_signature(role) {
-            return Err(ManifestError::IncompatibleSignature {
-                role,
-                definition: definition.key,
-            });
-        }
-        primitives.insert(role, definition.key);
         Ok(TrustedRuntimeManifest {
             standard_library: self.standard_library.clone(),
             digest: manifest_digest(&self.standard_library, &primitives),
@@ -160,6 +166,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
                 where_associated_effect_bindings: vec![],
             }
         }
+        PrimitiveRole::TextByteLen => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::Text)],
+            result: Type::Scalar(ScalarType::Usize),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
     }
 }
 fn manifest_digest(
@@ -172,6 +189,7 @@ fn manifest_digest(
     for (role, definition) in primitives {
         bytes.push(match role {
             PrimitiveRole::BranchBool => 0,
+            PrimitiveRole::TextByteLen => 1,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }

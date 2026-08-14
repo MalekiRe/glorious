@@ -72,7 +72,7 @@ fn stage_zero_build_identity_advances_the_vm_artifact_boundary() {
     let identity = CompilerBuildIdentity::stage0(Digest::of_bytes(b"stage0-vm"));
     assert_eq!(identity.bytecode_generation, STAGE0_BYTECODE_GENERATION);
     assert_eq!(identity.verifier_generation, STAGE0_VERIFIER_GENERATION);
-    assert_eq!(STAGE0_BYTECODE_GENERATION, 6);
+    assert_eq!(STAGE0_BYTECODE_GENERATION, 7);
     assert_eq!(STAGE0_VERIFIER_GENERATION, 6);
 
     let package = PackageKey("app@0.1.0".into());
@@ -198,11 +198,18 @@ fn runtime_manifest_selectors_are_canonical_semantic_world_inputs() {
     let mut with_manifest = request(vec![source]);
     with_manifest.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("std@0.1.0".into()),
-        selectors: vec![PrimitiveSelector {
-            role: PrimitiveRole::BranchBool,
-            module_path: "crate".into(),
-            name: "branch_bool".into(),
-        }],
+        selectors: vec![
+            PrimitiveSelector {
+                role: PrimitiveRole::BranchBool,
+                module_path: "crate".into(),
+                name: "branch_bool".into(),
+            },
+            PrimitiveSelector {
+                role: PrimitiveRole::TextByteLen,
+                module_path: "crate".into(),
+                name: "__g1_text_byte_len".into(),
+            },
+        ],
     });
     assert_ne!(
         without_manifest.fingerprint,

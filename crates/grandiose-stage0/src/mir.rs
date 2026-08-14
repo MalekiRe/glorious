@@ -9,6 +9,7 @@ use crate::{
     identity::{DefKey, Digest},
     instance::InstanceKey,
     placeflow::PlaceFlow,
+    runtime_manifest::PrimitiveRole,
     signature::{
         ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedInterface,
         ElaboratedNominalLayout,
@@ -114,6 +115,13 @@ pub enum MirInstruction {
     ConstText {
         dst: MirLocal,
         value: String,
+    },
+    /// Manifest-bound, capability-free UTF-8 byte-length leaf. The callee's
+    /// source identity was checked before lowering; MIR intentionally carries
+    /// no name, host symbol, or ambient authority for this operation.
+    TextByteLen {
+        dst: MirLocal,
+        value: MirLocal,
     },
     MakeTuple {
         dst: MirLocal,
@@ -1128,6 +1136,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::GeChar { dst, .. }
         | MirInstruction::Call { dst, .. }
         | MirInstruction::HostCall { dst, .. }
+        | MirInstruction::TextByteLen { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -1236,6 +1245,21 @@ impl MirLowering {
         bodies: &BTreeMap<DefKey, TypedBody>,
         signatures: Option<&ElaboratedInterface>,
     ) -> Self {
+        Self::lower_with_bodies_signatures_and_primitives(
+            definition, body, flow, bodies, signatures, None,
+        )
+    }
+    /// Lower against the sealed runtime-primitive identity table. This is a
+    /// distinct authority input from source signatures: only a manifest-bound
+    /// declaration key may select a VM primitive instruction.
+    pub fn lower_with_bodies_signatures_and_primitives(
+        definition: DefKey,
+        body: &TypedBody,
+        flow: &PlaceFlow,
+        bodies: &BTreeMap<DefKey, TypedBody>,
+        signatures: Option<&ElaboratedInterface>,
+        runtime_primitives: Option<&BTreeMap<DefKey, PrimitiveRole>>,
+    ) -> Self {
         // Recovered syntax and Core errors are deliberately editor-only
         // products.  Do not let an otherwise empty ownership analysis make a
         // malformed body look executable to MIR consumers.
@@ -1277,6 +1301,7 @@ impl MirLowering {
             body,
             bodies,
             signatures,
+            runtime_primitives,
             // Core environments are branded by the source callable that
             // owns the whole body.  A lifted child has a synthetic VM key,
             // but it must keep validating nested environments against this
@@ -2989,6 +3014,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
                 .try_for_each(|ty| validate_mir_type(ty, &mut lifetime_binders))?;
             validate_mir_type(result, &mut lifetime_binders)
         }
+        MirInstruction::TextByteLen { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -3670,6 +3696,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
         | MirInstruction::ConstText { dst, .. } => vec![*dst],
+        MirInstruction::TextByteLen { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -3764,6 +3791,7 @@ struct Lowerer<'a> {
     body: &'a TypedBody,
     bodies: &'a BTreeMap<DefKey, TypedBody>,
     signatures: Option<&'a ElaboratedInterface>,
+    runtime_primitives: Option<&'a BTreeMap<DefKey, PrimitiveRole>>,
     /// The source callable whose body-local `CallableId`s and environment
     /// brands this lowering session consumes.  This remains unchanged while
     /// recursively lowering lifted closures; `definition` below is only the
@@ -12731,25 +12759,66 @@ impl Lowerer<'_> {
                         definition: callee,
                         arguments: generic_arguments,
                         host_import,
-                    } => match host_import {
-                        Some(import) => self.instructions.push(MirInstruction::HostCall {
-                            dst,
-                            capability: import.capability,
-                            symbol: import.symbol,
-                            parameters: arguments
-                                .iter()
-                                .map(|argument| self.locals[argument.0 as usize].ty.clone())
-                                .collect(),
-                            result: self.body.expression(id).ty.clone(),
-                            arguments,
-                        }),
-                        None => self.instructions.push(MirInstruction::Call {
-                            dst,
-                            callee,
-                            generic_arguments,
-                            trait_instance: None,
-                            arguments,
-                        }),
+                    } => match self
+                        .runtime_primitives
+                        .and_then(|primitives| primitives.get(&callee))
+                        .copied()
+                    {
+                        Some(PrimitiveRole::TextByteLen) => {
+                            let [value] = arguments.as_slice() else {
+                                self.error(
+                                    "G6005",
+                                    "TextByteLen primitive must have one Text operand",
+                                );
+                                return None;
+                            };
+                            if !generic_arguments.is_empty()
+                                || self.locals[value.0 as usize].ty
+                                    != Type::Scalar(crate::types::ScalarType::Text)
+                                || self.body.expression(id).ty
+                                    != Type::Scalar(crate::types::ScalarType::Usize)
+                            {
+                                self.error(
+                                    "G6005",
+                                    "TextByteLen primitive ABI does not match manifest contract",
+                                );
+                                return None;
+                            }
+                            self.instructions
+                                .push(MirInstruction::TextByteLen { dst, value: *value });
+                        }
+                        Some(PrimitiveRole::BranchBool) => {
+                            // BranchBool remains a source-level callable until
+                            // its control-flow lowering is introduced. It must
+                            // not silently select the Text primitive path.
+                            self.instructions.push(MirInstruction::Call {
+                                dst,
+                                callee,
+                                generic_arguments,
+                                trait_instance: None,
+                                arguments,
+                            });
+                        }
+                        None => match host_import {
+                            Some(import) => self.instructions.push(MirInstruction::HostCall {
+                                dst,
+                                capability: import.capability,
+                                symbol: import.symbol,
+                                parameters: arguments
+                                    .iter()
+                                    .map(|argument| self.locals[argument.0 as usize].ty.clone())
+                                    .collect(),
+                                result: self.body.expression(id).ty.clone(),
+                                arguments,
+                            }),
+                            None => self.instructions.push(MirInstruction::Call {
+                                dst,
+                                callee,
+                                generic_arguments,
+                                trait_instance: None,
+                                arguments,
+                            }),
+                        },
                     },
                     CoreKind::TraitMethod {
                         evidence,
@@ -13577,6 +13646,7 @@ impl Lowerer<'_> {
             body: self.body,
             bodies: self.bodies,
             signatures: self.signatures,
+            runtime_primitives: self.runtime_primitives,
             owner: self.owner,
             definition,
             locals: vec![],
