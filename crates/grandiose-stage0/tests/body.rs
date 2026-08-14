@@ -189,6 +189,31 @@ fn body_parser_retains_explicit_nominal_arguments_on_construction_and_patterns()
 }
 
 #[test]
+fn body_parser_preserves_multiple_type_arguments_before_a_qualified_constructor() {
+    let body = parse("{ Result<i64, ()>::Ok(7) }");
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected block")
+    };
+    let ExprKind::Call { callee, .. } = &body.expression(values[0]).kind else {
+        panic!("expected constructor call")
+    };
+    assert!(matches!(
+        &body.expression(*callee).kind,
+        ExprKind::GenericPath {
+            path,
+            effect_arguments,
+            operation_arguments,
+        } if path == &vec!["Result".to_owned(), "Ok".to_owned()]
+            && operation_arguments.is_empty()
+            && matches!(effect_arguments.as_slice(), [
+                HeaderGenericArgument::Type(HeaderType::Path(first)),
+                HeaderGenericArgument::Type(HeaderType::Tuple(unit)),
+            ] if first == &vec!["i64".to_owned()] && unit.is_empty())
+    ));
+}
+
+#[test]
 fn body_parser_preserves_structural_handler_arms_and_legacy_perform_spelling() {
     let body = parse(
         "{ handle perform Console::read(7) { Console::read(value) with continuation => value } }",

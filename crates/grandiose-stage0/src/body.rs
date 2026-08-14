@@ -1023,13 +1023,49 @@ impl Parser<'_> {
     fn starts_structural_u32_argument(&self) -> bool {
         self.current().is_some_and(|index| {
             self.lexed.tokens[index].kind == TokenKind::Integer
-                || self.lexed.tokens[index].kind == TokenKind::Punctuation('(')
+                || (self.lexed.tokens[index].kind == TokenKind::Punctuation('(')
+                    && self.parenthesized_structural_u32_ahead())
                 || (self.lexed.tokens[index].kind == TokenKind::Identifier
                     && self.tokens.get(self.position + 1).is_some_and(|next| {
                         self.lexed.tokens[*next].kind == TokenKind::Operator
                             && matches!(self.text(*next), "+" | "-" | "*" | "/" | "%")
                     }))
         })
+    }
+
+    /// Body generic arguments are parsed before Core has resolved the
+    /// declaration and therefore cannot yet consult the slot kind.  Bare
+    /// parentheses must remain a type tuple (`()`) rather than being claimed
+    /// by the structural-u32 grammar; otherwise `Result<i64, ()>::Ok(...)`
+    /// consumes its unit error type as a malformed const expression and
+    /// reports the misleading G4026 at the closing `>`.
+    ///
+    /// A parenthesized structural expression is still unambiguous when it
+    /// contains a numeric literal or arithmetic operator.  Parenthesized
+    /// identifiers alone remain type syntax at this grammar boundary, just
+    /// like their unparenthesized form.
+    fn parenthesized_structural_u32_ahead(&self) -> bool {
+        let mut depth = 0_u32;
+        for position in self.position..self.tokens.len() {
+            let token = self.tokens[position];
+            match self.lexed.tokens[token].kind {
+                TokenKind::Punctuation('(') => depth = depth.saturating_add(1),
+                TokenKind::Punctuation(')') if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                TokenKind::Integer if depth > 0 => return true,
+                TokenKind::Operator
+                    if depth > 0 && matches!(self.text(token), "+" | "-" | "*" | "/" | "%") =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn closure_structural_u32_argument(

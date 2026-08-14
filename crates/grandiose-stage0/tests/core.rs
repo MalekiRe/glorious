@@ -196,6 +196,29 @@ fn typed_core_retains_explicit_nominal_arguments_on_record_and_enum_construction
 }
 
 #[test]
+fn typed_core_accepts_multiple_explicit_type_arguments_on_constructors_and_calls() {
+    let core = core_for(
+        "core-multiple-explicit-generic-arguments@0.1.0",
+        "pub enum Result<T, E> { Ok(T), Err(E) } pub fn make<T, E>(value: T) -> Result<T, E> { Result::Ok(value) } pub fn main() -> Result<i64, ()> { let direct = Result<i64, ()>::Ok(7); make<i64, ()>(7) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let expected = vec![
+        GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+        GenericArgument::Type(Type::Unit),
+    ];
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(&expression.ty, Type::Nominal { arguments, .. } if arguments == &expected)
+            && matches!(expression.kind, CoreKind::Enum { .. })
+    }));
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::Function { arguments, .. } if arguments == &expected
+        )
+    }));
+}
+
+#[test]
 fn mixed_nominal_constructor_arguments_reach_the_runtime_layout_boundary() {
     let core = core_for(
         "core-mixed-nominal-construction@0.1.0",
