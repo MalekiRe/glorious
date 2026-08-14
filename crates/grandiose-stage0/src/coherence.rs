@@ -1106,7 +1106,9 @@ fn rebase_overlap_effect_row(value: &crate::EffectRow, offset: u32) -> crate::Ef
             })
             .collect(),
         tail: value.tail.map(|tail| match tail {
-            crate::EffectTail::Generic(index) => crate::EffectTail::Generic(index.saturating_add(offset)),
+            crate::EffectTail::Generic(index) => {
+                crate::EffectTail::Generic(index.saturating_add(offset))
+            }
             crate::EffectTail::Infer(index) => crate::EffectTail::Infer(index),
         }),
     }

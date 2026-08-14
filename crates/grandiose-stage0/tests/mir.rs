@@ -127,7 +127,7 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
     );
 
     let mut scoped_hrtb_gat = graph();
-    scoped_hrtb_gat.locals[1].ty = Type::Callable {
+    let scoped_hrtb_gat_type = Type::Callable {
         lifetime_binders: 1,
         parameters: vec![],
         result: Box::new(Type::Projection {
@@ -151,6 +151,10 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
         effects: EffectRow::empty(),
         invocation: Quantity::ONCE,
     };
+    for local in &mut scoped_hrtb_gat.locals[1..] {
+        local.ty = scoped_hrtb_gat_type.clone();
+    }
+    scoped_hrtb_gat.result = scoped_hrtb_gat_type;
     assert!(
         scoped_hrtb_gat.validate().is_ok(),
         "MIR must retain scoped HRTB lifetimes and open effect rows in GAT arguments: {:#?}",

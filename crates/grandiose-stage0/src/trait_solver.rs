@@ -1922,7 +1922,9 @@ fn match_effect_row_at(
         let mut matched = false;
         for index in 0..unmatched_effects.len() {
             let found = &unmatched_effects[index];
-            if expected.definition != found.definition || expected.arguments.len() != found.arguments.len() {
+            if expected.definition != found.definition
+                || expected.arguments.len() != found.arguments.len()
+            {
                 continue;
             }
             let mut candidate = substitution.clone();
@@ -1998,7 +2000,10 @@ fn match_effect_row_at(
     }
 
     match template.tail {
-        None if unmatched_effects.is_empty() && unmatched_projections.is_empty() && actual.tail.is_none() => {
+        None if unmatched_effects.is_empty()
+            && unmatched_projections.is_empty()
+            && actual.tail.is_none() =>
+        {
             Some(())
         }
         Some(crate::EffectTail::Generic(index)) => {
@@ -2216,7 +2221,6 @@ fn match_type_at(
                 invocation: actual_invocation,
             } if lifetime_binders == actual_lifetime_binders
                 && parameters.len() == actual_parameters.len()
-                && effects == actual_effects
                 && invocation == actual_invocation =>
             {
                 parameters
@@ -2225,7 +2229,8 @@ fn match_type_at(
                     .try_for_each(|(template, actual)| {
                         match_type_at(template, actual, substitution, binder_depth + 1)
                     })?;
-                match_type_at(result, actual_result, substitution, binder_depth + 1)
+                match_type_at(result, actual_result, substitution, binder_depth + 1)?;
+                match_effect_row_at(effects, actual_effects, substitution, binder_depth + 1)
             }
             _ => None,
         },
