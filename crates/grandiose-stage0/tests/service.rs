@@ -590,6 +590,14 @@ fn service_selects_and_executes_explicit_trait_method_calls() {
 }
 
 #[test]
+fn service_selects_trait_methods_using_the_implicit_self_receiver_type() {
+    let source = "trait Increment { fn increment(value: Self) -> Self; } impl Increment for i64 { fn increment(value: Self) -> Self { value + 1 } } pub fn main() -> i64 { Increment::increment(41) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_selects_generic_qualified_trait_method_arguments() {
     let source = "trait Replace { fn replace<T>(value: i64, replacement: T) -> T; } impl Replace for i64 { fn replace<T>(value: i64, replacement: T) -> T { replacement } } pub fn main() -> Text { Replace::replace(0, \"selected\") }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

@@ -1348,3 +1348,66 @@ fn transparent_aliases_are_normalized_inside_callable_effect_identities() {
     let effect = signature.effects.effects.iter().next().expect("Log effect");
     assert_eq!(effect.arguments, [Type::Scalar(ScalarType::Text)]);
 }
+
+#[test]
+fn trait_self_is_instantiated_for_method_contracts_and_impl_members() {
+    let package = PackageKey("signature-trait-self@0.1.0".into());
+    let source = "trait Identity { fn apply(value: Self) -> Self; } struct Box {} impl Identity for Box { fn apply(value: Self) -> Self { value } }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let box_definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Box"))
+        .expect("Box definition")
+        .key;
+    let implementation = interface
+        .definitions
+        .iter()
+        .find(|definition| {
+            matches!(
+                definition.syntax.header,
+                grandiose_stage0::ParsedHeader::Implementation(_)
+            )
+        })
+        .expect("implementation definition");
+    let ElaboratedHeader::Implementation(implementation) = signatures
+        .definitions
+        .get(&implementation.key)
+        .expect("implementation signature")
+    else {
+        panic!("expected implementation signature")
+    };
+    let method = implementation.methods.get("apply").expect("apply method");
+    let expected_self = Type::Nominal {
+        definition: box_definition,
+        arguments: vec![],
+    };
+    assert_eq!(method.parameters.len(), 1);
+    assert_eq!(method.parameters[0], expected_self);
+    assert_eq!(method.result, method.parameters[0]);
+}
+
+#[test]
+fn trait_self_is_instantiated_in_supertrait_obligations() {
+    let package = PackageKey("signature-trait-self-supertrait@0.1.0".into());
+    let source = "trait Parent<T> {} trait Child: Parent<Self> {} impl Parent<i64> for i64 {} impl Child for i64 {}";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}

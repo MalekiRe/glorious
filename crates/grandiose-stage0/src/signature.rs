@@ -18,6 +18,12 @@ use crate::{
     },
 };
 
+/// The implicit receiver binder of a trait declaration.  It lives outside the
+/// densely numbered source binders so it cannot collide with trait or method
+/// generic arguments.  A selected implementation replaces it with its
+/// concrete self type before a method contract becomes callable.
+const TRAIT_SELF_GENERIC: u32 = u32::MAX;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
     pub generics: u32,
@@ -232,6 +238,7 @@ impl ElaboratedInterface {
                 effect_row_generics: BTreeMap::new(),
                 lifetime_generics: BTreeMap::new(),
                 const_generics: BTreeMap::new(),
+                self_type: None,
                 diagnostics: vec![],
             };
             let header = elaborator.definition(definition);
@@ -452,8 +459,10 @@ impl ElaboratedInterface {
                 continue;
             };
             for supertrait in &trait_header.supertraits {
-                let relation =
-                    substitute_trait_reference(supertrait, &implementation.relation.arguments);
+                let relation = replace_trait_self_trait_reference(
+                    substitute_trait_reference(supertrait, &implementation.relation.arguments),
+                    &implementation.self_ty,
+                );
                 let goal = TraitGoal {
                     relation: relation.clone(),
                     subject: implementation.self_ty.clone(),
@@ -864,19 +873,28 @@ fn instantiate_trait_method_contract(
             .cloned()
             .map(|parameter| {
                 rebase_method_lifetimes(
-                    substitute_alias_generics(parameter, &arguments),
+                    replace_trait_self_type(
+                        substitute_alias_generics(parameter, &arguments),
+                        &implementation.self_ty,
+                    ),
                     trait_generic_count,
                     implementation_generic_count,
                 )
             })
             .collect(),
         result: rebase_method_lifetimes(
-            substitute_alias_generics(method.result.clone(), &arguments),
+            replace_trait_self_type(
+                substitute_alias_generics(method.result.clone(), &arguments),
+                &implementation.self_ty,
+            ),
             trait_generic_count,
             implementation_generic_count,
         ),
         effects: rebase_method_lifetime_effect_row(
-            substitute_effect_row(method.effects.clone(), &arguments),
+            replace_trait_self_effect_row(
+                substitute_effect_row(method.effects.clone(), &arguments),
+                &implementation.self_ty,
+            ),
             trait_generic_count,
             implementation_generic_count,
         ),
@@ -887,12 +905,18 @@ fn instantiate_trait_method_contract(
             .map(|(subject, relation)| {
                 (
                     rebase_method_lifetimes(
-                        substitute_alias_generics(subject.clone(), &arguments),
+                        replace_trait_self_type(
+                            substitute_alias_generics(subject.clone(), &arguments),
+                            &implementation.self_ty,
+                        ),
                         trait_generic_count,
                         implementation_generic_count,
                     ),
                     rebase_method_lifetime_trait_reference(
-                        substitute_trait_reference(relation, &arguments),
+                        replace_trait_self_trait_reference(
+                            substitute_trait_reference(relation, &arguments),
+                            &implementation.self_ty,
+                        ),
                         trait_generic_count,
                         implementation_generic_count,
                     ),
@@ -900,6 +924,128 @@ fn instantiate_trait_method_contract(
             })
             .collect(),
     }
+}
+
+/// Substitute the trait-owned implicit receiver after ordinary declaration
+/// generics have been instantiated.  `Self` may appear beneath aliases,
+/// projections, callback signatures, and effect arguments, so this operates
+/// on the canonical semantic tree rather than on the spelling of a parameter.
+fn replace_trait_self_type(value: Type, self_ty: &Type) -> Type {
+    match value {
+        Type::Generic(TRAIT_SELF_GENERIC) => self_ty.clone(),
+        Type::Nominal {
+            definition,
+            arguments,
+        } => Type::Nominal {
+            definition,
+            arguments: arguments
+                .into_iter()
+                .map(|value| replace_trait_self_type(value, self_ty))
+                .collect(),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } => Type::Projection {
+            subject: Box::new(replace_trait_self_type(*subject, self_ty)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|value| replace_trait_self_type(value, self_ty))
+                .collect(),
+            name,
+            item_arguments: item_arguments
+                .into_iter()
+                .map(|value| replace_trait_self_type(value, self_ty))
+                .collect(),
+        },
+        Type::Tuple(values) => Type::Tuple(
+            values
+                .into_iter()
+                .map(|value| replace_trait_self_type(value, self_ty))
+                .collect(),
+        ),
+        Type::Array(value) => Type::Array(Box::new(replace_trait_self_type(*value, self_ty))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability,
+            lifetime,
+            referent: Box::new(replace_trait_self_type(*referent, self_ty)),
+        },
+        Type::Callable {
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            parameters: parameters
+                .into_iter()
+                .map(|value| replace_trait_self_type(value, self_ty))
+                .collect(),
+            result: Box::new(replace_trait_self_type(*result, self_ty)),
+            effects: replace_trait_self_effect_row(effects, self_ty),
+            invocation,
+        },
+        value => value,
+    }
+}
+
+fn replace_trait_self_trait_reference(
+    relation: ElaboratedTraitReference,
+    self_ty: &Type,
+) -> ElaboratedTraitReference {
+    ElaboratedTraitReference {
+        definition: relation.definition,
+        arguments: relation
+            .arguments
+            .into_iter()
+            .map(|value| replace_trait_self_type(value, self_ty))
+            .collect(),
+    }
+}
+
+fn replace_trait_self_effect_row(value: EffectRow, self_ty: &Type) -> EffectRow {
+    EffectRow {
+        effects: value
+            .effects
+            .into_iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(|value| replace_trait_self_type(value, self_ty))
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| EffectRowProjection {
+                subject: Box::new(replace_trait_self_type(*projection.subject, self_ty)),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(|value| replace_trait_self_type(value, self_ty))
+                    .collect(),
+                name: projection.name,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(|value| replace_trait_self_type(value, self_ty))
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    }
+    .canonicalized()
 }
 
 /// Rebase lifetimes introduced by a trait method into the implementation
@@ -1199,6 +1345,9 @@ struct Elaborator<'a> {
     effect_row_generics: BTreeMap<String, u32>,
     lifetime_generics: BTreeMap<String, u32>,
     const_generics: BTreeMap<String, (u32, ConstKind)>,
+    /// Trait declarations retain an implicit `Self` placeholder; implementation
+    /// members instead see their declared implementation head directly.
+    self_type: Option<Type>,
     diagnostics: Vec<SignatureDiagnostic>,
 }
 impl Elaborator<'_> {
@@ -1267,6 +1416,7 @@ impl Elaborator<'_> {
     fn trait_header(&mut self, header: &TraitHeader) -> ElaboratedTrait {
         self.require_type_generics(&header.generics, "trait declarations");
         self.bind_generics(&header.generics);
+        let outer_self_type = self.self_type.replace(Type::Generic(TRAIT_SELF_GENERIC));
         let methods = header
             .methods
             .iter()
@@ -1313,7 +1463,7 @@ impl Elaborator<'_> {
                 (method.name.clone(), signature)
             })
             .collect();
-        ElaboratedTrait {
+        let result = ElaboratedTrait {
             generics: header.generics.len() as u32,
             generic_kinds: header.generics.kinds(),
             supertraits: header
@@ -1337,13 +1487,16 @@ impl Elaborator<'_> {
                 })
                 .collect(),
             methods,
-        }
+        };
+        self.self_type = outer_self_type;
+        result
     }
     fn implementation(&mut self, header: &ImplementationHeader) -> ElaboratedImplementation {
         self.require_type_generics(&header.generics, "implementation declarations");
         self.bind_generics(&header.generics);
         let relation = self.trait_ref(&header.relation);
         let self_ty = self.ty(&header.self_ty);
+        let outer_self_type = self.self_type.replace(self_ty.clone());
         let where_bounds = header
             .where_bounds
             .iter()
@@ -1459,7 +1612,7 @@ impl Elaborator<'_> {
                 (method.name.clone(), signature)
             })
             .collect();
-        ElaboratedImplementation {
+        let result = ElaboratedImplementation {
             generics: header.generics.len() as u32,
             generic_kinds: header.generics.kinds(),
             negative: header.negative,
@@ -1469,7 +1622,9 @@ impl Elaborator<'_> {
             associated_types,
             associated_effect_rows,
             methods,
-        }
+        };
+        self.self_type = outer_self_type;
+        result
     }
     fn effect_header(&mut self, header: &EffectHeader) -> ElaboratedEffect {
         self.require_type_generics(&header.generics, "effect declarations");
@@ -1916,6 +2071,23 @@ impl Elaborator<'_> {
             return Type::Error;
         };
         if path.len() == 1 {
+            if name == "Self" {
+                return if arguments.is_empty() {
+                    match &self.self_type {
+                        Some(value) => value.clone(),
+                        None => {
+                            self.error(
+                                "G3319",
+                                "`Self` is only valid in a trait or implementation member".into(),
+                            );
+                            Type::Error
+                        }
+                    }
+                } else {
+                    self.arity(name, 0, arguments.len());
+                    Type::Error
+                };
+            }
             if let Some(index) = self.generics.get(name) {
                 return if arguments.is_empty() {
                     Type::Generic(*index)
@@ -2290,6 +2462,10 @@ fn normalize_nominal_fields(
 
 fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
     match value {
+        // Trait `Self` is not a source generic slot.  It must survive alias
+        // normalization until trait-method instantiation supplies the selected
+        // implementation head.
+        Type::Generic(TRAIT_SELF_GENERIC) => Type::Generic(TRAIT_SELF_GENERIC),
         Type::Generic(index) => arguments
             .get(index as usize)
             .cloned()
