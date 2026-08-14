@@ -279,6 +279,9 @@ pub struct ImplementationMethodHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitHeader {
+    /// Auto traits use structural, coinductive selection when no explicit
+    /// implementation decides the goal.
+    pub auto_trait: bool,
     pub generics: GenericParameters,
     pub supertraits: Vec<TraitRefHeader>,
     pub associated_types: Vec<AssociatedTypeHeader>,
@@ -444,6 +447,9 @@ impl HeaderParse {
         if parser.word() == Some("pub") {
             parser.position += 1;
         }
+        if shell.auto_trait {
+            parser.position += 1;
+        }
         let keyword = parser.word().map(str::to_owned);
         parser.position += 1; // Scanner already proved the declaration keyword.
         let header = match shell.kind {
@@ -505,7 +511,7 @@ impl HeaderParse {
                     diagnostics: vec![],
                     recovered: false,
                 };
-                let value = body_parser.trait_header(generics, supertraits);
+                let value = body_parser.trait_header(generics, supertraits, shell.auto_trait);
                 parser.diagnostics.extend(body_parser.diagnostics);
                 parser.recovered |= body_parser.recovered;
                 ParsedHeader::Trait(value)
@@ -577,6 +583,7 @@ impl Parser<'_> {
         &mut self,
         generics: GenericParameters,
         supertraits: Vec<TraitRefHeader>,
+        auto_trait: bool,
     ) -> TraitHeader {
         let mut associated_types = vec![];
         let mut associated_consts = vec![];
@@ -585,6 +592,7 @@ impl Parser<'_> {
         if !self.punctuation('{') {
             self.error("G3232", "expected `{` after trait declaration");
             return TraitHeader {
+                auto_trait,
                 generics,
                 supertraits,
                 associated_types,
@@ -727,6 +735,7 @@ impl Parser<'_> {
             self.error("G3239", "expected `}` after trait declaration");
         }
         TraitHeader {
+            auto_trait,
             generics,
             supertraits,
             associated_types,

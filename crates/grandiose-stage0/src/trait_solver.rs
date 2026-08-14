@@ -8,9 +8,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedHeader,
-    ElaboratedImplementation, ElaboratedInterface, ElaboratedTrait, ElaboratedTraitReference,
-    GenericArgument, Type, implementation_method_key,
+    CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedEnumVariantPayload,
+    ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface, ElaboratedNominalLayout,
+    ElaboratedTrait, ElaboratedTraitReference, GenericArgument, Type, implementation_method_key,
     signature::TRAIT_SELF_GENERIC,
     types::{canonical_generic_arguments_encoding, canonical_type_encoding},
 };
@@ -51,6 +51,13 @@ pub enum TraitCandidateExplanation {
         implementation: DefKey,
         reason: TraitCandidateRejection,
     },
+    /// Implicit field traversal for a source-declared auto trait. The
+    /// evidence is synthesized from the canonical goal and therefore is as
+    /// stable and cacheable as ordinary implementation evidence.
+    Structural {
+        evidence: DefKey,
+        obligations: Vec<TraitWhereBoundExplanation>,
+    },
 }
 
 /// One implementation where-bound after the candidate's head substitution.
@@ -87,12 +94,12 @@ pub struct TraitSelectionExplanation {
 }
 
 /// Cycle semantics available to the current source-trait kernel.  Ordinary
-/// traits are inductive: re-entering an active goal is ambiguous.  The parser
-/// does not yet expose auto/coinductive traits or structural field traversal,
-/// so this deliberately has no optimistic coinductive branch.
+/// traits are inductive: re-entering an active goal is ambiguous. Source
+/// `auto trait` declarations add a separate structural coinductive policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TraitCyclePolicy {
     Inductive,
+    CoinductiveAuto,
 }
 
 /// A finite explanation-tree leaf produced by recursive goal evaluation.
@@ -315,6 +322,11 @@ pub struct TraitSolver {
     /// frozen copy alongside implementation rules so projection selection
     /// remains self-contained and deterministic.
     traits: BTreeMap<DefKey, ElaboratedTrait>,
+    /// Frozen layouts are needed for source-declared auto traits to turn a
+    /// nominal application into its field obligations. Keeping them in the
+    /// solver preserves the same body-local, interface-only boundary as impl
+    /// rule selection.
+    definitions: BTreeMap<DefKey, ElaboratedHeader>,
     tables: BTreeMap<Digest, TableState>,
     limits: TraitSolverLimits,
     steps: u32,
@@ -405,6 +417,7 @@ impl TraitSolver {
         Self {
             rules,
             traits,
+            definitions: signatures.definitions.clone(),
             tables: BTreeMap::new(),
             limits,
             steps: 0,
@@ -412,7 +425,7 @@ impl TraitSolver {
     }
 
     pub fn solve(&mut self, goal: TraitGoal) -> TraitAnswer {
-        self.solve_at(goal, 0).into()
+        self.solve_at(goal, 0, false).into()
     }
 
     pub fn query(&self, goal: &TraitGoal) -> TraitGoalQuery {
@@ -534,12 +547,13 @@ impl TraitSolver {
         let mut probe = Self {
             rules: self.rules.clone(),
             traits: self.traits.clone(),
+            definitions: self.definitions.clone(),
             tables: BTreeMap::new(),
             limits: self.limits.clone(),
             steps: 0,
         };
         let mut active = BTreeMap::new();
-        let mut explanation = probe.explain_at(goal, 0, &mut active);
+        let mut explanation = probe.explain_at(goal, 0, false, &mut active);
         // Table reuse can only make the ordinary solver more precise within a
         // fixed budget. Its answer remains authoritative for callers, while
         // the fresh probe supplies the deterministic causal tree.
@@ -551,6 +565,7 @@ impl TraitSolver {
         &mut self,
         goal: TraitGoal,
         depth: u32,
+        coinductive_edge: bool,
         active: &mut BTreeMap<Digest, TraitGoal>,
     ) -> TraitSelectionExplanation {
         if depth >= self.limits.max_depth {
@@ -586,13 +601,24 @@ impl TraitSolver {
         };
         let key = goal_key(&goal);
         if let Some(reentered) = active.get(&key) {
+            let auto = coinductive_edge && self.is_auto_trait(&goal);
             return TraitSelectionExplanation {
+                answer: if auto {
+                    TraitAnswer::Proven {
+                        evidence: self.structural_evidence(&goal),
+                    }
+                } else {
+                    TraitAnswer::Ambiguous
+                },
                 goal,
-                answer: TraitAnswer::Ambiguous,
                 candidates: vec![],
                 terminal: Some(TraitExplanationTerminal::OrdinaryCycle {
                     reentered: reentered.clone(),
-                    policy: TraitCyclePolicy::Inductive,
+                    policy: if auto {
+                        TraitCyclePolicy::CoinductiveAuto
+                    } else {
+                        TraitCyclePolicy::Inductive
+                    },
                 }),
             };
         }
@@ -609,7 +635,7 @@ impl TraitSolver {
             .filter(|rule| rule.implementation.relation.definition == goal.relation.definition)
             .cloned()
             .collect::<Vec<_>>();
-        let candidates = rules
+        let mut candidates: Vec<TraitCandidateExplanation> = rules
             .into_iter()
             .map(|rule| {
                 let Some(substitution) = match_rule(&rule.implementation, &goal) else {
@@ -624,7 +650,7 @@ impl TraitSolver {
                         relation: substitute_relation(relation, &substitution),
                         subject: substitute_type(subject, &substitution),
                     };
-                    let explanation = self.explain_at(obligation.clone(), depth + 1, active);
+                    let explanation = self.explain_at(obligation.clone(), depth + 1, false, active);
                     let outcome = explanation.answer.clone();
                     match outcome {
                         TraitAnswer::Ambiguous => saw_cycle = true,
@@ -658,8 +684,35 @@ impl TraitSolver {
                 }
             })
             .collect();
+        let mut answer = select_answer(&positives, &negatives, saw_cycle, saw_overflow).into();
+        if matches!(answer, TraitAnswer::NoSolution)
+            && self.is_auto_trait(&goal)
+            && let Some(obligations) = self.structural_obligations(&goal)
+        {
+            let mut outcomes = Vec::new();
+            let mut structural_answer = TraitAnswer::Proven {
+                evidence: self.structural_evidence(&goal),
+            };
+            for obligation in obligations {
+                let explanation = self.explain_at(obligation.clone(), depth + 1, true, active);
+                let outcome = explanation.answer.clone();
+                if !matches!(outcome, TraitAnswer::Proven { .. }) {
+                    structural_answer = outcome.clone();
+                }
+                outcomes.push(TraitWhereBoundExplanation {
+                    goal: obligation,
+                    outcome,
+                    explanation: Box::new(explanation),
+                });
+            }
+            let evidence = self.structural_evidence(&goal);
+            candidates.push(TraitCandidateExplanation::Structural {
+                evidence,
+                obligations: outcomes,
+            });
+            answer = structural_answer;
+        }
         active.remove(&key);
-        let answer = select_answer(&positives, &negatives, saw_cycle, saw_overflow).into();
         TraitSelectionExplanation {
             goal,
             answer,
@@ -1365,7 +1418,12 @@ impl TraitSolver {
             TraitAnswer::Overflow => TraitMethodAnswer::Overflow,
         }
     }
-    fn solve_at(&mut self, goal: TraitGoal, depth: u32) -> TraitAnswerIndex {
+    fn solve_at(
+        &mut self,
+        goal: TraitGoal,
+        depth: u32,
+        coinductive_edge: bool,
+    ) -> TraitAnswerIndex {
         if depth >= self.limits.max_depth || self.steps >= self.limits.max_steps {
             return TraitAnswerIndex::Overflow;
         }
@@ -1383,8 +1441,12 @@ impl TraitSolver {
         let key = goal_key(&goal);
         match self.tables.get(&key).copied() {
             Some(TableState::Complete(answer)) => return answer,
-            // Ordinary recursive cycles are ambiguous by design.  Auto traits
-            // are not in this kernel yet and therefore get no coinduction.
+            // A recursive success is available only across a structural auto
+            // edge. Rule where-bounds always pass `false`, so a mixed cycle
+            // containing an ordinary trait remains inductively ambiguous.
+            Some(TableState::Evaluating) if coinductive_edge && self.is_auto_trait(&goal) => {
+                return TraitAnswerIndex::Proven(self.structural_evidence(&goal));
+            }
             Some(TableState::Evaluating) => return TraitAnswerIndex::Ambiguous,
             None => {}
         }
@@ -1410,7 +1472,7 @@ impl TraitSolver {
                     relation: substitute_relation(relation, &substitution),
                     subject: substitute_type(subject, &substitution),
                 };
-                match self.solve_at(obligation, depth + 1) {
+                match self.solve_at(obligation, depth + 1, false) {
                     TraitAnswerIndex::Proven(_) => {}
                     TraitAnswerIndex::Ambiguous => {
                         viable = false;
@@ -1436,9 +1498,135 @@ impl TraitSolver {
                 }
             }
         }
-        let answer = select_answer(&positives, &negatives, saw_cycle, saw_overflow);
+        let mut answer = select_answer(&positives, &negatives, saw_cycle, saw_overflow);
+        if matches!(answer, TraitAnswerIndex::NoSolution) {
+            answer = self.solve_structural_auto_goal(&goal, depth);
+        }
         self.tables.insert(key, TableState::Complete(answer));
         answer
+    }
+
+    fn is_auto_trait(&self, goal: &TraitGoal) -> bool {
+        self.traits
+            .get(&goal.relation.definition)
+            .is_some_and(|trait_header| trait_header.auto_trait)
+    }
+
+    /// Produce structural auto-trait evidence only when the source has
+    /// explicitly declared the relation `auto`. An explicit positive or
+    /// negative implementation is selected before this fallback, so a
+    /// negative impl reliably opts a type out of otherwise structural proof.
+    fn solve_structural_auto_goal(&mut self, goal: &TraitGoal, depth: u32) -> TraitAnswerIndex {
+        if !self.is_auto_trait(goal) {
+            return TraitAnswerIndex::NoSolution;
+        }
+        let Some(obligations) = self.structural_obligations(goal) else {
+            return TraitAnswerIndex::NoSolution;
+        };
+        for obligation in obligations {
+            match self.solve_at(obligation, depth + 1, true) {
+                TraitAnswerIndex::Proven(_) => {}
+                TraitAnswerIndex::Overflow => return TraitAnswerIndex::Overflow,
+                TraitAnswerIndex::Ambiguous => return TraitAnswerIndex::Ambiguous,
+                TraitAnswerIndex::Refuted(_) | TraitAnswerIndex::NoSolution => {
+                    return TraitAnswerIndex::NoSolution;
+                }
+            }
+        }
+        TraitAnswerIndex::Proven(self.structural_evidence(goal))
+    }
+
+    fn structural_evidence(&self, goal: &TraitGoal) -> DefKey {
+        let key = goal_key(goal);
+        DefKey(Digest::of_parts([
+            b"grandiose-stage0-structural-auto-trait-v1".as_slice(),
+            goal.relation.definition.0.as_bytes().as_slice(),
+            key.as_bytes().as_slice(),
+        ]))
+    }
+
+    /// Enumerate the direct field/value obligations of one auto-trait goal.
+    /// An enum requires every payload shape to satisfy the trait: its runtime
+    /// value may inhabit any declared variant. Scalars and uninhabited/unit
+    /// values have no contained type obligation.
+    fn structural_obligations(&self, goal: &TraitGoal) -> Option<Vec<TraitGoal>> {
+        let subjects = match &goal.subject {
+            Type::Unit | Type::Never | Type::Scalar(_) => vec![],
+            Type::Tuple(values) => values.clone(),
+            Type::Array(value) => vec![(**value).clone()],
+            Type::Reference { referent, .. } => vec![(**referent).clone()],
+            Type::Callable {
+                parameters, result, ..
+            } => {
+                let mut values = parameters.clone();
+                values.push((**result).clone());
+                values
+            }
+            Type::Nominal {
+                definition,
+                arguments,
+            } => self.nominal_structural_fields(*definition, arguments)?,
+            // A generic, projection, inference variable, const carrier, or
+            // error has no known representation from which to derive proof.
+            Type::Projection { .. }
+            | Type::ConstU32(_)
+            | Type::ConstQuantity(_)
+            | Type::ConstGeneric { .. }
+            | Type::Generic(_)
+            | Type::Infer(_)
+            | Type::Error => return None,
+        };
+        Some(
+            subjects
+                .into_iter()
+                .map(|subject| TraitGoal {
+                    relation: goal.relation.clone(),
+                    subject,
+                })
+                .collect(),
+        )
+    }
+
+    fn nominal_structural_fields(
+        &self,
+        definition: DefKey,
+        arguments: &[GenericArgument],
+    ) -> Option<Vec<Type>> {
+        let ElaboratedHeader::Nominal {
+            generics, layout, ..
+        } = self.definitions.get(&definition)?
+        else {
+            return None;
+        };
+        if *generics as usize != arguments.len() {
+            return None;
+        }
+        let mut substitution = ImplementationSubstitution::default();
+        for (index, argument) in arguments.iter().cloned().enumerate() {
+            install_item_argument(&mut substitution, index as u32, argument);
+        }
+        let fields: Vec<Type> = match layout {
+            ElaboratedNominalLayout::Struct(fields) => {
+                fields.iter().map(|field| field.ty.clone()).collect()
+            }
+            ElaboratedNominalLayout::Enum(variants) => variants
+                .iter()
+                .flat_map(|variant| match &variant.payload {
+                    ElaboratedEnumVariantPayload::Unit => vec![],
+                    ElaboratedEnumVariantPayload::Tuple(fields) => fields.clone(),
+                    ElaboratedEnumVariantPayload::Struct(fields) => {
+                        fields.iter().map(|field| field.ty.clone()).collect()
+                    }
+                })
+                .collect(),
+            ElaboratedNominalLayout::Opaque => return None,
+        };
+        Some(
+            fields
+                .into_iter()
+                .map(|field| substitute_type(&field, &substitution))
+                .collect(),
+        )
     }
 
     /// Reduce concrete associated projections in a trait goal before it is

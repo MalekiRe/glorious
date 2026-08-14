@@ -47,6 +47,8 @@ pub struct ElaboratedTraitReference {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedTrait {
+    /// Source-declared auto traits admit structural, coinductive proof search.
+    pub auto_trait: bool,
     pub generics: u32,
     /// Kinds of declaration binders in source-slot order.  Traits may bind
     /// regions just like callables, but those regions must never be confused
@@ -2002,6 +2004,7 @@ impl Elaborator<'_> {
             })
             .collect();
         let result = ElaboratedTrait {
+            auto_trait: header.auto_trait,
             generics: header.generics.len() as u32,
             generic_kinds: header.generics.kinds(),
             supertraits: header

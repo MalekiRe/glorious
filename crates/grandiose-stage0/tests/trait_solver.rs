@@ -38,6 +38,10 @@ fn terminal(explanation: &TraitSelectionExplanation) -> Option<&TraitExplanation
     explanation.terminal.as_ref().or_else(|| {
         explanation.candidates.iter().find_map(|candidate| {
             let (TraitCandidateExplanation::Applicable { where_bounds, .. }
+            | TraitCandidateExplanation::Structural {
+                obligations: where_bounds,
+                ..
+            }
             | TraitCandidateExplanation::Rejected {
                 reason:
                     TraitCandidateRejection::WhereBound {
@@ -1283,4 +1287,117 @@ fn associated_constants_normalize_overrides_defaults_and_const_generics() {
             ..
         }
     ));
+}
+
+#[test]
+fn auto_traits_structurally_traverse_source_nominals_and_type_forms() {
+    let (interface, signatures) = signatures(
+        "auto trait Sendish {} struct Pair<T> { left: T, right: T } enum Choice<T> { Empty, One(T), Named { value: T } } impl !Sendish for Text {}",
+    );
+    let sendish = key(&interface, "Sendish");
+    let pair = key(&interface, "Pair");
+    let choice = key(&interface, "Choice");
+    let relation = ElaboratedTraitReference {
+        definition: sendish,
+        arguments: vec![],
+    };
+    let mut solver = TraitSolver::new(&signatures);
+    for subject in [
+        Type::Tuple(vec![
+            Type::Scalar(ScalarType::I64),
+            Type::Array(Box::new(Type::Scalar(ScalarType::Bool))),
+        ]),
+        Type::Reference {
+            mutability: Mutability::Shared,
+            lifetime: Lifetime::Static,
+            referent: Box::new(Type::Scalar(ScalarType::I64)),
+        },
+        Type::Callable {
+            lifetime_binders: 0,
+            parameters: vec![Type::Scalar(ScalarType::I64)],
+            result: Box::new(Type::Scalar(ScalarType::Bool)),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+        },
+        Type::Nominal {
+            definition: pair,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+        Type::Nominal {
+            definition: choice,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+    ] {
+        let answer = solver.solve(TraitGoal {
+            relation: relation.clone(),
+            subject,
+        });
+        assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:?}");
+    }
+    let answer = solver.solve(TraitGoal {
+        relation,
+        subject: Type::Nominal {
+            definition: pair,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))],
+        },
+    });
+    assert!(matches!(answer, TraitAnswer::NoSolution), "{answer:?}");
+}
+
+#[test]
+fn auto_trait_recursive_nominals_are_coinductive_but_explicit_negatives_win() {
+    let (interface, signatures) = signatures(
+        "auto trait Sendish {} struct Link { next: Link } struct Denied {} impl !Sendish for Denied {}",
+    );
+    let sendish = key(&interface, "Sendish");
+    let relation = ElaboratedTraitReference {
+        definition: sendish,
+        arguments: vec![],
+    };
+    let mut solver = TraitSolver::new(&signatures);
+    let recursive = solver.explain(TraitGoal {
+        relation: relation.clone(),
+        subject: Type::Nominal {
+            definition: key(&interface, "Link"),
+            arguments: vec![],
+        },
+    });
+    assert!(
+        matches!(recursive.answer, TraitAnswer::Proven { .. }),
+        "{recursive:#?}"
+    );
+    assert!(matches!(
+        terminal(&recursive),
+        Some(TraitExplanationTerminal::OrdinaryCycle {
+            policy: TraitCyclePolicy::CoinductiveAuto,
+            ..
+        })
+    ));
+    let denied = solver.solve(TraitGoal {
+        relation,
+        subject: Type::Nominal {
+            definition: key(&interface, "Denied"),
+            arguments: vec![],
+        },
+    });
+    assert!(matches!(denied, TraitAnswer::Refuted { .. }), "{denied:?}");
+}
+
+#[test]
+fn ordinary_trait_cycles_remain_inductive() {
+    let (interface, signatures) = signatures(
+        "trait Ordinary {} struct Link { next: Link } impl Ordinary for Link where Link: Ordinary {}",
+    );
+    let ordinary = key(&interface, "Ordinary");
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ordinary,
+            arguments: vec![],
+        },
+        subject: Type::Nominal {
+            definition: key(&interface, "Link"),
+            arguments: vec![],
+        },
+    });
+    assert!(matches!(answer, TraitAnswer::Ambiguous), "{answer:?}");
 }

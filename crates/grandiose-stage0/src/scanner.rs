@@ -33,6 +33,9 @@ pub struct DeclarationShell {
     pub kind: DeclarationKind,
     pub name: Option<String>,
     pub visibility_public: bool,
+    /// `auto trait` is retained by scanning so header parsing can preserve
+    /// the declaration's solver policy without inspecting source text again.
+    pub auto_trait: bool,
     pub span: Span,
     pub header: TokenRange,
     pub body: Option<TokenRange>,
@@ -116,6 +119,10 @@ impl Scanner<'_> {
             public = true;
             self.position += 1;
         }
+        let auto_trait = self.word_at(self.position) == Some("auto");
+        if auto_trait {
+            self.position += 1;
+        }
         let Some(keyword) = self.word_at(self.position) else {
             self.unexpected(start_position);
             return;
@@ -124,6 +131,10 @@ impl Scanner<'_> {
             self.unexpected(start_position);
             return;
         };
+        if auto_trait && kind != DeclarationKind::Trait {
+            self.unexpected(start_position);
+            return;
+        }
         let declaration_position = self.position;
         self.position += 1;
         let name = self.name_after(kind);
@@ -138,6 +149,7 @@ impl Scanner<'_> {
             kind,
             name,
             visibility_public: public,
+            auto_trait,
             span,
             header: TokenRange {
                 start: header_start,
