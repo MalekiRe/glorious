@@ -14,7 +14,10 @@ use crate::{
         TraitAnswer, TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer,
         TraitProjectionAnswer, TraitSolver,
     },
-    types::{EffectInstance, EffectRow, InferContext, Lifetime, Mutability, ScalarType, Type},
+    types::{
+        EffectInstance, EffectRow, GenericArgument, InferContext, Lifetime, Mutability, ScalarType,
+        Type,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1016,10 +1019,12 @@ fn type_contains_inference(ty: &Type) -> bool {
         } => {
             parameters.iter().any(type_contains_inference)
                 || type_contains_inference(result)
-                || effects
-                    .effects
-                    .iter()
-                    .any(|effect| effect.arguments.iter().any(type_contains_inference))
+                || effects.effects.iter().any(|effect| {
+                    effect
+                        .arguments
+                        .iter()
+                        .any(generic_argument_contains_inference)
+                })
                 || matches!(effects.tail, Some(crate::types::EffectTail::Infer(_)))
                 || effects.projections.iter().any(|projection| {
                     type_contains_inference(&projection.subject)
@@ -1044,6 +1049,14 @@ fn type_contains_inference(ty: &Type) -> bool {
     }
 }
 
+fn generic_argument_contains_inference(argument: &GenericArgument) -> bool {
+    match argument {
+        GenericArgument::Type(value) => type_contains_inference(value),
+        GenericArgument::EffectRow(value) => effect_row_contains_inference(value),
+        _ => false,
+    }
+}
+
 fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
     match kind {
         CoreKind::Closure {
@@ -1058,10 +1071,17 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
                     .any(|capture| type_contains_inference(&capture.ty))
         }
         CoreKind::Assign { place, .. } => place_contains_inference(place),
-        CoreKind::Perform { effect, .. } => effect.arguments.iter().any(type_contains_inference),
+        CoreKind::Perform { effect, .. } => effect
+            .arguments
+            .iter()
+            .any(generic_argument_contains_inference),
         CoreKind::PatternTest { pattern, .. } => pattern_contains_inference(pattern),
         CoreKind::Handle { clauses, .. } => clauses.iter().any(|clause| {
-            clause.effect.arguments.iter().any(type_contains_inference)
+            clause
+                .effect
+                .arguments
+                .iter()
+                .any(generic_argument_contains_inference)
                 || clause.payload_types.iter().any(type_contains_inference)
                 || clause.patterns.iter().any(pattern_contains_inference)
                 || clause
@@ -1107,10 +1127,12 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
 }
 
 fn effect_row_contains_inference(row: &EffectRow) -> bool {
-    row.effects
-        .iter()
-        .any(|effect| effect.arguments.iter().any(type_contains_inference))
-        || matches!(row.tail, Some(crate::types::EffectTail::Infer(_)))
+    row.effects.iter().any(|effect| {
+        effect
+            .arguments
+            .iter()
+            .any(generic_argument_contains_inference)
+    }) || matches!(row.tail, Some(crate::types::EffectTail::Infer(_)))
         || row.projections.iter().any(|projection| {
             type_contains_inference(&projection.subject)
                 || projection
@@ -2765,12 +2787,16 @@ impl Elaborator<'_> {
                         definition,
                         arguments: arguments
                             .iter()
-                            .map(|argument| match argument {
-                                crate::header::HeaderGenericArgument::Type(argument) => {
-                                    self.header_type(argument)
-                                }
-                                crate::header::HeaderGenericArgument::U32(_) => Type::Error,
-                                crate::header::HeaderGenericArgument::Quantity(_) => Type::Error,
+                            .map(|argument| {
+                                GenericArgument::Type(match argument {
+                                    crate::header::HeaderGenericArgument::Type(argument) => {
+                                        self.header_type(argument)
+                                    }
+                                    crate::header::HeaderGenericArgument::U32(_) => Type::Error,
+                                    crate::header::HeaderGenericArgument::Quantity(_) => {
+                                        Type::Error
+                                    }
+                                })
                             })
                             .collect(),
                     });
@@ -3194,7 +3220,7 @@ impl Elaborator<'_> {
                     .arguments
                     .iter()
                     .cloned()
-                    .map(|ty| self.zonk_type(ty, span))
+                    .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
             }
             CoreKind::PatternTest { pattern, .. } => self.zonk_pattern(pattern, span),
@@ -3205,7 +3231,7 @@ impl Elaborator<'_> {
                         .arguments
                         .iter()
                         .cloned()
-                        .map(|ty| self.zonk_type(ty, span))
+                        .map(|argument| self.zonk_generic_argument(argument, span))
                         .collect();
                     clause.payload_types = clause
                         .payload_types
@@ -3314,6 +3340,16 @@ impl Elaborator<'_> {
                 self.recovered = true;
                 Type::Error
             }
+        }
+    }
+
+    fn zonk_generic_argument(&mut self, argument: GenericArgument, span: Span) -> GenericArgument {
+        match argument {
+            GenericArgument::Type(value) => GenericArgument::Type(self.zonk_type(value, span)),
+            GenericArgument::EffectRow(value) => {
+                GenericArgument::EffectRow(self.zonk_effect_row(value, span))
+            }
+            argument => argument,
         }
     }
 
@@ -4390,7 +4426,10 @@ impl Elaborator<'_> {
             .collect::<Vec<_>>();
         let instance = EffectInstance {
             definition: effect_definition,
-            arguments: effect_arguments,
+            arguments: effect_arguments
+                .into_iter()
+                .map(GenericArgument::Type)
+                .collect(),
         };
         self.check_effect_instance(&instance, Some(operation_index), span);
         Some(self.alloc(
@@ -5246,7 +5285,10 @@ impl Elaborator<'_> {
             source,
             effect: EffectInstance {
                 definition: effect,
-                arguments: effect_arguments,
+                arguments: effect_arguments
+                    .into_iter()
+                    .map(GenericArgument::Type)
+                    .collect(),
             },
             operation_index,
             operation,
@@ -6088,7 +6130,7 @@ fn substitute_call_effects(
                 arguments: effect
                     .arguments
                     .into_iter()
-                    .map(|value| substitute_call_lifetimes(value, substitution, depth))
+                    .map(|value| substitute_call_generic_argument(value, substitution, depth))
                     .collect::<Result<_, _>>()?,
             })
         })
@@ -6122,6 +6164,25 @@ fn substitute_call_effects(
         projections,
         tail,
     })
+}
+
+fn substitute_call_generic_argument(
+    value: GenericArgument,
+    substitution: &CallLifetimeSubstitution,
+    depth: u32,
+) -> Result<GenericArgument, LifetimeError> {
+    match value {
+        GenericArgument::Type(value) => {
+            substitute_call_lifetimes(value, substitution, depth).map(GenericArgument::Type)
+        }
+        GenericArgument::EffectRow(value) => {
+            substitute_call_effects(value, substitution, depth).map(GenericArgument::EffectRow)
+        }
+        GenericArgument::Lifetime(value) => {
+            substitute_call_lifetime(value, substitution, depth).map(GenericArgument::Lifetime)
+        }
+        value => Ok(value),
+    }
 }
 
 fn projection_is_concrete(value: &Type) -> bool {

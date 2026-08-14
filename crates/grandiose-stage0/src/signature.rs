@@ -1039,7 +1039,7 @@ fn replace_trait_self_effect_row(value: EffectRow, self_ty: &Type) -> EffectRow 
                 arguments: effect
                     .arguments
                     .into_iter()
-                    .map(|value| replace_trait_self_type(value, self_ty))
+                    .map(|value| replace_trait_self_generic_argument(value, self_ty))
                     .collect(),
             })
             .collect(),
@@ -1260,7 +1260,7 @@ fn rebase_method_lifetime_effect_row(
                     .arguments
                     .into_iter()
                     .map(|argument| {
-                        rebase_method_lifetimes(
+                        rebase_method_lifetime_generic_argument(
                             argument,
                             trait_generic_count,
                             implementation_generic_count,
@@ -1428,7 +1428,7 @@ fn normalize_effect_row(
                     .arguments
                     .into_iter()
                     .map(|argument| {
-                        normalize_alias_type(argument, definitions, &mut vec![], diagnostics)
+                        normalize_trait_generic_argument(argument, definitions, diagnostics)
                     })
                     .collect(),
             })
@@ -1987,7 +1987,7 @@ impl Elaborator<'_> {
                     } else {
                         effects.push(EffectInstance {
                             definition,
-                            arguments,
+                            arguments: arguments.into_iter().map(GenericArgument::Type).collect(),
                         });
                     }
                 }
@@ -2809,7 +2809,7 @@ fn substitute_effect_row(value: EffectRow, arguments: &[Type]) -> EffectRow {
                 arguments: effect
                     .arguments
                     .into_iter()
-                    .map(|argument| substitute_alias_generics(argument, arguments))
+                    .map(|argument| substitute_alias_effect_generic_argument(argument, arguments))
                     .collect(),
             })
             .collect(),
@@ -2835,6 +2835,21 @@ fn substitute_effect_row(value: EffectRow, arguments: &[Type]) -> EffectRow {
         tail: value.tail,
     }
     .canonicalized()
+}
+
+fn substitute_alias_effect_generic_argument(
+    argument: GenericArgument,
+    arguments: &[Type],
+) -> GenericArgument {
+    match argument {
+        GenericArgument::Type(value) => {
+            GenericArgument::Type(substitute_alias_generics(value, arguments))
+        }
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(substitute_effect_row(value, arguments))
+        }
+        argument => argument,
+    }
 }
 
 /// Substitute declaration generic slots into a type consumer.  This boundary
@@ -2958,7 +2973,7 @@ fn substitute_trait_effect_row(value: EffectRow, arguments: &[GenericArgument]) 
                 arguments: effect
                     .arguments
                     .into_iter()
-                    .map(|argument| substitute_trait_type_generics(argument, arguments))
+                    .map(|argument| substitute_trait_generic_argument(argument, arguments))
                     .collect(),
             })
             .collect(),

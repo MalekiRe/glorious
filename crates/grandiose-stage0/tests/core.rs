@@ -1333,7 +1333,7 @@ fn typed_closure_contracts_preserve_generic_effect_instances() {
         &expression.ty,
         grandiose_stage0::Type::Callable { effects, .. }
             if effects.effects.iter().any(|effect| effect.definition == trace
-                && effect.arguments == [grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::Text)])
+                && effect.arguments == [grandiose_stage0::GenericArgument::Type(grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::Text))])
     )));
 }
 
@@ -2136,7 +2136,9 @@ fn generic_effect_instances_are_resolved_as_distinct_handler_identities() {
     assert_eq!(clause.effect.arguments.len(), 1);
     assert!(matches!(
         clause.effect.arguments[0],
-        grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::I64)
+        grandiose_stage0::GenericArgument::Type(grandiose_stage0::Type::Scalar(
+            grandiose_stage0::ScalarType::I64
+        ))
     ));
     assert!(clause.terminal);
 
@@ -2555,7 +2557,7 @@ fn generic_effect_handler_frame_retains_its_nominal_instance_arguments() {
             MirInstruction::InstallHandler {
                 effect_arguments,
                 ..
-            } if effect_arguments == &[grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::I64)]
+            } if effect_arguments == &[grandiose_stage0::GenericArgument::Type(grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::I64))]
         )
     ));
 }

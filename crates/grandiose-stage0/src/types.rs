@@ -123,7 +123,7 @@ pub struct EffectInstance {
     pub definition: DefKey,
     /// Protocol arguments are part of the nominal effect identity.  A row
     /// containing `State<i64>` is therefore distinct from `State<Text>`.
-    pub arguments: Vec<Type>,
+    pub arguments: Vec<GenericArgument>,
 }
 
 /// A delayed associated effect-row normalization. This is deliberately a row
@@ -140,9 +140,10 @@ pub struct EffectRowProjection {
 
 impl Ord for EffectInstance {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.definition
-            .cmp(&other.definition)
-            .then_with(|| canonical_types(&self.arguments).cmp(&canonical_types(&other.arguments)))
+        self.definition.cmp(&other.definition).then_with(|| {
+            canonical_generic_arguments(&self.arguments)
+                .cmp(&canonical_generic_arguments(&other.arguments))
+        })
     }
 }
 
@@ -547,7 +548,12 @@ impl InferContext {
                         arguments: effect
                             .arguments
                             .into_iter()
-                            .map(|argument| self.zonk(argument))
+                            .map(|argument| match argument {
+                                GenericArgument::Type(argument) => {
+                                    self.zonk(argument).map(GenericArgument::Type)
+                                }
+                                argument => Ok(argument),
+                            })
                             .collect::<Result<_, _>>()?,
                     })
                 })
@@ -589,6 +595,34 @@ impl InferContext {
             .zip(right)
             .map(|(left, right)| self.unify(left, right))
             .collect()
+    }
+
+    fn unify_generic_arguments(
+        &mut self,
+        left: Vec<GenericArgument>,
+        right: Vec<GenericArgument>,
+    ) -> Result<(), TypeError> {
+        if left.len() != right.len() {
+            return Err(TypeError::Arity {
+                expected: left.len(),
+                found: right.len(),
+            });
+        }
+        for (left, right) in left.into_iter().zip(right) {
+            match (left, right) {
+                (GenericArgument::Type(left), GenericArgument::Type(right)) => {
+                    self.unify(left, right)?;
+                }
+                (left, right) if left == right => {}
+                _ => {
+                    return Err(TypeError::Mismatch {
+                        expected: Box::new(Type::Error),
+                        found: Box::new(Type::Error),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn unify_effect_rows(
@@ -757,7 +791,7 @@ impl InferContext {
                         .arguments
                         .iter()
                         .zip(&other.arguments)
-                        .all(|(left, right)| self.types_may_unify(left, right))
+                        .all(|(left, right)| self.generic_arguments_may_unify(left, right))
                 {
                     candidates.push(index);
                 }
@@ -769,7 +803,7 @@ impl InferContext {
                 continue;
             }
             let index = candidates[0];
-            self.unify_many(
+            self.unify_generic_arguments(
                 effect.arguments.clone(),
                 right_values[index].arguments.clone(),
             )?;
@@ -937,6 +971,19 @@ impl InferContext {
             _ => false,
         }
     }
+
+    fn generic_arguments_may_unify(
+        &mut self,
+        left: &GenericArgument,
+        right: &GenericArgument,
+    ) -> bool {
+        match (left, right) {
+            (GenericArgument::Type(left), GenericArgument::Type(right)) => {
+                self.types_may_unify(left, right)
+            }
+            _ => left == right,
+        }
+    }
 }
 
 fn encode_type(value: &Type, output: &mut Vec<u8>) {
@@ -1036,7 +1083,7 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             output.extend_from_slice(&(effects.effects.len() as u64).to_le_bytes());
             for effect in &effects.effects {
                 output.extend_from_slice(&effect.definition.0.as_bytes());
-                encode_types(&effect.arguments, output);
+                encode_generic_arguments(&effect.arguments, output);
             }
             output.extend_from_slice(&(effects.projections.len() as u64).to_le_bytes());
             for projection in &effects.projections {
@@ -1106,9 +1153,9 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
     }
 }
 
-fn canonical_types(values: &[Type]) -> Vec<u8> {
+fn canonical_generic_arguments(values: &[GenericArgument]) -> Vec<u8> {
     let mut bytes = vec![];
-    encode_types(values, &mut bytes);
+    encode_generic_arguments(values, &mut bytes);
     bytes
 }
 
@@ -1127,5 +1174,83 @@ fn encode_types(values: &[Type], output: &mut Vec<u8>) {
     output.extend_from_slice(&(values.len() as u64).to_le_bytes());
     for value in values {
         encode_type(value, output);
+    }
+}
+
+fn encode_generic_arguments(values: &[GenericArgument], output: &mut Vec<u8>) {
+    output.extend_from_slice(&(values.len() as u64).to_le_bytes());
+    for value in values {
+        encode_generic_argument(value, output);
+    }
+}
+
+fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
+    match value {
+        GenericArgument::Type(value) => {
+            output.push(0);
+            encode_type(value, output);
+        }
+        GenericArgument::EffectRow(value) => {
+            output.push(1);
+            output.extend_from_slice(&(value.effects.len() as u64).to_le_bytes());
+            for effect in &value.effects {
+                output.extend_from_slice(&effect.definition.0.as_bytes());
+                encode_generic_arguments(&effect.arguments, output);
+            }
+            output.extend_from_slice(&(value.projections.len() as u64).to_le_bytes());
+            for projection in &value.projections {
+                output.extend_from_slice(&effect_row_projection_key(projection));
+            }
+            match value.tail {
+                Some(EffectTail::Infer(variable)) => {
+                    output.push(0);
+                    output.extend_from_slice(&variable.0.to_le_bytes());
+                }
+                Some(EffectTail::Generic(index)) => {
+                    output.push(1);
+                    output.extend_from_slice(&index.to_le_bytes());
+                }
+                None => output.push(2),
+            }
+        }
+        GenericArgument::Lifetime(value) => {
+            output.push(2);
+            match value {
+                Lifetime::Static => output.push(0),
+                Lifetime::Generic(index) => {
+                    output.push(1);
+                    output.extend_from_slice(&index.to_le_bytes());
+                }
+                Lifetime::Bound { depth, index } => {
+                    output.push(2);
+                    output.extend_from_slice(&depth.to_le_bytes());
+                    output.extend_from_slice(&index.to_le_bytes());
+                }
+                Lifetime::Elided => output.push(3),
+            }
+        }
+        GenericArgument::ConstU32(value) => {
+            output.push(3);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        GenericArgument::ConstQuantity(value) => {
+            output.push(4);
+            output.extend_from_slice(&value.lower.to_le_bytes());
+            match value.upper {
+                Some(upper) => {
+                    output.push(0);
+                    output.extend_from_slice(&upper.to_le_bytes());
+                }
+                None => output.push(1),
+            }
+        }
+        GenericArgument::ConstGeneric { index, kind } => {
+            output.push(5);
+            output.extend_from_slice(&index.to_le_bytes());
+            output.push(match kind {
+                ConstKind::U32 => 0,
+                ConstKind::Quantity => 1,
+            });
+        }
     }
 }

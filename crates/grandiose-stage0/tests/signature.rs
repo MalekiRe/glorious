@@ -1453,8 +1453,14 @@ fn generic_effect_rows_keep_protocol_arguments_in_their_identity() {
     let text = callable("text").effects.effects.iter().next().unwrap();
     assert_eq!(integers.definition, state);
     assert_eq!(text.definition, state);
-    assert_eq!(integers.arguments, [Type::Scalar(ScalarType::I64)]);
-    assert_eq!(text.arguments, [Type::Scalar(ScalarType::Text)]);
+    assert_eq!(
+        integers.arguments,
+        [GenericArgument::Type(Type::Scalar(ScalarType::I64))]
+    );
+    assert_eq!(
+        text.arguments,
+        [GenericArgument::Type(Type::Scalar(ScalarType::Text))]
+    );
     assert_ne!(integers, text);
 }
 
@@ -1482,7 +1488,10 @@ fn transparent_aliases_are_normalized_inside_callable_effect_identities() {
         panic!("expected callable")
     };
     let effect = signature.effects.effects.iter().next().expect("Log effect");
-    assert_eq!(effect.arguments, [Type::Scalar(ScalarType::Text)]);
+    assert_eq!(
+        effect.arguments,
+        [GenericArgument::Type(Type::Scalar(ScalarType::Text))]
+    );
 }
 
 #[test]

@@ -122,11 +122,11 @@ fn effect_rows_distinguish_instances_of_the_same_protocol_declaration() {
     let state = DefKey(Digest::of_bytes(b"State"));
     let integers = EffectRow::closed_instances([EffectInstance {
         definition: state,
-        arguments: vec![Type::Scalar(ScalarType::I64)],
+        arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
     }]);
     let text = EffectRow::closed_instances([EffectInstance {
         definition: state,
-        arguments: vec![Type::Scalar(ScalarType::Text)],
+        arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))],
     }]);
     let callable = |effects| Type::Callable {
         lifetime_binders: 0,
@@ -361,11 +361,11 @@ fn effect_row_unification_solves_protocol_argument_inference() {
     let variable = inference.fresh();
     let generic = EffectRow::closed_instances([EffectInstance {
         definition: state,
-        arguments: vec![variable],
+        arguments: vec![GenericArgument::Type(variable)],
     }]);
     let concrete = EffectRow::closed_instances([EffectInstance {
         definition: state,
-        arguments: vec![Type::Scalar(ScalarType::I64)],
+        arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
     }]);
     let callable = |effects| Type::Callable {
         lifetime_binders: 0,
@@ -407,11 +407,32 @@ fn effect_instance_ordering_is_total_during_error_recovery() {
     let mut instances = BTreeSet::new();
     instances.insert(EffectInstance {
         definition,
-        arguments: vec![Type::Error],
+        arguments: vec![GenericArgument::Type(Type::Error)],
     });
     instances.insert(EffectInstance {
         definition,
-        arguments: vec![inference.fresh()],
+        arguments: vec![GenericArgument::Type(inference.fresh())],
     });
     assert_eq!(instances.len(), 2);
+}
+
+#[test]
+fn effect_instance_identity_preserves_generic_argument_kinds() {
+    let definition = DefKey(Digest::of_bytes(b"kind-preserving-effect"));
+    let type_encoded_const = EffectInstance {
+        definition,
+        arguments: vec![GenericArgument::Type(Type::ConstU32(1))],
+    };
+    let structural_const = EffectInstance {
+        definition,
+        arguments: vec![GenericArgument::ConstU32(1)],
+    };
+    assert_ne!(type_encoded_const, structural_const);
+
+    let instances = BTreeSet::from([type_encoded_const, structural_const]);
+    assert_eq!(
+        instances.len(),
+        2,
+        "effect identity must not erase argument kinds"
+    );
 }

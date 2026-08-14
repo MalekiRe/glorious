@@ -1,12 +1,12 @@
 use grandiose_stage0::{
     BodySyntax, CandidateVmArtifact, CandidateVmProgram, CoreId, DeclarationScan, DefKey,
-    DefinitionIndex, Digest, ElaboratedInterface, FileKey, InterfaceSet, LabelBrand, LexedFile,
-    LogicalPath, MirBlock, MirBlockId, MirCleanupPlan, MirFunction, MirInstruction, MirLocal,
-    MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey, PlaceFlow, ScalarType, Type,
-    TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmExecutionLimits,
-    VmFunction, VmInstruction, VmPattern, VmType, decode_and_verify_artifact,
-    decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
-    encode_artifact, encode_program, verify_vm, verify_vm_program,
+    DefinitionIndex, Digest, ElaboratedInterface, FileKey, GenericArgument, InterfaceSet,
+    LabelBrand, LexedFile, LogicalPath, MirBlock, MirBlockId, MirCleanupPlan, MirFunction,
+    MirInstruction, MirLocal, MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey,
+    PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace,
+    VmCleanupProof, VmExecutionLimits, VmFunction, VmInstruction, VmPattern, VmType,
+    decode_and_verify_artifact, decode_and_verify_program, decode_artifact, decode_program,
+    emit_vm, emit_vm_program, encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
 
@@ -18,6 +18,40 @@ struct LeaveFixtureOffsets {
     moved_field_count: usize,
     loan_owner_tag: usize,
     loan_field_count: usize,
+}
+
+#[test]
+fn vm_rejects_non_type_effect_arguments_before_bytecode_lowering() {
+    let effect = DefKey(Digest::of_bytes(b"vm-non-type-effect"));
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"vm-non-type-effect-caller")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![MirLocalDecl {
+            ty: Type::Scalar(ScalarType::I64),
+            source: CoreId(u32::MAX),
+        }],
+        result: Type::Scalar(ScalarType::I64),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![MirInstruction::Perform {
+                dst: MirLocal(0),
+                effect,
+                effect_arguments: vec![GenericArgument::ConstU32(1)],
+                operation: 0,
+                arguments: vec![],
+            }],
+            terminator: MirTerminator::Return { value: MirLocal(0) },
+        }],
+    };
+    assert!(matches!(
+        emit_vm(&function),
+        Err(VmArtifactError::UnsupportedEffectArgument {
+            effect: found,
+            argument,
+        }) if found == effect && *argument == GenericArgument::ConstU32(1)
+    ));
 }
 
 /// Byte positions for the intentionally fixed-shape `Leave` fixture below.

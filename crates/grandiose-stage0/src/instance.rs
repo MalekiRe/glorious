@@ -190,11 +190,30 @@ fn is_concrete_type(value: &Type) -> bool {
                 && effects
                     .effects
                     .iter()
-                    .all(|effect| effect.arguments.iter().all(is_concrete_type))
+                    .all(|effect| effect.arguments.iter().all(is_concrete_generic_argument))
         }
         Type::Unit | Type::Never | Type::Scalar(_) | Type::ConstU32(_) | Type::ConstQuantity(_) => {
             true
         }
+    }
+}
+
+fn is_concrete_generic_argument(value: &GenericArgument) -> bool {
+    match value {
+        GenericArgument::Type(value) => is_concrete_type(value),
+        GenericArgument::EffectRow(value) => {
+            value.tail.is_none()
+                && value.projections.is_empty()
+                && value
+                    .effects
+                    .iter()
+                    .all(|effect| effect.arguments.iter().all(is_concrete_generic_argument))
+        }
+        GenericArgument::Lifetime(value) => {
+            matches!(value, Lifetime::Static | Lifetime::Bound { .. })
+        }
+        GenericArgument::ConstU32(_) | GenericArgument::ConstQuantity(_) => true,
+        GenericArgument::ConstGeneric { .. } => false,
     }
 }
 

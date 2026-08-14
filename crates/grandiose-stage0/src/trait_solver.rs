@@ -582,7 +582,7 @@ impl TraitSolver {
                 let arguments = effect
                     .arguments
                     .into_iter()
-                    .map(|argument| self.normalize_type_projections(argument, &mut vec![]))
+                    .map(|argument| self.normalize_trait_argument(argument, &mut vec![]))
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|answer| {
                         Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
@@ -1284,7 +1284,7 @@ fn substitute_effect_row(
                 arguments: effect
                     .arguments
                     .iter()
-                    .map(|argument| substitute_type(argument, substitution))
+                    .map(|argument| substitute_generic_argument(argument, substitution))
                     .collect(),
             })
             .collect(),

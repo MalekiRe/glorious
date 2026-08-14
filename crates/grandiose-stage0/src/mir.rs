@@ -136,7 +136,7 @@ pub enum MirInstruction {
         effect: DefKey,
         /// Exact nominal arguments of the protocol instance. `State<i64>`
         /// and `State<Text>` must remain distinct at the handler runtime.
-        effect_arguments: Vec<Type>,
+        effect_arguments: Vec<crate::GenericArgument>,
         operation: u32,
         arguments: Vec<MirLocal>,
     },
@@ -145,7 +145,7 @@ pub enum MirInstruction {
     /// `Resume` re-enters that continuation with deep reinstatement.
     InstallHandler {
         effect: DefKey,
-        effect_arguments: Vec<Type>,
+        effect_arguments: Vec<crate::GenericArgument>,
         operation: u32,
         payload_destinations: Vec<MirLocal>,
         resume_type: Type,
@@ -1865,29 +1865,29 @@ fn validate_lowered_handler_contracts(
         // Probe each source arm with independent substitutions: a refutable
         // earlier arm must not leak a partial generic match into the selected
         // arm's frozen contract.
-        let Some((clause, mut substitutions)) =
-            clauses.iter().copied().find_map(|clause| {
-                let mut substitutions = BTreeMap::new();
-                let matches =
-                    clause.effect.definition == *effect
-                        && clause.effect.arguments.len() == arguments.len()
-                        && clause.effect.arguments.iter().zip(arguments).all(
-                            |(expected, actual)| {
-                                type_contract_matches(expected, actual, &mut substitutions)
-                            },
-                        )
-                        && clause.operation == *operation
-                        && clause.payload_types.len() == payload_destinations.len()
-                        && clause.payload_types.iter().zip(payload_destinations).all(
-                            |(expected, local)| {
-                                function.local_type(*local).is_ok_and(|actual| {
-                                    type_contract_matches(expected, actual, &mut substitutions)
-                                })
-                            },
-                        );
-                matches.then_some((clause, substitutions))
-            })
-        else {
+        let Some((clause, mut substitutions)) = clauses.iter().copied().find_map(|clause| {
+            let mut substitutions = BTreeMap::new();
+            let matches = clause.effect.definition == *effect
+                && clause.effect.arguments.len() == arguments.len()
+                && clause
+                    .effect
+                    .arguments
+                    .iter()
+                    .zip(arguments)
+                    .all(|(expected, actual)| {
+                        generic_argument_contract_matches(expected, actual, &mut substitutions)
+                    })
+                && clause.operation == *operation
+                && clause.payload_types.len() == payload_destinations.len()
+                && clause.payload_types.iter().zip(payload_destinations).all(
+                    |(expected, local)| {
+                        function.local_type(*local).is_ok_and(|actual| {
+                            type_contract_matches(expected, actual, &mut substitutions)
+                        })
+                    },
+                );
+            matches.then_some((clause, substitutions))
+        }) else {
             return Err(
                 "MIR handler frame has no matching frozen effect operation contract".into(),
             );
@@ -2010,6 +2010,19 @@ fn type_contract_matches(
         // A frozen Core contract must not retain body inference variables, but
         // recovery products do.  They never constrain a valid MIR frame.
         Type::Infer(_) | Type::Error => true,
+        _ => expected == actual,
+    }
+}
+
+fn generic_argument_contract_matches(
+    expected: &crate::GenericArgument,
+    actual: &crate::GenericArgument,
+    substitutions: &mut BTreeMap<u32, Type>,
+) -> bool {
+    match (expected, actual) {
+        (crate::GenericArgument::Type(expected), crate::GenericArgument::Type(actual)) => {
+            type_contract_matches(expected, actual, substitutions)
+        }
         _ => expected == actual,
     }
 }
@@ -8366,7 +8379,7 @@ fn instantiate_interprocedural_effect(
         arguments: effect
             .arguments
             .into_iter()
-            .map(|argument| substitute_generic_type(argument, &substitutions))
+            .map(|argument| substitute_generic_argument(argument, &substitutions))
             .collect::<Option<_>>()?,
     })
 }
@@ -8510,6 +8523,22 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
     }
 }
 
+fn substitute_generic_argument(
+    value: crate::GenericArgument,
+    substitutions: &BTreeMap<u32, Type>,
+) -> Option<crate::GenericArgument> {
+    match value {
+        crate::GenericArgument::Type(value) => {
+            substitute_generic_type(value, substitutions).map(crate::GenericArgument::Type)
+        }
+        crate::GenericArgument::EffectRow(value) => {
+            substitute_generic_effect_row(value, substitutions)
+                .map(crate::GenericArgument::EffectRow)
+        }
+        value => Some(value),
+    }
+}
+
 fn substitute_generic_effect_row(
     value: crate::EffectRow,
     substitutions: &BTreeMap<u32, Type>,
@@ -8524,7 +8553,7 @@ fn substitute_generic_effect_row(
                     arguments: effect
                         .arguments
                         .into_iter()
-                        .map(|argument| substitute_generic_type(argument, substitutions))
+                        .map(|argument| substitute_generic_argument(argument, substitutions))
                         .collect::<Option<_>>()?,
                 })
             })

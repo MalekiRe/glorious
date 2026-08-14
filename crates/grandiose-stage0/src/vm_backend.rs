@@ -473,6 +473,13 @@ pub enum VmArtifactError {
         local: u32,
         ty: Type,
     },
+    /// Effect identity retains all generic kinds in Core and MIR. The current
+    /// bytecode encodes only VM value types, so non-type protocol arguments
+    /// must be rejected before lowering rather than reinterpreted.
+    UnsupportedEffectArgument {
+        effect: DefKey,
+        argument: Box<crate::GenericArgument>,
+    },
     UnsupportedControlFlow,
     InvalidRegister {
         register: u32,
@@ -977,6 +984,30 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
     {
         return Err(VmArtifactError::UnsupportedControlFlow);
     }
+    for instruction in function.blocks.iter().flat_map(|block| &block.instructions) {
+        let (effect, arguments) = match instruction {
+            MirInstruction::Perform {
+                effect,
+                effect_arguments,
+                ..
+            }
+            | MirInstruction::InstallHandler {
+                effect,
+                effect_arguments,
+                ..
+            } => (effect, effect_arguments),
+            _ => continue,
+        };
+        if let Some(argument) = arguments
+            .iter()
+            .find(|argument| !matches!(argument, crate::GenericArgument::Type(_)))
+        {
+            return Err(VmArtifactError::UnsupportedEffectArgument {
+                effect: *effect,
+                argument: Box::new(argument.clone()),
+            });
+        }
+    }
     let mut registers = function
         .locals
         .iter()
@@ -1245,6 +1276,13 @@ fn vm_type(value: &Type) -> Result<VmType, Type> {
         }),
         value => Err(value.clone()),
     }
+}
+
+fn vm_effect_argument(value: &crate::GenericArgument) -> VmType {
+    let crate::GenericArgument::Type(value) = value else {
+        unreachable!("effect arguments were validated before VM lowering")
+    };
+    vm_type(value).expect("validated MIR has VM-representable effect arguments")
 }
 fn encode_type(value: &VmType, output: &mut Vec<u8>) {
     output.push(match value {
@@ -2384,12 +2422,7 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
         } => VmInstruction::Perform {
             dst: dst.0,
             effect: *effect,
-            effect_arguments: effect_arguments
-                .iter()
-                .map(|argument| {
-                    vm_type(argument).expect("validated MIR has VM-representable effect arguments")
-                })
-                .collect(),
+            effect_arguments: effect_arguments.iter().map(vm_effect_argument).collect(),
             operation: *operation,
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
@@ -2402,12 +2435,7 @@ fn lower_instruction(value: &MirInstruction, starts: &[u32]) -> VmInstruction {
             target,
         } => VmInstruction::InstallHandler {
             effect: *effect,
-            effect_arguments: effect_arguments
-                .iter()
-                .map(|argument| {
-                    vm_type(argument).expect("validated MIR has VM-representable effect arguments")
-                })
-                .collect(),
+            effect_arguments: effect_arguments.iter().map(vm_effect_argument).collect(),
             operation: *operation,
             payload_destinations: payload_destinations
                 .iter()
