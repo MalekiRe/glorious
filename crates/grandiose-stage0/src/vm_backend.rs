@@ -348,9 +348,10 @@ pub enum VmInstruction {
     Resume {
         value: u32,
     },
-    /// Invoke a replayable continuation as a callable operation. The resumed
+    /// Invoke a resumable continuation as a callable operation. The resumed
     /// computation returns to the handler clause and writes its result to
-    /// `dst`, allowing the clause to invoke the same snapshot again.
+    /// `dst`; a replay frame retains its snapshot while a one-shot frame is
+    /// consumed before the protected computation runs.
     ResumeReturn {
         dst: u32,
         value: u32,
@@ -5009,7 +5010,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let Some(frame) = states.handlers.last() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if !frame.continuation.is_replay() || frame.continuations.is_empty() {
+                if frame.continuation == VmContinuationPolicy::Terminal
+                    || frame.continuations.is_empty()
+                {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let continuation = frame
@@ -5025,21 +5028,24 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         found,
                     });
                 }
-                // The resume-return edge is verified by the source/MIR
-                // contract and preserves the clause state. Its result has
-                // the protected computation's type at the callsite.
+                // The resumed path returns from the enclosing function after
+                // its protected computation completes.  A replay-only root
+                // shape can have the same type as the resume argument, but
+                // an interprocedural one-shot continuation commonly does
+                // not (for example `Unit -> i64`).
                 let result = register_type(function, *dst)?;
-                if result != frame.resume_type {
+                let function_result = return_type(function)?;
+                if result != frame.resume_type && result != function_result {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
-                        expected: frame.resume_type.clone(),
+                        expected: function_result,
                         found: result,
                     });
                 }
                 let mut resumed_handlers = states.handlers.clone();
                 resumed_handlers
                     .last_mut()
-                    .expect("active replay handler exists")
+                    .expect("active resumable handler exists")
                     .continuations
                     .clear();
                 resumed_handlers.extend(continuation.above.clone());
@@ -7257,17 +7263,20 @@ fn execute(
                 let resumed = registers[value as usize]
                     .clone()
                     .ok_or(VmArtifactError::ReadBeforeWrite { register: value })?;
-                let Some(frame) = handlers.last() else {
+                let Some(frame) = handlers.last_mut() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if !frame.continuation.is_replay() {
+                if frame.continuation == VmContinuationPolicy::Terminal {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let continuation = frame
-                    .suspended
-                    .clone()
-                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-                if continuation.remaining_replays == 0 {
+                let replaying = frame.continuation.is_replay();
+                let continuation = if replaying {
+                    frame.suspended.clone()
+                } else {
+                    frame.suspended.take()
+                }
+                .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if replaying && continuation.remaining_replays == 0 {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 budget.reserve_allocation(registers.len())?;
@@ -7288,11 +7297,13 @@ fn execute(
                     .chain(above.iter().map(|frame| frame.id))
                     .collect();
                 let mut return_handlers = handlers.clone();
-                return_handlers
-                    .last_mut()
-                    .and_then(|frame| frame.suspended.as_mut())
-                    .expect("checked suspended replay handler")
-                    .remaining_replays -= 1;
+                if replaying {
+                    return_handlers
+                        .last_mut()
+                        .and_then(|frame| frame.suspended.as_mut())
+                        .expect("checked suspended replay handler")
+                        .remaining_replays -= 1;
+                }
                 resumption_returns.push(RuntimeResumptionReturn {
                     pc: pc + 1,
                     dst,
@@ -7303,7 +7314,9 @@ fn execute(
                 // The active execution gets a clean handler frame so its
                 // protected `UninstallHandler` can run. The clause snapshot
                 // above retains the suspended continuation for the next use.
-                handlers.last_mut().expect("active frame exists").suspended = None;
+                if replaying {
+                    handlers.last_mut().expect("active frame exists").suspended = None;
+                }
                 handlers.extend(above);
                 registers = saved_registers;
                 registers[continuation_dst as usize] = Some(resumed);
@@ -8934,17 +8947,20 @@ fn execute_with_arguments(
                 let resumed = registers[*value as usize]
                     .clone()
                     .ok_or(VmArtifactError::ReadBeforeWrite { register: *value })?;
-                let Some(frame) = handlers.last() else {
+                let Some(frame) = handlers.last_mut() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if !frame.continuation.is_replay() {
+                if frame.continuation == VmContinuationPolicy::Terminal {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let continuation = frame
-                    .suspended
-                    .clone()
-                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-                if continuation.remaining_replays == 0 {
+                let replaying = frame.continuation.is_replay();
+                let continuation = if replaying {
+                    frame.suspended.clone()
+                } else {
+                    frame.suspended.take()
+                }
+                .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                if replaying && continuation.remaining_replays == 0 {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 budget.reserve_allocation(registers.len())?;
@@ -8966,11 +8982,13 @@ fn execute_with_arguments(
                     .chain(above.iter().map(|frame| frame.id))
                     .collect();
                 let mut return_handlers = handlers.clone();
-                return_handlers
-                    .last_mut()
-                    .and_then(|frame| frame.suspended.as_mut())
-                    .expect("checked suspended replay handler")
-                    .remaining_replays -= 1;
+                if replaying {
+                    return_handlers
+                        .last_mut()
+                        .and_then(|frame| frame.suspended.as_mut())
+                        .expect("checked suspended replay handler")
+                        .remaining_replays -= 1;
+                }
                 resumption_returns.push(RuntimeResumptionReturn {
                     pc: pc + 1,
                     dst: *dst,
@@ -8978,7 +8996,9 @@ fn execute_with_arguments(
                     handlers: return_handlers,
                     resumed_handler_ids,
                 });
-                handlers.last_mut().expect("active frame exists").suspended = None;
+                if replaying {
+                    handlers.last_mut().expect("active frame exists").suspended = None;
+                }
                 handlers.extend(above);
                 if let Some(program) = program {
                     definition = program.definition;

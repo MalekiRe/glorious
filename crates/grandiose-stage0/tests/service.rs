@@ -6695,6 +6695,83 @@ fn service_links_public_dependency_package_interfaces_and_bodies() {
 }
 
 #[test]
+fn service_materializes_reachable_generic_dependency_callables() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::identity; pub fn main() -> i64 { identity(42) }",
+            "math@0.1.0",
+            "pub fn identity<T>(value: T) -> T { value }",
+        ))
+        .expect("a reachable generic dependency body must materialize into the linked artifact");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_links_private_helpers_reached_from_specialized_dependency_generics() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::relay; pub fn main() -> i64 { relay(42) }",
+            "math@0.1.0",
+            "fn helper<T>(value: T) -> T { value } pub fn relay<T>(value: T) -> T { helper(value) }",
+        ))
+        .expect("a specialized exported generic must retain its dependency-private helper body");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_links_transitive_dependency_callable_bodies() {
+    let mut request = request("use middle::relay; pub fn main() -> i64 { relay() }");
+    request.sources.push(SourceInput::new(
+        PackageKey("middle@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"use base::answer; pub fn relay() -> i64 { answer() }".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("base@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn answer() -> i64 { 42 }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("transitive dependency callable bodies must link into the root artifact");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_materializes_dependency_generic_function_values_for_indirect_calls() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::identity; pub fn apply(function: (i64) -> i64) -> i64 { function(42) } pub fn main() -> i64 { apply(identity) }",
+            "math@0.1.0",
+            "pub fn identity<T>(value: T) -> T { value }",
+        ))
+        .expect("generic dependency function values must be materialized before indirect execution");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_materializes_dependency_generic_trait_method_values_for_indirect_calls() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::Replace; pub fn apply(function: (i64, Text) -> Text) -> Text { function(0, \"linked\") } pub fn main() -> Text { apply(Replace::replace) }",
+            "math@0.1.0",
+            "pub trait Replace { fn replace<T>(value: i64, replacement: T) -> T; } impl Replace for i64 { fn replace<T>(value: i64, replacement: T) -> T { replacement } }",
+        ))
+        .expect("selected generic dependency trait method values must materialize before indirect execution");
+    assert_eq!(outcome.artifact.unwrap().run_text().unwrap(), "linked");
+}
+
+#[test]
+fn service_returns_interprocedural_one_shot_continuation_results_to_the_handler_clause() {
+    let source = "effect Ask { [1,1] ask() -> i64; } pub fn worker() -> i64 / Ask { let value = Ask::ask(); value + 1 } pub fn main() -> i64 { handle worker() { Ask::ask() with k => k(41) + 1 } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a one-shot continuation result may feed the remainder of its handler clause");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
 fn service_follows_dependency_module_declarations_within_their_own_package_world() {
     let mut request = request("use math::api::answer; pub fn main() -> i64 { answer() }");
     let package = PackageKey("math@0.1.0".into());

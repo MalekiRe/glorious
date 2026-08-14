@@ -3837,6 +3837,11 @@ struct DirectResumptionState {
 #[derive(Clone, Debug)]
 enum DirectResumptionPlan {
     Identity,
+    /// Consume the active one-shot snapshot, execute its protected suffix,
+    /// then return that suffix's result to the clause callsite.  This is
+    /// distinct from `Identity`: an interprocedural continuation can have a
+    /// non-empty residual after the performed operation.
+    RuntimeConsumeReturn,
     /// A real VM replay frame. Each source call transfers into a fresh
     /// continuation snapshot and returns its result to the clause callsite.
     RuntimeReplay,
@@ -11064,18 +11069,41 @@ impl Lowerer<'_> {
             instructions: entry,
             terminator: MirTerminator::Return { value: result },
         }];
+        let consume_returning_clause = active.len() == 1
+            && matches!(
+                active[0].resumption,
+                CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                }
+            );
         let previous_named = self.named.clone();
         for (clause, payloads) in active.iter().zip(payloads) {
             self.instructions = Vec::new();
             self.named = previous_named.clone();
             self.bind_handler_patterns(&clause.patterns, &payloads)?;
-            let resumed = self.direct_handler_clause_value(clause)?;
-            self.instructions
-                .push(MirInstruction::Resume { value: resumed });
+            let resumed = if consume_returning_clause {
+                self.direct_handler_clause_value_for_consuming_return(clause)?
+            } else {
+                self.direct_handler_clause_value(clause)?
+            };
+            if consume_returning_clause {
+                // `ResumeReturn` restores an inactive copy of this frame
+                // after the protected callee finishes.  Close that lexical
+                // frame before publishing the clause result.
+                self.instructions.push(MirInstruction::UninstallHandler);
+            } else {
+                self.instructions
+                    .push(MirInstruction::Resume { value: resumed });
+            }
             blocks.push(MirBlock {
                 parameters: vec![],
                 instructions: std::mem::take(&mut self.instructions),
-                terminator: MirTerminator::Unreachable,
+                terminator: if consume_returning_clause {
+                    MirTerminator::Return { value: resumed }
+                } else {
+                    MirTerminator::Unreachable
+                },
             });
         }
         self.named = previous_named;
@@ -11965,6 +11993,47 @@ impl Lowerer<'_> {
             }
         }
     }
+
+    /// Lower the precise one-shot shape where an interprocedural protected
+    /// computation must finish before the clause can continue.  The ordinary
+    /// `Identity` plan is valid only when no residual result can flow back to
+    /// the clause; using it here silently replaced that result with the
+    /// operation's resume argument.
+    fn direct_handler_clause_value_for_consuming_return(
+        &mut self,
+        clause: &CoreHandlerClause,
+    ) -> Option<MirLocal> {
+        let CoreHandlerResumption::Explicit { name, quantity } = &clause.resumption else {
+            return None;
+        };
+        if *quantity != crate::quantity::Quantity::ONCE
+            || self.handler_body_uses_snapshot_alias(clause.body)
+        {
+            return None;
+        }
+        let previous = self.direct_resumption.replace(DirectResumptionState {
+            name: name.clone(),
+            quantity: *quantity,
+            calls: 0,
+            plan: DirectResumptionPlan::RuntimeConsumeReturn,
+        });
+        let result = self.value(clause.body);
+        let state = self
+            .direct_resumption
+            .take()
+            .expect("direct resumption state must outlive its clause body");
+        self.direct_resumption = previous;
+        let result = result?;
+        let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls)).ok()?;
+        if !state.quantity.contains(actual) {
+            self.error(
+                "G6005",
+                "direct resumptive handler calls do not satisfy its declared quantity",
+            );
+            return None;
+        }
+        Some(result)
+    }
     fn handler_body_uses_snapshot_alias(&self, id: CoreId) -> bool {
         match &self.body.expression(id).kind {
             CoreKind::Let { value, .. } => {
@@ -12700,7 +12769,8 @@ impl Lowerer<'_> {
                             self.instructions
                                 .push(MirInstruction::Copy { dst, src: argument });
                         }
-                        DirectResumptionPlan::RuntimeReplay => {
+                        DirectResumptionPlan::RuntimeConsumeReturn
+                        | DirectResumptionPlan::RuntimeReplay => {
                             self.instructions.push(MirInstruction::ResumeReturn {
                                 dst,
                                 value: argument,
