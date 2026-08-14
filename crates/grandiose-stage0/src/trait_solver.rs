@@ -831,9 +831,12 @@ fn match_type(
                 Some(())
             }
         },
-        Type::Unit | Type::Never | Type::Scalar(_) | Type::Error => {
-            (template == actual).then_some(())
-        }
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstGeneric { .. }
+        | Type::Error => (template == actual).then_some(()),
         Type::Nominal {
             definition,
             arguments,
@@ -1144,6 +1147,10 @@ fn projection_is_concrete(value: &Type) -> bool {
         Type::Callable {
             parameters, result, ..
         } => parameters.iter().all(projection_is_concrete) && projection_is_concrete(result),
-        Type::Unit | Type::Never | Type::Scalar(_) => true,
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstGeneric { .. } => true,
     }
 }

@@ -351,6 +351,22 @@ impl TypedBody {
                         .collect()
                 })
                 .unwrap_or_default(),
+            const_parameters: definition
+                .callable_header()
+                .map(|header| {
+                    header
+                        .generics
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, name)| {
+                            header
+                                .generics
+                                .const_kind(name)
+                                .map(|kind| (name.clone(), (index as u32, kind)))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
             declared_effects: signatures
                 .definitions
                 .get(&definition.key)
@@ -507,6 +523,21 @@ impl TypedBody {
                 }
                 parameters
             },
+            const_parameters: {
+                let mut parameters = std::collections::BTreeMap::new();
+                for (index, name) in context.implementation_header.generics.iter().enumerate() {
+                    if let Some(kind) = context.implementation_header.generics.const_kind(name) {
+                        parameters.insert(name.clone(), (index as u32, kind));
+                    }
+                }
+                let method_base = context.implementation_header.generics.len() as u32;
+                for (offset, name) in context.method.signature.generics.iter().enumerate() {
+                    if let Some(kind) = context.method.signature.generics.const_kind(name) {
+                        parameters.insert(name.clone(), (method_base + offset as u32, kind));
+                    }
+                }
+                parameters
+            },
             declared_effects: context.signature.effects.clone(),
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
@@ -576,6 +607,7 @@ impl TypedBody {
             effect_row_parameters: std::collections::BTreeMap::new(),
             const_parameters: std::collections::BTreeSet::new(),
             lifetime_parameters: std::collections::BTreeMap::new(),
+            const_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
@@ -695,6 +727,10 @@ struct Elaborator<'a> {
     /// Lifetime binders have their own namespace and slot identity. They are
     /// valid only as the qualifier of a reference, never as a value type.
     lifetime_parameters: std::collections::BTreeMap<String, u32>,
+    /// Structural const binders share source-slot numbering with the other
+    /// generic kinds, but are only valid while elaborating an explicit const
+    /// argument of a kinded nominal application.
+    const_parameters: std::collections::BTreeMap<String, (u32, crate::ConstKind)>,
     declared_effects: EffectRow,
     /// Protocol instances exhaustively intercepted by lexically active deep
     /// handlers.  A partial handler never enters this set, so forwarding still
@@ -1196,17 +1232,11 @@ impl Elaborator<'_> {
                 name,
                 item_arguments,
             } => self.header_projection(subject, trait_path, trait_arguments, name, item_arguments),
-            HeaderType::Path(path) => self.header_path(path, vec![]),
-            HeaderType::Application(base, arguments) => {
-                let arguments = arguments
-                    .iter()
-                    .map(|argument| self.header_type(argument))
-                    .collect::<Vec<_>>();
-                match base.as_ref() {
-                    HeaderType::Path(path) => self.header_path(path, arguments),
-                    _ => Type::Error,
-                }
-            }
+            HeaderType::Path(path) => self.header_path(path, &[]),
+            HeaderType::Application(base, arguments) => match base.as_ref() {
+                HeaderType::Path(path) => self.header_path(path, arguments),
+                _ => Type::Error,
+            },
         }
     }
     fn header_lifetime(&mut self, spelling: Option<&str>) -> Lifetime {
@@ -1390,7 +1420,11 @@ impl Elaborator<'_> {
             answer => self.projection_normalization_error(answer),
         }
     }
-    fn header_path(&mut self, path: &[String], arguments: Vec<Type>) -> Type {
+    fn header_path(
+        &mut self,
+        path: &[String],
+        arguments: &[crate::header::HeaderGenericArgument],
+    ) -> Type {
         let Some(name) = path.last() else {
             return Type::Error;
         };
@@ -1437,8 +1471,10 @@ impl Elaborator<'_> {
                 };
             }
             if name == "Array" {
-                return match arguments.as_slice() {
-                    [element] => Type::Array(Box::new(element.clone())),
+                return match arguments {
+                    [crate::header::HeaderGenericArgument::Type(element)] => {
+                        Type::Array(Box::new(self.header_type(element)))
+                    }
                     _ => Type::Error,
                 };
             }
@@ -1447,10 +1483,43 @@ impl Elaborator<'_> {
             .index
             .resolve_path(DefinitionNamespace::Type, self.module, path)
         {
-            ResolutionState::Resolved(definition) => Type::Nominal {
-                definition,
-                arguments,
-            },
+            ResolutionState::Resolved(definition) => {
+                let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
+                if kinds.len() != arguments.len() {
+                    return Type::Error;
+                }
+                Type::Nominal {
+                    definition,
+                    arguments: arguments
+                        .iter()
+                        .zip(kinds)
+                        .map(|(argument, kind)| match (argument, kind) {
+                            (
+                                crate::header::HeaderGenericArgument::Type(value),
+                                crate::GenericKind::Type,
+                            ) => self.header_type(value),
+                            (
+                                crate::header::HeaderGenericArgument::U32(value),
+                                crate::GenericKind::Const(crate::ConstKind::U32),
+                            ) => Type::ConstU32(*value),
+                            (
+                                crate::header::HeaderGenericArgument::Type(
+                                    crate::header::HeaderType::Path(path),
+                                ),
+                                crate::GenericKind::Const(kind),
+                            ) if path.len() == 1 => self
+                                .const_parameters
+                                .get(&path[0])
+                                .filter(|(_, found)| found == kind)
+                                .map_or(Type::Error, |(index, kind)| Type::ConstGeneric {
+                                    index: *index,
+                                    kind: *kind,
+                                }),
+                            _ => Type::Error,
+                        })
+                        .collect(),
+                }
+            }
             ResolutionState::Ambiguous(_) => Type::Error,
             ResolutionState::Inaccessible(_)
             | ResolutionState::Unresolved
@@ -1529,7 +1598,12 @@ impl Elaborator<'_> {
                         definition,
                         arguments: arguments
                             .iter()
-                            .map(|argument| self.header_type(argument))
+                            .map(|argument| match argument {
+                                crate::header::HeaderGenericArgument::Type(argument) => {
+                                    self.header_type(argument)
+                                }
+                                crate::header::HeaderGenericArgument::U32(_) => Type::Error,
+                            })
                             .collect(),
                     });
                 }
@@ -3783,7 +3857,12 @@ fn projection_is_concrete(value: &Type) -> bool {
         Type::Callable {
             parameters, result, ..
         } => parameters.iter().all(projection_is_concrete) && projection_is_concrete(result),
-        Type::Unit | Type::Never | Type::Scalar(_) | Type::Error => true,
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstGeneric { .. }
+        | Type::Error => true,
     }
 }
 

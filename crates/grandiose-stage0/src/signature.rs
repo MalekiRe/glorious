@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use crate::{
     header::{
         CallableHeader, EffectHeader, EffectRowHeader, EnumVariantPayloadHeader, GenericParameters,
-        HeaderType, ImplementationHeader, NominalLayoutHeader, ParsedHeader, TraitHeader,
-        TraitRefHeader,
+        HeaderGenericArgument, HeaderType, ImplementationHeader, NominalLayoutHeader, ParsedHeader,
+        TraitHeader, TraitRefHeader,
     },
     identity::{DefKey, ModuleKey},
     interface::{Definition, DefinitionNamespace, PackageInterface},
@@ -1536,9 +1536,23 @@ impl Elaborator<'_> {
             let (path, arguments) = match effect {
                 HeaderType::Path(path) => (path, vec![]),
                 HeaderType::Application(base, arguments) => match base.as_ref() {
-                    HeaderType::Path(path) => {
-                        (path, arguments.iter().map(|value| self.ty(value)).collect())
-                    }
+                    HeaderType::Path(path) => (
+                        path,
+                        arguments
+                            .iter()
+                            .map(|value| match value {
+                                HeaderGenericArgument::Type(value) => self.ty(value),
+                                HeaderGenericArgument::U32(_) => {
+                                    self.error(
+                                        "G3318",
+                                        "effect arguments must be types, not structural constants"
+                                            .into(),
+                                    );
+                                    Type::Error
+                                }
+                            })
+                            .collect(),
+                    ),
                     _ => {
                         self.error("G3312", "effect row member is not a nominal path".into());
                         continue;
@@ -1779,22 +1793,19 @@ impl Elaborator<'_> {
                 }
             }
             HeaderType::Path(path) => self.path(path, vec![]),
-            HeaderType::Application(base, arguments) => {
-                let arguments = arguments.iter().map(|argument| self.ty(argument)).collect();
-                match base.as_ref() {
-                    HeaderType::Path(path) => self.path(path, arguments),
-                    _ => {
-                        self.error(
-                            "G3302",
-                            "type application base is not a nominal path".into(),
-                        );
-                        Type::Error
-                    }
+            HeaderType::Application(base, arguments) => match base.as_ref() {
+                HeaderType::Path(path) => self.path(path, arguments.clone()),
+                _ => {
+                    self.error(
+                        "G3302",
+                        "type application base is not a nominal path".into(),
+                    );
+                    Type::Error
                 }
-            }
+            },
         }
     }
-    fn path(&mut self, path: &[String], arguments: Vec<Type>) -> Type {
+    fn path(&mut self, path: &[String], arguments: Vec<HeaderGenericArgument>) -> Type {
         let Some(name) = path.last() else {
             return Type::Error;
         };
@@ -1841,7 +1852,9 @@ impl Elaborator<'_> {
             }
             if name == "Array" {
                 return match arguments.as_slice() {
-                    [element] => Type::Array(Box::new(element.clone())),
+                    [HeaderGenericArgument::Type(element)] => {
+                        Type::Array(Box::new(self.ty(element)))
+                    }
                     _ => {
                         self.arity(name, 1, arguments.len());
                         Type::Error
@@ -1859,9 +1872,10 @@ impl Elaborator<'_> {
                     self.arity(name, expected, arguments.len());
                     Type::Error
                 } else {
+                    let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
                     Type::Nominal {
                         definition,
-                        arguments,
+                        arguments: self.elaborate_generic_arguments(name, &arguments, kinds),
                     }
                 }
             }
@@ -1878,6 +1892,79 @@ impl Elaborator<'_> {
                 Type::Error
             }
         }
+    }
+    fn elaborate_generic_arguments(
+        &mut self,
+        name: &str,
+        arguments: &[HeaderGenericArgument],
+        kinds: &[GenericKind],
+    ) -> Vec<Type> {
+        arguments
+            .iter()
+            .zip(kinds)
+            .map(|(argument, kind)| match (argument, kind) {
+                (HeaderGenericArgument::Type(value), GenericKind::Type) => self.ty(value),
+                (HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
+                    Type::ConstU32(*value)
+                }
+                (HeaderGenericArgument::Type(HeaderType::Path(path)), GenericKind::Const(kind))
+                    if path.len() == 1 =>
+                {
+                    let const_name = &path[0];
+                    match self.const_generics.get(const_name) {
+                        Some((index, found)) if found == kind => Type::ConstGeneric {
+                            index: *index,
+                            kind: *kind,
+                        },
+                        Some((_, found)) => {
+                            self.error(
+                                "G3318",
+                                format!(
+                                    "const generic `{const_name}` of kind `{}` cannot fill `{}` slot of `{name}`",
+                                    const_kind_name(*found),
+                                    const_kind_name(*kind),
+                                ),
+                            );
+                            Type::Error
+                        }
+                        None => {
+                            self.error(
+                                "G3318",
+                                format!(
+                                    "generic argument for `{name}` must be a structural `{}` constant",
+                                    const_kind_name(*kind),
+                                ),
+                            );
+                            Type::Error
+                        }
+                    }
+                }
+                (HeaderGenericArgument::U32(_), GenericKind::Type) => {
+                    self.error(
+                        "G3318",
+                        format!("type slot of `{name}` cannot receive a structural constant"),
+                    );
+                    Type::Error
+                }
+                (_, GenericKind::Const(kind)) => {
+                    self.error(
+                        "G3318",
+                        format!(
+                            "generic argument for `{name}` must be a structural `{}` constant",
+                            const_kind_name(*kind),
+                        ),
+                    );
+                    Type::Error
+                }
+                (_, GenericKind::EffectRow) | (_, GenericKind::Lifetime) => {
+                    self.error(
+                        "G3318",
+                        format!("generic argument for `{name}` has an unsupported non-type kind"),
+                    );
+                    Type::Error
+                }
+            })
+            .collect()
     }
     fn arity(&mut self, name: &str, expected: usize, found: usize) {
         self.error(
@@ -2087,6 +2174,10 @@ fn normalize_nominal_fields(
 fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
     match value {
         Type::Generic(index) => arguments
+            .get(index as usize)
+            .cloned()
+            .unwrap_or(Type::Error),
+        Type::ConstGeneric { index, .. } => arguments
             .get(index as usize)
             .cloned()
             .unwrap_or(Type::Error),

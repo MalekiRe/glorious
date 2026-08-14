@@ -209,7 +209,9 @@ fn collect_generic_names(
         HeaderType::Application(base, arguments) => {
             collect_generic_names(base, declared, used);
             for argument in arguments {
-                collect_generic_names(argument, declared, used);
+                if let crate::header::HeaderGenericArgument::Type(argument) = argument {
+                    collect_generic_names(argument, declared, used);
+                }
             }
         }
         HeaderType::Projection {
@@ -314,8 +316,16 @@ fn unify_type(
                 && left_arguments
                     .iter()
                     .zip(right_arguments)
-                    .all(|(left, right)| {
-                        unify_type(left, right, left_generics, right_generics, bindings)
+                    .all(|(left, right)| match (left, right) {
+                        (
+                            crate::header::HeaderGenericArgument::Type(left),
+                            crate::header::HeaderGenericArgument::Type(right),
+                        ) => unify_type(left, right, left_generics, right_generics, bindings),
+                        (
+                            crate::header::HeaderGenericArgument::U32(left),
+                            crate::header::HeaderGenericArgument::U32(right),
+                        ) => left == right,
+                        _ => false,
                     })
         }
         (HeaderType::Tuple(left), HeaderType::Tuple(right)) => {

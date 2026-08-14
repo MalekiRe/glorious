@@ -204,6 +204,17 @@ pub enum Type {
         effects: EffectRow,
         invocation: Quantity,
     },
+    /// A normalized structural `u32` supplied to a const generic slot. This
+    /// is an argument term, not a standalone source type; header elaboration
+    /// enforces that it only occupies a `ConstKind::U32` slot.
+    ConstU32(u32),
+    /// A const binder occurrence retained in a nominal identity.  It shares
+    /// the owner-local source slot numbering with other generic kinds, while
+    /// its explicit kind prevents type substitution from accepting it.
+    ConstGeneric {
+        index: u32,
+        kind: ConstKind,
+    },
     Generic(u32),
     Infer(InferVar),
     Error,
@@ -275,6 +286,22 @@ impl InferContext {
             (Type::Never, value) | (value, Type::Never) => Ok(value),
             (Type::Unit, Type::Unit) => Ok(Type::Unit),
             (Type::Scalar(left), Type::Scalar(right)) if left == right => Ok(Type::Scalar(left)),
+            (Type::ConstU32(left), Type::ConstU32(right)) if left == right => {
+                Ok(Type::ConstU32(left))
+            }
+            (
+                Type::ConstGeneric {
+                    index: left_index,
+                    kind: left_kind,
+                },
+                Type::ConstGeneric {
+                    index: right_index,
+                    kind: right_kind,
+                },
+            ) if left_index == right_index && left_kind == right_kind => Ok(Type::ConstGeneric {
+                index: left_index,
+                kind: left_kind,
+            }),
             (Type::Generic(left), Type::Generic(right)) if left == right => Ok(Type::Generic(left)),
             (Type::Error, _) | (_, Type::Error) => Ok(Type::Error),
             (
@@ -995,6 +1022,18 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
         Type::Generic(index) => {
             output.push(8);
             output.extend_from_slice(&index.to_le_bytes());
+        }
+        Type::ConstU32(value) => {
+            output.push(12);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        Type::ConstGeneric { index, kind } => {
+            output.push(13);
+            output.extend_from_slice(&index.to_le_bytes());
+            output.push(match kind {
+                ConstKind::U32 => 0,
+                ConstKind::Quantity => 1,
+            });
         }
         // Effect-instance ordering is also used while elaborating recovered
         // source. These encodings are deterministic body-local order keys;

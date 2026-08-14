@@ -64,6 +64,68 @@ fn declaration_index_retains_const_generic_kinds_for_future_argument_elaboration
 }
 
 #[test]
+fn nominal_const_applications_preserve_literals_and_binder_identity() {
+    let package = PackageKey("signature-const-generic-applications@0.1.0".into());
+    let source = "pub struct Tag<n: u32> {} pub type Alias<n: u32> = Tag<n>; pub fn literal() -> Tag<7> { panic } pub fn inherited<n: u32>() -> Tag<n> { panic } pub fn through_alias() -> Alias<9> { panic }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let lookup = |name: &str| {
+        let key = interface
+            .definitions
+            .iter()
+            .find(|definition| definition.name.as_deref() == Some(name))
+            .expect("callable definition")
+            .key;
+        match signatures.definitions.get(&key).expect("signature") {
+            ElaboratedHeader::Callable(signature) => signature.result.clone(),
+            _ => panic!("expected callable"),
+        }
+    };
+    assert!(matches!(
+        lookup("literal"),
+        Type::Nominal { arguments, .. } if arguments == vec![Type::ConstU32(7)]
+    ));
+    assert!(matches!(
+        lookup("inherited"),
+        Type::Nominal { arguments, .. }
+            if arguments == vec![Type::ConstGeneric { index: 0, kind: ConstKind::U32 }]
+    ));
+    assert!(matches!(
+        lookup("through_alias"),
+        Type::Nominal { arguments, .. } if arguments == vec![Type::ConstU32(9)]
+    ));
+}
+
+#[test]
+fn nominal_const_applications_reject_wrong_slot_kinds() {
+    let package = PackageKey("signature-const-generic-slot-kinds@0.1.0".into());
+    let source = "pub struct Tag<n: u32> {} pub struct Box<T> {} pub fn type_in_const() -> Tag<i64> { panic } pub fn const_in_type() -> Box<7> { panic }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert_eq!(
+        signatures
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "G3318")
+            .count(),
+        2,
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn interfaces_preserve_declared_reference_lifetimes_without_type_slots() {
     let package = PackageKey("signature-reference-lifetimes@0.1.0".into());
     let source = "pub fn borrow<'a>(value: &'a i64, fallback: &i64) -> &'static i64 { value }";

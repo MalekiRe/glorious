@@ -78,7 +78,7 @@ impl<const N: usize> PartialEq<[&str; N]> for GenericParameters {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeaderType {
     Path(Vec<String>),
-    Application(Box<HeaderType>, Vec<HeaderType>),
+    Application(Box<HeaderType>, Vec<HeaderGenericArgument>),
     /// An associated type selected through an explicit trait relation.  The
     /// angle-bracket form avoids treating a qualified path as either a module
     /// path or an associated item before its receiver has been elaborated.
@@ -109,6 +109,15 @@ pub enum HeaderType {
     },
     Never,
     Recovered,
+}
+
+/// An explicitly supplied nominal generic argument.  Structural constants are
+/// kept distinct from source types before elaboration, preventing value syntax
+/// from entering the type namespace by accident.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HeaderGenericArgument {
+    Type(HeaderType),
+    U32(u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1412,7 +1421,7 @@ impl Parser<'_> {
         }
         let mut value = HeaderType::Path(path);
         if self.at_operator("<") {
-            let arguments = self.type_arguments();
+            let arguments = self.generic_arguments();
             value = HeaderType::Application(Box::new(value), arguments);
         }
         value
@@ -1431,6 +1440,37 @@ impl Parser<'_> {
         }
         if !self.operator(">") {
             self.error("G3208", "expected `>` after type arguments");
+        }
+        arguments
+    }
+    fn generic_arguments(&mut self) -> Vec<HeaderGenericArgument> {
+        if !self.at_operator("<") {
+            return vec![];
+        }
+        self.position += 1;
+        let mut arguments = vec![];
+        while self.current().is_some() && !self.at_operator(">") {
+            if let Some(index) = self.current()
+                && self.lexed.tokens[index].kind == TokenKind::Integer
+            {
+                let text = self.text(index).to_owned();
+                self.position += 1;
+                match text.parse::<u32>() {
+                    Ok(value) => arguments.push(HeaderGenericArgument::U32(value)),
+                    Err(_) => {
+                        self.error("G3222", "structural u32 generic argument is out of range");
+                        arguments.push(HeaderGenericArgument::U32(0));
+                    }
+                }
+            } else {
+                arguments.push(HeaderGenericArgument::Type(self.ty()));
+            }
+            if !self.punctuation(',') {
+                break;
+            }
+        }
+        if !self.operator(">") {
+            self.error("G3208", "expected `>` after generic arguments");
         }
         arguments
     }

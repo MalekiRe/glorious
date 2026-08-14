@@ -1,6 +1,7 @@
 use grandiose_stage0::{
-    BodySyntax, ConstKind, DeclarationScan, Digest, EnumVariantPayloadHeader, FileKey, HeaderParse,
-    HeaderType, LexedFile, LogicalPath, NominalLayoutHeader, PackageKey, ParsedHeader, Quantity,
+    BodySyntax, ConstKind, DeclarationScan, Digest, EnumVariantPayloadHeader, FileKey,
+    HeaderGenericArgument, HeaderParse, HeaderType, LexedFile, LogicalPath, NominalLayoutHeader,
+    PackageKey, ParsedHeader, Quantity,
 };
 
 #[test]
@@ -25,6 +26,25 @@ fn callable_headers_share_generic_and_type_grammar_without_parsing_the_body() {
     ));
     assert!(matches!(header.result, Some(HeaderType::Application(_, _))));
     assert_ne!(Digest::of_bytes(b""), lexed.source_fingerprint);
+}
+
+#[test]
+fn nominal_headers_retain_structural_u32_arguments() {
+    let package = PackageKey("header-structural-u32-argument@0.1.0".into());
+    let source = "pub fn seven() -> Tag<7> { seven }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert!(matches!(
+        header.result,
+        Some(HeaderType::Application(_, arguments))
+            if arguments == vec![HeaderGenericArgument::U32(7)]
+    ));
 }
 
 #[test]

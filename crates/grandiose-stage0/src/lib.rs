@@ -52,10 +52,10 @@ pub use fixity::{Fixity, FixityPosition, FixityTable};
 pub use header::{
     AssociatedTypeDefinitionHeader, AssociatedTypeHeader, CallableHeader, EffectHeader,
     EffectOperationHeader, EffectRowHeader, EnumVariantHeader, EnumVariantPayloadHeader,
-    FixityForm, FixityHeader, GenericParameters, HeaderDiagnostic, HeaderParameter, HeaderParse,
-    HeaderType, ImplementationHeader, ImplementationMethodHeader, ImportBindingHeader,
-    ImportHeader, NominalFieldHeader, NominalLayoutHeader, ParsedHeader, TraitHeader,
-    TraitMethodHeader, TraitRefHeader, WhereBoundHeader,
+    FixityForm, FixityHeader, GenericParameters, HeaderDiagnostic, HeaderGenericArgument,
+    HeaderParameter, HeaderParse, HeaderType, ImplementationHeader, ImplementationMethodHeader,
+    ImportBindingHeader, ImportHeader, NominalFieldHeader, NominalLayoutHeader, ParsedHeader,
+    TraitHeader, TraitMethodHeader, TraitRefHeader, WhereBoundHeader,
 };
 pub use identity::{
     DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId, implementation_method_key,

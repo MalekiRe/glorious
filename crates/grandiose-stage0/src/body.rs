@@ -6,7 +6,7 @@
 //! belong to later semantic queries, not parser heuristics.
 
 use crate::{
-    header::{EffectRowHeader, HeaderType},
+    header::{EffectRowHeader, HeaderGenericArgument, HeaderType},
     scanner::TokenRange,
     source::{LexedFile, Span, TokenKind},
 };
@@ -1140,7 +1140,13 @@ impl Parser<'_> {
             return Some(base);
         }
         let arguments = self.closure_type_arguments()?;
-        Some(HeaderType::Application(Box::new(base), arguments))
+        Some(HeaderType::Application(
+            Box::new(base),
+            arguments
+                .into_iter()
+                .map(HeaderGenericArgument::Type)
+                .collect(),
+        ))
     }
 
     fn closure_type_arguments(&mut self) -> Option<Vec<HeaderType>> {
