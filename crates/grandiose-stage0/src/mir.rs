@@ -6969,9 +6969,7 @@ impl Lowerer<'_> {
             {
                 operation_clauses.truncate(fallback + 1);
             }
-            let Some(policy) = policy_for(&operation_clauses[0]) else {
-                return None;
-            };
+            let policy = policy_for(&operation_clauses[0])?;
             if operation_clauses.iter().any(|clause| {
                 policy_for(clause).as_ref() != Some(&policy)
                     || clause.patterns.len() != arguments.len()
@@ -7122,7 +7120,7 @@ impl Lowerer<'_> {
                 operation: *operation_index,
                 payload_destinations: payloads.clone(),
                 resume_type: self.body.expression(*operation).ty.clone(),
-                continuation: policy.clone(),
+                continuation: *policy,
                 target: dispatch_targets[index],
             });
             debug_assert_eq!(clauses[0].effect, *effect);
