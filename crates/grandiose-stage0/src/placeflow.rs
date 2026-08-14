@@ -139,6 +139,7 @@ impl PlaceFlow {
             states: BTreeMap::new(),
             projection_loans: vec![],
             reborrow_parents: BTreeMap::new(),
+            reference_origins: BTreeMap::new(),
             moved_places: BTreeSet::new(),
             events: vec![],
             refinements: vec![],
@@ -187,6 +188,9 @@ struct Analyzer<'a> {
     /// separate from the loan identity because a child may end nonlexically
     /// while the parent loan remains available again.
     reborrow_parents: BTreeMap<String, String>,
+    /// Provenance outlives one compact active-loan entry.  It is consulted
+    /// only when a live descendant proves the parent region remains open.
+    reference_origins: BTreeMap<String, ProjectionLoan>,
     /// Canonical paths that have been moved and have not since been
     /// reinitialized. Whole-local moves are mirrored in `states`; field moves
     /// deliberately are not, because their siblings remain usable.
@@ -904,11 +908,15 @@ impl Analyzer<'_> {
             // loan. Legacy temporary/capture loans remain represented solely
             // by LocalState until their Core lifetime is explicit.
             if owner.is_some() {
-                self.projection_loans.push(ProjectionLoan {
+                let loan = ProjectionLoan {
                     place,
                     unique,
                     owner,
-                });
+                };
+                if let Some(owner) = &loan.owner {
+                    self.reference_origins.insert(owner.clone(), loan.clone());
+                }
+                self.projection_loans.push(loan);
             }
             return;
         }
@@ -939,11 +947,15 @@ impl Analyzer<'_> {
                 return;
             }
         }
-        self.projection_loans.push(ProjectionLoan {
+        let loan = ProjectionLoan {
             place: place.clone(),
             unique,
             owner,
-        });
+        };
+        if let Some(owner) = &loan.owner {
+            self.reference_origins.insert(owner.clone(), loan.clone());
+        }
+        self.projection_loans.push(loan);
         self.place_event(
             if unique {
                 FlowEventKind::BorrowUnique(self.root_name(id))
@@ -966,12 +978,28 @@ impl Analyzer<'_> {
         let CoreKind::Local(parent) = &self.body.expression(reference).kind else {
             return false;
         };
-        let Some(parent_loan) = self
+        let parent_loan = self
             .projection_loans
             .iter()
             .find(|loan| loan.owner.as_deref() == Some(parent.as_str()))
             .cloned()
-        else {
+            .or_else(|| {
+                self.projection_loans
+                    .iter()
+                    .any(|loan| {
+                        let mut owner = loan.owner.as_deref();
+                        while let Some(current) = owner {
+                            if current == parent {
+                                return true;
+                            }
+                            owner = self.reborrow_parents.get(current).map(String::as_str);
+                        }
+                        false
+                    })
+                    .then(|| self.reference_origins.get(parent).cloned())
+                    .flatten()
+            });
+        let Some(parent_loan) = parent_loan else {
             self.error(span, "G5006", "reborrow has no live parent loan".into());
             return true;
         };
@@ -988,11 +1016,13 @@ impl Analyzer<'_> {
             parent_loan.place.clone(),
             span,
         );
-        self.projection_loans.push(ProjectionLoan {
+        let loan = ProjectionLoan {
             place: parent_loan.place,
             unique,
             owner: Some(owner.clone()),
-        });
+        };
+        self.reference_origins.insert(owner.clone(), loan.clone());
+        self.projection_loans.push(loan);
         self.reborrow_parents.insert(owner, parent.clone());
         true
     }
