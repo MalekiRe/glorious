@@ -1244,7 +1244,6 @@ impl TypedBody {
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
             resumption_bindings: std::collections::BTreeMap::new(),
-            direct_resumption_callee: None,
             active_labels: vec![],
             resumption_use_tracker: None,
         };
@@ -1425,7 +1424,6 @@ impl TypedBody {
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
             resumption_bindings: std::collections::BTreeMap::new(),
-            direct_resumption_callee: None,
             active_labels: vec![],
             resumption_use_tracker: None,
         };
@@ -1508,7 +1506,6 @@ impl TypedBody {
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
             resumption_bindings: std::collections::BTreeMap::new(),
-            direct_resumption_callee: None,
             active_labels: vec![],
             resumption_use_tracker: None,
         };
@@ -1662,12 +1659,6 @@ struct Elaborator<'a> {
     /// generated identity. Scope generations are never reused, so stale
     /// entries cannot make a shadowing local resumptive.
     resumption_bindings: std::collections::BTreeMap<(String, u64), ActiveResumption>,
-    /// A frame-bound resumption is not yet a first-class closure value in the
-    /// runtime representation.  This short-lived authorization is installed
-    /// only while elaborating the callee of `k(value)` (or migration spelling
-    /// `resume(k, value)`).  Every other value use fails at Typed Core rather
-    /// than leaking to a later MIR-only failure.
-    direct_resumption_callee: Option<ActiveResumption>,
     active_labels: Vec<ActiveLabel>,
     /// Installed only while one explicit handler arm is elaborated. Nested
     /// handler arms replace and restore it, preserving lexical continuation
