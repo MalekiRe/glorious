@@ -10,7 +10,7 @@ use crate::{
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
     signature::{ElaboratedHeader, ElaboratedInterface},
     source::Span,
-    trait_solver::{TraitAnswer, TraitGoal, TraitSolver},
+    trait_solver::{TraitAnswer, TraitGoal, TraitMethodAnswer, TraitSolver},
     types::{EffectInstance, EffectRow, InferContext, Mutability, ScalarType, Type},
 };
 
@@ -732,6 +732,14 @@ impl Elaborator<'_> {
                 }
                 match &self.body.expression(callee).kind {
                     ExprKind::Path(path) => {
+                        if let Some(value) = self.trait_method_call(
+                            path.clone(),
+                            vec![],
+                            arguments.clone(),
+                            expression.span,
+                        ) {
+                            return value;
+                        }
                         if let Some(value) =
                             self.perform(path.clone(), vec![], arguments.clone(), expression.span)
                         {
@@ -745,7 +753,15 @@ impl Elaborator<'_> {
                         let effect_arguments = effect_arguments
                             .iter()
                             .map(|argument| self.header_type(argument))
-                            .collect();
+                            .collect::<Vec<_>>();
+                        if let Some(value) = self.trait_method_call(
+                            path.clone(),
+                            effect_arguments.clone(),
+                            arguments.clone(),
+                            expression.span,
+                        ) {
+                            return value;
+                        }
                         if let Some(value) = self.perform(
                             path.clone(),
                             effect_arguments,
@@ -1941,6 +1957,135 @@ impl Elaborator<'_> {
         self.check_call_where_bounds(callee, span);
         self.alloc(CoreKind::Call { callee, arguments }, *result, span)
     }
+    /// Resolve an explicitly-qualified trait method call. The method's first
+    /// declared parameter is the receiver; qualification keeps this initial
+    /// surface free of accidental field-vs-method ambiguity while preserving
+    /// the solver evidence and selected implementation identity for MIR.
+    fn trait_method_call(
+        &mut self,
+        path: Vec<String>,
+        trait_arguments: Vec<Type>,
+        supplied: Vec<ExprId>,
+        span: Span,
+    ) -> Option<CoreId> {
+        let (name, trait_path) = path.split_last()?;
+        if trait_path.is_empty() {
+            return None;
+        }
+        let trait_definition =
+            match self
+                .index
+                .resolve_path(DefinitionNamespace::Trait, self.module, trait_path)
+            {
+                ResolutionState::Resolved(definition) => definition,
+                _ => return None,
+            };
+        let Some(ElaboratedHeader::Trait(trait_header)) =
+            self.signatures.definitions.get(&trait_definition)
+        else {
+            return Some(self.fail(
+                span,
+                "G4168",
+                "qualified method path does not name a frozen trait",
+            ));
+        };
+        if trait_arguments.len() != trait_header.generics as usize {
+            return Some(self.fail(
+                span,
+                "G4168",
+                "trait method qualification has the wrong number of trait arguments",
+            ));
+        }
+        let Some(method_header) = trait_header.methods.get(name) else {
+            return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
+        };
+        let values = supplied
+            .into_iter()
+            .map(|value| self.expression(value))
+            .collect::<Vec<_>>();
+        let Some(receiver) = values.first().copied() else {
+            return Some(self.fail(
+                span,
+                "G4168",
+                "qualified trait method call requires a receiver argument",
+            ));
+        };
+        let subject = self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
+        let method_arguments = (0..method_header.generics)
+            .map(|_| self.inference.fresh())
+            .collect::<Vec<_>>();
+        let answer = TraitSolver::new(self.signatures).select_method(
+            TraitGoal {
+                relation: crate::ElaboratedTraitReference {
+                    definition: trait_definition,
+                    arguments: trait_arguments,
+                },
+                subject,
+            },
+            name,
+            &method_arguments,
+        );
+        let (method, signature) = match answer {
+            TraitMethodAnswer::Selected {
+                method, signature, ..
+            } => (method, signature),
+            TraitMethodAnswer::Refuted { .. } => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "qualified trait method is refuted by a negative implementation",
+                ));
+            }
+            TraitMethodAnswer::NoSolution => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "no implementation provides the qualified trait method",
+                ));
+            }
+            TraitMethodAnswer::Ambiguous => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "qualified trait method implementation is ambiguous",
+                ));
+            }
+            TraitMethodAnswer::Overflow => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "qualified trait method selection exceeded the solver limit",
+                ));
+            }
+            TraitMethodAnswer::MissingMethod { .. } => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "selected implementation omits the qualified trait method",
+                ));
+            }
+            TraitMethodAnswer::MethodArity { .. } => {
+                return Some(self.fail(
+                    span,
+                    "G4169",
+                    "qualified trait method generic arguments could not be inferred",
+                ));
+            }
+        };
+        let callee = self.alloc(
+            CoreKind::Function(method),
+            Type::Callable {
+                parameters: signature.parameters.clone(),
+                result: Box::new(signature.result.clone()),
+                effects: signature.effects.clone(),
+                invocation: signature.invocation,
+            },
+            span,
+        );
+        let call = self.call(callee, values, span);
+        self.check_where_bounds(signature.where_bounds.clone(), span);
+        Some(call)
+    }
     fn perform(
         &mut self,
         path: Vec<String>,
@@ -2681,9 +2826,16 @@ impl Elaborator<'_> {
             self.recovered = true;
             return;
         };
+        self.check_where_bounds(signature.where_bounds, span);
+    }
+    fn check_where_bounds(
+        &mut self,
+        bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+        span: Span,
+    ) {
         let mut solver = TraitSolver::new(self.signatures);
         let mut failed = false;
-        for (subject, relation) in signature.where_bounds {
+        for (subject, relation) in bounds {
             let subject = match self.inference.zonk(subject) {
                 Ok(subject) => subject,
                 Err(_) => {

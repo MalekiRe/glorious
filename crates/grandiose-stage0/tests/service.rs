@@ -225,6 +225,51 @@ fn service_type_checks_implementation_method_bodies_with_impl_generics() {
 }
 
 #[test]
+fn service_selects_and_executes_explicit_trait_method_calls() {
+    let source = "trait Increment { fn increment(value: i64) -> i64; } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 1 } } pub fn main() -> i64 { Increment::increment(41) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_selects_generic_qualified_trait_method_arguments() {
+    let source = "trait Replace { fn replace<T>(value: i64, replacement: T) -> T; } impl Replace for i64 { fn replace<T>(value: i64, replacement: T) -> T { replacement } } pub fn main() -> Text { Replace::replace(0, \"selected\") }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_text().unwrap(), "selected");
+}
+
+#[test]
+fn service_selects_generic_qualified_trait_instances() {
+    let source = "trait Identity<T> { fn identity(value: T) -> T; } impl<T> Identity<T> for T { fn identity(value: T) -> T { value } } pub fn main() -> i64 { Identity<i64>::identity(42) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_enforces_selected_trait_method_where_bounds() {
+    let accepted = "trait Mark {} trait Convert { fn convert<T>(receiver: i64, value: T) -> T where T: Mark; } impl Mark for i64 {} impl Convert for i64 { fn convert<T>(receiver: i64, value: T) -> T where T: Mark { value } } pub fn main() -> i64 { Convert::convert(0, 42) }";
+    let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let rejected = "trait Mark {} trait Convert { fn convert<T>(receiver: i64, value: T) -> T where T: Mark; } impl Mark for i64 {} impl Convert for i64 { fn convert<T>(receiver: i64, value: T) -> T where T: Mark { value } } pub fn main() -> Text { Convert::convert(0, \"not marked\") }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(rejected))
+    else {
+        panic!("unproven trait method bound unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4143"),
+        "missing trait method bound diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
     let enum_source = "pub enum Result { Ok(i64), Err(Text) } pub fn main() -> Bool { Result::Ok(42) is Result::Ok(42) }";
     let outcome = StageZeroCompiler::new()
