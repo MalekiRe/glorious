@@ -2864,6 +2864,35 @@ fn service_instantiates_structural_const_nominal_layouts_at_record_construction(
 }
 
 #[test]
+fn service_specializes_trait_method_effect_identities_with_quantity_generics() {
+    let source = "effect Pulse<n: u32> { ask() -> i64; } trait Relay { fn relay<n: u32>(receiver: i64) -> i64 / { Pulse<n> }; } impl Relay for i64 { fn relay<n: u32>(receiver: i64) -> i64 / { Pulse<n> } { Pulse<n>::ask() } } pub fn main() -> i64 { handle Relay::relay<7>(0) { Pulse<7>::ask() with k => k(42) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_instantiates_quantity_generic_enum_payloads() {
+    let source = "pub enum Packet<q: Quantity, T> { Value(T) } pub fn main() -> i64 { let packet = Packet<[1, 1], i64>::Value(41); 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let rejected = "pub enum Packet<q: Quantity, T> { Value(T) } pub fn main() -> i64 { let packet = Packet<[1, 1], i64>::Value(\"wrong\"); 0 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(rejected))
+    else {
+        panic!("quantity-generic enum payload accepted the wrong value type");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4131"),
+        "missing quantity-generic enum payload mismatch diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
     let enum_source = "pub enum Result { Ok(i64), Err(Text) } pub fn main() -> Bool { Result::Ok(42) is Result::Ok(42) }";
     let outcome = StageZeroCompiler::new()

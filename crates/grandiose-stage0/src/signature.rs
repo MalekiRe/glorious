@@ -1969,22 +1969,7 @@ impl ElaboratedInterface {
         arguments: &[GenericArgument],
     ) -> Result<Vec<NominalField>, InstantiationError> {
         let kinds = self.nominal_kinds(definition)?;
-        validate_generic_arguments(kinds, arguments)?;
-        // VM nominal signatures retain type and structural-const identity,
-        // but not region or effect-row identity. Keep that executable-layout
-        // boundary explicit while allowing const-generic layouts to cross it;
-        // the former type-only query rejected both categories together.
-        if let Some((slot, argument)) = arguments.iter().enumerate().find(|(_, argument)| {
-            matches!(
-                argument,
-                GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_)
-            )
-        }) {
-            return Err(InstantiationError::RequiresType {
-                slot,
-                argument: Box::new(argument.clone()),
-            });
-        }
+        validate_runtime_nominal_arguments(kinds, arguments)?;
         let Some(ElaboratedHeader::Nominal {
             generic_kinds,
             layout,
@@ -2004,23 +1989,9 @@ impl ElaboratedInterface {
         };
         Ok(fields
             .iter()
-            .map(|field| {
-                let ty = substitute_alias_generic_identity(field.ty.clone(), arguments);
-                // A layout can carry a declaration-owned projection that only
-                // becomes concrete once this nominal application supplies
-                // its complete mixed-kind argument vector.  Normalize it at
-                // the shared interface query so Core, MIR copy descriptors,
-                // and source-level field access agree on the executable
-                // field type. Symbolic generic projections remain intact.
-                let ty = crate::TraitSolver::new(self)
-                    .normalize_type(ty)
-                    .unwrap_or_else(|_| {
-                        substitute_alias_generic_identity(field.ty.clone(), arguments)
-                    });
-                NominalField {
-                    name: field.name.clone(),
-                    ty,
-                }
+            .map(|field| NominalField {
+                name: field.name.clone(),
+                ty: self.instantiate_runtime_nominal_field(&field.ty, arguments),
             })
             .collect())
     }
@@ -2276,9 +2247,30 @@ impl ElaboratedInterface {
         name: &str,
     ) -> Result<(u32, Vec<Type>), InstantiationError> {
         let kinds = self.nominal_kinds(definition)?;
-        let arguments = validated_type_arguments(kinds, arguments)?;
-        self.instantiate_enum_variant(definition, &arguments, name)
-            .ok_or(InstantiationError::MissingMember)
+        validate_runtime_nominal_arguments(kinds, arguments)?;
+        let Some(ElaboratedHeader::Nominal {
+            layout: ElaboratedNominalLayout::Enum(variants),
+            ..
+        }) = self.definitions.get(&definition)
+        else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        let Some((index, variant)) = variants
+            .iter()
+            .enumerate()
+            .find(|(_, variant)| variant.name == name)
+        else {
+            return Err(InstantiationError::MissingMember);
+        };
+        let fields = match &variant.payload {
+            ElaboratedEnumVariantPayload::Unit => vec![],
+            ElaboratedEnumVariantPayload::Tuple(fields) => fields
+                .iter()
+                .map(|field| self.instantiate_runtime_nominal_field(field, arguments))
+                .collect(),
+            ElaboratedEnumVariantPayload::Struct(_) => return Err(InstantiationError::WrongLayout),
+        };
+        Ok((index as u32, fields))
     }
 
     pub fn instantiate_enum_variant(
@@ -2322,9 +2314,34 @@ impl ElaboratedInterface {
         name: &str,
     ) -> Result<(u32, Vec<NominalField>), InstantiationError> {
         let kinds = self.nominal_kinds(definition)?;
-        let arguments = validated_type_arguments(kinds, arguments)?;
-        self.instantiate_enum_record_variant(definition, &arguments, name)
-            .ok_or(InstantiationError::MissingMember)
+        validate_runtime_nominal_arguments(kinds, arguments)?;
+        let Some(ElaboratedHeader::Nominal {
+            layout: ElaboratedNominalLayout::Enum(variants),
+            ..
+        }) = self.definitions.get(&definition)
+        else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        let Some((index, variant)) = variants
+            .iter()
+            .enumerate()
+            .find(|(_, variant)| variant.name == name)
+        else {
+            return Err(InstantiationError::MissingMember);
+        };
+        let ElaboratedEnumVariantPayload::Struct(fields) = &variant.payload else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        Ok((
+            index as u32,
+            fields
+                .iter()
+                .map(|field| NominalField {
+                    name: field.name.clone(),
+                    ty: self.instantiate_runtime_nominal_field(&field.ty, arguments),
+                })
+                .collect(),
+        ))
     }
 
     pub fn instantiate_enum_record_variant(
@@ -2376,9 +2393,36 @@ impl ElaboratedInterface {
         index: u32,
     ) -> Result<Vec<NominalField>, InstantiationError> {
         let kinds = self.nominal_kinds(definition)?;
-        let arguments = validated_type_arguments(kinds, arguments)?;
-        self.instantiate_enum_fields(definition, &arguments, index)
-            .ok_or(InstantiationError::MissingMember)
+        validate_runtime_nominal_arguments(kinds, arguments)?;
+        let Some(ElaboratedHeader::Nominal {
+            layout: ElaboratedNominalLayout::Enum(variants),
+            ..
+        }) = self.definitions.get(&definition)
+        else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        let Some(variant) = variants.get(index as usize) else {
+            return Err(InstantiationError::MissingMember);
+        };
+        let fields = match &variant.payload {
+            ElaboratedEnumVariantPayload::Unit => vec![],
+            ElaboratedEnumVariantPayload::Tuple(fields) => fields
+                .iter()
+                .enumerate()
+                .map(|(index, ty)| NominalField {
+                    name: index.to_string(),
+                    ty: self.instantiate_runtime_nominal_field(ty, arguments),
+                })
+                .collect(),
+            ElaboratedEnumVariantPayload::Struct(fields) => fields
+                .iter()
+                .map(|field| NominalField {
+                    name: field.name.clone(),
+                    ty: self.instantiate_runtime_nominal_field(&field.ty, arguments),
+                })
+                .collect(),
+        };
+        Ok(fields)
     }
 
     pub fn instantiate_enum_fields(
@@ -2430,6 +2474,20 @@ impl ElaboratedInterface {
             return Err(InstantiationError::WrongLayout);
         };
         Ok(generic_kinds)
+    }
+
+    fn instantiate_runtime_nominal_field(
+        &self,
+        field: &Type,
+        arguments: &[GenericArgument],
+    ) -> Type {
+        let field = substitute_alias_generic_identity(field.clone(), arguments);
+        // Symbolic projections stay symbolic, while a field that became
+        // concrete through this mixed-kind nominal application is reduced
+        // before Core/MIR can consume the layout.
+        crate::TraitSolver::new(self)
+            .normalize_type(field.clone())
+            .unwrap_or(field)
     }
 
     fn normalize_aliases(&mut self) {
@@ -2542,51 +2600,6 @@ impl ElaboratedInterface {
     }
 }
 
-/// Normalize the whole observable callable contract, including every nested
-/// bound and effect argument. Trait and implementation methods live in frozen
-/// interfaces just like top-level callables, so aliases cannot be allowed to
-/// survive in only these declarations.
-fn validated_type_arguments(
-    kinds: &[GenericKind],
-    arguments: &[GenericArgument],
-) -> Result<Vec<Type>, InstantiationError> {
-    if kinds.len() != arguments.len() {
-        return Err(InstantiationError::WrongArity {
-            expected: kinds.len(),
-            found: arguments.len(),
-        });
-    }
-    kinds
-        .iter()
-        .zip(arguments)
-        .enumerate()
-        .map(|(slot, (kind, argument))| {
-            let valid = match (kind, argument) {
-                (GenericKind::Type, GenericArgument::Type(_))
-                | (GenericKind::EffectRow, GenericArgument::EffectRow(_))
-                | (GenericKind::Lifetime, GenericArgument::Lifetime(_)) => true,
-                (GenericKind::Const(kind), argument) => {
-                    generic_argument_matches_const_kind(argument, *kind)
-                }
-                _ => false,
-            };
-            if !valid {
-                return Err(InstantiationError::WrongKind {
-                    slot,
-                    expected: *kind,
-                });
-            }
-            match argument {
-                GenericArgument::Type(value) => Ok(value.clone()),
-                argument => Err(InstantiationError::RequiresType {
-                    slot,
-                    argument: Box::new(argument.clone()),
-                }),
-            }
-        })
-        .collect()
-}
-
 /// Validate a source-kind-preserving substitution. Effect operation
 /// instantiation is identity-sensitive rather than type-only: it may carry
 /// lifetime, row, `u32`, and quantity arguments through nested parameter and
@@ -2617,6 +2630,29 @@ fn validate_generic_arguments(
                 expected: *kind,
             });
         }
+    }
+    Ok(())
+}
+
+/// Executable nominal layouts retain type and structural-const identity. A
+/// region or effect-row application remains meaningful in an interface, but
+/// this VM's record/enum signatures cannot encode it as a runtime layout slot.
+/// Keep that boundary shared by every nominal constructor and pattern query.
+fn validate_runtime_nominal_arguments(
+    kinds: &[GenericKind],
+    arguments: &[GenericArgument],
+) -> Result<(), InstantiationError> {
+    validate_generic_arguments(kinds, arguments)?;
+    if let Some((slot, argument)) = arguments.iter().enumerate().find(|(_, argument)| {
+        matches!(
+            argument,
+            GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_)
+        )
+    }) {
+        return Err(InstantiationError::RequiresType {
+            slot,
+            argument: Box::new(argument.clone()),
+        });
     }
     Ok(())
 }

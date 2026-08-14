@@ -219,6 +219,26 @@ fn mixed_nominal_constructor_arguments_reach_the_runtime_layout_boundary() {
 }
 
 #[test]
+fn typed_core_retains_quantity_arguments_on_enum_construction() {
+    let core = core_for(
+        "core-quantity-enum-construction@0.1.0",
+        "pub enum Packet<q: Quantity, T> { Value(T) } pub fn main() -> i64 { let packet = Packet<[1, 1], i64>::Value(41); 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let expected = vec![
+        GenericArgument::ConstQuantity(Quantity::new(1, Some(1)).unwrap()),
+        GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+    ];
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::Enum { .. }
+                if matches!(&expression.ty, Type::Nominal { arguments, .. } if arguments == &expected)
+        )
+    }));
+}
+
+#[test]
 fn mixed_nominal_pattern_arguments_are_checked_against_subject_identity() {
     let core = core_for(
         "core-mixed-nominal-pattern@0.1.0",
