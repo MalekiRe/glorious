@@ -466,7 +466,12 @@ impl HeaderParse {
             parser.position += 1;
         }
         let keyword = parser.word().map(str::to_owned);
-        parser.position += 1; // Scanner already proved the declaration keyword.
+        // Explicit declarations consume their keyword here. Canonical bare
+        // callables instead begin with the callable's own name, which the
+        // shared callable parser must retain and consume itself.
+        if shell.kind != DeclarationKind::Function || keyword.as_deref() == Some("fn") {
+            parser.position += 1;
+        }
         let header = match shell.kind {
             DeclarationKind::Function | DeclarationKind::HostImport => {
                 ParsedHeader::Function(parser.callable())

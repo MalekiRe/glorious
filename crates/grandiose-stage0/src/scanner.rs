@@ -138,11 +138,19 @@ impl Scanner<'_> {
         } else {
             None
         };
-        let Some(keyword) = self.word_at(self.position) else {
+        let Some(keyword) = self.word_at(self.position).map(str::to_owned) else {
             self.unexpected(start_position);
             return;
         };
-        let Some(mut kind) = declaration_kind(keyword) else {
+        // Canonical source permits a callable declaration to start directly
+        // with its identifier (`map<T>(...)`), in addition to the explicit
+        // `fn map<T>(...)` spelling.  Recognize only an identifier followed
+        // by a callable introducer so an ordinary unknown top-level token is
+        // still diagnosed instead of silently becoming a declaration.
+        let bare_callable = declaration_kind(&keyword).is_none() && self.bare_callable_ahead();
+        let Some(mut kind) =
+            declaration_kind(&keyword).or(bare_callable.then_some(DeclarationKind::Function))
+        else {
             self.unexpected(start_position);
             return;
         };
@@ -159,7 +167,11 @@ impl Scanner<'_> {
         }
         let declaration_position = self.position;
         self.position += 1;
-        let name = self.name_after(kind);
+        let name = if bare_callable {
+            Some(keyword)
+        } else {
+            self.name_after(kind)
+        };
         let header_start = self.significant[start_position];
         let (header_end, body, next_position) = self.find_boundary(kind, declaration_position);
         let span = Span {
@@ -349,6 +361,19 @@ impl Scanner<'_> {
             .get(self.position)
             .copied()
             .filter(|index| self.lexed.tokens[*index].kind != TokenKind::End)
+    }
+
+    /// A bare callable's name is the current identifier; its next
+    /// significant token must begin either a generic parameter list or an
+    /// ordinary parameter list. This deliberately excludes arbitrary words
+    /// from the declaration namespace.
+    fn bare_callable_ahead(&self) -> bool {
+        let Some(next) = self.significant.get(self.position + 1).copied() else {
+            return false;
+        };
+        matches!(self.lexed.tokens[next].kind, TokenKind::Punctuation('('))
+            || (self.lexed.tokens[next].kind == TokenKind::Operator
+                && self.lexed.text(self.source, &self.lexed.tokens[next]) == "<")
     }
 
     fn word_at(&self, position: usize) -> Option<&str> {
