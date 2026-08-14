@@ -430,6 +430,9 @@ pub enum MirInstruction {
 pub enum MirContinuationPolicy {
     Consume,
     Replay,
+    /// A bottom-typed operation transfers to its clause without any legal
+    /// resumption. The target must cancel the suspended frame before return.
+    Terminal,
 }
 /// Explicit control edge for a MIR basic block. Block parameters are the only
 /// phi mechanism; every edge carries an exactly typed argument list.
@@ -1179,6 +1182,32 @@ impl MirLowering {
         // request to inline or re-derive the callee's body.  Install the
         // caller's lexical frames around the ordinary call so the VM can
         // dispatch a later callee `Perform` through its real call stack.
+        if let Some(function) =
+            lowerer.lower_root_interprocedural_terminal_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_interprocedural_replay_resumption(body.root, parameters.clone())
         {
@@ -7236,12 +7265,164 @@ impl Lowerer<'_> {
             blocks,
         })
     }
-    /// Lower a closed, effectful ordinary call through lexical VM frames.
+    /// Lower a terminal operation reached through an ordinary callee call.
     ///
-    /// The callee's frozen callable effect row is the interprocedural summary
-    /// used here. It authorizes only exact, closed protocol instances; open
-    /// tails and delayed projections deliberately remain unsupported rather
-    /// than being guessed from a callee body. This keeps calls, functions,
+    /// A terminal operation never resumes the protected call. Its VM frame
+    /// still has to exist so a callee `Perform` can cross the call stack, but
+    /// the selected clause must `Cancel` that suspended frame before it
+    /// returns its final handler result. This exact path rejects ordered and
+    /// partial matrices rather than manufacturing a continuation for bottom.
+    fn lower_root_interprocedural_terminal_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        if !matches!(self.body.expression(computation).ty, Type::Never) {
+            return None;
+        }
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.effects.len() != 1 || effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let effect = effects
+            .effects
+            .iter()
+            .next()
+            .expect("single-element effect row has one effect");
+        let [clause] = clauses.as_slice() else {
+            return None;
+        };
+        if !clause.terminal
+            || clause.effect != *effect
+            || !matches!(clause.resumption, CoreHandlerResumption::Terminal)
+            || clause.continuation.is_some()
+            || clause.patterns.len() != clause.payload_types.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+        {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let performed = self.alloc(Type::Never, computation);
+        let payload_destinations = clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation: clause.operation,
+            payload_destinations: payload_destinations.clone(),
+            // `Never` maps to the VM's zero-sized bottom register. It is not
+            // used to resume the operation, but retains the frame contract
+            // required to verify the callee's terminal `Perform`.
+            resume_type: Type::Never,
+            continuation: MirContinuationPolicy::Terminal,
+            target: MirBlockId(1),
+        });
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: performed,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: performed,
+                callee,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: performed,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        // The normal edge is source-unreachable, but keeping its lexical
+        // cleanup makes the verifier reject neither the frame nor a malformed
+        // artifact that attempted to continue past a terminal call.
+        entry.push(MirInstruction::UninstallHandler);
+
+        self.instructions = Vec::new();
+        let handler_named = self.named.clone();
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        let result = self.value(clause.body)?;
+        self.instructions.push(MirInstruction::Cancel);
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        self.named = handler_named;
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Return { value: result },
+                },
+            ],
+        })
+    }
+
     /// Lower an exact replayable continuation whose suspended performance is
     /// reached through a normal callee call.
     ///

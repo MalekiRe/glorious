@@ -1669,6 +1669,48 @@ fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
 }
 
 #[test]
+fn verifier_rejects_snapshot_capture_from_a_terminal_handler_frame() {
+    let effect = DefKey(Digest::of_bytes(b"terminal-capture"));
+    let continuation = VmType::Callable {
+        parameters: vec![VmType::Unit],
+        result: Box::new(VmType::Unit),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"terminal-capture-candidate")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![continuation, VmType::I64],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::Unit,
+                    continuation: VmContinuationPolicy::Terminal,
+                    target: 2,
+                },
+                VmInstruction::Trap,
+                VmInstruction::CaptureResumption { dst: 0 },
+                VmInstruction::Cancel,
+                VmInstruction::ConstI64 { dst: 1, value: 42 },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"terminal-capture-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let error = verify_vm(candidate).unwrap_err();
+    assert!(
+        matches!(error, VmArtifactError::HandlerResumeUnavailable),
+        "terminal frames must never mint a resumable snapshot: {error:?}"
+    );
+}
+
+#[test]
 fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
     let effect = DefKey(Digest::of_bytes(b"forged-snapshot-effect"));
     let continuation = VmType::Callable {

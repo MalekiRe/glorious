@@ -3344,6 +3344,79 @@ fn service_intercepts_a_terminal_performance_reached_through_a_helper() {
 }
 
 #[test]
+fn service_intercepts_a_nontransparent_terminal_callee_through_a_vm_frame() {
+    let source = "effect Stop { stop(value: i64) -> !; } pub fn leaf(value: i64) -> ! / Stop { Stop::stop(value) } pub fn helper(value: i64) -> ! / Stop { let copied = value; leaf(copied) } pub fn main() -> i64 { handle helper(42) { Stop::stop(value) => value } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+        "terminal helper must remain a normal VM call"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. })),
+        "caller must retain a terminal handler frame across the call"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Cancel)),
+        "terminal arm must cancel the suspended frame before returning"
+    );
+    assert!(
+        program
+            .functions
+            .values()
+            .any(
+                |function| function.instructions.iter().any(|instruction| matches!(
+                    instruction,
+                    VmInstruction::Perform { dst, .. }
+                        if function.registers[*dst as usize] == VmType::Unit
+                ))
+            ),
+        "the terminal performance's Never result must encode as the VM bottom/unit register"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_intercepts_an_indirect_terminal_callee_through_a_vm_frame() {
+    let source = "effect Stop { stop(value: i64) -> !; } pub fn leaf(value: i64) -> ! / Stop { Stop::stop(value) } pub fn helper(value: i64) -> ! / Stop { let copied = value; leaf(copied) } pub fn main() -> i64 { let operation = helper; handle operation(42) { Stop::stop(value) => value } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        "terminal function values must preserve their indirect VM call"
+    );
+    assert!(
+        entry.instructions.iter().any(|instruction| matches!(
+            instruction,
+            VmInstruction::InstallHandler {
+                continuation: VmContinuationPolicy::Terminal,
+                ..
+            }
+        )),
+        "the indirect terminal call must carry explicit terminal frame evidence"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_resumption_binds_payloads_before_entering_a_nonempty_continuation() {
     let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(41); value + 1 } { Ask::ask(seed) with k => k(seed) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

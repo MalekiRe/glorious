@@ -106,6 +106,9 @@ pub enum VmCompare {
 pub enum VmContinuationPolicy {
     Consume,
     Replay,
+    /// A bottom-typed operation transfers to a terminal clause. The runtime
+    /// retains the suspended call only until that clause cancels its frame.
+    Terminal,
 }
 /// Canonically encoded structural pattern for the standalone VM verifier.
 /// It contains no source binder identity; fields carry their expected runtime
@@ -1285,7 +1288,10 @@ pub fn emit_program(program: &MirProgram) -> Result<CandidateVmProgram, VmArtifa
 }
 fn vm_type(value: &Type) -> Result<VmType, Type> {
     match value {
-        Type::Unit => Ok(VmType::Unit),
+        // Bottom has no inhabitant at runtime. It still needs a structural
+        // register type so a terminal `Perform` can cross a caller-installed
+        // handler frame before the terminal clause cancels that frame.
+        Type::Unit | Type::Never => Ok(VmType::Unit),
         Type::Scalar(ScalarType::I64) => Ok(VmType::I64),
         Type::Scalar(ScalarType::F64) => Ok(VmType::F64),
         Type::Scalar(ScalarType::Bool) => Ok(VmType::Bool),
@@ -2161,6 +2167,7 @@ impl<'a> Decoder<'a> {
                     continuation: match self.byte()? {
                         0 => VmContinuationPolicy::Consume,
                         1 => VmContinuationPolicy::Replay,
+                        2 => VmContinuationPolicy::Terminal,
                         _ => {
                             return Err(VmArtifactError::MalformedEncoding {
                                 message: "invalid handler continuation policy",
@@ -2857,6 +2864,7 @@ fn lower_instruction(
             continuation: match continuation {
                 MirContinuationPolicy::Consume => VmContinuationPolicy::Consume,
                 MirContinuationPolicy::Replay => VmContinuationPolicy::Replay,
+                MirContinuationPolicy::Terminal => VmContinuationPolicy::Terminal,
             },
             target: *starts
                 .get(target.0 as usize)
@@ -3674,6 +3682,19 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     target: *target,
                     continuations: Vec::new(),
                 });
+                if *continuation == VmContinuationPolicy::Terminal {
+                    // A terminal performance may happen in an ordinary callee
+                    // rather than in this function's visible CFG. Model that
+                    // exceptional transfer with initialized payload registers
+                    // so the terminal target and its mandatory cancellation
+                    // are verified even though the normal call edge cannot
+                    // return successfully.
+                    let mut terminal = states.clone();
+                    for destination in payload_destinations {
+                        write(&mut terminal, *destination)?;
+                    }
+                    propagate_state(&mut incoming, &mut worklist, *target, &terminal)?;
+                }
             }
             VmInstruction::UninstallHandler => {
                 let Some(frame) = states.handlers.pop() else {
@@ -3689,7 +3710,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let Some(frame) = states.handlers.last_mut() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuations.is_empty() {
+                if frame.continuation == VmContinuationPolicy::Terminal
+                    || frame.continuations.is_empty()
+                {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let found = register_type(function, *value)?;
@@ -3703,6 +3726,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let continuations = match frame.continuation {
                     VmContinuationPolicy::Consume => std::mem::take(&mut frame.continuations),
                     VmContinuationPolicy::Replay => frame.continuations.clone(),
+                    VmContinuationPolicy::Terminal => {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
                 };
                 let replaying = frame.continuation == VmContinuationPolicy::Replay;
                 for continuation in continuations {
@@ -3783,7 +3809,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let Some(frame) = states.handlers.last() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuations.is_empty() {
+                if frame.continuation == VmContinuationPolicy::Terminal
+                    || frame.continuations.is_empty()
+                {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let VmType::Callable { parameters, .. } = register_type(function, *dst)? else {
@@ -3819,7 +3847,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let frame = &mut states.handlers[index];
-                if frame.continuations.is_empty() {
+                if frame.continuation == VmContinuationPolicy::Terminal
+                    || frame.continuations.is_empty()
+                {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let VmType::Callable { parameters, .. } = register_type(function, *snapshot)?
@@ -3836,6 +3866,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let continuations = match frame.continuation {
                     VmContinuationPolicy::Consume => std::mem::take(&mut frame.continuations),
                     VmContinuationPolicy::Replay => frame.continuations.clone(),
+                    VmContinuationPolicy::Terminal => {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
                 };
                 let replaying = frame.continuation == VmContinuationPolicy::Replay;
                 // A non-local snapshot transfer abandons frames installed
@@ -3925,7 +3958,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let Some(frame) = states.handlers.pop() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if frame.continuations.is_empty() {
+                if frame.continuations.is_empty()
+                    && frame.continuation != VmContinuationPolicy::Terminal
+                {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 expire_snapshot_brand(&mut states.snapshots, frame.id);
@@ -5405,6 +5440,9 @@ fn execute(
                 let continuation = match frame.continuation {
                     VmContinuationPolicy::Consume => frame.suspended.take(),
                     VmContinuationPolicy::Replay => frame.suspended.clone(),
+                    VmContinuationPolicy::Terminal => {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
                 };
                 let Some(continuation) = continuation else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -5508,6 +5546,9 @@ fn execute(
                 let continuation = match handlers[index].continuation {
                     VmContinuationPolicy::Consume => handlers[index].suspended.take(),
                     VmContinuationPolicy::Replay => handlers[index].suspended.clone(),
+                    VmContinuationPolicy::Terminal => {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
                 }
                 .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 if handlers[index].continuation == VmContinuationPolicy::Replay {
@@ -6215,6 +6256,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(match continuation {
                 VmContinuationPolicy::Consume => 0,
                 VmContinuationPolicy::Replay => 1,
+                VmContinuationPolicy::Terminal => 2,
             });
             output.extend_from_slice(&target.to_le_bytes());
         }
@@ -6925,6 +6967,9 @@ fn execute_with_arguments(
                 let continuation = match frame.continuation {
                     VmContinuationPolicy::Consume => frame.suspended.take(),
                     VmContinuationPolicy::Replay => frame.suspended.clone(),
+                    VmContinuationPolicy::Terminal => {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
                 };
                 let Some(continuation) = continuation else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
@@ -7037,6 +7082,9 @@ fn execute_with_arguments(
                 let continuation = match handlers[index].continuation {
                     VmContinuationPolicy::Consume => handlers[index].suspended.take(),
                     VmContinuationPolicy::Replay => handlers[index].suspended.clone(),
+                    VmContinuationPolicy::Terminal => {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
                 }
                 .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 if handlers[index].continuation == VmContinuationPolicy::Replay {
