@@ -4,7 +4,10 @@
 //! A request stages its complete set of semantic products and publishes it
 //! only after the service publication boundary has accepted the request.
 
-use std::{collections::BTreeMap, sync::Mutex};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Mutex,
+};
 
 use crate::{DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId};
 
@@ -33,6 +36,14 @@ pub enum DependencyStatus {
     Red {
         parent: RevisionId,
         first_changed: DependencyNode,
+    },
+    /// The staged graph contains a dependency cycle. Cycles are never green:
+    /// callers must recompute through a query family that has an explicit
+    /// SCC/fixed-point policy rather than reuse this fact as ordinary cache
+    /// evidence.
+    Cycle {
+        parent: RevisionId,
+        member: DependencyNode,
     },
 }
 
@@ -141,7 +152,14 @@ impl DependencyTransaction<'_> {
         let mut statuses = BTreeMap::<DependencyNode, DependencyStatus>::new();
         let mut traces = BTreeMap::new();
         for node in self.facts.keys() {
-            let status = validate(node, &self.facts, parent, self.parent, &mut statuses);
+            let status = validate(
+                node,
+                &self.facts,
+                parent,
+                self.parent,
+                &mut statuses,
+                &mut BTreeSet::new(),
+            );
             let fact = self.facts.get(node).expect("fact key came from facts");
             traces.insert(
                 node.clone(),
@@ -164,6 +182,7 @@ fn validate(
     parent: Option<&RevisionLedger>,
     parent_id: Option<RevisionId>,
     statuses: &mut BTreeMap<DependencyNode, DependencyStatus>,
+    visiting: &mut BTreeSet<DependencyNode>,
 ) -> DependencyStatus {
     if let Some(status) = statuses.get(node) {
         return status.clone();
@@ -177,21 +196,49 @@ fn validate(
     let fact = facts
         .get(node)
         .expect("validation only visits staged facts");
+    // Dependency edges are normally produced by the acyclic phase pipeline,
+    // but the ledger is an internal trust boundary: a malformed or future
+    // cyclic query graph must never turn validation into unbounded recursion.
+    // Treat the back edge as a deterministic red dependency. The enclosing
+    // node records the first canonical cycle member as its invalidation cause.
+    if !visiting.insert(node.clone()) {
+        return DependencyStatus::Cycle {
+            parent: parent_id,
+            member: node.clone(),
+        };
+    }
     // This is red/green *value* validation. A dependency may have changed
     // and forced this product to be checked, while the newly computed
     // product remains byte-for-byte semantically equal. In that case it is
     // green and downstream products can reuse it. That distinction is what
     // keeps a private body edit from invalidating an unchanged public
     // interface (or an unrelated fixity table).
+    let mut cycle_member = None;
     let first_changed = fact.dependencies.iter().find_map(|dependency| {
-        let dependency_status = validate(dependency, facts, parent, Some(parent_id), statuses);
+        let dependency_status = validate(
+            dependency,
+            facts,
+            parent,
+            Some(parent_id),
+            statuses,
+            visiting,
+        );
         match dependency_status {
             DependencyStatus::Green { .. } => None,
             DependencyStatus::Red { first_changed, .. } => Some(first_changed),
+            DependencyStatus::Cycle { member, .. } => {
+                cycle_member.get_or_insert(member.clone());
+                Some(member)
+            }
             DependencyStatus::Cold => Some(dependency.clone()),
         }
     });
-    let status = if parent_fact.fingerprint == fact.fingerprint
+    let status = if let Some(member) = cycle_member {
+        DependencyStatus::Cycle {
+            parent: parent_id,
+            member,
+        }
+    } else if parent_fact.fingerprint == fact.fingerprint
         && parent_fact.dependencies == fact.dependencies
     {
         DependencyStatus::Green { parent: parent_id }
@@ -206,6 +253,7 @@ fn validate(
             first_changed: node.clone(),
         }
     };
+    visiting.remove(node);
     statuses.insert(node.clone(), status.clone());
     status
 }
@@ -284,6 +332,40 @@ mod tests {
         assert!(matches!(
             ledger.trace(revision(1), &artifact).unwrap().status,
             DependencyStatus::Red { first_changed, .. } if first_changed == source
+        ));
+    }
+
+    #[test]
+    fn cyclic_facts_are_deterministically_red_instead_of_recursing() {
+        let ledger = DependencyLedger::default();
+        let left = DependencyNode::Core(DefKey(Digest::of_bytes(b"left")));
+        let right = DependencyNode::Mir(DefKey(Digest::of_bytes(b"right")));
+
+        let mut first = ledger.transaction(revision(0), None);
+        first.record(left.clone(), Digest::of_bytes(b"left"), vec![right.clone()]);
+        first.record(
+            right.clone(),
+            Digest::of_bytes(b"right"),
+            vec![left.clone()],
+        );
+        first.commit();
+
+        let mut second = ledger.transaction(revision(1), Some(revision(0)));
+        second.record(left.clone(), Digest::of_bytes(b"left"), vec![right.clone()]);
+        second.record(
+            right.clone(),
+            Digest::of_bytes(b"right"),
+            vec![left.clone()],
+        );
+        second.commit();
+
+        assert!(matches!(
+            ledger.trace(revision(1), &left).unwrap().status,
+            DependencyStatus::Cycle { member, .. } if member == left
+        ));
+        assert!(matches!(
+            ledger.trace(revision(1), &right).unwrap().status,
+            DependencyStatus::Cycle { .. }
         ));
     }
 }
