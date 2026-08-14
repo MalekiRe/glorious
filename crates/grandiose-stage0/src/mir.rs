@@ -8291,7 +8291,9 @@ impl Lowerer<'_> {
                 .or_insert_with(Vec::new)
                 .push(clause);
         }
-        if grouped.len() < 2 {
+        if grouped.is_empty()
+            || (grouped.len() < 2 && grouped.values().all(|group| group.len() < 2))
+        {
             return None;
         }
         let groups = grouped.into_values().collect::<Vec<_>>();
@@ -8302,7 +8304,7 @@ impl Lowerer<'_> {
             fallback.is_some_and(|index| index + 1 != group.len())
                 || group.iter().any(|clause| {
                     clause.patterns.len() != clause.payload_types.len()
-                        || !matches!(
+                        || (!matches!(
                             clause.resumption,
                             CoreHandlerResumption::Tail {
                                 quantity: crate::quantity::Quantity::ONCE
@@ -8310,10 +8312,27 @@ impl Lowerer<'_> {
                                 quantity: crate::quantity::Quantity::ONCE,
                                 ..
                             }
-                        )
+                        ) && !matches!(
+                            clause.resumption,
+                            CoreHandlerResumption::Explicit { quantity, .. }
+                                if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
+                        ))
                         || clause.continuation.is_none()
                         || self.handler_body_uses_snapshot_alias(clause.body)
                 })
+                || (group.iter().any(|clause| {
+                    matches!(
+                        clause.resumption,
+                        CoreHandlerResumption::Explicit { quantity, .. }
+                            if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
+                    )
+                }) && !group.iter().all(|clause| {
+                    matches!(
+                        clause.resumption,
+                        CoreHandlerResumption::Explicit { quantity, .. }
+                            if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
+                    )
+                }))
                 || group.windows(2).any(|pair| {
                     pair[0]
                         .continuation
@@ -8403,6 +8422,11 @@ impl Lowerer<'_> {
 
         let mut entry = std::mem::take(&mut self.instructions);
         for (index, group) in groups.iter().enumerate() {
+            let replay = matches!(
+                group[0].resumption,
+                CoreHandlerResumption::Explicit { quantity, .. }
+                    if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
+            );
             let target = test_blocks[index][0]
                 .first()
                 .copied()
@@ -8418,7 +8442,11 @@ impl Lowerer<'_> {
                     .expect("ordered arm has frozen continuation contract")
                     .parameter
                     .clone(),
-                continuation: MirContinuationPolicy::Consume,
+                continuation: if replay {
+                    MirContinuationPolicy::Replay
+                } else {
+                    MirContinuationPolicy::Consume
+                },
                 target,
             });
         }
@@ -8463,14 +8491,23 @@ impl Lowerer<'_> {
         let boundary_values = self.values.clone();
         let mut bodies = Vec::new();
         for (group, payloads) in groups.iter().zip(&payloads) {
+            let replay = matches!(
+                group[0].resumption,
+                CoreHandlerResumption::Explicit { quantity, .. }
+                    if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
+            );
             for clause in group {
                 self.instructions = Vec::new();
                 self.named = boundary_named.clone();
                 self.values = boundary_values.clone();
                 self.bind_handler_patterns(&clause.patterns, payloads)?;
                 let value = self.direct_handler_clause_value(clause)?;
-                self.instructions.push(MirInstruction::Resume { value });
-                bodies.push(std::mem::take(&mut self.instructions));
+                self.instructions.push(if replay {
+                    MirInstruction::Cancel
+                } else {
+                    MirInstruction::Resume { value }
+                });
+                bodies.push((value, replay, std::mem::take(&mut self.instructions)));
             }
         }
         self.named = boundary_named;
@@ -8504,11 +8541,19 @@ impl Lowerer<'_> {
             instructions: entry,
             terminator: MirTerminator::Return { value: result },
         }];
-        blocks.extend(bodies.into_iter().map(|instructions| MirBlock {
-            parameters: vec![],
-            instructions,
-            terminator: MirTerminator::Unreachable,
-        }));
+        blocks.extend(
+            bodies
+                .into_iter()
+                .map(|(value, replay, instructions)| MirBlock {
+                    parameters: vec![],
+                    instructions,
+                    terminator: if replay {
+                        MirTerminator::Return { value }
+                    } else {
+                        MirTerminator::Unreachable
+                    },
+                }),
+        );
         let mut flat = 0;
         for (group_index, group) in groups.iter().enumerate() {
             for clause_index in 0..group.len() {

@@ -3656,6 +3656,48 @@ fn service_replays_distinct_generic_operations_through_a_function_value() {
 }
 
 #[test]
+fn service_replays_an_ordered_refutable_operation_matrix_across_calls() {
+    for (indirect, source) in [
+        (
+            false,
+            "effect Ask { [2,2] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn main() -> i64 { handle helper(40) { Ask::ask(0) with k => k(1) + k(2); Ask::ask(value) with k => k(value) + k(value + 1) } }",
+        ),
+        (
+            true,
+            "effect Ask { [2,2] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Ask::ask(0) with k => k(1) + k(2); Ask::ask(value) with k => k(value) + k(value + 1) } }",
+        ),
+    ] {
+        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        let program = decode_program(&artifact.canonical_bytes()).unwrap();
+        let entry = program.functions.get(&program.entry).unwrap();
+        assert_eq!(
+            entry
+                .instructions
+                .iter()
+                .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+                .count(),
+            4,
+        );
+        assert!(
+            entry
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::PatternTest { .. }))
+        );
+        assert_eq!(
+            entry
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            indirect,
+        );
+        assert_eq!(artifact.run_i64().unwrap(), 81);
+    }
+}
+
+#[test]
 fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
