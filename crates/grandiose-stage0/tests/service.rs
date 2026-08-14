@@ -3828,7 +3828,7 @@ fn service_rejects_references_to_body_locals_in_returned_aggregates() {
 fn service_tracks_outlives_through_assigned_tuple_reference_projections() {
     let incoming = StageZeroCompiler::new()
         .compile(request(
-            "pub struct Slot { value: &i64, tag: i64 } pub fn relay(slot: Slot) -> &i64 { slot.value } pub fn main() -> i64 { 0 }",
+            "pub struct Inner { value: &i64 } pub struct Outer { inner: Inner, tag: i64 } pub fn relay(slot: Outer) -> &i64 { slot.inner.value } pub fn main() -> i64 { 0 }",
         ))
         .expect("an incoming aggregate reference must remain returnable");
     assert!(
@@ -3838,11 +3838,12 @@ fn service_tracks_outlives_through_assigned_tuple_reference_projections() {
     );
 
     let local_escape = r#"
-        pub struct Slot { value: &i64, tag: i64 }
-        pub fn bad(slot: Slot) -> &i64 {
+        pub struct Inner { value: &i64 }
+        pub struct Outer { inner: Inner, tag: i64 }
+        pub fn bad(slot: Outer) -> &i64 {
             let value = 1;
-            slot.value = &value;
-            slot.value
+            slot.inner.value = &value;
+            slot.inner.value
         }
         pub fn main() -> i64 { 0 }
     "#;

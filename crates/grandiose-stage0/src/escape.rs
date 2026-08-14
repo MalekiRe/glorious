@@ -185,7 +185,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Assign { place, value } => {
                 let value = self.value(value);
-                self.assign(place, value);
+                self.assign(place, value, expression.span);
                 Value::None
             }
             CoreKind::Block(values) => {
@@ -327,31 +327,22 @@ impl Analyzer<'_> {
         }
     }
 
-    fn assign(&mut self, place: CorePlace, value: Value) {
+    fn assign(&mut self, place: CorePlace, value: Value, span: Span) {
         match place {
             CorePlace::Local { name, .. } => {
                 self.values.insert(name, value);
             }
-            CorePlace::Field {
-                base,
-                index,
-                field_count,
-                ..
-            } => {
+            CorePlace::Field { ref base, .. } => {
                 if let Some(name) = base.root_local().map(|(name, _)| name.to_owned()) {
                     let entry = self.values.entry(name).or_insert(Value::None);
-                    // A parameter nominal layout is intentionally not stored
-                    // in EscapeFlow. The frozen Core projection nevertheless
-                    // carries its exact arity, which is sufficient to open a
-                    // conservative structural provenance shell on first
-                    // write and retain the assigned reference thereafter.
-                    if matches!(entry, Value::None) {
-                        *entry = Value::Aggregate(vec![Value::None; field_count as usize]);
-                    }
-                    if let Value::Aggregate(fields) = entry
-                        && let Some(field) = fields.get_mut(index as usize)
-                    {
-                        *field = value;
+                    let mut path = vec![];
+                    collect_field_path(&place, &mut path);
+                    if !assign_field_path(entry, &path, value) {
+                        self.error(
+                            span,
+                            "G5021",
+                            "aggregate projection assignment has no sealed structural provenance path",
+                        );
                     }
                 }
             }
@@ -415,6 +406,49 @@ impl Analyzer<'_> {
             message: message.into(),
         });
     }
+}
+
+/// Extract outer-to-inner structural projections from frozen Core. Unlike a
+/// source spelling, every segment carries a checked layout arity.
+fn collect_field_path(place: &CorePlace, path: &mut Vec<(u32, u32)>) {
+    if let CorePlace::Field {
+        base,
+        index,
+        field_count,
+        ..
+    } = place
+    {
+        collect_field_path(base, path);
+        path.push((*index, *field_count));
+    }
+}
+
+/// Materialize only the structural shells proved by Core and replace the
+/// terminal projection. Any contradiction with an existing aggregate shape
+/// is rejected instead of erasing a body-local borrow from escape analysis.
+fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value) -> bool {
+    let mut current = value;
+    for (position, (index, field_count)) in path.iter().enumerate() {
+        if *index >= *field_count {
+            return false;
+        }
+        if matches!(current, Value::None) {
+            *current = Value::Aggregate(vec![Value::None; *field_count as usize]);
+        }
+        let Value::Aggregate(fields) = current else {
+            return false;
+        };
+        if fields.len() != *field_count as usize {
+            return false;
+        }
+        let field = &mut fields[*index as usize];
+        if position + 1 == path.len() {
+            *field = replacement;
+            return true;
+        }
+        current = field;
+    }
+    false
 }
 
 fn join(mut values: Vec<Value>) -> Value {

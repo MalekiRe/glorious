@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
-    ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan, DefKey,
-    DefinitionIndex, Digest, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey,
+    ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, CorePlace, DeclarationScan,
+    DefKey, DefinitionIndex, Digest, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey,
     FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath,
     MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span,
     Type, TypedBody, implementation_method_key,
@@ -3232,6 +3232,49 @@ fn capture_environments_seal_and_validate_mode_derived_post_states() {
                 .iter()
                 .any(|diagnostic| diagnostic.code == "G6011"),
         "MIR accepted a forged capture post-state: {lowered:#?}"
+    );
+}
+
+#[test]
+fn escapeflow_fails_closed_on_a_forged_nested_aggregate_projection_path() {
+    let mut core = core_for(
+        "core-forged-nested-aggregate-path@0.1.0",
+        r#"
+            pub struct Inner { value: &i64 }
+            pub struct Outer { inner: Inner, tag: i64 }
+            pub fn main() -> i64 {
+                let outer = Outer { inner: Inner { value: &0 }, tag: 0 };
+                let first = 1;
+                outer.inner.value = &first;
+                let second = 2;
+                outer.inner.value = &second;
+                0
+            }
+        "#,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let assignment = core
+        .expressions
+        .iter_mut()
+        .filter_map(|expression| match &mut expression.kind {
+            CoreKind::Assign { place, .. } => Some(place),
+            _ => None,
+        })
+        .nth(1)
+        .expect("second nested assignment");
+    let CorePlace::Field { field_count, .. } = assignment else {
+        panic!("nested assignment must retain a field place")
+    };
+    *field_count = 2;
+    let escapes = EscapeFlow::analyze(&core, &flow);
+    assert!(
+        escapes
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5021"),
+        "forged nested field layout lost provenance without a diagnostic: {escapes:#?}"
     );
 }
 
