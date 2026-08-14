@@ -36,15 +36,19 @@ products whose values actually changed.
 
 When a product is red, the trace names the first canonical changed input when
 one is available. Missing parent facts are cold: the compiler recomputes
-rather than relying on retention or a historical cache entry.
+rather than relying on retention or a historical cache entry. A staged graph
+with a dependency cycle is explicitly `Cycle`, never green; it must be routed
+through a query family with an SCC or fixed-point policy before it can become
+reusable evidence. An edge to a product absent from the same transaction is
+explicitly `Incomplete`, never an internal panic or a cache hit.
 
 ## Tooling contract
 
 `StageZeroCompiler::dependency_trace` returns the fingerprint, direct typed
-dependencies, and `Cold`, `Green`, or `Red { first_changed }` status for a
-single published product. `dependency_traces` returns the complete ordered
-revision ledger. Both APIs are inspection-only and return no result for an
-unpublished or collected revision.
+dependencies, and `Cold`, `Green`, `Red { first_changed }`, `Cycle`, or
+`Incomplete` status for a single published product. `dependency_traces`
+returns the complete ordered revision ledger. Both APIs are inspection-only and
+return no result for an unpublished or collected revision.
 
 The ledger is pruned when its retired revision is safely collected. A child
 whose parent has already been collected starts cold, preserving correctness
