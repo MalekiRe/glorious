@@ -5382,6 +5382,93 @@ fn service_rejects_references_to_body_locals_in_returned_aggregates() {
 }
 
 #[test]
+fn service_executes_enum_payload_reference_refinements() {
+    let source = r#"
+        pub enum Holder { Held(&mut i64), Empty }
+        pub fn main() -> i64 {
+            let value = 42;
+            let holder = Holder::Held(&mut value);
+            handle holder is Holder::Held(parent) {
+                true => {
+                    *parent
+                };
+                false => 0
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("enum payload reborrows must retain caller provenance through handlers");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let caller_owned = r#"
+        pub enum Holder { Held(&mut i64), Empty }
+        pub fn relay(value: &mut i64) -> i64 {
+            let holder = Holder::Held(value);
+            handle holder is Holder::Held(parent) {
+                true => {
+                    *parent
+                };
+                false => 0
+            }
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(caller_owned))
+        .expect("caller-owned enum payload reborrows must remain legal");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+}
+
+#[test]
+fn service_rejects_body_local_references_in_enum_and_array_effect_payloads() {
+    let enum_source = r#"
+        pub enum Holder { Held(&i64), Empty }
+        effect Store { save(value: Holder); }
+        pub fn bad() -> i64 / {Store} {
+            let value = 1;
+            Store::save(Holder::Held(&value));
+            0
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(enum_diagnostics)) =
+        StageZeroCompiler::new().compile(request(enum_source))
+    else {
+        panic!("enum payload borrowing a body local unexpectedly compiled")
+    };
+    assert!(
+        enum_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5015"),
+        "missing enum payload suspension diagnostic: {enum_diagnostics:#?}"
+    );
+
+    let array_source = r#"
+        type Ref = &i64;
+        effect Store { save(value: Array<Ref>); }
+        pub fn bad() -> i64 / {Store} {
+            let value = 1;
+            Store::save([&value]);
+            0
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(array_diagnostics)) =
+        StageZeroCompiler::new().compile(request(array_source))
+    else {
+        panic!("array payload borrowing a body local unexpectedly compiled")
+    };
+    assert!(
+        array_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5015"),
+        "missing array payload suspension diagnostic: {array_diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_tracks_outlives_through_assigned_tuple_reference_projections() {
     let incoming = StageZeroCompiler::new()
         .compile(request(

@@ -308,6 +308,17 @@ impl Analyzer<'_> {
                 for clause in clauses {
                     self.values = incoming.clone();
                     self.bind_pattern_value(&clause.pattern, computation.clone());
+                    // A boolean completion pattern alone cannot carry a
+                    // reference, but a positive refinement can.  Its subject
+                    // and projection plan are frozen Core facts, so bind it
+                    // from the original aggregate rather than treating the
+                    // arm-local name as an unconstrained scalar.  This keeps
+                    // aggregate references visible at both return and effect
+                    // suspension boundaries.
+                    if let Some(refinement) = &clause.refinement {
+                        let subject = self.value(refinement.subject);
+                        self.bind_pattern_value(&refinement.pattern, subject);
+                    }
                     exits.push(self.value(clause.body));
                 }
                 self.values = incoming;
@@ -441,7 +452,21 @@ impl Analyzer<'_> {
     }
 
     fn borrowed_value(&mut self, id: CoreId) -> Value {
+        // Reborrowing through a reference supplied by the caller must remain
+        // caller-owned.  `place_root` intentionally has no body-local root
+        // for `&*external`; treating that absence as a temporary would reject
+        // a valid reborrow merely because the reference first travelled
+        // through an enum/array/refinement aggregate.
+        let external_reborrow = match self.body.expression(id).kind.clone() {
+            CoreKind::Deref(reference) => {
+                matches!(self.value(reference), Value::ExternalBorrowed)
+            }
+            _ => false,
+        };
         let Some(root) = self.place_root(id) else {
+            if external_reborrow {
+                return Value::ExternalBorrowed;
+            }
             self.error(
                 self.body.expression(id).span,
                 "G5013",

@@ -619,6 +619,7 @@ impl Analyzer<'_> {
                     // matching spelling to retarget an outer loan.
                     self.activate_branch_bindings(&clause.bindings, None);
                     self.record_completion_result_origins(computation, &clause.pattern);
+                    self.record_refinement_reference_origins(clause.refinement.as_ref());
                     self.visit_with_live_after(clause.body, live_after);
                     self.end_scope(clause.span);
                     exits.push((
@@ -1414,17 +1415,32 @@ impl Analyzer<'_> {
 
     fn record_aggregate_reference_origins(&mut self, name: &str, id: CoreId) {
         match self.body.expression(id).kind.clone() {
-            CoreKind::Record { fields, .. } | CoreKind::Tuple(fields) => {
+            // Every aggregate constructor carries its children in frozen Core
+            // order.  Keeping this deliberately independent of source field
+            // syntax means that enum payload binders and array elements get
+            // the exact same backing-loan identity as tuple and record
+            // fields.  In particular, a reference may be created before an
+            // effect boundary and only extracted by a later refinement arm.
+            CoreKind::Record { fields, .. }
+            | CoreKind::Enum { fields, .. }
+            | CoreKind::Tuple(fields)
+            | CoreKind::Array(fields) => {
                 for (index, field) in fields.into_iter().enumerate() {
                     let key = format!("{name}.{index}");
-                    if let CoreKind::Borrow { unique, value } = self.body.expression(field).kind
-                        && let Some(place) = self.projection(value)
-                    {
+                    // Do not special-case a syntactic `&place`: the
+                    // aggregate can equally receive a caller reference,
+                    // reborrow, or frozen call result.  All of those have a
+                    // sealed projection loan by this point.  Copy the loan
+                    // identity into the aggregate slot while leaving the
+                    // aggregate itself as ordinary storage; a later
+                    // `&*slot` creates the child reborrow that owns an NLL
+                    // region.
+                    if let Some(parent) = self.reference_loan_from_value(field) {
                         self.reference_origins.insert(
                             key.clone(),
                             ProjectionLoan {
-                                place,
-                                unique,
+                                place: parent.place,
+                                unique: parent.unique,
                                 owner: None,
                             },
                         );
@@ -1562,6 +1578,7 @@ impl Analyzer<'_> {
         for field in fields {
             let fields = match &self.body.expression(value).kind {
                 CoreKind::Tuple(fields)
+                | CoreKind::Array(fields)
                 | CoreKind::Record { fields, .. }
                 | CoreKind::Enum { fields, .. } => fields,
                 _ => {
@@ -1640,6 +1657,23 @@ impl Analyzer<'_> {
                 self.install_reference_alias(&self.resolve_name(&name), parent, argument);
             }
         }
+    }
+
+    /// A completion clause for an `is` test carries two independent frozen
+    /// facts: the boolean completion result and the positive structural
+    /// refinement.  The former has no reference payload; the latter may bind
+    /// one from an enum/array/nominal aggregate.  Reify that exact Core
+    /// subject before visiting the arm, after its generative bindings are
+    /// active, so a body-local borrow cannot disappear at the refinement
+    /// boundary and a caller loan remains eligible for reborrowing.
+    fn record_refinement_reference_origins(
+        &mut self,
+        refinement: Option<&crate::core::CoreRefinementBranch>,
+    ) {
+        let Some(refinement) = refinement else {
+            return;
+        };
+        self.record_pattern_reference_from_value(&refinement.pattern, refinement.subject, &[]);
     }
 
     fn record_pattern_reference_from_value(

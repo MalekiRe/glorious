@@ -4354,6 +4354,170 @@ fn placeflow_releases_aggregate_reborrows_after_their_last_handler_use() {
 }
 
 #[test]
+fn placeflow_preserves_enum_payload_reference_origins_across_handler_boundaries() {
+    let core = core_for(
+        "core-enum-reference-reborrow-handler@0.1.0",
+        "pub enum Holder { Held(&mut i64), Empty } effect Tick { [0, 1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let holder = Holder::Held(&mut value); handle holder is Holder::Held(parent) { true => { let child = &mut *parent; handle Tick::tick() { Tick::tick() => *child }; *parent }; false => 0 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    assert!(
+        flow.events
+            .iter()
+            .any(|event| matches!(&event.kind, FlowEventKind::Reborrow(root) if root == "value")),
+        "enum payload reborrow did not retain its backing place: {flow:#?}"
+    );
+    assert!(
+        flow.events.iter().any(
+            |event| matches!(&event.kind, FlowEventKind::EndBorrow(owner) if owner == "child")
+        ),
+        "enum payload reborrow was not released after its handler use: {flow:#?}"
+    );
+}
+
+#[test]
+fn forged_array_reference_slots_keep_reborrow_and_escape_provenance() {
+    let package = PackageKey("core-forged-array-reference-provenance@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let i64 = Type::Scalar(ScalarType::I64);
+    let reference = Type::Reference {
+        mutability: grandiose_stage0::Mutability::Unique,
+        lifetime: Lifetime::Elided,
+        referent: Box::new(i64.clone()),
+    };
+    let mut body = TypedBody {
+        parameters: vec![],
+        expressions: vec![
+            CoreExpr {
+                kind: CoreKind::Literal("1".into()),
+                ty: i64.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Let {
+                    name: "value".into(),
+                    value: CoreId(0),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Local("value".into()),
+                ty: i64.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Borrow {
+                    unique: true,
+                    value: CoreId(2),
+                },
+                ty: reference.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Array(vec![CoreId(3)]),
+                ty: Type::Array(Box::new(reference.clone())),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Let {
+                    name: "holder".into(),
+                    value: CoreId(4),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Local("holder".into()),
+                ty: Type::Array(Box::new(reference.clone())),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Field {
+                    base: CoreId(6),
+                    index: 0,
+                    field_count: 1,
+                },
+                ty: reference.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Deref(CoreId(7)),
+                ty: i64.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Borrow {
+                    unique: true,
+                    value: CoreId(8),
+                },
+                ty: reference.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Let {
+                    name: "child".into(),
+                    value: CoreId(9),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Local("child".into()),
+                ty: reference.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Deref(CoreId(11)),
+                ty: i64.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Block(vec![CoreId(1), CoreId(5), CoreId(10), CoreId(12)]),
+                ty: i64.clone(),
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Block(vec![CoreId(1), CoreId(4)]),
+                ty: Type::Array(Box::new(reference)),
+                span,
+            },
+        ],
+        root: CoreId(13),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    assert!(body.validate().is_empty(), "{:#?}", body.validate());
+    let flow = PlaceFlow::analyze(&body);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    assert!(
+        flow.events
+            .iter()
+            .any(|event| matches!(&event.kind, FlowEventKind::Reborrow(root) if root == "value")),
+        "array element did not retain its frozen backing loan: {flow:#?}"
+    );
+
+    // A separately rooted view simulates a decoded/frozen body that returns
+    // the aggregate directly.  EscapeFlow must still see the body-local loan
+    // even though the array layout itself is not a source-level record.
+    body.root = CoreId(14);
+    let escaped_flow = PlaceFlow::analyze(&body);
+    let escapes = EscapeFlow::analyze(&body, &escaped_flow);
+    assert!(
+        escapes
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "forged array return lost its body-local reference provenance: {escapes:#?}"
+    );
+}
+
+#[test]
 fn handler_payload_reference_survives_completion_and_return_escape_checks() {
     let core = core_for(
         "core-handler-payload-reference-escape@0.1.0",
