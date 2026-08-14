@@ -181,6 +181,81 @@ fn matching_associated_effect_row_projections_unify_without_erasure() {
 }
 
 #[test]
+fn associated_effect_row_projections_unify_their_subject_and_type_arguments() {
+    let capability = DefKey(Digest::of_bytes(b"Capability"));
+    let mut inference = InferContext::default();
+    let left = EffectRow {
+        effects: BTreeSet::new(),
+        projections: vec![EffectRowProjection {
+            subject: Box::new(inference.fresh()),
+            trait_definition: capability,
+            trait_arguments: vec![inference.fresh()],
+            name: "Effects".into(),
+            item_arguments: vec![inference.fresh()],
+        }],
+        tail: None,
+    };
+    let right = EffectRow {
+        effects: BTreeSet::new(),
+        projections: vec![EffectRowProjection {
+            subject: Box::new(Type::Scalar(ScalarType::I64)),
+            trait_definition: capability,
+            trait_arguments: vec![Type::Scalar(ScalarType::Text)],
+            name: "Effects".into(),
+            item_arguments: vec![Type::Scalar(ScalarType::U8)],
+        }],
+        tail: None,
+    };
+    let callable = |effects| Type::Callable {
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects,
+        invocation: Quantity::ONCE,
+    };
+
+    let unified = inference
+        .unify(callable(left), callable(right.clone()))
+        .unwrap();
+    assert_eq!(inference.zonk(unified).unwrap(), callable(right));
+}
+
+#[test]
+fn associated_effect_row_projection_sets_unify_independently_of_source_order() {
+    let first = DefKey(Digest::of_bytes(b"FirstCapability"));
+    let second = DefKey(Digest::of_bytes(b"SecondCapability"));
+    let projection = |trait_definition, name: &str| EffectRowProjection {
+        subject: Box::new(Type::Scalar(ScalarType::I64)),
+        trait_definition,
+        trait_arguments: vec![],
+        name: name.into(),
+        item_arguments: vec![],
+    };
+    let left = EffectRow {
+        effects: BTreeSet::new(),
+        projections: vec![projection(first, "First"), projection(second, "Second")],
+        tail: None,
+    };
+    let right = EffectRow {
+        effects: BTreeSet::new(),
+        projections: vec![projection(second, "Second"), projection(first, "First")],
+        tail: None,
+    };
+    let callable = |effects| Type::Callable {
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects,
+        invocation: Quantity::ONCE,
+    };
+
+    assert_eq!(
+        InferContext::default()
+            .unify(callable(left.clone()), callable(right))
+            .unwrap(),
+        callable(left)
+    );
+}
+
+#[test]
 fn distinct_associated_effect_row_projections_do_not_unify() {
     let capability = DefKey(Digest::of_bytes(b"Capability"));
     let row = |name: &str| EffectRow {

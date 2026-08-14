@@ -425,7 +425,27 @@ impl InferContext {
                     })
                 })
                 .collect::<Result<_, _>>()?,
-            projections: effects.projections,
+            projections: effects
+                .projections
+                .into_iter()
+                .map(|projection| {
+                    Ok(EffectRowProjection {
+                        subject: Box::new(self.zonk(*projection.subject)?),
+                        trait_definition: projection.trait_definition,
+                        trait_arguments: projection
+                            .trait_arguments
+                            .into_iter()
+                            .map(|argument| self.zonk(argument))
+                            .collect::<Result<_, _>>()?,
+                        name: projection.name,
+                        item_arguments: projection
+                            .item_arguments
+                            .into_iter()
+                            .map(|argument| self.zonk(argument))
+                            .collect::<Result<_, _>>()?,
+                    })
+                })
+                .collect::<Result<_, _>>()?,
             tail: effects.tail,
         })
     }
@@ -455,16 +475,18 @@ impl InferContext {
         }
         let (left_only, right_only) =
             self.partition_effect_instances(&left.effects, &right.effects)?;
-        if !left.projections.is_empty() || !right.projections.is_empty() {
+        let Some(projections) =
+            self.unify_effect_row_projections(left.projections.clone(), right.projections.clone())?
+        else {
             return Err(TypeError::EffectRow {
                 expected: left,
                 found: right,
             });
-        }
+        };
         match (left.tail, right.tail) {
             (None, None) if left_only.is_empty() && right_only.is_empty() => Ok(EffectRow {
                 effects: left.effects.union(&right.effects).cloned().collect(),
-                projections: vec![],
+                projections,
                 tail: None,
             }),
             (None, None) => Err(TypeError::EffectRow {
@@ -484,7 +506,7 @@ impl InferContext {
             {
                 Ok(EffectRow {
                     effects: left.effects.union(&right.effects).cloned().collect(),
-                    projections: vec![],
+                    projections,
                     tail: Some(EffectTail::Infer(variable)),
                 })
             }
@@ -511,7 +533,7 @@ impl InferContext {
                 )?;
                 Ok(EffectRow {
                     effects: left.effects.union(&right.effects).cloned().collect(),
-                    projections: vec![],
+                    projections,
                     tail: Some(EffectTail::Infer(tail)),
                 })
             }
@@ -520,6 +542,55 @@ impl InferContext {
                 found: right,
             }),
         }
+    }
+
+    /// Unify the symbolic terms in two rows just as rigorously as ordinary
+    /// effect instances.  Projection identity is determined by its selected
+    /// associated item (trait, name, and arities), while its subject and type
+    /// arguments remain regular inference terms.  Requiring `Eq` here used to
+    /// reject `<T as Capability>::Effects` against the same projection after
+    /// `T` had been inferred to a concrete type.
+    ///
+    /// Returning `None` means the two rows name different projection sets;
+    /// the caller turns that into the row-level mismatch diagnostic.  A type
+    /// mismatch inside otherwise matching projections is intentionally kept
+    /// as its more precise [`TypeError::Mismatch`].
+    fn unify_effect_row_projections(
+        &mut self,
+        left: Vec<EffectRowProjection>,
+        right: Vec<EffectRowProjection>,
+    ) -> Result<Option<Vec<EffectRowProjection>>, TypeError> {
+        if left.len() != right.len() {
+            return Ok(None);
+        }
+        let mut unmatched = right;
+        let mut unified = Vec::with_capacity(left.len());
+        for left_projection in left {
+            let Some(index) = unmatched.iter().position(|right_projection| {
+                left_projection.trait_definition == right_projection.trait_definition
+                    && left_projection.name == right_projection.name
+                    && left_projection.trait_arguments.len()
+                        == right_projection.trait_arguments.len()
+                    && left_projection.item_arguments.len() == right_projection.item_arguments.len()
+            }) else {
+                return Ok(None);
+            };
+            let right_projection = unmatched.remove(index);
+            unified.push(EffectRowProjection {
+                subject: Box::new(self.unify(*left_projection.subject, *right_projection.subject)?),
+                trait_definition: left_projection.trait_definition,
+                trait_arguments: self.unify_many(
+                    left_projection.trait_arguments,
+                    right_projection.trait_arguments,
+                )?,
+                name: left_projection.name,
+                item_arguments: self.unify_many(
+                    left_projection.item_arguments,
+                    right_projection.item_arguments,
+                )?,
+            });
+        }
+        Ok(Some(unified))
     }
 
     fn bind(&mut self, variable: InferVar, value: Type) -> Result<(), TypeError> {
