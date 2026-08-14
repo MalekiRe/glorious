@@ -1,7 +1,8 @@
 use std::collections::BTreeSet;
 
 use grandiose_stage0::{
-    DefKey, Digest, EffectInstance, EffectRow, InferContext, Quantity, ScalarType, Type, TypeError,
+    DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, InferContext, Quantity,
+    ScalarType, Type, TypeError,
 };
 
 #[test]
@@ -125,6 +126,32 @@ fn effect_rows_distinguish_instances_of_the_same_protocol_declaration() {
         InferContext::default().unify(callable(integers), callable(text)),
         Err(TypeError::EffectRow { .. })
     ));
+}
+
+#[test]
+fn callable_fingerprints_include_associated_effect_row_projections() {
+    let capability = DefKey(Digest::of_bytes(b"Capability"));
+    let subject = Type::Scalar(ScalarType::I64);
+    let callable = |name: &str| Type::Callable {
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects: EffectRow {
+            effects: BTreeSet::new(),
+            projections: vec![EffectRowProjection {
+                subject: Box::new(subject.clone()),
+                trait_definition: capability,
+                trait_arguments: vec![],
+                name: name.into(),
+                item_arguments: vec![],
+            }],
+            tail: None,
+        },
+        invocation: Quantity::ONCE,
+    };
+    let mut inference = InferContext::default();
+    let first = inference.type_fingerprint(callable("First")).unwrap();
+    let second = inference.type_fingerprint(callable("Second")).unwrap();
+    assert_ne!(first, second);
 }
 
 #[test]

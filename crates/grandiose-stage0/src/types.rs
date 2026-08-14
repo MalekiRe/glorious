@@ -782,6 +782,15 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
                 output.extend_from_slice(&effect.definition.0.as_bytes());
                 encode_types(&effect.arguments, output);
             }
+            output.extend_from_slice(&(effects.projections.len() as u64).to_le_bytes());
+            for projection in &effects.projections {
+                encode_type(&projection.subject, output);
+                output.extend_from_slice(&projection.trait_definition.0.as_bytes());
+                encode_types(&projection.trait_arguments, output);
+                output.extend_from_slice(&(projection.name.len() as u64).to_le_bytes());
+                output.extend_from_slice(projection.name.as_bytes());
+                encode_types(&projection.item_arguments, output);
+            }
             match effects.tail {
                 Some(variable) => {
                     output.push(0);
