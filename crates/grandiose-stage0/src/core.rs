@@ -3239,6 +3239,22 @@ impl TypedBody {
             resumption_use_trackers: vec![],
         };
         let root = elaborator.expression_expected(body.root, None);
+        let initializer_type = match elaborator
+            .inference
+            .generalize_result_type(elaborator.expressions[root.0 as usize].ty.clone())
+        {
+            Ok((initializer_type, _)) => initializer_type,
+            Err(_) => {
+                elaborator.error(
+                    definition.span,
+                    "G4116",
+                    "cannot infer a complete closure type",
+                );
+                elaborator.recovered = true;
+                Type::Error
+            }
+        };
+        elaborator.expressions[root.0 as usize].ty = initializer_type;
         elaborator.seal_types();
         elaborator
             .diagnostics
@@ -3250,6 +3266,12 @@ impl TypedBody {
             diagnostics: elaborator.diagnostics,
             recovered: elaborator.recovered,
         }
+    }
+
+    pub fn value_initializer_type(&self) -> (Vec<crate::GenericKind>, Type) {
+        let root = self.expression(self.root);
+        let generic_kinds = vec![crate::GenericKind::Type; type_generic_arity(&root.ty) as usize];
+        (generic_kinds, root.ty.clone())
     }
 }
 
@@ -6414,10 +6436,35 @@ impl Elaborator<'_> {
                         Some(ElaboratedHeader::Constant(None)) => {
                             self.fail(span, "G4102", "constant value has no frozen type")
                         }
-                        Some(ElaboratedHeader::ValueInitializer(Some(ty))) => {
-                            self.alloc(CoreKind::Constant(definition), ty.clone(), span)
+                        Some(ElaboratedHeader::ValueInitializer {
+                            generic_kinds,
+                            ty: Some(_),
+                        }) => {
+                            let arguments = generic_kinds
+                                .iter()
+                                .enumerate()
+                                .map(|(index, kind)| match kind {
+                                    crate::GenericKind::Type => {
+                                        GenericArgument::Type(self.inference.fresh())
+                                    }
+                                    crate::GenericKind::EffectRow => {
+                                        GenericArgument::EffectRow(self.inference.fresh_effects())
+                                    }
+                                    crate::GenericKind::Lifetime => {
+                                        GenericArgument::Lifetime(Lifetime::Generic(index as u32))
+                                    }
+                                    crate::GenericKind::Const(kind) => {
+                                        self.inference.fresh_const(*kind)
+                                    }
+                                })
+                                .collect::<Vec<_>>();
+                            let ty = self
+                                .signatures
+                                .instantiate_value_initializer_generic(definition, &arguments)
+                                .expect("fresh arguments match the frozen initializer contract");
+                            self.alloc(CoreKind::Constant(definition), ty, span)
                         }
-                        Some(ElaboratedHeader::ValueInitializer(None)) => self.fail(
+                        Some(ElaboratedHeader::ValueInitializer { ty: None, .. }) => self.fail(
                             span,
                             "G4102",
                             "top-level value initializer has no frozen type",
@@ -9921,6 +9968,68 @@ impl Elaborator<'_> {
             span,
             message: message.into(),
         });
+    }
+}
+
+fn type_generic_arity(value: &Type) -> u32 {
+    fn argument_arity(value: &GenericArgument) -> u32 {
+        match value {
+            GenericArgument::Type(value) => type_generic_arity(value),
+            GenericArgument::EffectRow(row) => row
+                .effects
+                .iter()
+                .flat_map(|effect| effect.arguments.iter())
+                .map(argument_arity)
+                .chain(row.projections.iter().flat_map(|projection| {
+                    std::iter::once(type_generic_arity(&projection.subject))
+                        .chain(projection.trait_arguments.iter().map(argument_arity))
+                        .chain(projection.item_arguments.iter().map(argument_arity))
+                }))
+                .max()
+                .unwrap_or(0),
+            GenericArgument::ConstProjection {
+                subject,
+                trait_arguments,
+                ..
+            } => std::iter::once(type_generic_arity(subject))
+                .chain(trait_arguments.iter().map(argument_arity))
+                .max()
+                .unwrap_or(0),
+            _ => 0,
+        }
+    }
+
+    match value {
+        Type::Generic(index) => index + 1,
+        Type::Nominal { arguments, .. } => arguments.iter().map(argument_arity).max().unwrap_or(0),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => std::iter::once(type_generic_arity(subject))
+            .chain(trait_arguments.iter().map(argument_arity))
+            .chain(item_arguments.iter().map(argument_arity))
+            .max()
+            .unwrap_or(0),
+        Type::Tuple(values) => values.iter().map(type_generic_arity).max().unwrap_or(0),
+        Type::Array(value) => type_generic_arity(value),
+        Type::Reference { referent, .. } => type_generic_arity(referent),
+        Type::Callable {
+            parameters,
+            result,
+            effects,
+            ..
+        } => parameters
+            .iter()
+            .map(type_generic_arity)
+            .chain(std::iter::once(type_generic_arity(result)))
+            .chain(std::iter::once(argument_arity(
+                &GenericArgument::EffectRow(effects.clone()),
+            )))
+            .max()
+            .unwrap_or(0),
+        _ => 0,
     }
 }
 

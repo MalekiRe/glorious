@@ -7659,6 +7659,14 @@ fn service_freezes_constructor_top_level_value_initializers() {
 }
 
 #[test]
+fn service_generalizes_polymorphic_top_level_value_initializers() {
+    let source = "pub enum Result<T, E> { Ok(T), Err(E) } type Option<T> = Result<T, ()>; let None = Result::Err(()); pub fn no_number() -> Option<i64> { None } pub fn no_text() -> Option<Text> { None } pub fn main() -> i64 { handle no_number() { Result::Ok(_) => 0, Result::Err(_) => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_accepts_canonical_boolean_value_initializer_spellings() {
     let source = "pub fn __g1_bool_true() -> Bool { true } pub fn __g1_bool_false() -> Bool { false } let true = __g1_bool_true(); let false = __g1_bool_false(); pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

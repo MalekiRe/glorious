@@ -278,7 +278,10 @@ pub enum ElaboratedHeader {
     /// A top-level evaluated `let`. The `Option` is `None` only during the
     /// private elaboration prepass; all consumers require the resulting type
     /// to be frozen before reading the value.
-    ValueInitializer(Option<Type>),
+    ValueInitializer {
+        generic_kinds: Vec<GenericKind>,
+        ty: Option<Type>,
+    },
     /// Aliases retain both their binder arity and their frozen target.  The
     /// normalizer substitutes these at every consuming signature boundary;
     /// aliases therefore never become runtime nominal identities.
@@ -868,9 +871,38 @@ impl ElaboratedInterface {
         }
     }
 
-    pub fn freeze_value_initializer(&mut self, definition: DefKey, ty: Type) {
-        self.definitions
-            .insert(definition, ElaboratedHeader::ValueInitializer(Some(ty)));
+    pub fn freeze_value_initializer(
+        &mut self,
+        definition: DefKey,
+        generic_kinds: Vec<GenericKind>,
+        ty: Type,
+    ) {
+        self.definitions.insert(
+            definition,
+            ElaboratedHeader::ValueInitializer {
+                generic_kinds,
+                ty: Some(ty),
+            },
+        );
+    }
+
+    pub fn instantiate_value_initializer_generic(
+        &self,
+        definition: DefKey,
+        arguments: &[GenericArgument],
+    ) -> Result<Type, InstantiationError> {
+        let ElaboratedHeader::ValueInitializer {
+            generic_kinds,
+            ty: Some(ty),
+        } = self
+            .definitions
+            .get(&definition)
+            .ok_or(InstantiationError::MissingDefinition)?
+        else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        validate_generic_arguments(generic_kinds, arguments)?;
+        Ok(substitute_alias_generic_identity(ty.clone(), arguments))
     }
 
     fn resolve_value_aliases(&mut self, interface: &PackageInterface, index: &DefinitionIndex) {
@@ -1273,7 +1305,7 @@ impl ElaboratedInterface {
                     self.validate_type_projection_obligations(target, &[], &mut diagnostics);
                 }
                 ElaboratedHeader::Constant(Some(ty))
-                | ElaboratedHeader::ValueInitializer(Some(ty)) => {
+                | ElaboratedHeader::ValueInitializer { ty: Some(ty), .. } => {
                     self.validate_type_projection_obligations(ty, &[], &mut diagnostics);
                 }
                 ElaboratedHeader::Nominal { layout, .. } => match layout {
@@ -1458,7 +1490,7 @@ impl ElaboratedInterface {
                     }
                 }
                 ElaboratedHeader::Constant(None)
-                | ElaboratedHeader::ValueInitializer(None)
+                | ElaboratedHeader::ValueInitializer { ty: None, .. }
                 | ElaboratedHeader::Opaque => {}
             }
         }
@@ -2528,7 +2560,7 @@ impl ElaboratedInterface {
                     );
                 }
                 ElaboratedHeader::Constant(Some(ty))
-                | ElaboratedHeader::ValueInitializer(Some(ty)) => {
+                | ElaboratedHeader::ValueInitializer { ty: Some(ty), .. } => {
                     *ty = normalize_alias_type(ty.clone(), &aliases, &mut vec![], &mut diagnostics);
                 }
                 ElaboratedHeader::Nominal { layout, .. } => {
@@ -2608,7 +2640,7 @@ impl ElaboratedInterface {
                     }
                 }
                 ElaboratedHeader::Constant(None)
-                | ElaboratedHeader::ValueInitializer(None)
+                | ElaboratedHeader::ValueInitializer { ty: None, .. }
                 | ElaboratedHeader::Opaque => {}
             }
         }
@@ -3556,7 +3588,10 @@ impl Elaborator<'_> {
                 ElaboratedHeader::Constant(ty.as_ref().map(|value| self.ty(value)))
             }
             ParsedHeader::ValueAlias { .. } => ElaboratedHeader::Opaque,
-            ParsedHeader::ValueInitializer { .. } => ElaboratedHeader::ValueInitializer(None),
+            ParsedHeader::ValueInitializer { .. } => ElaboratedHeader::ValueInitializer {
+                generic_kinds: vec![],
+                ty: None,
+            },
             ParsedHeader::Nominal { generics, layout } => {
                 self.bind_generics(generics);
                 ElaboratedHeader::Nominal {

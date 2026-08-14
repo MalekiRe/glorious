@@ -533,6 +533,132 @@ impl InferContext {
         GenericArgument::ConstInfer { variable, kind }
     }
 
+    /// Turn the unresolved type variables reachable from a deliberately
+    /// polymorphic value boundary into declaration-owned generic binders.
+    ///
+    /// This is intentionally narrower than ordinary zonking: call sites and
+    /// executable function bodies must still reject unconstrained inference.
+    /// A top-level value initializer is different: it is evaluated once, and
+    /// a type variable that occurs only in its outward result is a parametric
+    /// value (for example `Result::Err(()) : Option<T>`), not an ambiguous
+    /// executable choice.  Binding the variables in this context also makes
+    /// the subsequent Core seal rewrite every occurrence consistently.
+    pub fn generalize_result_type(
+        &mut self,
+        value: Type,
+    ) -> Result<(Type, Vec<GenericKind>), TypeError> {
+        let mut variables = BTreeSet::new();
+        self.collect_unresolved_type_variables(value.clone(), &mut variables)?;
+        let variables = variables.into_iter().collect::<Vec<_>>();
+        for (index, variable) in variables.iter().enumerate() {
+            self.bindings[variable.0 as usize] = Some(Type::Generic(index as u32));
+        }
+        let value = self.zonk(value)?;
+        Ok((value, vec![GenericKind::Type; variables.len()]))
+    }
+
+    fn collect_unresolved_type_variables(
+        &mut self,
+        value: Type,
+        variables: &mut BTreeSet<InferVar>,
+    ) -> Result<(), TypeError> {
+        match self.resolve(value) {
+            Type::Infer(variable) => {
+                variables.insert(variable);
+                Ok(())
+            }
+            Type::Nominal { arguments, .. } => arguments.into_iter().try_for_each(|argument| {
+                self.collect_generic_argument_variables(argument, variables)
+            }),
+            Type::Projection {
+                subject,
+                trait_arguments,
+                item_arguments,
+                ..
+            } => {
+                self.collect_unresolved_type_variables(*subject, variables)?;
+                trait_arguments.into_iter().try_for_each(|argument| {
+                    self.collect_generic_argument_variables(argument, variables)
+                })?;
+                item_arguments.into_iter().try_for_each(|argument| {
+                    self.collect_generic_argument_variables(argument, variables)
+                })
+            }
+            Type::Tuple(values) => values
+                .into_iter()
+                .try_for_each(|value| self.collect_unresolved_type_variables(value, variables)),
+            Type::Array(value) => self.collect_unresolved_type_variables(*value, variables),
+            Type::Reference { referent, .. } => {
+                self.collect_unresolved_type_variables(*referent, variables)
+            }
+            Type::Callable {
+                parameters,
+                result,
+                effects,
+                ..
+            } => {
+                parameters.into_iter().try_for_each(|parameter| {
+                    self.collect_unresolved_type_variables(parameter, variables)
+                })?;
+                self.collect_unresolved_type_variables(*result, variables)?;
+                self.collect_effect_variables(effects, variables)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn collect_generic_argument_variables(
+        &mut self,
+        argument: GenericArgument,
+        variables: &mut BTreeSet<InferVar>,
+    ) -> Result<(), TypeError> {
+        match argument {
+            GenericArgument::Type(value) => {
+                self.collect_unresolved_type_variables(value, variables)
+            }
+            GenericArgument::EffectRow(value) => self.collect_effect_variables(value, variables),
+            GenericArgument::ConstProjection {
+                subject,
+                trait_arguments,
+                ..
+            } => {
+                self.collect_unresolved_type_variables(*subject, variables)?;
+                trait_arguments.into_iter().try_for_each(|argument| {
+                    self.collect_generic_argument_variables(argument, variables)
+                })
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn collect_effect_variables(
+        &mut self,
+        effects: EffectRow,
+        variables: &mut BTreeSet<InferVar>,
+    ) -> Result<(), TypeError> {
+        if matches!(effects.tail, Some(EffectTail::Infer(_))) {
+            return Err(TypeError::UnresolvedEffect(match effects.tail {
+                Some(EffectTail::Infer(variable)) => variable,
+                _ => unreachable!(),
+            }));
+        }
+        for effect in effects.effects {
+            for argument in effect.arguments {
+                self.collect_generic_argument_variables(argument, variables)?;
+            }
+        }
+        for projection in effects.projections {
+            self.collect_unresolved_type_variables(*projection.subject, variables)?;
+            for argument in projection.trait_arguments {
+                self.collect_generic_argument_variables(argument, variables)?;
+            }
+            for argument in projection.item_arguments {
+                self.collect_generic_argument_variables(argument, variables)?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn unify(&mut self, left: Type, right: Type) -> Result<Type, TypeError> {
         let left = self.resolve(left);
         let right = self.resolve(right);

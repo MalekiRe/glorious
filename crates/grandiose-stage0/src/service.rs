@@ -956,8 +956,8 @@ impl StageZeroCompiler {
                     &fixities,
                 );
                 if core.diagnostics.is_empty() && !core.recovered {
-                    let ty = core.expression(core.root).ty.clone();
-                    signatures.freeze_value_initializer(declaration.key, ty);
+                    let (generic_kinds, ty) = core.value_initializer_type();
+                    signatures.freeze_value_initializer(declaration.key, generic_kinds, ty);
                 }
             }
         }
