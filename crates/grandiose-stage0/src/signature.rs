@@ -256,11 +256,39 @@ impl ElaboratedInterface {
     fn validate_associated_type_definitions(&mut self) {
         let mut diagnostics = Vec::new();
         for implementation in self.definitions.values().filter_map(|header| match header {
-            ElaboratedHeader::Implementation(implementation) if !implementation.negative => {
-                Some(implementation)
-            }
+            ElaboratedHeader::Implementation(implementation) => Some(implementation),
             _ => None,
         }) {
+            if implementation.negative {
+                let mut items = implementation
+                    .associated_types
+                    .keys()
+                    .map(|name| format!("associated type `{name}`"))
+                    .chain(
+                        implementation
+                            .associated_effect_rows
+                            .keys()
+                            .map(|name| format!("associated effect row `{name}`")),
+                    )
+                    .chain(
+                        implementation
+                            .methods
+                            .keys()
+                            .map(|name| format!("method `{name}`")),
+                    )
+                    .collect::<Vec<_>>();
+                items.sort();
+                if !items.is_empty() {
+                    diagnostics.push(SignatureDiagnostic {
+                        code: "G4149",
+                        message: format!(
+                            "negative implementation cannot define {}",
+                            items.join(", ")
+                        ),
+                    });
+                }
+                continue;
+            }
             let Some(ElaboratedHeader::Trait(trait_header)) =
                 self.definitions.get(&implementation.relation.definition)
             else {

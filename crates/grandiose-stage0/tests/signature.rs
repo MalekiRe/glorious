@@ -753,6 +753,38 @@ fn positive_implementations_reject_missing_or_negative_supertrait_evidence() {
 }
 
 #[test]
+fn negative_implementations_cannot_define_callable_or_associated_item_evidence() {
+    let package = PackageKey("signature-negative-impl-items@0.1.0".into());
+    let source = r#"
+        trait Marker {
+            type Item;
+            type Trace: EffectRow;
+            fn inspect(value: i64) -> i64;
+        }
+        impl !Marker for i64 {
+            type Item = Text;
+            type Trace = { Console };
+            fn inspect(value: i64) -> i64 { value }
+        }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "G4149"
+                && diagnostic.message.contains("associated type `Item`")
+                && diagnostic.message.contains("associated effect row `Trace`")
+                && diagnostic.message.contains("method `inspect`")
+        }),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn generic_associated_type_projections_are_preserved_in_frozen_signatures() {
     let package = PackageKey("signature-associated-projection@0.1.0".into());
     let source = "trait Iterator { type Item; } pub fn collect<T>(value: T) -> <T as Iterator>::Item { ignored }";
