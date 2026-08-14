@@ -737,6 +737,16 @@ fn instantiate_trait_method_contract(
     method: &CallableSignature,
     implementation: &ElaboratedImplementation,
 ) -> CallableSignature {
+    // Trait methods are elaborated in the trait's binder environment, while
+    // implementation methods are elaborated after the implementation's own
+    // binders. Type generics already pass through `arguments` below, but
+    // lifetimes deliberately have their own namespace and therefore need an
+    // explicit de Bruijn-style rebase as well. Without it, for example,
+    // `impl<T> Borrow for Box<T> { fn get<'a>(...) ... }` compared the
+    // trait's method lifetime slot 0 with the implementation method's slot 1
+    // and incorrectly rejected an identical contract.
+    let trait_generic_count = implementation.relation.arguments.len() as u32;
+    let implementation_generic_count = implementation.generics;
     let mut arguments = implementation.relation.arguments.clone();
     arguments
         .extend((0..method.generics).map(|offset| Type::Generic(implementation.generics + offset)));
@@ -747,22 +757,253 @@ fn instantiate_trait_method_contract(
             .parameters
             .iter()
             .cloned()
-            .map(|parameter| substitute_alias_generics(parameter, &arguments))
+            .map(|parameter| {
+                rebase_method_lifetimes(
+                    substitute_alias_generics(parameter, &arguments),
+                    trait_generic_count,
+                    implementation_generic_count,
+                )
+            })
             .collect(),
-        result: substitute_alias_generics(method.result.clone(), &arguments),
-        effects: substitute_effect_row(method.effects.clone(), &arguments),
+        result: rebase_method_lifetimes(
+            substitute_alias_generics(method.result.clone(), &arguments),
+            trait_generic_count,
+            implementation_generic_count,
+        ),
+        effects: rebase_method_lifetime_effect_row(
+            substitute_effect_row(method.effects.clone(), &arguments),
+            trait_generic_count,
+            implementation_generic_count,
+        ),
         invocation: method.invocation,
         where_bounds: method
             .where_bounds
             .iter()
             .map(|(subject, relation)| {
                 (
-                    substitute_alias_generics(subject.clone(), &arguments),
-                    substitute_trait_reference(relation, &arguments),
+                    rebase_method_lifetimes(
+                        substitute_alias_generics(subject.clone(), &arguments),
+                        trait_generic_count,
+                        implementation_generic_count,
+                    ),
+                    rebase_method_lifetime_trait_reference(
+                        substitute_trait_reference(relation, &arguments),
+                        trait_generic_count,
+                        implementation_generic_count,
+                    ),
                 )
             })
             .collect(),
     }
+}
+
+/// Rebase lifetimes introduced by a trait method into the implementation
+/// method's binder prefix. Lifetimes that belong to the trait itself remain
+/// untouched; they are part of the selected trait relation rather than the
+/// method's universal binder.
+fn rebase_method_lifetimes(
+    value: Type,
+    trait_generic_count: u32,
+    implementation_generic_count: u32,
+) -> Type {
+    match value {
+        Type::Nominal {
+            definition,
+            arguments,
+        } => Type::Nominal {
+            definition,
+            arguments: arguments
+                .into_iter()
+                .map(|value| {
+                    rebase_method_lifetimes(
+                        value,
+                        trait_generic_count,
+                        implementation_generic_count,
+                    )
+                })
+                .collect(),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } => Type::Projection {
+            subject: Box::new(rebase_method_lifetimes(
+                *subject,
+                trait_generic_count,
+                implementation_generic_count,
+            )),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|value| {
+                    rebase_method_lifetimes(
+                        value,
+                        trait_generic_count,
+                        implementation_generic_count,
+                    )
+                })
+                .collect(),
+            name,
+            item_arguments: item_arguments
+                .into_iter()
+                .map(|value| {
+                    rebase_method_lifetimes(
+                        value,
+                        trait_generic_count,
+                        implementation_generic_count,
+                    )
+                })
+                .collect(),
+        },
+        Type::Tuple(values) => Type::Tuple(
+            values
+                .into_iter()
+                .map(|value| {
+                    rebase_method_lifetimes(
+                        value,
+                        trait_generic_count,
+                        implementation_generic_count,
+                    )
+                })
+                .collect(),
+        ),
+        Type::Array(value) => Type::Array(Box::new(rebase_method_lifetimes(
+            *value,
+            trait_generic_count,
+            implementation_generic_count,
+        ))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability,
+            lifetime: match lifetime {
+                Lifetime::Generic(index) if index >= trait_generic_count => {
+                    Lifetime::Generic(implementation_generic_count + (index - trait_generic_count))
+                }
+                lifetime => lifetime,
+            },
+            referent: Box::new(rebase_method_lifetimes(
+                *referent,
+                trait_generic_count,
+                implementation_generic_count,
+            )),
+        },
+        Type::Callable {
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            parameters: parameters
+                .into_iter()
+                .map(|value| {
+                    rebase_method_lifetimes(
+                        value,
+                        trait_generic_count,
+                        implementation_generic_count,
+                    )
+                })
+                .collect(),
+            result: Box::new(rebase_method_lifetimes(
+                *result,
+                trait_generic_count,
+                implementation_generic_count,
+            )),
+            effects: rebase_method_lifetime_effect_row(
+                effects,
+                trait_generic_count,
+                implementation_generic_count,
+            ),
+            invocation,
+        },
+        value => value,
+    }
+}
+
+fn rebase_method_lifetime_trait_reference(
+    relation: ElaboratedTraitReference,
+    trait_generic_count: u32,
+    implementation_generic_count: u32,
+) -> ElaboratedTraitReference {
+    ElaboratedTraitReference {
+        definition: relation.definition,
+        arguments: relation
+            .arguments
+            .into_iter()
+            .map(|argument| {
+                rebase_method_lifetimes(argument, trait_generic_count, implementation_generic_count)
+            })
+            .collect(),
+    }
+}
+
+fn rebase_method_lifetime_effect_row(
+    value: EffectRow,
+    trait_generic_count: u32,
+    implementation_generic_count: u32,
+) -> EffectRow {
+    EffectRow {
+        effects: value
+            .effects
+            .into_iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(|argument| {
+                        rebase_method_lifetimes(
+                            argument,
+                            trait_generic_count,
+                            implementation_generic_count,
+                        )
+                    })
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| EffectRowProjection {
+                subject: Box::new(rebase_method_lifetimes(
+                    *projection.subject,
+                    trait_generic_count,
+                    implementation_generic_count,
+                )),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(|argument| {
+                        rebase_method_lifetimes(
+                            argument,
+                            trait_generic_count,
+                            implementation_generic_count,
+                        )
+                    })
+                    .collect(),
+                name: projection.name,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(|argument| {
+                        rebase_method_lifetimes(
+                            argument,
+                            trait_generic_count,
+                            implementation_generic_count,
+                        )
+                    })
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    }
+    .canonicalized()
 }
 
 fn normalize_trait_reference(

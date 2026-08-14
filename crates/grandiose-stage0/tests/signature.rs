@@ -282,6 +282,55 @@ fn interfaces_retain_implementation_method_signatures_and_validate_method_sets()
 }
 
 #[test]
+fn implementation_trait_methods_rebase_lifetime_binders_after_impl_generics() {
+    let package = PackageKey("signature-trait-method-lifetime-rebase@0.1.0".into());
+    let source = r#"
+        struct Box<T> {}
+        trait Inspect {
+            fn inspect<'a, U>(value: &'a U) -> &'a U;
+        }
+        impl<T> Inspect for Box<T> {
+            fn inspect<'b, V>(value: &'b V) -> &'b V { value }
+        }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G4147"),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let implementation = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.is_none())
+        .expect("implementation declaration");
+    let ElaboratedHeader::Implementation(implementation) =
+        signatures.definitions.get(&implementation.key).unwrap()
+    else {
+        panic!("expected implementation signature")
+    };
+    let method = implementation
+        .methods
+        .get("inspect")
+        .expect("inspect method");
+    assert!(matches!(
+        method.parameters.as_slice(),
+        [Type::Reference {
+            lifetime: Lifetime::Generic(1),
+            referent,
+            ..
+        }] if **referent == Type::Generic(2)
+    ));
+}
+
+#[test]
 fn implementation_methods_must_match_the_instantiated_trait_contract() {
     let package = PackageKey("signature-impl-method-contract@0.1.0".into());
     let source = r#"
