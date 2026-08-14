@@ -3461,6 +3461,128 @@ fn call_reference_provenance_preserves_return_and_suspension_escape_obligations(
 }
 
 #[test]
+fn performed_operations_freeze_generic_reference_provenance() {
+    let core = core_for(
+        "core-perform-reference-generic@0.1.0",
+        "effect Relay<T> { [0, 1] relay(value: &T) -> &T; } pub fn main() -> &i64 / {Relay<i64>} { let value = 1; Relay<i64>::relay(&value) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let perform = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Perform {
+                effect,
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(paths),
+                ..
+            } => Some((effect, paths)),
+            _ => None,
+        })
+        .expect("generic effect performance did not retain reference provenance");
+    assert_eq!(perform.0.arguments.len(), 1);
+    assert_eq!(perform.1.len(), 1);
+    assert_eq!(perform.1[0].result_fields, Vec::<u32>::new());
+    assert_eq!(perform.1[0].argument, 0);
+    assert_eq!(perform.1[0].argument_fields, Vec::<u32>::new());
+
+    let flow = PlaceFlow::analyze(&core);
+    let escapes = EscapeFlow::analyze(&core, &flow);
+    assert!(
+        escapes
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "performed reference result hid a body-local return: {escapes:#?}"
+    );
+}
+
+#[test]
+fn forged_perform_reference_provenance_fails_core_validation() {
+    let mut core = core_for(
+        "core-forged-perform-reference@0.1.0",
+        "effect Relay { [0, 1] relay(value: &i64) -> &i64; } pub fn main() -> &i64 / {Relay} { let value = 1; Relay::relay(&value) }",
+    );
+    let origin = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Perform {
+                reference_origin, ..
+            } => Some(reference_origin),
+            _ => None,
+        })
+        .expect("performed operation did not reach Core");
+    *origin = grandiose_stage0::CallReferenceOrigin::None;
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4187"),
+        "forged performed-operation provenance was accepted: {:#?}",
+        core.validate()
+    );
+}
+
+#[test]
+fn handler_payload_reference_alias_preserves_its_parent_loan() {
+    let core = core_for(
+        "core-handler-payload-reference-provenance@0.1.0",
+        "effect Relay { [0, 1] relay(value: &mut i64) -> i64; } pub fn main() -> i64 { let value = 1; let parent = &mut value; handle Relay::relay(parent) { Relay::relay(payload) with _ => { let child = &mut *payload; *child } } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        !flow
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5006"),
+        "handler payload lost the caller loan before its reborrow: {flow:#?}"
+    );
+}
+
+#[test]
+fn handler_payload_reference_survives_completion_and_return_escape_checks() {
+    let core = core_for(
+        "core-handler-payload-reference-escape@0.1.0",
+        "effect Relay { [0, 1] relay(value: &i64) -> &i64; } pub fn main() -> &i64 { let value = 1; handle Relay::relay(&value) { completed => completed, Relay::relay(payload) with _ => payload } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let escapes = EscapeFlow::analyze(&core, &flow);
+    assert!(
+        escapes
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "handler payload/completion hid a body-local reference: {escapes:#?}"
+    );
+}
+
+#[test]
+fn resumed_handler_reference_result_keeps_effect_payload_provenance() {
+    let core = core_for(
+        "core-handler-resumption-reference-provenance@0.1.0",
+        "effect Relay { [1, 1] relay(value: &i64) -> &i64; } pub fn main() -> &i64 { let value = 1; handle Relay::relay(&value) { completed => completed, Relay::relay(payload) with resume => resume(payload) } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let escapes = EscapeFlow::analyze(&core, &flow);
+    assert!(
+        escapes
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "resumption result hid its effect payload reference: {escapes:#?}"
+    );
+    assert!(
+        !escapes
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "resumption lost frozen reference provenance: {escapes:#?}"
+    );
+}
+
+#[test]
 fn rigid_lifetime_contracts_reject_short_borrows_at_return_assignment_and_aggregate_boundaries() {
     let returned = core_for(
         "core-return-outlives@0.1.0",

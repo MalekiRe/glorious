@@ -449,6 +449,11 @@ pub enum CoreKind {
         operation: u32,
         arguments: Vec<CoreId>,
         terminal: bool,
+        /// Frozen caller-region provenance for the operation result.  Effect
+        /// operations are callable boundaries too: the handler/resumption
+        /// machinery must never infer a shorter region from an implementation
+        /// detail after Core has been sealed.
+        reference_origin: CallReferenceOrigin,
     },
     /// Deep handler scope.  Its operations are already namespace-resolved,
     /// structurally typed, and coverage-checked before this Core boundary.
@@ -954,12 +959,14 @@ impl CoreFingerprintEncoder<'_> {
                 operation,
                 arguments,
                 terminal,
+                reference_origin,
             } => {
                 self.bytes(b"perform");
                 self.effect(effect);
                 self.bytes(&operation.to_le_bytes());
                 self.bytes(&[*terminal as u8]);
                 self.ids(arguments);
+                self.debug(reference_origin);
             }
             CoreKind::Handle {
                 computation,
@@ -1168,32 +1175,41 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
 }
 
 fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type) -> Option<String> {
-    let CoreKind::Call {
-        arguments,
-        reference_origin,
-        ..
-    } = kind
-    else {
-        return None;
+    let (arguments, reference_origin, boundary) = match kind {
+        CoreKind::Call {
+            arguments,
+            reference_origin,
+            ..
+        } => (arguments, reference_origin, "call"),
+        CoreKind::Perform {
+            arguments,
+            reference_origin,
+            ..
+        } => (arguments, reference_origin, "effect operation"),
+        _ => return None,
     };
     let is_reference = known_reference_bearing_type(result);
     match reference_origin {
-        CallReferenceOrigin::None if is_reference => {
-            Some("reference-valued call omitted its frozen caller-region provenance".into())
-        }
+        CallReferenceOrigin::None if is_reference => Some(format!(
+            "reference-valued {boundary} omitted its frozen caller-region provenance"
+        )),
         CallReferenceOrigin::Paths(paths) => {
             if !known_reference_bearing_type(result) && !matches!(result, Type::Nominal { .. }) {
-                return Some("call-reference paths require a reference-bearing result".into());
+                return Some(format!(
+                    "{boundary}-reference paths require a reference-bearing result"
+                ));
             }
             let mut result_paths = std::collections::BTreeSet::new();
             for path in paths {
                 if !result_paths.insert(path.result_fields.clone()) {
-                    return Some(
-                        "call-reference provenance repeats a result projection path".into(),
-                    );
+                    return Some(format!(
+                        "{boundary}-reference provenance repeats a result projection path"
+                    ));
                 }
                 let Some(argument) = arguments.get(path.argument as usize) else {
-                    return Some("call-reference provenance indexes a missing argument".into());
+                    return Some(format!(
+                        "{boundary}-reference provenance indexes a missing argument"
+                    ));
                 };
                 if !body.contains(*argument) {
                     return None;
@@ -1206,9 +1222,9 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
                 lifetime: Lifetime::Static,
                 ..
             } => None,
-            _ => {
-                Some("external call-reference provenance requires a static reference result".into())
-            }
+            _ => Some(format!(
+                "external {boundary}-reference provenance requires a static reference result"
+            )),
         },
         // An unconstrained generic result may later instantiate to a scalar
         // or a reference. Its call-site Core has no direct path to validate;
@@ -4715,13 +4731,20 @@ impl Elaborator<'_> {
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
             }
-            CoreKind::Perform { effect, .. } => {
+            CoreKind::Perform {
+                effect,
+                arguments,
+                reference_origin,
+                ..
+            } => {
                 effect.arguments = effect
                     .arguments
                     .iter()
                     .cloned()
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
+                *reference_origin =
+                    call_reference_origin(self.signatures, &self.expressions, arguments, result);
             }
             CoreKind::Call {
                 arguments,
@@ -6388,6 +6411,7 @@ impl Elaborator<'_> {
                 operation: operation_index,
                 arguments: values,
                 terminal: operation.terminal,
+                reference_origin: CallReferenceOrigin::Opaque,
             },
             operation.result.clone(),
             span,

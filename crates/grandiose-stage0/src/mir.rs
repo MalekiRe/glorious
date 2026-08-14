@@ -2919,6 +2919,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(protected).kind.clone()
         else {
             return None;
@@ -3214,6 +3215,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(protected).kind.clone()
         else {
             return None;
@@ -3455,6 +3457,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(computation).kind.clone()
         else {
             return None;
@@ -3962,6 +3965,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(performed).kind.clone()
         else {
             return None;
@@ -4563,6 +4567,7 @@ impl Lowerer<'_> {
                 operation,
                 arguments,
                 terminal: false,
+                ..
             } = self.body.expression(value).kind.clone()
             else {
                 continue;
@@ -4836,6 +4841,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(performed).kind.clone()
         else {
             return None;
@@ -5124,6 +5130,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(performed).kind.clone()
         else {
             return None;
@@ -5574,6 +5581,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(current).kind.clone()
         else {
             return None;
@@ -5883,6 +5891,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(inner_computation).kind.clone()
         else {
             return None;
@@ -6171,6 +6180,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(value).kind.clone()
         else {
             return None;
@@ -6429,6 +6439,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(perform).kind.clone()
         else {
             return None;
@@ -6588,6 +6599,7 @@ impl Lowerer<'_> {
             operation,
             arguments,
             terminal: false,
+            ..
         } = self.body.expression(computation).kind.clone()
         else {
             return None;
@@ -6822,6 +6834,7 @@ impl Lowerer<'_> {
             operation,
             arguments,
             terminal: false,
+            ..
         } = self.body.expression(computation).kind.clone()
         else {
             return None;
@@ -6981,6 +6994,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(value).kind.clone()
         else {
             return None;
@@ -7169,6 +7183,7 @@ impl Lowerer<'_> {
             operation,
             arguments,
             terminal: false,
+            ..
         } = self.body.expression(value).kind.clone()
         else {
             return None;
@@ -8774,6 +8789,7 @@ impl Lowerer<'_> {
             operation,
             arguments: argument_ids,
             terminal: false,
+            ..
         } = self.body.expression(computation).kind.clone()
         else {
             return None;
@@ -10050,6 +10066,7 @@ impl Lowerer<'_> {
                 operation,
                 arguments,
                 terminal: _,
+                ..
             } => {
                 let arguments = arguments
                     .into_iter()

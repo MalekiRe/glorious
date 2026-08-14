@@ -238,71 +238,49 @@ impl Analyzer<'_> {
                     .into_iter()
                     .map(|argument| self.value(argument))
                     .collect::<Vec<_>>();
-                match reference_origin {
-                    CallReferenceOrigin::None => Value::None,
-                    CallReferenceOrigin::External => Value::ExternalBorrowed,
-                    CallReferenceOrigin::Paths(paths) => {
-                        let mut result = Value::None;
-                        for path in paths {
-                            let Some(argument) = values.get(path.argument as usize) else {
-                                self.error(
-                                    expression.span,
-                                    "G5023",
-                                    "reference-valued call names an argument outside its frozen arity",
-                                );
-                                continue;
-                            };
-                            let Some(value) = value_at_path(argument, &path.argument_fields) else {
-                                self.error(
-                                    expression.span,
-                                    "G5023",
-                                    "reference-valued call forwards an argument without structural provenance",
-                                );
-                                continue;
-                            };
-                            if !put_value_at_path(&mut result, &path.result_fields, value) {
-                                self.error(
-                                    expression.span,
-                                    "G5023",
-                                    "reference-valued call has contradictory frozen result paths",
-                                );
-                            }
-                        }
-                        result
-                    }
-                    CallReferenceOrigin::Opaque => {
-                        if known_reference_bearing_type(&expression.ty) {
-                            self.error(
-                                expression.span,
-                                "G5023",
-                                "reference-valued call has no frozen caller-region provenance",
-                            );
-                        }
-                        Value::None
-                    }
-                }
+                self.reference_result_value(
+                    &reference_origin,
+                    values,
+                    &expression.ty,
+                    expression.span,
+                    "call",
+                )
             }
-            CoreKind::Perform { arguments, .. } => {
-                for argument in arguments {
-                    let value = self.value(argument);
-                    self.report_suspension_escape(&value, expression.span);
-                }
-                Value::None
-            }
+            CoreKind::Perform { .. } => self
+                .performed_value(id)
+                .map(|(_, _, _, value)| value)
+                .unwrap_or(Value::None),
             CoreKind::Handle {
                 computation,
                 clauses,
             } => {
-                let computation = self.value(computation);
+                // Capture the evaluated payload once, before the dynamic arm
+                // split.  This gives every matching handler binder the exact
+                // borrowed/external value that crossed the suspension rather
+                // than re-evaluating argument Core in each arm.
+                let performed = self.performed_value(computation);
+                let computation = performed
+                    .as_ref()
+                    .map(|(_, _, _, value)| value.clone())
+                    .unwrap_or_else(|| self.value(computation));
                 let incoming = self.values.clone();
                 // A handler may complete normally without selecting an
                 // operation arm, so the computation is one of its dynamic
                 // exits alongside every matching clause.
-                let mut exits = vec![computation];
+                let mut exits = vec![computation.clone()];
                 for clause in clauses {
                     self.values = incoming.clone();
-                    for (name, _) in clause.bindings {
-                        self.values.remove(&name);
+                    if let Some((effect, operation, payloads, _)) = &performed
+                        && *effect == clause.effect
+                        && *operation == clause.operation
+                    {
+                        for (pattern, payload) in clause.patterns.iter().zip(payloads) {
+                            self.bind_pattern_value(pattern, payload.clone());
+                        }
+                    } else {
+                        for (name, _) in &clause.bindings {
+                            self.values.remove(name);
+                        }
                     }
                     if let crate::core::CoreHandlerResumption::Explicit { name, .. } =
                         clause.resumption
@@ -320,17 +298,134 @@ impl Analyzer<'_> {
             } => {
                 let computation = self.value(computation);
                 let incoming = self.values.clone();
-                let mut exits = vec![computation];
+                let mut exits = vec![computation.clone()];
                 for clause in clauses {
                     self.values = incoming.clone();
-                    for (name, _) in clause.bindings {
-                        self.values.remove(&name);
-                    }
+                    self.bind_pattern_value(&clause.pattern, computation.clone());
                     exits.push(self.value(clause.body));
                 }
                 self.values = incoming;
                 join(exits)
             }
+        }
+    }
+
+    /// Reconstruct the escaped value shape from the same immutable region map
+    /// used by the place flow.  Both function calls and performed operations
+    /// are callable boundaries; keeping this single implementation prevents a
+    /// handled/resumed effect result from dropping a body-local borrow.
+    fn reference_result_value(
+        &mut self,
+        origin: &CallReferenceOrigin,
+        values: Vec<Value>,
+        result_ty: &Type,
+        span: Span,
+        boundary: &str,
+    ) -> Value {
+        match origin {
+            CallReferenceOrigin::None => Value::None,
+            CallReferenceOrigin::External => Value::ExternalBorrowed,
+            CallReferenceOrigin::Paths(paths) => {
+                let mut result = Value::None;
+                for path in paths {
+                    let Some(argument) = values.get(path.argument as usize) else {
+                        self.error(
+                            span,
+                            "G5023",
+                            format!("reference-valued {boundary} names an argument outside its frozen arity"),
+                        );
+                        continue;
+                    };
+                    let Some(value) = value_at_path(argument, &path.argument_fields) else {
+                        self.error(
+                            span,
+                            "G5023",
+                            format!("reference-valued {boundary} forwards an argument without structural provenance"),
+                        );
+                        continue;
+                    };
+                    if !put_value_at_path(&mut result, &path.result_fields, value) {
+                        self.error(
+                            span,
+                            "G5023",
+                            format!(
+                                "reference-valued {boundary} has contradictory frozen result paths"
+                            ),
+                        );
+                    }
+                }
+                result
+            }
+            CallReferenceOrigin::Opaque => {
+                if known_reference_bearing_type(result_ty) {
+                    self.error(
+                        span,
+                        "G5023",
+                        format!(
+                            "reference-valued {boundary} has no frozen caller-region provenance"
+                        ),
+                    );
+                }
+                Value::None
+            }
+        }
+    }
+
+    /// Evaluate a direct operation exactly once and retain both its payload
+    /// values and frozen result provenance for the enclosing handler.
+    fn performed_value(
+        &mut self,
+        id: CoreId,
+    ) -> Option<(crate::EffectInstance, u32, Vec<Value>, Value)> {
+        let expression = self.body.expression(id).clone();
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments,
+            reference_origin,
+            ..
+        } = expression.kind
+        else {
+            return None;
+        };
+        let values = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Vec<_>>();
+        for value in &values {
+            self.report_suspension_escape(value, expression.span);
+        }
+        let result = self.reference_result_value(
+            &reference_origin,
+            values.clone(),
+            &expression.ty,
+            expression.span,
+            "effect operation",
+        );
+        Some((effect, operation, values, result))
+    }
+
+    fn bind_pattern_value(&mut self, pattern: &crate::core::CorePattern, value: Value) {
+        match pattern {
+            crate::core::CorePattern::Bind { name } => {
+                self.values.insert(name.clone(), value);
+            }
+            crate::core::CorePattern::Tuple(patterns) => {
+                for (index, pattern) in patterns.iter().enumerate() {
+                    let child = value_at_path(&value, &[index as u32]).unwrap_or(Value::None);
+                    self.bind_pattern_value(pattern, child);
+                }
+            }
+            crate::core::CorePattern::Record { fields, .. }
+            | crate::core::CorePattern::Enum { fields, .. } => {
+                for field in fields {
+                    let child = value_at_path(&value, &[field.index]).unwrap_or(Value::None);
+                    self.bind_pattern_value(&field.pattern, child);
+                }
+            }
+            crate::core::CorePattern::Any
+            | crate::core::CorePattern::Literal(_)
+            | crate::core::CorePattern::Error => {}
         }
     }
 

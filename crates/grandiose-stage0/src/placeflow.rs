@@ -2,7 +2,8 @@
 
 use crate::{
     core::{
-        CallReferenceOrigin, CaptureMode, CoreId, CoreKind, CorePlace, RefinementBrand, TypedBody,
+        CallReferenceOrigin, CaptureMode, CoreId, CoreKind, CorePattern, CorePlace,
+        RefinementBrand, TypedBody,
     },
     source::Span,
 };
@@ -488,6 +489,11 @@ impl Analyzer<'_> {
                 for clause in &clauses {
                     self.collect_local_uses(clause.body, &mut inside_handler);
                 }
+                // A matching payload binder may reborrow a reference carried
+                // by this suspension.  Retain its caller loan through the
+                // dynamic handler boundary even though the source argument's
+                // spelling is not visible inside the arm.
+                self.collect_local_uses(computation, &mut inside_handler);
                 self.visit_with_live_after(computation, &inside_handler);
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
@@ -511,6 +517,7 @@ impl Analyzer<'_> {
                         _ => None,
                     };
                     self.activate_branch_bindings(&clause.bindings, resumption);
+                    self.record_handler_payload_origins(computation, &clause);
                     self.visit_with_live_after(clause.body, live_after);
                     // A dynamically selected arm may update outer places,
                     // but neither its payload nor continuation identity may
@@ -545,6 +552,10 @@ impl Analyzer<'_> {
                 for clause in &clauses {
                     self.collect_local_uses(clause.body, &mut inside_completion);
                 }
+                // Completion binders can project a reference returned by a
+                // performed operation or call. Keep its source argument live
+                // while the result is structurally bound into the arm.
+                self.collect_local_uses(computation, &mut inside_completion);
                 self.visit_with_live_after(computation, &inside_completion);
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
@@ -567,6 +578,7 @@ impl Analyzer<'_> {
                     // completion-pattern binders: forged Core cannot use a
                     // matching spelling to retarget an outer loan.
                     self.activate_branch_bindings(&clause.bindings, None);
+                    self.record_completion_result_origins(computation, &clause.pattern);
                     self.visit_with_live_after(clause.body, live_after);
                     self.end_scope(clause.span);
                     exits.push((
@@ -1384,6 +1396,11 @@ impl Analyzer<'_> {
                 arguments,
                 reference_origin,
                 ..
+            }
+            | CoreKind::Perform {
+                arguments,
+                reference_origin,
+                ..
             } => self.record_call_reference_origin(name, id, &arguments, reference_origin),
             _ => {}
         }
@@ -1468,6 +1485,23 @@ impl Analyzer<'_> {
                     .cloned()
                     .or_else(|| self.reference_origins.get(&key).cloned())
             }
+            CoreKind::Call {
+                arguments,
+                reference_origin: CallReferenceOrigin::Paths(paths),
+                ..
+            }
+            | CoreKind::Perform {
+                arguments,
+                reference_origin: CallReferenceOrigin::Paths(paths),
+                ..
+            } => paths
+                .iter()
+                .find(|path| path.result_fields.is_empty())
+                .and_then(|path| {
+                    arguments.get(path.argument as usize).and_then(|argument| {
+                        self.reference_loan_from_value_path(*argument, &path.argument_fields)
+                    })
+                }),
             _ => None,
         }
     }
@@ -1476,12 +1510,143 @@ impl Analyzer<'_> {
         if fields.is_empty() {
             return self.reference_loan_from_value(id);
         }
-        let key = projection_key(&self.reference_origin_key(id)?, fields);
-        self.projection_loans
-            .iter()
-            .find(|loan| loan.owner.as_deref() == Some(key.as_str()))
-            .cloned()
-            .or_else(|| self.reference_origins.get(&key).cloned())
+        let mut value = id;
+        for field in fields {
+            let fields = match &self.body.expression(value).kind {
+                CoreKind::Tuple(fields)
+                | CoreKind::Record { fields, .. }
+                | CoreKind::Enum { fields, .. } => fields,
+                _ => {
+                    let key = projection_key(&self.reference_origin_key(value)?, &[*field]);
+                    return self
+                        .projection_loans
+                        .iter()
+                        .find(|loan| loan.owner.as_deref() == Some(key.as_str()))
+                        .cloned()
+                        .or_else(|| self.reference_origins.get(&key).cloned());
+                }
+            };
+            value = *fields.get(*field as usize)?;
+        }
+        self.reference_loan_from_value(value)
+    }
+
+    /// Handler payload binders are ordinary branch locals, but their backing
+    /// loan comes from the suspended operation's frozen caller-region path.
+    /// Install that alias before analysing the arm so reborrows, forwarding,
+    /// cancellation, and scope exit all see the same loan identity.
+    fn record_handler_payload_origins(
+        &mut self,
+        computation: CoreId,
+        clause: &crate::core::CoreHandlerClause,
+    ) {
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments,
+            ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return;
+        };
+        if effect != clause.effect || operation != clause.operation {
+            return;
+        }
+        for (pattern, argument) in clause.patterns.iter().zip(arguments) {
+            self.record_pattern_reference_from_value(pattern, argument, &[]);
+        }
+    }
+
+    fn record_completion_result_origins(&mut self, computation: CoreId, pattern: &CorePattern) {
+        let (arguments, origin) = match self.body.expression(computation).kind.clone() {
+            CoreKind::Call {
+                arguments,
+                reference_origin,
+                ..
+            }
+            | CoreKind::Perform {
+                arguments,
+                reference_origin,
+                ..
+            } => (arguments, reference_origin),
+            _ => return,
+        };
+        let CallReferenceOrigin::Paths(paths) = origin else {
+            return;
+        };
+        let mut bindings = Vec::new();
+        collect_pattern_binders(pattern, &mut Vec::new(), &mut bindings);
+        for (name, result_fields) in bindings {
+            let Some(path) = paths
+                .iter()
+                .find(|path| path.result_fields == result_fields)
+            else {
+                continue;
+            };
+            let Some(argument) = arguments.get(path.argument as usize).copied() else {
+                continue;
+            };
+            if let Some(parent) =
+                self.reference_loan_from_value_path(argument, &path.argument_fields)
+            {
+                self.install_reference_alias(&self.resolve_name(&name), parent, argument);
+            }
+        }
+    }
+
+    fn record_pattern_reference_from_value(
+        &mut self,
+        pattern: &CorePattern,
+        value: CoreId,
+        fields: &[u32],
+    ) {
+        match pattern {
+            CorePattern::Bind { name } => {
+                if let Some(parent) = self.reference_loan_from_value_path(value, fields) {
+                    self.install_reference_alias(&self.resolve_name(name), parent, value);
+                }
+            }
+            CorePattern::Tuple(patterns) => {
+                for (index, pattern) in patterns.iter().enumerate() {
+                    let mut child = fields.to_vec();
+                    child.push(index as u32);
+                    self.record_pattern_reference_from_value(pattern, value, &child);
+                }
+            }
+            CorePattern::Record {
+                fields: patterns, ..
+            }
+            | CorePattern::Enum {
+                fields: patterns, ..
+            } => {
+                for field in patterns {
+                    let mut child = fields.to_vec();
+                    child.push(field.index);
+                    self.record_pattern_reference_from_value(&field.pattern, value, &child);
+                }
+            }
+            CorePattern::Any | CorePattern::Literal(_) | CorePattern::Error => {}
+        }
+    }
+
+    fn install_reference_alias(&mut self, result: &str, parent: ProjectionLoan, source: CoreId) {
+        let alias = ProjectionLoan {
+            place: parent.place.clone(),
+            unique: parent.unique,
+            owner: Some(result.to_owned()),
+        };
+        self.reference_origins
+            .insert(result.to_owned(), alias.clone());
+        if !self.projection_loans.contains(&alias) {
+            self.projection_loans.push(alias);
+        }
+        if let Some(owner) = parent.owner {
+            self.reborrow_parents.insert(result.to_owned(), owner);
+        }
+        self.event(
+            FlowEventKind::Reborrow(parent.place.root),
+            self.body.expression(source).span,
+        );
     }
 
     fn record_assigned_reference_origin(&mut self, place: &CorePlace, value: CoreId) {
@@ -1673,6 +1838,34 @@ impl Analyzer<'_> {
 fn known_reference_bearing_type(value: &crate::types::Type) -> bool {
     matches!(value, crate::types::Type::Reference { .. })
         || matches!(value, crate::types::Type::Tuple(values) if values.iter().any(known_reference_bearing_type))
+}
+
+/// Flatten a frozen pattern to the structural paths owned by each binder.
+/// Core patterns retain declaration indices, so this is independent of source
+/// spellings and stays valid for generic effect payload/result identities.
+fn collect_pattern_binders(
+    pattern: &CorePattern,
+    prefix: &mut Vec<u32>,
+    output: &mut Vec<(String, Vec<u32>)>,
+) {
+    match pattern {
+        CorePattern::Bind { name } => output.push((name.clone(), prefix.clone())),
+        CorePattern::Tuple(patterns) => {
+            for (index, pattern) in patterns.iter().enumerate() {
+                prefix.push(index as u32);
+                collect_pattern_binders(pattern, prefix, output);
+                prefix.pop();
+            }
+        }
+        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
+            for field in fields {
+                prefix.push(field.index);
+                collect_pattern_binders(&field.pattern, prefix, output);
+                prefix.pop();
+            }
+        }
+        CorePattern::Any | CorePattern::Literal(_) | CorePattern::Error => {}
+    }
 }
 
 /// A handler arm is dynamically selected.  Until the full quantity analysis
