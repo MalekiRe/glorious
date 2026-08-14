@@ -11584,7 +11584,6 @@ fn call_reference_origin(
     for (result_fields, result_ty) in result_leaves {
         let Type::Reference {
             lifetime: result_lifetime,
-            referent: result_referent,
             ..
         } = result_ty
         else {
@@ -11599,9 +11598,14 @@ fn call_reference_origin(
         }
         let candidates = argument_leaves
             .iter()
+            // Caller-region provenance follows the reference lifetime and
+            // structural path, not referent equality.  A well-typed callee
+            // may project `&'a Tri` to `&'a i64`; requiring `Tri == i64`
+            // would incorrectly turn that unique, frozen loan relation into
+            // opaque provenance.  More than one same-region argument still
+            // remains ambiguous and therefore fails closed below.
             .filter(|(_, _, candidate)| {
-                matches!(candidate, Type::Reference { lifetime, referent, .. }
-                    if lifetime == &result_lifetime && referent == &result_referent)
+                matches!(candidate, Type::Reference { lifetime, .. } if lifetime == &result_lifetime)
             })
             .collect::<Vec<_>>();
         let [(argument, argument_fields, _)] = candidates.as_slice() else {
@@ -11668,9 +11672,21 @@ fn callable_reference_origin_from_contract(
             // preserve just the caller-derived paths in this mixed result.
             continue;
         }
+        let Type::Reference {
+            lifetime: result_lifetime,
+            ..
+        } = result_ty
+        else {
+            unreachable!("reference leaf traversal only yields references");
+        };
+        // See `call_reference_origin`: a declaration contract records the
+        // caller region it forwards.  It intentionally permits a structural
+        // projection whose referent differs from the source aggregate.
         let candidates = argument_leaves
             .iter()
-            .filter(|(_, _, candidate)| candidate == &result_ty)
+            .filter(|(_, _, candidate)| {
+                matches!(candidate, Type::Reference { lifetime, .. } if lifetime == &result_lifetime)
+            })
             .collect::<Vec<_>>();
         let [(argument, argument_fields, _)] = candidates.as_slice() else {
             return CallReferenceOrigin::Opaque;
