@@ -713,6 +713,10 @@ impl StageZeroCompiler {
                         Some(declaration.span),
                     ));
                 }
+                let core_validation = core.validate();
+                diagnostics.extend(core_validation.iter().map(|diagnostic| {
+                    CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
+                }));
                 let flow = PlaceFlow::analyze(&core);
                 diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
                     CompileDiagnostic::source(
@@ -740,6 +744,7 @@ impl StageZeroCompiler {
                 let valid = flow.diagnostics.is_empty()
                     && escapes.diagnostics.is_empty()
                     && uses.diagnostics.is_empty()
+                    && core_validation.is_empty()
                     && core.diagnostics.is_empty()
                     && body.diagnostics.is_empty();
                 body_products.push((declaration.key, is_constant, valid, core, flow));
@@ -828,6 +833,10 @@ impl StageZeroCompiler {
                             Some(method.span),
                         ));
                     }
+                    let core_validation = core.validate();
+                    diagnostics.extend(core_validation.iter().map(|diagnostic| {
+                        CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
+                    }));
                     let flow = PlaceFlow::analyze(&core);
                     diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(
@@ -855,6 +864,7 @@ impl StageZeroCompiler {
                     let valid = flow.diagnostics.is_empty()
                         && escapes.diagnostics.is_empty()
                         && uses.diagnostics.is_empty()
+                        && core_validation.is_empty()
                         && core.diagnostics.is_empty()
                         && body.diagnostics.is_empty();
                     body_products.push((
