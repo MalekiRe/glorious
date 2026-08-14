@@ -1995,7 +1995,8 @@ fn materialize_concrete_instances(
             .ok_or_else(|| format!("instance body is unavailable for {:?}", key.callable))?;
         let mut specialized = base;
         specialized.definition = executable;
-        specialize_mir_local_types(&mut specialized, key.arguments());
+        let body_arguments = materialization_body_arguments(&key, signatures)?;
+        specialize_mir_local_types(&mut specialized, &body_arguments);
         materialize_deferred_scalar_operations(&mut specialized)?;
         register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
         targets.insert(key.clone(), executable);
@@ -2112,6 +2113,67 @@ fn materialize_concrete_instances(
         }
     }
     Ok(instances)
+}
+
+/// Translate the executable instance identity for a selected trait method
+/// back into that implementation body's binder order.  A method instance key
+/// intentionally includes the trait relation arguments and an evidence digest
+/// so distinct dictionaries cannot alias.  Neither belongs to the method
+/// body's generic substitution: its slots are implementation binders followed
+/// by method binders.  Treating the executable key itself as that substitution
+/// therefore shifted every method argument by the trait arity.
+fn materialization_body_arguments(
+    key: &InstanceKey,
+    signatures: &ElaboratedInterface,
+) -> Result<Vec<GenericArgument>, String> {
+    for (implementation_definition, header) in &signatures.definitions {
+        let ElaboratedHeader::Implementation(implementation) = header else {
+            continue;
+        };
+        for (name, method) in &implementation.methods {
+            if implementation_method_key(*implementation_definition, name) != key.callable {
+                continue;
+            }
+            let trait_generic_kinds = match signatures
+                .definitions
+                .get(&implementation.relation.definition)
+            {
+                Some(ElaboratedHeader::Trait(trait_header)) => &trait_header.generic_kinds,
+                _ => {
+                    return Err("selected implementation method has no trait declaration".into());
+                }
+            };
+            // A body binder can only be reconstructed from a trait-instance
+            // key when the implementation binders correspond one-for-one to
+            // the trait relation binders.  More general impl-head inversion
+            // needs a first-class selected substitution; fail closed until it
+            // exists instead of assigning a wrong register type.
+            if !implementation.generic_kinds.is_empty()
+                && implementation.generic_kinds != *trait_generic_kinds
+            {
+                return Err(
+                    "selected generic implementation method lacks a reconstructible body substitution"
+                        .into(),
+                );
+            }
+            let relation_arguments = implementation.relation.arguments.len();
+            let method_arguments = method.generic_kinds.len();
+            const EVIDENCE_ARGUMENTS: usize = 8;
+            let expected = relation_arguments
+                .checked_add(method_arguments)
+                .and_then(|count| count.checked_add(EVIDENCE_ARGUMENTS))
+                .ok_or_else(|| "trait method instance argument count overflowed".to_owned())?;
+            if key.arguments().len() != expected {
+                return Err("selected trait method instance has an invalid executable key".into());
+            }
+            let mut arguments = key.arguments()[..implementation.generic_kinds.len()].to_vec();
+            arguments.extend_from_slice(
+                &key.arguments()[relation_arguments..relation_arguments + method_arguments],
+            );
+            return Ok(arguments);
+        }
+    }
+    Ok(key.arguments().to_vec())
 }
 
 /// Rewrite scalar operations whose source templates deliberately retain a

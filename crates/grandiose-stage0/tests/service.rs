@@ -3950,6 +3950,33 @@ fn service_selects_generic_qualified_trait_instances() {
 }
 
 #[test]
+fn service_materializes_generic_trait_methods_with_associated_type_and_const_layouts() {
+    let source = "trait Recipe<T> { type Item; const Width: u32; fn replace<U>(value: T, replacement: U) -> U; } pub struct Witness<n: u32> { value: i64 } impl Recipe<i64> for i64 { type Item = i64; const Width = 7; fn replace<U>(value: i64, replacement: U) -> U { replacement } } pub fn package<U>(value: <i64 as Recipe<i64>>::Item, replacement: U) -> U { let witness = Witness<<i64 as Recipe<i64>>::Width> { value: value }; Recipe<i64>::replace(witness.value, replacement) } pub fn main() -> Text { let selected = \"trait dictionary\"; package(0, move selected) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("concrete evidence must materialize the generic trait method and projections");
+    assert_eq!(
+        outcome
+            .artifact
+            .expect("build must publish a VM artifact")
+            .run_text()
+            .unwrap(),
+        "trait dictionary"
+    );
+    assert!(
+        outcome
+            .instance_graph
+            .expect("generic public wrapper and selected trait method are instances")
+            .ordered()
+            .iter()
+            .filter(|instance| !instance.arguments().is_empty())
+            .count()
+            >= 2,
+        "both the public wrapper and its evidence-selected generic method must materialize"
+    );
+}
+
+#[test]
 fn service_materializes_selected_trait_method_values_from_callable_context() {
     let source = "trait Increment { fn increment(value: i64) -> i64; } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 1 } } pub fn apply(function: (i64) -> i64) -> i64 { function(41) } pub fn main() -> i64 { apply(Increment::increment) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
