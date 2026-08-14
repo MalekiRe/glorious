@@ -5644,6 +5644,57 @@ fn service_reborrows_a_refined_enum_payload_by_position() {
 }
 
 #[test]
+fn service_reborrows_each_nested_multi_variant_refinement_payload() {
+    let source = r#"
+        fn __g1_abort() -> ! { () }
+        pub enum Tri { First(i64), Second(i64), Third(i64) }
+        pub fn view<'a>(value: &'a Tri) -> &'a i64 {
+            handle *value is Tri::First(_) {
+                true => &value.0,
+                false => handle *value is Tri::Second(_) {
+                    true => &value.0,
+                    false => handle *value is Tri::Third(_) {
+                        true => &value.0,
+                        false => __g1_abort(),
+                    },
+                },
+            }
+        }
+        pub fn main() -> i64 {
+            let first = Tri::First(10);
+            let second = Tri::Second(20);
+            let third = Tri::Third(12);
+            *view(&first) + *view(&second) + *view(&third)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_refuses_an_ambiguous_multi_variant_negative_payload_projection() {
+    let source = r#"
+        pub enum Tri { First(i64), Second(i64), Third(i64) }
+        pub fn invalid<'a>(value: &'a Tri) -> &'a i64 {
+            handle *value is Tri::First(_) {
+                true => &value.0,
+                false => &value.0,
+            }
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4128"),
+        "missing ambiguous multi-variant refinement diagnostic: {error:#?}"
+    );
+}
+
+#[test]
 fn service_lowers_a_top_level_value_alias_to_its_callable_target() {
     let source = "pub fn add_one(value: i64) -> i64 { value + 1 } let increment = add_one; pub fn main() -> i64 { increment(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
