@@ -318,6 +318,26 @@ fn manifest_bound_generic_int_predicates_preserve_their_u32_runtime_abi() {
 }
 
 #[test]
+fn manifest_bound_checked_i64_to_u32_converts_and_rejects_out_of_range_values() {
+    let source = "fn __g1_int_convert_checked_to_u32<T>(value: T) -> u32 { () } pub fn main() -> u32 { __g1_int_convert_checked_to_u32<i64>(42) }";
+    let mut input = request(source);
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertCheckedToU32,
+        "__g1_int_convert_checked_to_u32",
+    ));
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_u32()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
 fn manifest_bound_generic_int_shr_uses_its_mixed_vm_abi() {
     let mut input = request(
         "fn __g1_int_shr<T>(value: T, count: u32) -> T { () } fn __g1_int_equal<T>(left: T, right: T) -> u32 { () } pub fn main() -> i64 { __g1_int_shr<i64>(8, __g1_int_equal<i64>(65, 65)) }",
