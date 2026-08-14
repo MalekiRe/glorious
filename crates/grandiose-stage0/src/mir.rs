@@ -1386,6 +1386,16 @@ fn fold_block(
         if did_fold {
             folds += 1;
         }
+        // Constants describe the current contents of addressable locals, not
+        // immutable SSA values. A unique dereference may update any local
+        // reachable through its sealed loan path; an ordinary call or
+        // resumption may do the same in a different frame. Until this pass
+        // tracks that alias set precisely, discard every fact at those
+        // boundaries. In particular, do not turn a read of `value` after
+        // `overwrite(&mut value)` back into the initializer literal.
+        if invalidates_alias_visible_constants(&instruction) {
+            constants.clear();
+        }
         match instruction {
             MirInstruction::ConstI64 { dst, value } => {
                 constants.insert(dst, Constant::I64(value));
@@ -1412,6 +1422,27 @@ fn fold_block(
     }
     (output, constants, folds)
 }
+
+fn invalidates_alias_visible_constants(instruction: &MirInstruction) -> bool {
+    matches!(
+        instruction,
+        MirInstruction::Store { .. }
+            | MirInstruction::DerefStore { .. }
+            | MirInstruction::ArraySetMove { .. }
+            | MirInstruction::ArrayPushMove { .. }
+            | MirInstruction::ArrayPopMove { .. }
+            | MirInstruction::ArrayReserve { .. }
+            | MirInstruction::ArrayFinishDrained { .. }
+            | MirInstruction::Call { .. }
+            | MirInstruction::CallIndirect { .. }
+            | MirInstruction::HostCall { .. }
+            | MirInstruction::Perform { .. }
+            | MirInstruction::Resume { .. }
+            | MirInstruction::ResumeReturn { .. }
+            | MirInstruction::ResumeSnapshot { .. }
+    )
+}
+
 fn constant_instruction(dst: MirLocal, value: Option<&Constant>) -> Option<MirInstruction> {
     match value {
         Some(Constant::I64(value)) => Some(MirInstruction::ConstI64 { dst, value: *value }),
@@ -13977,8 +14008,12 @@ impl Lowerer<'_> {
                     let plan = resumption.plan.clone();
                     match plan {
                         DirectResumptionPlan::Identity => {
-                            self.instructions
-                                .push(MirInstruction::Copy { dst, src: argument });
+                            // A continuation may carry an affine result (for
+                            // example, a unique borrow) just as a normal
+                            // function may.  Its identity path therefore
+                            // forwards the capability rather than assuming
+                            // the result can always be copied.
+                            self.copy_or_move(dst, argument);
                         }
                         DirectResumptionPlan::RuntimeConsumeReturn
                         | DirectResumptionPlan::RuntimeReplay => {
@@ -14006,8 +14041,7 @@ impl Lowerer<'_> {
                             let resumed = self.value(result)?;
                             self.named = previous_named;
                             self.values = previous_values;
-                            self.instructions
-                                .push(MirInstruction::Copy { dst, src: resumed });
+                            self.copy_or_move(dst, resumed);
                         }
                     }
                     self.values.insert(id, dst);
@@ -15803,14 +15837,18 @@ impl Lowerer<'_> {
                     self.statement(value)?;
                 }
                 let src = self.value(last)?;
-                self.instructions.push(MirInstruction::Copy { dst, src });
+                // The final expression is the block's result.  Forward an
+                // affine result by move so `fn f(&mut T) -> &mut T` does not
+                // manufacture a second unique capability at a structural
+                // block boundary.
+                self.copy_or_move(dst, src);
             }
             // A label with no transfer is static scope evidence only and
             // erases to its body. A transfer itself deliberately fails closed
             // until MIR gains its checked cleanup-carrying leave terminator.
             CoreKind::Label { body, .. } => {
                 let src = self.value(body)?;
-                self.instructions.push(MirInstruction::Copy { dst, src });
+                self.copy_or_move(dst, src);
             }
             CoreKind::Transfer { .. } => {
                 self.error(
@@ -15880,8 +15918,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(&clause.patterns, &arguments)?;
         let body = self.value(clause.body)?;
         self.named = previous;
-        self.instructions
-            .push(MirInstruction::Copy { dst, src: body });
+        self.copy_or_move(dst, body);
         Some(())
     }
     fn direct_operation(
