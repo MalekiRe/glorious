@@ -16,6 +16,39 @@ fn local(ty: Type) -> MirLocalDecl {
     }
 }
 
+#[test]
+fn mir_rejects_a_forged_nonfinite_replay_budget() {
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"forged-mir-replay-budget")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(Type::Scalar(ScalarType::I64))],
+        result: Type::Scalar(ScalarType::I64),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::InstallHandler {
+                    effect: DefKey(Digest::of_bytes(b"forged-mir-replay-effect")),
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: Type::Scalar(ScalarType::I64),
+                    continuation: MirContinuationPolicy::Replay { uses: 1 },
+                    target: MirBlockId(1),
+                }],
+                terminator: MirTerminator::Unreachable,
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            },
+        ],
+    };
+    assert!(function.validate().is_err());
+}
+
 fn graph() -> MirFunction {
     MirFunction {
         definition: DefKey(Digest::of_bytes(b"mir-cfg")),

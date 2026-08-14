@@ -499,10 +499,33 @@ pub(crate) fn lifted_callable_definition(brand: EnvironmentBrand) -> DefKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MirContinuationPolicy {
     Consume,
-    Replay,
+    /// An exact finite multi-shot continuation.  The count is frozen from
+    /// Typed Core and crosses the VM boundary so bytecode cannot turn an
+    /// `[n,n]` source contract into an unbounded replay capability.
+    Replay {
+        uses: u32,
+    },
     /// A bottom-typed operation transfers to its clause without any legal
     /// resumption. The target must cancel the suspended frame before return.
     Terminal,
+}
+
+impl MirContinuationPolicy {
+    fn is_replay(self) -> bool {
+        matches!(self, Self::Replay { .. })
+    }
+}
+
+/// Stage 0 accepts replay only for a concrete exact finite contract.  Keep
+/// the conversion in one place so every specialised lowering either carries
+/// the same executable budget or declines to lower the unsupported shape.
+fn exact_replay_uses(resumption: &CoreHandlerResumption) -> Option<u32> {
+    let CoreHandlerResumption::Explicit { quantity, .. } = resumption else {
+        return None;
+    };
+    (quantity.upper == Some(quantity.lower) && quantity.lower >= 2)
+        .then(|| u32::try_from(quantity.lower).ok())
+        .flatten()
 }
 /// Explicit control edge for a MIR basic block. Block parameters are the only
 /// phi mechanism; every edge carries an exactly typed argument list.
@@ -2176,10 +2199,14 @@ impl MirFunction {
         }
         if let MirInstruction::InstallHandler {
             payload_destinations,
+            continuation,
             target,
             ..
         } = instruction
         {
+            if matches!(continuation, MirContinuationPolicy::Replay { uses } if *uses < 2) {
+                return Err("MIR replay handler has fewer than two exact uses".into());
+            }
             if target.0 as usize >= self.blocks.len() {
                 return Err("MIR handler target block is absent".into());
             }
@@ -2687,14 +2714,15 @@ fn validate_lowered_handler_contracts(
                 operation,
                 payload_destinations,
                 resume_type,
+                continuation,
                 target,
-                ..
             } => Some((
                 effect,
                 effect_arguments,
                 operation,
                 payload_destinations,
                 resume_type,
+                continuation,
                 target,
             )),
             _ => None,
@@ -2721,7 +2749,9 @@ fn validate_lowered_handler_contracts(
         ));
     }
 
-    for (effect, arguments, operation, payload_destinations, resume_type, target) in installs {
+    for (effect, arguments, operation, payload_destinations, resume_type, continuation, target) in
+        installs
+    {
         // Probe each source arm with independent substitutions: a refutable
         // earlier arm must not leak a partial generic match into the selected
         // arm's frozen contract.
@@ -2759,6 +2789,9 @@ fn validate_lowered_handler_contracts(
             {
                 return Err("terminal handler frame retained a continuation contract".into());
             }
+            if *continuation != MirContinuationPolicy::Terminal {
+                return Err("terminal handler frame did not retain its terminal VM policy".into());
+            }
             continue;
         }
         let Some(contract) = clause.continuation.as_ref() else {
@@ -2770,6 +2803,15 @@ fn validate_lowered_handler_contracts(
             | CoreHandlerResumption::Discard { quantity } => *quantity,
             CoreHandlerResumption::Terminal => unreachable!("terminal arms returned above"),
         };
+        let expected_policy = exact_replay_uses(&clause.resumption)
+            .map(|uses| MirContinuationPolicy::Replay { uses })
+            .unwrap_or(MirContinuationPolicy::Consume);
+        if *continuation != expected_policy {
+            return Err(
+                "MIR handler continuation policy disagrees with its frozen quantity contract"
+                    .into(),
+            );
+        }
         if contract.invocation != declared_quantity {
             return Err(
                 "MIR handler resumption quantity disagrees with its frozen continuation contract"
@@ -6271,9 +6313,11 @@ impl Lowerer<'_> {
             }
             CoreHandlerResumption::Explicit { quantity, .. }
                 if !quantity.contains(crate::quantity::Quantity::ONCE)
-                    && quantity.upper.is_some_and(|upper| upper >= 2) =>
+                    && exact_replay_uses(&outer_clause.resumption).is_some() =>
             {
-                MirContinuationPolicy::Replay
+                MirContinuationPolicy::Replay {
+                    uses: exact_replay_uses(&outer_clause.resumption)?,
+                }
             }
             _ => return None,
         };
@@ -6423,7 +6467,7 @@ impl Lowerer<'_> {
             MirBlock {
                 parameters: vec![],
                 instructions: outer_instructions,
-                terminator: if outer_policy == MirContinuationPolicy::Replay {
+                terminator: if outer_policy.is_replay() {
                     MirTerminator::Return {
                         value: outer_resumed,
                     }
@@ -7802,9 +7846,7 @@ impl Lowerer<'_> {
             | CoreHandlerResumption::Tail { quantity } => {
                 if *quantity == crate::quantity::Quantity::ONCE {
                     (false, false)
-                } else if matches!(clause.resumption, CoreHandlerResumption::Explicit { .. })
-                    && quantity.upper.is_some_and(|upper| upper >= 2)
-                {
+                } else if exact_replay_uses(&clause.resumption).is_some() {
                     (false, true)
                 } else {
                     return None;
@@ -7843,7 +7885,9 @@ impl Lowerer<'_> {
             payload_destinations: payload_destinations.clone(),
             resume_type: self.body.expression(value).ty.clone(),
             continuation: if replay {
-                MirContinuationPolicy::Replay
+                MirContinuationPolicy::Replay {
+                    uses: exact_replay_uses(&clause.resumption)?,
+                }
             } else {
                 MirContinuationPolicy::Consume
             },
@@ -8686,7 +8730,9 @@ impl Lowerer<'_> {
                     .expect("checked explicit replay continuation")
                     .parameter
                     .clone(),
-                continuation: MirContinuationPolicy::Replay,
+                continuation: MirContinuationPolicy::Replay {
+                    uses: exact_replay_uses(&clause.resumption)?,
+                },
                 target: *target,
             });
         }
@@ -8894,7 +8940,9 @@ impl Lowerer<'_> {
             operation: clause.operation,
             payload_destinations: payload_destinations.clone(),
             resume_type: continuation.parameter.clone(),
-            continuation: MirContinuationPolicy::Replay,
+            continuation: MirContinuationPolicy::Replay {
+                uses: exact_replay_uses(&clause.resumption)?,
+            },
             target: MirBlockId(2),
         });
         match callee_kind {
@@ -9170,11 +9218,7 @@ impl Lowerer<'_> {
 
         let mut entry = std::mem::take(&mut self.instructions);
         for (index, group) in groups.iter().enumerate() {
-            let replay = matches!(
-                group[0].resumption,
-                CoreHandlerResumption::Explicit { quantity, .. }
-                    if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
-            );
+            let replay_uses = exact_replay_uses(&group[0].resumption);
             let target = test_blocks[index][0]
                 .first()
                 .copied()
@@ -9190,8 +9234,8 @@ impl Lowerer<'_> {
                     .expect("ordered arm has frozen continuation contract")
                     .parameter
                     .clone(),
-                continuation: if replay {
-                    MirContinuationPolicy::Replay
+                continuation: if let Some(uses) = replay_uses {
+                    MirContinuationPolicy::Replay { uses }
                 } else {
                     MirContinuationPolicy::Consume
                 },

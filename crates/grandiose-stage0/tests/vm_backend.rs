@@ -432,7 +432,7 @@ fn program_replay_resumption_returns_after_the_original_caller_path_completes() 
                             operation: 0,
                             payload_destinations: vec![1],
                             resume_type: VmType::I64,
-                            continuation: VmContinuationPolicy::Replay,
+                            continuation: VmContinuationPolicy::Replay { uses: 2 },
                             target: 7,
                         },
                         VmInstruction::Call {
@@ -516,7 +516,7 @@ fn verifier_rejects_an_unrestored_handler_across_a_replay_return() {
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
-                    continuation: VmContinuationPolicy::Replay,
+                    continuation: VmContinuationPolicy::Replay { uses: 2 },
                     target: 6,
                 },
                 VmInstruction::Perform {
@@ -1954,7 +1954,7 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
         definition,
         captures: 0,
         parameters: 0,
-        registers: vec![VmType::I64; 5],
+        registers: vec![VmType::I64; 10],
         instructions: vec![
             VmInstruction::ConstI64 { dst: 0, value: 41 },
             VmInstruction::InstallHandler {
@@ -1963,7 +1963,7 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
                 operation: 0,
                 payload_destinations: vec![1],
                 resume_type: VmType::I64,
-                continuation: VmContinuationPolicy::Replay,
+                continuation: VmContinuationPolicy::Replay { uses: 2 },
                 target: 5,
             },
             VmInstruction::Perform {
@@ -1981,7 +1981,16 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
                 left: 1,
                 right: 3,
             },
-            VmInstruction::Resume { value: 4 },
+            VmInstruction::ResumeReturn { dst: 5, value: 4 },
+            VmInstruction::ConstI64 { dst: 6, value: 2 },
+            VmInstruction::AddI64 {
+                dst: 7,
+                left: 1,
+                right: 6,
+            },
+            VmInstruction::ResumeReturn { dst: 8, value: 7 },
+            VmInstruction::Cancel,
+            VmInstruction::Return { value: 8 },
         ],
     };
     let mut artifact = CandidateVmArtifact {
@@ -1993,7 +2002,45 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
     artifact.fingerprint = artifact.computed_fingerprint();
     let bytes = encode_artifact(&artifact);
     assert_eq!(decode_artifact(&bytes).unwrap(), artifact);
-    assert_eq!(verify_vm(artifact).unwrap().run_i64().unwrap(), 42);
+    assert_eq!(verify_vm(artifact).unwrap().run_i64().unwrap(), 43);
+
+    let mut malformed_policy = function.clone();
+    let VmInstruction::InstallHandler { continuation, .. } = &mut malformed_policy.instructions[1]
+    else {
+        panic!("fixture changed")
+    };
+    *continuation = VmContinuationPolicy::Replay { uses: 1 };
+    let mut malformed = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: malformed_policy,
+        fingerprint: Digest::of_bytes(b"replay-handler-malformed-policy"),
+    };
+    malformed.fingerprint = malformed.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(malformed),
+        Err(VmArtifactError::HandlerStateMismatch)
+    ));
+
+    // The verifier admits the CFG shape, but executable replay accounting is
+    // still the final hostile-bytecode boundary: a third invocation of a
+    // frozen `[2,2]` continuation must fail rather than become unbounded.
+    let mut over_replay = function.clone();
+    over_replay.instructions.insert(
+        over_replay.instructions.len() - 2,
+        VmInstruction::ResumeReturn { dst: 9, value: 4 },
+    );
+    let mut hostile = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: over_replay,
+        fingerprint: Digest::of_bytes(b"replay-handler-over-use"),
+    };
+    hostile.fingerprint = hostile.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(hostile).unwrap().run_i64(),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
 
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
@@ -2005,7 +2052,7 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
         fingerprint: Digest::of_bytes(b"replay-handler-program"),
     };
     program.fingerprint = program.computed_fingerprint();
-    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 42);
+    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 43);
 }
 
 #[test]
@@ -2527,7 +2574,7 @@ fn verifier_rejects_a_snapshot_alias_after_its_handler_is_cancelled() {
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
-                    continuation: VmContinuationPolicy::Replay,
+                    continuation: VmContinuationPolicy::Replay { uses: 2 },
                     target: 6,
                 },
                 VmInstruction::Perform {

@@ -4106,7 +4106,7 @@ fn service_replays_a_cross_call_continuation_with_resume_return() {
         entry.instructions.iter().any(|instruction| matches!(
             instruction,
             VmInstruction::InstallHandler {
-                continuation: VmContinuationPolicy::Replay,
+                continuation: VmContinuationPolicy::Replay { uses: 2 },
                 ..
             }
         )),
@@ -4125,6 +4125,32 @@ fn service_replays_a_cross_call_continuation_with_resume_return() {
 }
 
 #[test]
+fn service_preserves_a_three_shot_replay_budget_through_the_vm() {
+    let source = "effect Ask { [3,3] ask() -> i64; } pub fn helper() -> i64 / Ask { Ask::ask() } pub fn main() -> i64 { handle { let value = helper(); value + 1 } { Ask::ask(k) => k(20) + k(21) + k(22) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            continuation: VmContinuationPolicy::Replay { uses: 3 },
+            ..
+        }
+    )));
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 66);
+}
+
+#[test]
 fn service_replays_a_heterogeneous_operation_result_across_a_call() {
     let source = "effect Read { [2,2] read() -> Text; } pub fn helper() -> i64 / Read { let text = Read::read(); 40 } pub fn main() -> i64 { handle { let value = helper(); value + 1 } { Read::read(k) => k(\"one\") + k(\"two\") } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -4136,7 +4162,7 @@ fn service_replays_a_heterogeneous_operation_result_across_a_call() {
         instruction,
         VmInstruction::InstallHandler {
             resume_type: VmType::Text,
-            continuation: VmContinuationPolicy::Replay,
+            continuation: VmContinuationPolicy::Replay { uses: 2 },
             ..
         }
     )));
@@ -4159,7 +4185,7 @@ fn service_replays_distinct_generic_operations_across_a_direct_call() {
                 effect_arguments,
                 operation,
                 resume_type,
-                continuation: VmContinuationPolicy::Replay,
+                continuation: VmContinuationPolicy::Replay { uses: 2 },
                 target,
                 ..
             } => Some((
@@ -4221,7 +4247,7 @@ fn service_replays_distinct_generic_operations_through_a_function_value() {
                 effect_arguments,
                 operation,
                 resume_type,
-                continuation: VmContinuationPolicy::Replay,
+                continuation: VmContinuationPolicy::Replay { uses: 2 },
                 target,
                 ..
             } => Some((
@@ -4355,7 +4381,7 @@ fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
         entry.instructions.iter().any(|instruction| matches!(
             instruction,
             VmInstruction::InstallHandler {
-                continuation: VmContinuationPolicy::Replay,
+                continuation: VmContinuationPolicy::Replay { uses: 2 },
                 ..
             }
         )),
