@@ -2976,10 +2976,12 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
     }
-    /// Handler clauses may suspend and resume after the protected label scope
-    /// has changed. Until a `Leave` edge is represented inside every handler
-    /// continuation path, reject an outward transfer here rather than letting
-    /// handler specialization erase the target brand.
+    /// Handler clauses retain the exact enclosing label brand in Core.  MIR
+    /// now has a cleanup-carrying `Leave` terminator and the VM preserves it
+    /// across a suspended handler frame, so a lexically valid transfer is not
+    /// discarded merely because its source lies in a clause.  Closure escape
+    /// remains separately rejected above; unsupported handler CFG shapes fail
+    /// closed during MIR lowering rather than losing this proof here.
     fn check_handler_label_transfer_escape(&mut self, body: CoreId, span: Span) {
         let active = self
             .active_labels
@@ -2992,12 +2994,10 @@ impl Elaborator<'_> {
         let mut transfers = Vec::new();
         collect_transfer_brands(&self.expressions, body, &mut transfers);
         if transfers.into_iter().any(|brand| active.contains(&brand)) {
-            self.error(
-                span,
-                "G4184",
-                "handler clause cannot transfer to an enclosing label before handler leave edges are represented",
-            );
-            self.recovered = true;
+            // The active-set membership is the owner/brand proof consumed by
+            // `MirTerminator::Leave`; do not turn it into a recovered Core
+            // error now that the target survives handler lowering.
+            let _ = span;
         }
     }
     fn collect_captures(

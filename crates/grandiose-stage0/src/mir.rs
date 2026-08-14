@@ -1043,6 +1043,25 @@ impl MirLowering {
                 local
             })
             .collect::<Vec<_>>();
+        // A direct handler clause may itself take the lexically branded leave.
+        // Claim that full frame-aware edge before generic label or handler
+        // probes inspect the body as an ordinary value expression.
+        if let Some(function) =
+            lowerer.lower_root_label_handler_leave(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         // Labels must claim their nonlocal edge before handler-specialization
         // probes inspect the body as an ordinary value expression.
         if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
@@ -2202,6 +2221,150 @@ struct SiblingHandlerDispatch<'a> {
 }
 
 impl Lowerer<'_> {
+    /// Lower the first frame-aware label boundary: one directly selected,
+    /// irrefutable operation clause may leave an enclosing lexical label.
+    /// The protected computation retains its ordinary uninstall path, while
+    /// the clause has a real `Leave` terminator.  The VM therefore abandons
+    /// the suspended one-shot continuation and all frame capabilities before
+    /// entering the branded label join; it is not an emitter-only jump.
+    fn lower_root_label_handler_leave(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (label, prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => (root, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Label { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let (computation, clauses, label_prefix) = match self.body.expression(body).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*last).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let matching = clauses
+            .iter()
+            .filter(|clause| clause.effect == effect && clause.operation == operation)
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        if clause.terminal
+            || clause.patterns.len() != argument_ids.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+            || !self.contains_label_transfer(clause.body, brand)
+        {
+            return None;
+        }
+        for value in prefix {
+            self.statement(value)?;
+        }
+        for value in label_prefix {
+            self.statement(value)?;
+        }
+        let payloads = clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let performed = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let arguments = argument_ids
+            .iter()
+            .map(|id| self.value(*id))
+            .collect::<Option<Vec<_>>>()?;
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payloads.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            target: MirBlockId(2),
+        });
+        entry.push(MirInstruction::Perform {
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+
+        let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        self.instructions = Vec::new();
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.bind_handler_patterns(&clause.patterns, &payloads)?;
+        let transferred = self.lower_label_transfer_path(clause.body, brand)?;
+        let clause_instructions = std::mem::take(&mut self.instructions);
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(1),
+                        arguments: vec![performed],
+                    },
+                },
+                MirBlock {
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: clause_instructions,
+                    terminator: MirTerminator::Leave {
+                        brand,
+                        target: MirBlockId(1),
+                        arguments: vec![transferred],
+                        cleanup: MirCleanupPlan {
+                            moved_places: self.leave_cleanup.moved_places.clone(),
+                            active_loans: self.leave_cleanup.active_loans.clone(),
+                        },
+                    },
+                },
+            ],
+        })
+    }
     /// Lower a lexical label transfer into its own checked CFG edge.  This is
     /// deliberately a source/Core operation rather than an emitter shortcut:
     /// the target block receives the transferred value as a typed parameter
