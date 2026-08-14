@@ -1256,6 +1256,14 @@ fn service_selects_generic_qualified_trait_instances() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert!(
+        outcome
+            .instance_graph
+            .expect("selected trait method must materialize an instance")
+            .ordered()
+            .iter()
+            .any(|instance| !instance.arguments().is_empty())
+    );
 }
 
 #[test]

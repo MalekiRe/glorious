@@ -394,6 +394,7 @@ pub enum MirInstruction {
         /// Preserved from Typed Core until the instance materializer replaces
         /// the declaration key with a concrete executable identity.
         generic_arguments: Vec<GenericArgument>,
+        trait_instance: Option<MirTraitMethodInstance>,
         arguments: Vec<MirLocal>,
     },
     /// Materialize a lifted callable together with its ordered environment.
@@ -407,6 +408,7 @@ pub enum MirInstruction {
         /// instance materializer selects their executable body. Lifted
         /// closures always carry an empty list.
         generic_arguments: Vec<GenericArgument>,
+        trait_instance: Option<MirTraitMethodInstance>,
         /// Sealed source-level environment evidence. It is intentionally
         /// proof-only at Stage 0: VM closure layout checks capture types and
         /// count independently, while this prevents a Core environment from
@@ -998,6 +1000,15 @@ pub struct MirInstance {
     pub key: InstanceKey,
     /// VM-callable identity derived from `key`, never merely its declaration.
     pub executable: DefKey,
+}
+/// Solver-selected trait-method identity retained until executable instance
+/// materialization. Evidence preserves the coherent implementation selected
+/// by Typed Core instead of re-running trait selection during codegen.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirTraitMethodInstance {
+    pub evidence: DefKey,
+    pub trait_arguments: Vec<GenericArgument>,
+    pub method_arguments: Vec<GenericArgument>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirDiagnostic {
@@ -2158,6 +2169,20 @@ impl MirProgram {
                     {
                         return Err(
                             "MIR callable retained an unmaterialized generic substitution".into(),
+                        );
+                    }
+                    if matches!(
+                        instruction,
+                        MirInstruction::Call {
+                            trait_instance: Some(_),
+                            ..
+                        } | MirInstruction::MakeCallable {
+                            trait_instance: Some(_),
+                            ..
+                        }
+                    ) {
+                        return Err(
+                            "MIR callable retained an unmaterialized trait-method identity".into(),
                         );
                     }
                     if let MirInstruction::Call { callee, .. }
@@ -7820,22 +7845,32 @@ impl Lowerer<'_> {
                 callee,
                 captures: vec![],
                 generic_arguments,
+                trait_instance: None,
                 environment: None,
             }),
-            CoreKind::TraitMethod { method: callee, .. } => {
-                self.instructions.push(MirInstruction::MakeCallable {
-                    dst,
-                    callee,
-                    captures: vec![],
-                    generic_arguments: vec![],
-                    environment: None,
-                })
-            }
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => self.instructions.push(MirInstruction::MakeCallable {
+                dst,
+                callee,
+                captures: vec![],
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                environment: None,
+            }),
             CoreKind::Constant(callee) => {
                 self.instructions.push(MirInstruction::Call {
                     dst,
                     callee,
                     generic_arguments: vec![],
+                    trait_instance: None,
                     arguments: vec![],
                 });
             }
@@ -8254,16 +8289,25 @@ impl Lowerer<'_> {
                         dst,
                         callee,
                         generic_arguments,
+                        trait_instance: None,
                         arguments,
                     }),
-                    CoreKind::TraitMethod { method: callee, .. } => {
-                        self.instructions.push(MirInstruction::Call {
-                            dst,
-                            callee,
-                            generic_arguments: vec![],
-                            arguments,
-                        })
-                    }
+                    CoreKind::TraitMethod {
+                        evidence,
+                        method: callee,
+                        trait_arguments,
+                        method_arguments,
+                    } => self.instructions.push(MirInstruction::Call {
+                        dst,
+                        callee,
+                        generic_arguments: vec![],
+                        trait_instance: Some(MirTraitMethodInstance {
+                            evidence,
+                            trait_arguments,
+                            method_arguments,
+                        }),
+                        arguments,
+                    }),
                     _ => {
                         let callee = self.value(callee)?;
                         self.instructions.push(MirInstruction::CallIndirect {
@@ -8293,6 +8337,7 @@ impl Lowerer<'_> {
                     callee,
                     captures,
                     generic_arguments: vec![],
+                    trait_instance: None,
                     environment: Some(environment.brand),
                 });
             }

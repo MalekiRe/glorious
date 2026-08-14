@@ -1070,35 +1070,48 @@ impl StageZeroCompiler {
             };
             for expression in &body.expressions {
                 let function = match &expression.kind {
-                    crate::core::CoreKind::Function { .. } => Some(&expression.kind),
+                    crate::core::CoreKind::Function { .. }
+                    | crate::core::CoreKind::TraitMethod { .. } => Some(&expression.kind),
                     crate::core::CoreKind::Call { callee, .. } => {
                         Some(&body.expression(*callee).kind)
                     }
                     _ => None,
                 };
-                let Some(crate::core::CoreKind::Function {
-                    definition: callee,
-                    arguments,
-                }) = function
-                else {
-                    continue;
+                let key = match function {
+                    Some(crate::core::CoreKind::Function {
+                        definition: callee,
+                        arguments,
+                    }) => {
+                        let Some(ElaboratedHeader::Callable(signature)) =
+                            signatures.definitions.get(callee)
+                        else {
+                            continue;
+                        };
+                        InstanceKey::new(*callee, &signature.generic_kinds, arguments.clone())
+                    }
+                    Some(crate::core::CoreKind::TraitMethod {
+                        evidence,
+                        method,
+                        trait_arguments,
+                        method_arguments,
+                    }) => trait_method_instance_key(
+                        *evidence,
+                        *method,
+                        trait_arguments,
+                        method_arguments,
+                    ),
+                    _ => continue,
                 };
-                let Some(ElaboratedHeader::Callable(signature)) =
-                    signatures.definitions.get(callee)
-                else {
-                    continue;
-                };
-                let key = InstanceKey::new(*callee, &signature.generic_kinds, arguments.clone())
-                    .map_err(|error| {
-                        failed(
-                            input_fingerprint,
-                            vec![CompileDiagnostic::invariant(
-                                "G7030",
-                                format!("direct call instance is not concrete: {error:?}"),
-                            )],
-                            &source_lengths,
-                        )
-                    })?;
+                let key = key.map_err(|error| {
+                    failed(
+                        input_fingerprint,
+                        vec![CompileDiagnostic::invariant(
+                            "G7030",
+                            format!("callable instance is not concrete: {error:?}"),
+                        )],
+                        &source_lengths,
+                    )
+                })?;
                 instance_graph
                     .discover_callee(&caller, key, limits)
                     .map_err(|error| {
@@ -1343,19 +1356,43 @@ fn materialize_concrete_instances(
     for function in functions.values_mut() {
         for block in &mut function.blocks {
             for instruction in &mut block.instructions {
-                let (callee, generic_arguments) = match instruction {
+                let (callee, generic_arguments, trait_instance) = match instruction {
                     crate::MirInstruction::Call {
                         callee,
                         generic_arguments,
+                        trait_instance,
                         ..
                     }
                     | crate::MirInstruction::MakeCallable {
                         callee,
                         generic_arguments,
+                        trait_instance,
                         ..
-                    } => (callee, generic_arguments),
+                    } => (callee, generic_arguments, trait_instance),
                     _ => continue,
                 };
+                if trait_instance.is_some() {
+                    let key = {
+                        let trait_instance = trait_instance
+                            .as_ref()
+                            .expect("trait method identity was checked");
+                        trait_method_instance_key(
+                            trait_instance.evidence,
+                            *callee,
+                            &trait_instance.trait_arguments,
+                            &trait_instance.method_arguments,
+                        )
+                        .map_err(|error| {
+                            format!("trait method instance is not executable: {error:?}")
+                        })?
+                    };
+                    *callee = *targets.get(&key).ok_or_else(|| {
+                        format!("selected trait-method instance was not materialized: {key:?}")
+                    })?;
+                    generic_arguments.clear();
+                    *trait_instance = None;
+                    continue;
+                }
                 if generic_arguments.is_empty() {
                     continue;
                 }
@@ -1397,6 +1434,42 @@ fn materialize_concrete_instances(
         }
     }
     Ok(instances)
+}
+
+/// Canonicalize a solver-selected trait method into the shared instance-key
+/// vocabulary. Trait and method arguments remain ordered type slots; the
+/// evidence digest is appended as eight const slots so distinct coherent
+/// implementations can never share an executable body.
+fn trait_method_instance_key(
+    evidence: DefKey,
+    method: DefKey,
+    trait_arguments: &[GenericArgument],
+    method_arguments: &[GenericArgument],
+) -> Result<InstanceKey, crate::InstanceKeyError> {
+    let mut arguments = trait_arguments.to_vec();
+    arguments.extend_from_slice(method_arguments);
+    let mut kinds = arguments
+        .iter()
+        .map(instance_argument_kind)
+        .collect::<Vec<_>>();
+    for bytes in evidence.0.as_bytes().chunks_exact(4) {
+        arguments.push(GenericArgument::ConstU32(u32::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+        ])));
+        kinds.push(crate::GenericKind::Const(crate::ConstKind::U32));
+    }
+    InstanceKey::new(method, &kinds, arguments)
+}
+
+fn instance_argument_kind(argument: &GenericArgument) -> crate::GenericKind {
+    match argument {
+        GenericArgument::Type(_) => crate::GenericKind::Type,
+        GenericArgument::EffectRow(_) => crate::GenericKind::EffectRow,
+        GenericArgument::Lifetime(_) => crate::GenericKind::Lifetime,
+        GenericArgument::ConstU32(_) => crate::GenericKind::Const(crate::ConstKind::U32),
+        GenericArgument::ConstQuantity(_) => crate::GenericKind::Const(crate::ConstKind::Quantity),
+        GenericArgument::ConstGeneric { kind, .. } => crate::GenericKind::Const(*kind),
+    }
 }
 
 /// Stage 0's first materializer specializes every local signature.  The
