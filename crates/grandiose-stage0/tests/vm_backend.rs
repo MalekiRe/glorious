@@ -4,7 +4,8 @@ use grandiose_stage0::{
     LabelBrand, LexedFile, LogicalPath, MirBlock, MirBlockId, MirCleanupPlan, MirFunction,
     MirInstruction, MirLocal, MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey,
     PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace,
-    VmCleanupProof, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction, VmPattern,
+    VmCleanupProof, VmContinuationPolicy, VmExecutionLimits, VmFunction, VmGenericArgument,
+    VmInstruction, VmPattern,
     VmType, decode_and_verify_artifact, decode_and_verify_program, decode_artifact, decode_program,
     emit_vm, emit_vm_program, encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
@@ -325,6 +326,7 @@ fn cleanup_carrying_leave_entry(definition: DefKey, first: VmInstruction) -> VmF
                 operation: 0,
                 payload_destinations: vec![],
                 resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume,
                 target: 4,
             },
             VmInstruction::Leave {
@@ -1147,6 +1149,7 @@ fn verified_vm_executes_a_deep_one_shot_handler_frame() {
                     operation: 0,
                     payload_destinations: vec![1],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 5,
                 },
                 VmInstruction::Perform {
@@ -1270,6 +1273,7 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 4,
                 },
                 VmInstruction::Perform {
@@ -1356,6 +1360,7 @@ fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 5,
                 },
                 VmInstruction::Perform {
@@ -1404,6 +1409,7 @@ fn resumed_handler_frame_reinstalls_for_the_next_matching_operation() {
                     operation: 0,
                     payload_destinations: vec![2],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 8,
                 },
                 VmInstruction::Perform {
@@ -1461,6 +1467,7 @@ fn nested_partial_handler_forwards_to_an_outer_frame_and_restores_it_on_resume()
                     operation: 1,
                     payload_destinations: vec![1],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 9,
                 },
                 // This inner frame handles operation zero only. Operation one
@@ -1472,6 +1479,7 @@ fn nested_partial_handler_forwards_to_an_outer_frame_and_restores_it_on_resume()
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 12,
                 },
                 VmInstruction::Perform {
@@ -1531,6 +1539,7 @@ fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame()
                     operation: 0,
                     payload_destinations: vec![1],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 12,
                 },
                 VmInstruction::InstallHandler {
@@ -1539,6 +1548,7 @@ fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame()
                     operation: 0,
                     payload_destinations: vec![2],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 8,
                 },
                 VmInstruction::Perform {
@@ -1603,6 +1613,7 @@ fn cancelled_handler_continuation_abandons_its_snapshot_and_returns_clause_value
                     operation: 0,
                     payload_destinations: vec![1],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 6,
                 },
                 VmInstruction::Perform {
@@ -2377,6 +2388,7 @@ fn verifier_rejects_ordinary_control_flow_into_handler_clauses() {
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::Unit,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 4,
                 },
                 VmInstruction::BranchBool {
@@ -2411,6 +2423,7 @@ fn verifier_rejects_ordinary_control_flow_into_handler_clauses() {
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::Unit,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 1,
                 },
                 VmInstruction::Trap,
@@ -2643,6 +2656,7 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 4,
                 },
                 VmInstruction::Leave {
@@ -2747,6 +2761,7 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
                     operation: 0,
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
                     target: 3,
                 },
                 VmInstruction::Leave {
@@ -2789,6 +2804,7 @@ fn leave_from_a_handler_clause_abandons_its_suspended_continuation() {
                 operation: 0,
                 payload_destinations: vec![],
                 resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume,
                 target: 5,
             },
             VmInstruction::Perform {

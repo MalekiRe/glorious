@@ -140,7 +140,7 @@ pub enum MirInstruction {
         operation: u32,
         arguments: Vec<MirLocal>,
     },
-    /// Install a lexical one-shot handler frame. The VM stores the protected
+    /// Install a lexical handler frame. The VM stores the protected
     /// continuation at a matching `Perform` and transfers to `target`; a
     /// `Resume` re-enters that continuation with deep reinstatement.
     InstallHandler {
@@ -149,6 +149,7 @@ pub enum MirInstruction {
         operation: u32,
         payload_destinations: Vec<MirLocal>,
         resume_type: Type,
+        continuation: MirContinuationPolicy,
         target: MirBlockId,
     },
     UninstallHandler,
@@ -403,6 +404,16 @@ pub enum MirInstruction {
         callee: MirLocal,
         arguments: Vec<MirLocal>,
     },
+}
+
+/// The executable use policy for a handler continuation. Typed Core remains
+/// authoritative for exact lower/upper bounds; MIR preserves the distinction
+/// the VM must enforce at runtime: affine continuations are consumed, whereas
+/// unrestricted continuations retain a replayable snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirContinuationPolicy {
+    Consume,
+    Replay,
 }
 /// Explicit control edge for a MIR basic block. Block parameters are the only
 /// phi mechanism; every edge carries an exactly typed argument list.
@@ -1847,6 +1858,7 @@ fn validate_lowered_handler_contracts(
                 payload_destinations,
                 resume_type,
                 target,
+                ..
             } => Some((
                 effect,
                 effect_arguments,
@@ -2396,6 +2408,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: payloads.clone(),
             resume_type: self.body.expression(protected).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(handler_block),
         });
         entry.push(MirInstruction::Perform {
@@ -2688,6 +2701,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: payloads.clone(),
             resume_type: self.body.expression(protected).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(handler_target),
         });
         entry.push(MirInstruction::Perform {
@@ -2928,6 +2942,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: payloads.clone(),
             resume_type: self.body.expression(computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(2),
         });
         entry.push(MirInstruction::Perform {
@@ -3632,6 +3647,7 @@ impl Lowerer<'_> {
             operation: outer_clause.operation,
             payload_destinations: outer_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(1),
         });
         self.instructions = Vec::new();
@@ -3652,6 +3668,7 @@ impl Lowerer<'_> {
                 operation: clause.operation,
                 payload_destinations: dispatch.payload_destinations.clone(),
                 resume_type: self.body.expression(inner_computation).ty.clone(),
+                continuation: MirContinuationPolicy::Consume,
                 target,
             });
         }
@@ -3661,6 +3678,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: direct_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: direct_target,
         });
         self.instructions = Vec::new();
@@ -4372,6 +4390,7 @@ impl Lowerer<'_> {
             operation: outer_clause.operation,
             payload_destinations: outer_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(1),
         });
         self.instructions = Vec::new();
@@ -4390,6 +4409,7 @@ impl Lowerer<'_> {
                 operation: clause.operation,
                 payload_destinations: payload_destinations.clone(),
                 resume_type: self.body.expression(inner_computation).ty.clone(),
+                continuation: MirContinuationPolicy::Consume,
                 target: *target,
             });
         }
@@ -4399,6 +4419,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: direct_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: direct_target,
         });
         self.instructions = Vec::new();
@@ -4733,6 +4754,7 @@ impl Lowerer<'_> {
             operation: outer_clause.operation,
             payload_destinations: outer_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(1),
         });
         self.instructions = Vec::new();
@@ -4750,6 +4772,7 @@ impl Lowerer<'_> {
                 operation: clause.operation,
                 payload_destinations: payload_destinations.clone(),
                 resume_type: self.body.expression(inner_computation).ty.clone(),
+                continuation: MirContinuationPolicy::Consume,
                 target: sibling_clause_targets[0],
             });
         }
@@ -4759,6 +4782,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: inner_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: clause_targets[0],
         });
         self.instructions = Vec::new();
@@ -5130,6 +5154,7 @@ impl Lowerer<'_> {
                 operation: clause.operation,
                 payload_destinations: payloads.clone(),
                 resume_type: resume_type.clone(),
+                continuation: MirContinuationPolicy::Consume,
                 target: tests[0].first().copied().unwrap_or(bodies[0]),
             });
             self.instructions = Vec::new();
@@ -5392,6 +5417,7 @@ impl Lowerer<'_> {
             operation: outer_clause.operation,
             payload_destinations: outer_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(1),
         });
         entry.push(MirInstruction::InstallHandler {
@@ -5400,6 +5426,7 @@ impl Lowerer<'_> {
             operation: inner_clause.operation,
             payload_destinations: inner_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: if inner_tests.is_empty() {
                 inner_matched_target
             } else {
@@ -5872,6 +5899,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: payload_destinations.clone(),
             resume_type: self.body.expression(perform).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(1),
         });
         self.instructions = Vec::new();
@@ -6046,6 +6074,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: payloads.clone(),
             resume_type: self.body.expression(computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target,
         });
         entry.push(MirInstruction::Perform {
@@ -6227,6 +6256,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: payloads.clone(),
             resume_type: self.body.expression(computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(2),
         });
         entry.push(MirInstruction::Perform {
@@ -6394,6 +6424,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: payload_destinations.clone(),
             resume_type: self.body.expression(value).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(2),
         });
         entry.push(MirInstruction::Perform {
@@ -6766,6 +6797,7 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: payload_destinations.clone(),
             resume_type: self.body.expression(computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
             target: MirBlockId(1),
         });
         entry.push(MirInstruction::Perform {
