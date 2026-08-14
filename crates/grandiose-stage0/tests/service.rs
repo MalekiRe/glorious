@@ -859,6 +859,14 @@ fn service_installs_distinct_sibling_operation_frames_for_nested_handler_setup()
 }
 
 #[test]
+fn service_uses_ordered_refutable_clauses_for_distinct_sibling_operation_frames() {
+    let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; [1,1] third(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle { let first = Choice::first(40); let second = Choice::second(first); Choice::third(second) } { Choice::first(0) => 0, Choice::first(value) => value + 1, Choice::second(value) => value + 1, Choice::third(value) => value } } { Choice::third(value) => value } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_uses_ordered_sibling_handler_clauses_during_nested_setup() {
     let source = "effect Choice { [1,1] first(seed: i64) -> i64; [1,1] second(seed: i64) -> i64; } pub fn main() -> i64 / Choice { handle { handle { let first = Choice::first(40); Choice::second(first) } { Choice::first(0) => 0, Choice::first(value) => value + 1, Choice::second(0) => 0 } } { Choice::second(value) => value + 1 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
