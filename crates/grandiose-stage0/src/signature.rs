@@ -178,6 +178,7 @@ impl ElaboratedInterface {
         }
         result.normalize_aliases();
         result.validate_associated_type_definitions();
+        result.validate_implementation_supertraits();
         result
             .diagnostics
             .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));
@@ -192,6 +193,7 @@ impl ElaboratedInterface {
         }
         merged.normalize_aliases();
         merged.validate_associated_type_definitions();
+        merged.validate_implementation_supertraits();
         merged
             .diagnostics
             .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));
@@ -300,6 +302,70 @@ impl ElaboratedInterface {
                         code: "G4121",
                         message: format!("implementation omits trait method `{name}`"),
                     });
+                }
+            }
+        }
+        self.diagnostics.extend(diagnostics);
+    }
+
+    /// A positive implementation of a subtrait must establish every declared
+    /// supertrait for the same self type and instantiated trait arguments.
+    ///
+    /// This deliberately validates the implication at interface time instead
+    /// of treating a `Child` implementation as synthetic `Parent` method
+    /// evidence.  The latter would let `Parent::method` select a `Child`
+    /// implementation that contains no parent method body.  Requiring direct
+    /// parent evidence retains one callable identity per selected impl while
+    /// making declared supertrait contracts semantically meaningful.
+    fn validate_implementation_supertraits(&mut self) {
+        use crate::{TraitAnswer, TraitGoal, TraitSolver};
+
+        let implementations = self
+            .definitions
+            .values()
+            .filter_map(|header| match header {
+                ElaboratedHeader::Implementation(implementation) if !implementation.negative => {
+                    Some(implementation.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut solver = TraitSolver::new(self);
+        let mut diagnostics = Vec::new();
+        for implementation in implementations {
+            let Some(ElaboratedHeader::Trait(trait_header)) =
+                self.definitions.get(&implementation.relation.definition)
+            else {
+                continue;
+            };
+            for supertrait in &trait_header.supertraits {
+                let relation =
+                    substitute_trait_reference(supertrait, &implementation.relation.arguments);
+                let goal = TraitGoal {
+                    relation: relation.clone(),
+                    subject: implementation.self_ty.clone(),
+                };
+                match solver.solve(goal) {
+                    TraitAnswer::Proven { .. } => {}
+                    TraitAnswer::Refuted { .. } => diagnostics.push(SignatureDiagnostic {
+                        code: "G4148",
+                        message: "implementation of a subtrait is refuted by a required supertrait"
+                            .into(),
+                    }),
+                    TraitAnswer::NoSolution => diagnostics.push(SignatureDiagnostic {
+                        code: "G4148",
+                        message: "implementation does not prove a required supertrait".into(),
+                    }),
+                    TraitAnswer::Ambiguous => diagnostics.push(SignatureDiagnostic {
+                        code: "G4148",
+                        message: "implementation has ambiguous evidence for a required supertrait"
+                            .into(),
+                    }),
+                    TraitAnswer::Overflow => diagnostics.push(SignatureDiagnostic {
+                        code: "G4148",
+                        message: "implementation overflows while proving a required supertrait"
+                            .into(),
+                    }),
                 }
             }
         }

@@ -290,6 +290,7 @@ fn trait_impl_and_effect_contracts_elaborate_with_stable_declaration_identity() 
         trait Marker<T> {}
         trait Display<T>: Marker<T> { type Output; render(value: T) -> Text; }
         struct Box<T> { value: T }
+        impl<T> Marker<T> for Box<T> {}
         impl<T> Display<T> for Box<T> where T: Marker<T> { type Output = Text; fn render(value: T) -> Text { "rendered" } }
         effect Console<T> { write(value: T); [0, 1] read() -> T; stop() -> !; }
     "#;
@@ -341,6 +342,53 @@ fn trait_impl_and_effect_contracts_elaborate_with_stable_declaration_identity() 
     assert_eq!(console.operations[1].resumption, Quantity::AFFINE);
     assert!(console.operations[2].terminal);
     assert_eq!(console.operations[1].result, Type::Generic(0));
+}
+
+#[test]
+fn positive_implementations_must_prove_instantiated_supertraits() {
+    let package = PackageKey("signature-supertrait-obligations@0.1.0".into());
+    let source = r#"
+        trait Parent<T> {}
+        trait Child<T>: Parent<T> {}
+        struct Box<T> {}
+        impl<T> Parent<T> for Box<T> {}
+        impl<T> Child<T> for Box<T> {}
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
+fn positive_implementations_reject_missing_or_negative_supertrait_evidence() {
+    let package = PackageKey("signature-missing-supertrait@0.1.0".into());
+    let source = r#"
+        trait Parent<T> {}
+        trait Child<T>: Parent<T> {}
+        struct Box<T> {}
+        impl<T> !Parent<T> for Box<T> {}
+        impl<T> Child<T> for Box<T> {}
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4148" && diagnostic.message.contains("refuted")),
+        "{:#?}",
+        signatures.diagnostics
+    );
 }
 
 #[test]
