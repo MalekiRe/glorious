@@ -878,6 +878,12 @@ impl StageZeroCompiler {
         // all later value paths have a deterministic, interface-owned type.
         // Path-only `let target = callable;` declarations are intentionally
         // excluded: those retain the forwarding-alias contract frozen above.
+        // Keep the parsed form until the ordinary all-body pass consumes it.
+        // The preliminary elaboration cannot be reused: each successful
+        // initializer freezes a result type that can affect later bodies.
+        // Its body syntax, however, is immutable source-local input and must
+        // not be reparsed merely because it crosses this two-phase boundary.
+        let mut frozen_value_initializer_syntax = BTreeMap::new();
         for node in graphs.values().flat_map(|graph| graph.modules.values()) {
             let Some(source) = snapshot
                 .world()
@@ -907,6 +913,7 @@ impl StageZeroCompiler {
                     continue;
                 };
                 let body = BodySyntax::parse_expression(&lexed, text, body_range);
+                frozen_value_initializer_syntax.insert(declaration.key, body.clone());
                 if !body.diagnostics.is_empty() || body.recovered {
                     continue;
                 }
@@ -1222,7 +1229,14 @@ impl StageZeroCompiler {
                         declaration.syntax.header,
                         ParsedHeader::ValueInitializer { .. }
                     );
-                let body = if is_constant {
+                let body = if matches!(
+                    declaration.syntax.header,
+                    ParsedHeader::ValueInitializer { .. }
+                ) {
+                    frozen_value_initializer_syntax
+                        .remove(&declaration.key)
+                        .unwrap_or_else(|| BodySyntax::parse_expression(&lexed, text, body_range))
+                } else if is_constant {
                     BodySyntax::parse_expression(&lexed, text, body_range)
                 } else {
                     BodySyntax::parse(&lexed, text, body_range)
