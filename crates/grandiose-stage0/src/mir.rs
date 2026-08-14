@@ -483,6 +483,13 @@ pub enum MirInstruction {
         left: MirLocal,
         right: MirLocal,
     },
+    /// Exact manifest-bound i64 bitwise-or. This is never ordinary source
+    /// arithmetic and remains distinct in the frozen MIR contract.
+    BitOrI64 {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
     SubI64 {
         dst: MirLocal,
         left: MirLocal,
@@ -1067,7 +1074,8 @@ fn fold_block(
             MirInstruction::IntEqualI64 { .. }
             | MirInstruction::IntLessI64 { .. }
             | MirInstruction::IntGreaterI64 { .. }
-            | MirInstruction::BitAndI64 { .. } => None,
+            | MirInstruction::BitAndI64 { .. }
+            | MirInstruction::BitOrI64 { .. } => None,
             MirInstruction::SubI64 { dst, left, right } => {
                 fold_i64(dst, &constants, left, right, i64::checked_sub)
             }
@@ -1304,6 +1312,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::IntLessI64 { dst, .. }
         | MirInstruction::IntGreaterI64 { dst, .. }
         | MirInstruction::BitAndI64 { dst, .. }
+        | MirInstruction::BitOrI64 { dst, .. }
         | MirInstruction::SubI64 { dst, .. }
         | MirInstruction::MulI64 { dst, .. }
         | MirInstruction::DivI64 { dst, .. }
@@ -3305,6 +3314,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::IntLessI64 { .. }
         | MirInstruction::IntGreaterI64 { .. }
         | MirInstruction::BitAndI64 { .. }
+        | MirInstruction::BitOrI64 { .. }
         | MirInstruction::SubI64 { .. }
         | MirInstruction::MulI64 { .. }
         | MirInstruction::DivI64 { .. }
@@ -4046,6 +4056,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::IntLessI64 { dst, left, right }
         | MirInstruction::IntGreaterI64 { dst, left, right }
         | MirInstruction::BitAndI64 { dst, left, right }
+        | MirInstruction::BitOrI64 { dst, left, right }
         | MirInstruction::SubI64 { dst, left, right }
         | MirInstruction::MulI64 { dst, left, right }
         | MirInstruction::DivI64 { dst, left, right }
@@ -13662,7 +13673,8 @@ impl Lowerer<'_> {
                                 | PrimitiveRole::IntEqual
                                 | PrimitiveRole::IntLess
                                 | PrimitiveRole::IntGreater
-                                | PrimitiveRole::IntBitAnd),
+                                | PrimitiveRole::IntBitAnd
+                                | PrimitiveRole::IntBitOr),
                             ) => {
                                 let [left, right] = arguments.as_slice() else {
                                     self.error(
@@ -13740,6 +13752,11 @@ impl Lowerer<'_> {
                                         right: *right,
                                     },
                                     PrimitiveRole::IntBitAnd => MirInstruction::BitAndI64 {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::IntBitOr => MirInstruction::BitOrI64 {
                                         dst,
                                         left: *left,
                                         right: *right,

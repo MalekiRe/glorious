@@ -85,6 +85,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_bit_and<T>` in distributed std.
     /// Its frozen i64 specialization is a distinct bitwise VM operation.
     IntBitAnd,
+    /// Exact generic declaration `__g1_int_bit_or<T>` in distributed std.
+    /// Its frozen i64 specialization is a distinct bitwise VM operation.
+    IntBitOr,
 }
 
 impl PrimitiveRole {
@@ -130,6 +133,7 @@ impl PrimitiveRole {
             Self::IntLess => "int-less",
             Self::IntGreater => "int-greater",
             Self::IntBitAnd => "int-bit-and",
+            Self::IntBitOr => "int-bit-or",
         }
     }
 
@@ -175,6 +179,7 @@ impl PrimitiveRole {
             "int-less" => Self::IntLess,
             "int-greater" => Self::IntGreater,
             "int-bit-and" => Self::IntBitAnd,
+            "int-bit-or" => Self::IntBitOr,
             _ => return None,
         })
     }
@@ -539,7 +544,8 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         | PrimitiveRole::IntWrappingAdd
         | PrimitiveRole::IntWrappingSub
         | PrimitiveRole::IntWrappingMul
-        | PrimitiveRole::IntBitAnd => crate::CallableSignature {
+        | PrimitiveRole::IntBitAnd
+        | PrimitiveRole::IntBitOr => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0), Type::Generic(0)],
@@ -614,6 +620,7 @@ fn manifest_digest(
             PrimitiveRole::IntLess => 38,
             PrimitiveRole::IntGreater => 39,
             PrimitiveRole::IntBitAnd => 37,
+            PrimitiveRole::IntBitOr => 40,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
