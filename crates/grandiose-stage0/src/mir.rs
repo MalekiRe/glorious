@@ -1497,6 +1497,32 @@ impl MirLowering {
             };
         }
         if let Some(function) =
+            lowerer.lower_root_runtime_one_shot_indirect_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) =
             lowerer.lower_root_terminal_pattern_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -6923,6 +6949,125 @@ impl Lowerer<'_> {
         let payload_destinations = argument_ids
             .iter()
             .map(|argument| self.alloc(self.body.expression(*argument).ty.clone(), *argument))
+            .collect::<Vec<_>>();
+        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payload_destinations.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(1),
+        });
+        entry.push(MirInstruction::Perform {
+            dst: result,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+
+        self.instructions = Vec::new();
+        let previous_named = self.named.clone();
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        let resumed = self.direct_handler_clause_value(clause)?;
+        self.instructions
+            .push(MirInstruction::Resume { value: resumed });
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        self.named = previous_named;
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
+        })
+    }
+    /// Lower a named generic helper through a real VM handler frame. The
+    /// helper must have the proven parameter-forwarding shape recognised by
+    /// `direct_known_perform`; this preserves its Core effect identity while
+    /// making the handler transition, resume, and cleanup executable rather
+    /// than relying on terminal-handler lowering for a source-level call.
+    fn lower_root_runtime_one_shot_indirect_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Function { definition, .. } = self.body.expression(callee).kind.clone()
+        else {
+            return None;
+        };
+        let (effect, operation, forwarded) =
+            self.direct_known_perform(definition, arguments.clone())?;
+        let matching = clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        let quantity = match &clause.resumption {
+            CoreHandlerResumption::Explicit { quantity, .. }
+            | CoreHandlerResumption::Tail { quantity } => *quantity,
+            CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => return None,
+        };
+        if quantity != crate::quantity::Quantity::ONCE
+            || clause.patterns.len() != forwarded.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+        {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = forwarded
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let payload_destinations = clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
             .collect::<Vec<_>>();
         let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
         let mut entry = std::mem::take(&mut self.instructions);

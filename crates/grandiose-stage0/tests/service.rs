@@ -2651,6 +2651,47 @@ fn service_instantiates_generic_helper_effect_rows_before_static_handler_interce
 }
 
 #[test]
+fn service_handles_an_indirect_generic_helper_performance_through_a_vm_frame() {
+    let source = "effect Ask<T> { [1,1] ask(value: T) -> T; } pub fn helper<T>(value: T) -> T / Ask<T> { let copy = value; Ask<T>::ask(copy) } pub fn main() -> i64 { handle helper(41) { Ask<i64>::ask(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. })),
+        "indirect helper interception must retain a VM handler frame"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Perform { .. })),
+        "helper effect must lower to an executable caller-side performance"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_an_underused_indirect_generic_resumption() {
+    let source = "effect Ask<T> { [2,2] ask(value: T) -> T; } pub fn helper<T>(value: T) -> T / Ask<T> { let copy = value; Ask<T>::ask(copy) } pub fn main() -> i64 { handle helper(41) { Ask<i64>::ask(value) with k => k(value) } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("underused indirect generic resumption was accepted")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5012"),
+        "missing indirect generic quantity diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_composes_an_intercepted_helper_call_with_normal_completion() {
     let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn main() -> i64 { handle helper(41) { result => result + 1, Ask::ask(value) => value } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
