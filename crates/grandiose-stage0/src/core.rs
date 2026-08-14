@@ -342,6 +342,13 @@ impl TypedBody {
                     message: "Typed Core contains a recovered structural form".into(),
                 });
             }
+            if let Some(message) = core_structural_error(&expression.kind) {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4183",
+                    span: expression.span,
+                    message,
+                });
+            }
         }
         diagnostics
     }
@@ -407,6 +414,81 @@ fn core_kind_is_recovered(kind: &CoreKind) -> bool {
             .iter()
             .any(|clause| pattern_is_recovered(&clause.pattern)),
         _ => false,
+    }
+}
+
+fn core_structural_error(kind: &CoreKind) -> Option<String> {
+    match kind {
+        CoreKind::Field {
+            index, field_count, ..
+        } if index >= field_count => Some(format!(
+            "Typed Core field projection index {index} is outside structural arity {field_count}"
+        )),
+        CoreKind::Assign { place, .. } => place_structural_error(place),
+        CoreKind::PatternTest { pattern, .. } => pattern_structural_error(pattern),
+        CoreKind::Handle { clauses, .. } => clauses
+            .iter()
+            .flat_map(|clause| clause.patterns.iter())
+            .find_map(pattern_structural_error),
+        CoreKind::Completion { clauses, .. } => clauses
+            .iter()
+            .find_map(|clause| pattern_structural_error(&clause.pattern)),
+        _ => None,
+    }
+}
+
+fn place_structural_error(place: &CorePlace) -> Option<String> {
+    match place {
+        CorePlace::Field {
+            base,
+            index,
+            field_count,
+            ..
+        } if index >= field_count => Some(format!(
+            "Typed Core assignment field index {index} is outside structural arity {field_count}"
+        )),
+        CorePlace::Field { base, .. } => place_structural_error(base),
+        CorePlace::Local { .. } | CorePlace::Error => None,
+    }
+}
+
+fn pattern_structural_error(pattern: &CorePattern) -> Option<String> {
+    match pattern {
+        CorePattern::Tuple(values) => values.iter().find_map(pattern_structural_error),
+        CorePattern::Record {
+            field_count,
+            fields,
+            ..
+        }
+        | CorePattern::Enum {
+            field_count,
+            fields,
+            ..
+        } => {
+            let mut seen = std::collections::BTreeSet::new();
+            for field in fields {
+                if field.index >= *field_count {
+                    return Some(format!(
+                        "Typed Core pattern field index {} is outside structural arity {field_count}",
+                        field.index
+                    ));
+                }
+                if !seen.insert(field.index) {
+                    return Some(format!(
+                        "Typed Core pattern repeats structural field index {}",
+                        field.index
+                    ));
+                }
+                if let Some(error) = pattern_structural_error(&field.pattern) {
+                    return Some(error);
+                }
+            }
+            None
+        }
+        CorePattern::Any
+        | CorePattern::Bind { .. }
+        | CorePattern::Literal(_)
+        | CorePattern::Error => None,
     }
 }
 

@@ -113,6 +113,37 @@ fn typed_core_validation_rejects_dangling_expression_edges() {
 }
 
 #[test]
+fn typed_core_validation_rejects_impossible_structural_projection() {
+    let package = PackageKey("core-structural-validation@0.1.0".into());
+    let body = TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Field {
+                base: CoreId(0),
+                index: 1,
+                field_count: 1,
+            },
+            ty: Type::Unit,
+            span: Span {
+                file: FileKey::new(&package, "src/main.glorious"),
+                start: 0,
+                end: 1,
+            },
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4183"),
+        "invalid structural arity must be rejected before MIR lowering"
+    );
+}
+
+#[test]
 fn typed_core_checks_a_function_body_against_its_declared_result() {
     let package = PackageKey("core@0.1.0".into());
     let source = "pub fn main() -> Text { 1 }";
