@@ -2862,6 +2862,8 @@ impl TypedBody {
             .get(&definition.key)
             .and_then(callable)
             .map(|signature| signature.result.clone());
+        elaborator.declared_effects =
+            elaborator.normalize_concrete_effect_row(elaborator.declared_effects.clone());
         let expected_result =
             expected_result.map(|result| elaborator.normalize_concrete_type_projections(result));
         let mut parameters = vec![];
@@ -3050,6 +3052,8 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
         };
+        elaborator.declared_effects =
+            elaborator.normalize_concrete_effect_row(elaborator.declared_effects.clone());
         let mut parameters = vec![];
         for (parameter, ty) in context
             .method
@@ -4342,6 +4346,17 @@ impl Elaborator<'_> {
             Ok(value) => value,
             Err(answer) => self.projection_normalization_error(*answer),
         }
+    }
+
+    /// Effect rows follow the same boundary as type projections: concrete
+    /// selected rows are executable identities, while rows under declaration
+    /// binders remain symbolic for lexical forwarding.  Keep a failed
+    /// normalization intact so the ordinary effect checker can issue its
+    /// source diagnostic rather than silently dropping a forged projection.
+    fn normalize_concrete_effect_row(&self, value: EffectRow) -> EffectRow {
+        TraitSolver::new(self.signatures)
+            .normalize_effect_row(value.clone())
+            .unwrap_or(value)
     }
     fn projection_normalization_error(&mut self, answer: TraitProjectionAnswer) -> Type {
         match answer {
@@ -7317,11 +7332,12 @@ impl Elaborator<'_> {
                 ));
             }
         };
+        let effects = self.normalize_concrete_effect_row(signature.effects.clone());
         let callable = Type::Callable {
             lifetime_binders: 0,
             parameters: signature.parameters.clone(),
             result: Box::new(signature.result.clone()),
-            effects: signature.effects.clone(),
+            effects,
             invocation: signature.invocation,
         };
         let Some(expected) = expected else {
@@ -7488,6 +7504,7 @@ impl Elaborator<'_> {
                 ));
             }
         };
+        let effects = self.normalize_concrete_effect_row(signature.effects.clone());
         let callee = self.alloc(
             CoreKind::TraitMethod {
                 evidence,
@@ -7499,7 +7516,7 @@ impl Elaborator<'_> {
                 lifetime_binders: 0,
                 parameters: signature.parameters.clone(),
                 result: Box::new(signature.result.clone()),
-                effects: signature.effects.clone(),
+                effects,
                 invocation: signature.invocation,
             },
             span,

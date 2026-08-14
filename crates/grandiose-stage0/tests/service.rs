@@ -2985,6 +2985,45 @@ fn service_specializes_trait_method_effect_identities_with_quantity_generics() {
 }
 
 #[test]
+fn service_normalizes_concrete_associated_effect_rows_on_trait_method_values() {
+    let source = "effect Trace { note() -> i64; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Trace}; } trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { Trace::note() } } pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { handle apply(Relay::relay) { Trace::note() with k => k(42) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_normalizes_dependency_trait_method_effect_rows_through_handlers() {
+    let root = "use dependency::Relay; use dependency::Trace; pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { handle apply(Relay::relay) { Trace::note() with k => k(42) } }";
+    let dependency = "pub effect Trace { note() -> i64; } pub trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Trace}; } pub trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { Trace::note() } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            root,
+            "dependency@0.1.0",
+            dependency,
+        ))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_unselected_associated_effect_rows_on_trait_method_values() {
+    let source = "effect Trace { note() -> i64; } trait Capability { type Effects: EffectRow; } trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { 0 } } pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { handle apply(Relay::relay) { Trace::note() with k => k(42) } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("an unselected associated effect row escaped through a trait method value");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4190"),
+        "missing higher-order associated-effect rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_instantiates_quantity_generic_enum_payloads() {
     let source = "pub enum Packet<q: Quantity, T> { Value(T) } pub fn main() -> i64 { let packet = Packet<[1, 1], i64>::Value(41); 42 }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

@@ -374,6 +374,26 @@ fn typed_core_selects_methods_inherited_through_a_supertrait() {
 }
 
 #[test]
+fn typed_core_normalizes_concrete_associated_effect_rows_on_method_values() {
+    let core = core_for(
+        "core-trait-method-associated-effect-row@0.1.0",
+        "effect Trace { note() -> i64; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Trace}; } trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { Trace::note() } } pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { handle apply(Relay::relay) { Trace::note() with k => k(42) } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::TraitMethod { .. }
+                if matches!(
+                    &expression.ty,
+                    Type::Callable { effects, .. }
+                        if effects.projections.is_empty() && effects.effects.len() == 1
+                )
+        )
+    }));
+}
+
+#[test]
 fn typed_core_accepts_generic_subtrait_impls_proven_by_their_where_contract() {
     let core = core_for(
         "core-generic-supertrait-where@0.1.0",
