@@ -2676,6 +2676,14 @@ fn service_lowers_unique_borrow_deref_and_mutation_without_copying_the_place() {
 }
 
 #[test]
+fn service_preserves_unique_reference_writeback_across_a_direct_call_and_return() {
+    let source = "pub fn overwrite<'a>(value: &'a mut i64) -> &'a mut i64 { *value = 42; value } pub fn main() -> i64 { let value = 1; let returned = overwrite(&mut value); *returned = 43; value }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
 fn affine_nominal_values_cannot_copy_an_embedded_unique_reference() {
     let source = r#"
         pub struct Holder { reference: &mut i64 }

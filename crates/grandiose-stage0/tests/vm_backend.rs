@@ -6152,6 +6152,166 @@ fn unique_reference_mutates_its_live_register_and_round_trips() {
 }
 
 #[test]
+fn unique_reference_writeback_survives_direct_call_and_return() {
+    let callee = DefKey(Digest::of_bytes(b"unique-reference-mutator"));
+    let entry = DefKey(Digest::of_bytes(b"unique-reference-mutator-entry"));
+    let unique_i64 = VmType::Reference {
+        unique: true,
+        referent: Box::new(VmType::I64),
+    };
+    let callee_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: callee,
+        captures: 0,
+        parameters: 1,
+        registers: vec![unique_i64.clone(), VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 1, value: 42 },
+            VmInstruction::DerefStore {
+                reference: 0,
+                src: 1,
+            },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::I64,
+            unique_i64.clone(),
+            unique_i64,
+            VmType::I64,
+            VmType::I64,
+        ],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 1 },
+            VmInstruction::Borrow {
+                dst: 1,
+                src: 0,
+                fields: vec![],
+                unique: true,
+                reborrow: false,
+            },
+            VmInstruction::Call {
+                dst: 2,
+                callee,
+                arguments: vec![1],
+            },
+            VmInstruction::ConstI64 { dst: 3, value: 43 },
+            VmInstruction::DerefStore {
+                reference: 2,
+                src: 3,
+            },
+            VmInstruction::DerefCopy {
+                dst: 4,
+                reference: 1,
+            },
+            VmInstruction::Return { value: 4 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(callee, callee_function), (entry, entry_function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"unique-reference-mutator-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
+fn unique_reference_writeback_survives_indirect_call_and_return() {
+    let callee = DefKey(Digest::of_bytes(b"indirect-unique-reference-mutator"));
+    let entry = DefKey(Digest::of_bytes(b"indirect-unique-reference-mutator-entry"));
+    let unique_i64 = VmType::Reference {
+        unique: true,
+        referent: Box::new(VmType::I64),
+    };
+    let callable = VmType::Callable {
+        parameters: vec![unique_i64.clone()],
+        result: Box::new(unique_i64.clone()),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let callee_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: callee,
+        captures: 0,
+        parameters: 1,
+        registers: vec![unique_i64.clone(), VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 1, value: 42 },
+            VmInstruction::DerefStore {
+                reference: 0,
+                src: 1,
+            },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::I64,
+            unique_i64.clone(),
+            callable,
+            unique_i64,
+            VmType::I64,
+            VmType::I64,
+        ],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 1 },
+            VmInstruction::Borrow {
+                dst: 1,
+                src: 0,
+                fields: vec![],
+                unique: true,
+                reborrow: false,
+            },
+            VmInstruction::MakeCallable {
+                dst: 2,
+                callee,
+                captures: vec![],
+                environment: None,
+            },
+            VmInstruction::CallIndirect {
+                dst: 3,
+                callee: 2,
+                arguments: vec![1],
+            },
+            VmInstruction::ConstI64 { dst: 4, value: 43 },
+            VmInstruction::DerefStore {
+                reference: 3,
+                src: 4,
+            },
+            VmInstruction::DerefCopy {
+                dst: 5,
+                reference: 1,
+            },
+            VmInstruction::Return { value: 5 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(callee, callee_function), (entry, entry_function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"indirect-unique-reference-mutator-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
 fn verifier_rejects_copying_a_nominal_carrier_of_a_unique_reference() {
     let definition = DefKey(Digest::of_bytes(b"affine-nominal-copy"));
     let unique_i64 = VmType::Reference {

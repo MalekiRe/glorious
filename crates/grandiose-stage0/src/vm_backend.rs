@@ -1200,8 +1200,10 @@ pub enum VmArtifactError {
     InvalidLabelContract {
         message: &'static str,
     },
-    /// Stage 0 can rebase shared references into frame-independent callable
-    /// captures, but must not snapshot a unique reference and lose write-back.
+    /// A boundary that snapshots its payload (for example a callable capture
+    /// or retained continuation) cannot carry a unique reference without
+    /// losing write-back. Ordinary call/return boundaries use live caller
+    /// targets instead.
     UnsupportedEscapingUniqueReference,
     CallDepthLimit {
         limit: u32,
@@ -8316,6 +8318,11 @@ enum VmValue {
 #[derive(Clone, Debug)]
 enum ReferenceTarget {
     Register(u32),
+    /// A unique loan owned by an active caller frame. `caller_depth = 0`
+    /// denotes the direct caller; larger values walk further outward. Unlike
+    /// a captured snapshot, this target preserves write-back into the live
+    /// owning register while a callee holds a reborrow.
+    Caller { caller_depth: u32, register: u32 },
     Captured(Arc<VmValue>),
 }
 
@@ -8527,6 +8534,7 @@ fn store_reference(
 
 fn borrow_value(
     registers: &[Option<VmValue>],
+    callers: &[RuntimeProgramCaller],
     source: u32,
     value: &VmValue,
     fields: &[u32],
@@ -8551,7 +8559,7 @@ fn borrow_value(
         let referent = if fields.is_empty() {
             parent_referent.clone()
         } else {
-            project_reference(reference_target(registers, target)?, &path)?.ty()
+            project_reference(reference_target(registers, callers, target)?, &path)?.ty()
         };
         return Ok(VmValue::Reference {
             target: target.clone(),
@@ -8574,6 +8582,7 @@ fn borrow_value(
 
 fn reference_target<'a>(
     registers: &'a [Option<VmValue>],
+    callers: &'a [RuntimeProgramCaller],
     target: &'a ReferenceTarget,
 ) -> Result<&'a VmValue, VmArtifactError> {
     match target {
@@ -8581,12 +8590,61 @@ fn reference_target<'a>(
             .get(*target as usize)
             .and_then(Option::as_ref)
             .ok_or(VmArtifactError::InvalidRegister { register: *target }),
+        ReferenceTarget::Caller {
+            caller_depth,
+            register,
+        } => callers
+            .len()
+            .checked_sub(*caller_depth as usize + 1)
+            .and_then(|index| callers.get(index))
+            .and_then(|caller| caller.registers.get(*register as usize))
+            .and_then(Option::as_ref)
+            .ok_or(VmArtifactError::InvalidRegister {
+                register: *register,
+            }),
         ReferenceTarget::Captured(value) => Ok(value),
     }
 }
 
+fn store_reference_target(
+    registers: &mut [Option<VmValue>],
+    callers: &mut [RuntimeProgramCaller],
+    target: &ReferenceTarget,
+    fields: &[u32],
+    replacement: VmValue,
+    budget: &mut ExecutionBudget,
+) -> Result<(), VmArtifactError> {
+    let register = match target {
+        ReferenceTarget::Register(register) => registers
+            .get_mut(*register as usize)
+            .ok_or(VmArtifactError::InvalidRegister {
+                register: *register,
+            })?,
+        ReferenceTarget::Caller {
+            caller_depth,
+            register,
+        } => callers
+            .len()
+            .checked_sub(*caller_depth as usize + 1)
+            .and_then(|index| callers.get_mut(index))
+            .and_then(|caller| caller.registers.get_mut(*register as usize))
+            .ok_or(VmArtifactError::InvalidRegister {
+                register: *register,
+            })?,
+        ReferenceTarget::Captured(_) => {
+            return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
+        }
+    };
+    let value = register
+        .as_ref()
+        .ok_or(VmArtifactError::InvalidRegister { register: 0 })?;
+    *register = Some(store_reference(value, fields, replacement, budget)?);
+    Ok(())
+}
+
 fn referenced_array(
     registers: &[Option<VmValue>],
+    callers: &[RuntimeProgramCaller],
     reference: &VmValue,
 ) -> Result<Arc<[VmValue]>, VmArtifactError> {
     let VmValue::Reference {
@@ -8604,7 +8662,7 @@ fn referenced_array(
             found: referent.clone(),
         });
     }
-    match project_reference(reference_target(registers, target)?, fields)? {
+    match project_reference(reference_target(registers, callers, target)?, fields)? {
         VmValue::Array { values, .. } => Ok(values),
         found => Err(VmArtifactError::ResultType {
             expected: referent.clone(),
@@ -8615,31 +8673,33 @@ fn referenced_array(
 
 fn replace_referenced_array(
     registers: &mut [Option<VmValue>],
+    callers: &mut [RuntimeProgramCaller],
     reference: &VmValue,
     values: Vec<VmValue>,
     budget: &mut ExecutionBudget,
 ) -> Result<(), VmArtifactError> {
     let capacity = match reference {
         VmValue::Reference { target, fields, .. } => {
-            match project_reference(reference_target(registers, target)?, fields)? {
+            match project_reference(reference_target(registers, callers, target)?, fields)? {
                 VmValue::Array { capacity, .. } => capacity,
                 _ => values.len(),
             }
         }
         _ => values.len(),
     };
-    replace_referenced_array_with_capacity(registers, reference, values, capacity, budget)
+    replace_referenced_array_with_capacity(registers, callers, reference, values, capacity, budget)
 }
 
 fn replace_referenced_array_with_capacity(
     registers: &mut [Option<VmValue>],
+    callers: &mut [RuntimeProgramCaller],
     reference: &VmValue,
     values: Vec<VmValue>,
     capacity: usize,
     budget: &mut ExecutionBudget,
 ) -> Result<(), VmArtifactError> {
     let VmValue::Reference {
-        target: ReferenceTarget::Register(target),
+        target,
         fields,
         unique: true,
         ..
@@ -8648,19 +8708,17 @@ fn replace_referenced_array_with_capacity(
         return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
     };
     let capacity = capacity.max(values.len());
-    let updated = store_reference(
-        registers[*target as usize]
-            .as_ref()
-            .ok_or(VmArtifactError::InvalidRegister { register: *target })?,
+    store_reference_target(
+        registers,
+        callers,
+        target,
         fields,
         VmValue::Array {
             values: values.into(),
             capacity,
         },
         budget,
-    )?;
-    registers[*target as usize] = Some(updated);
-    Ok(())
+    )
 }
 
 fn array_element_borrow(
@@ -8693,6 +8751,7 @@ fn array_element_borrow(
 
 fn execute_array_primitive(
     registers: &mut [Option<VmValue>],
+    callers: &mut [RuntimeProgramCaller],
     instruction: &VmInstruction,
     budget: &mut ExecutionBudget,
 ) -> Result<(), VmArtifactError> {
@@ -8728,6 +8787,7 @@ fn execute_array_primitive(
             registers[*dst as usize] = Some(VmValue::Usize(
                 referenced_array(
                     registers,
+                    callers,
                     registers[*value as usize]
                         .as_ref()
                         .ok_or(VmArtifactError::InvalidRegister { register: *value })?,
@@ -8743,7 +8803,7 @@ fn execute_array_primitive(
                 return Err(VmArtifactError::InvalidRegister { register: *value });
             };
             let VmValue::Array { capacity, .. } =
-                project_reference(reference_target(registers, target)?, fields)?
+                project_reference(reference_target(registers, callers, target)?, fields)?
             else {
                 return Err(VmArtifactError::InvalidRegister { register: *value });
             };
@@ -8757,6 +8817,7 @@ fn execute_array_primitive(
         } => {
             let values = referenced_array(
                 registers,
+                callers,
                 registers[*value as usize]
                     .as_ref()
                     .ok_or(VmArtifactError::InvalidRegister { register: *value })?,
@@ -8780,7 +8841,7 @@ fn execute_array_primitive(
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?
                 .clone();
-            let mut values = referenced_array(registers, &reference)?.to_vec();
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
             let position = index(*position, registers)?;
             let moved = values
                 .get_mut(position)
@@ -8788,7 +8849,7 @@ fn execute_array_primitive(
                     register: position as u32,
                 })?;
             let moved = std::mem::replace(moved, VmValue::Unit);
-            replace_referenced_array(registers, &reference, values, budget)?;
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
             registers[*dst as usize] = Some(moved);
         }
         VmInstruction::ArrayGetBorrow {
@@ -8802,7 +8863,7 @@ fn execute_array_primitive(
             let reference = registers[*value as usize]
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?;
-            let values = referenced_array(registers, reference)?;
+            let values = referenced_array(registers, callers, reference)?;
             values
                 .get(position)
                 .ok_or(VmArtifactError::InvalidRegister {
@@ -8825,7 +8886,7 @@ fn execute_array_primitive(
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?
                 .clone();
-            let mut values = referenced_array(registers, &reference)?.to_vec();
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
             let position = index(*position, registers)?;
             *values
                 .get_mut(position)
@@ -8834,32 +8895,32 @@ fn execute_array_primitive(
                 })? = registers[*item as usize]
                 .take()
                 .ok_or(VmArtifactError::InvalidRegister { register: *item })?;
-            replace_referenced_array(registers, &reference, values, budget)?;
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
         }
         VmInstruction::ArrayPushMove { value, item, .. } => {
             let reference = registers[*value as usize]
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?
                 .clone();
-            let mut values = referenced_array(registers, &reference)?.to_vec();
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
             budget.reserve_value("array elements", values.len().saturating_add(1))?;
             values.push(
                 registers[*item as usize]
                     .take()
                     .ok_or(VmArtifactError::InvalidRegister { register: *item })?,
             );
-            replace_referenced_array(registers, &reference, values, budget)?;
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
         }
         VmInstruction::ArrayPopMove { dst, value, .. } => {
             let reference = registers[*value as usize]
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?
                 .clone();
-            let mut values = referenced_array(registers, &reference)?.to_vec();
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
             let moved = values
                 .pop()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?;
-            replace_referenced_array(registers, &reference, values, budget)?;
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
             registers[*dst as usize] = Some(moved);
         }
         VmInstruction::ArrayReserve {
@@ -8869,7 +8930,7 @@ fn execute_array_primitive(
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?
                 .clone();
-            let wanted = referenced_array(registers, &reference)?
+            let wanted = referenced_array(registers, callers, &reference)?
                 .len()
                 .saturating_add(index(*additional, registers)?);
             budget.reserve_value("array reserve", wanted)?;
@@ -8877,13 +8938,13 @@ fn execute_array_primitive(
                 return Err(VmArtifactError::InvalidRegister { register: *value });
             };
             let (values, capacity) =
-                match project_reference(reference_target(registers, target)?, fields)? {
+                match project_reference(reference_target(registers, callers, target)?, fields)? {
                     VmValue::Array { values, capacity } => (values.to_vec(), capacity),
                     _ => return Err(VmArtifactError::InvalidRegister { register: *value }),
                 };
             if wanted > capacity {
                 replace_referenced_array_with_capacity(
-                    registers, &reference, values, wanted, budget,
+                    registers, callers, &reference, values, wanted, budget,
                 )?;
             }
         }
@@ -8903,16 +8964,11 @@ fn execute_array_primitive(
     Ok(())
 }
 
-/// A callable runs in a fresh frame, so a shared reference captured from its
-/// creator must not retain a raw creator-register index. Rebase it to the
-/// immutable referent snapshot. Unique references are deliberately refused:
-/// snapshotting would silently lose their write-back alias.
-/// Rebase shared references at a VM frame boundary. Registers are frame-local,
-/// so a shared reference passed into a direct call (or returned from one) must
-/// not retain the producer frame's raw register index. Capturing its immutable
-/// referent preserves the source-level shared loan while making the runtime
-/// value independent of that dead frame. Unique references remain an explicit
-/// unsupported cross-frame boundary rather than silently losing write-back.
+/// Freeze a value for a boundary whose payload is retained independently of
+/// its current frame (callable captures and continuations). Shared references
+/// become immutable snapshots; unique references remain rejected because
+/// snapshotting would silently sever their write-back alias. Ordinary
+/// call/return boundaries use `transfer_call_frame_value` instead.
 fn freeze_frame_value(
     value: &VmValue,
     registers: &[Option<VmValue>],
@@ -8928,7 +8984,7 @@ fn freeze_frame_value(
             referent,
         } => Ok(VmValue::Reference {
             target: ReferenceTarget::Captured(Arc::new(project_reference(
-                reference_target(registers, target)?,
+                reference_target(registers, &[], target)?,
                 fields,
             )?)),
             fields: Arc::from([]),
@@ -8974,6 +9030,120 @@ fn freeze_frame_value(
             fields: fields
                 .iter()
                 .map(|value| freeze_frame_value(value, registers))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+            signature: signature.clone(),
+        }),
+        value => Ok(value.clone()),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum UniqueReferenceTransfer {
+    IntoCallee,
+    ToCaller,
+}
+
+/// Move a value across an ordinary call boundary. Shared references retain the
+/// existing immutable capture behavior; unique references instead retain a
+/// live caller-frame target so stores in either frame address the same owner.
+/// A unique reference into a callee-local register is not permitted to escape
+/// on return, preserving the source lifetime boundary.
+fn transfer_call_frame_value(
+    value: &VmValue,
+    registers: &[Option<VmValue>],
+    transfer: UniqueReferenceTransfer,
+) -> Result<VmValue, VmArtifactError> {
+    match value {
+        VmValue::Reference { unique: true, target, fields, referent } => {
+            let target = match (transfer, target) {
+                (UniqueReferenceTransfer::IntoCallee, ReferenceTarget::Register(register)) => {
+                    ReferenceTarget::Caller {
+                        caller_depth: 0,
+                        register: *register,
+                    }
+                }
+                (
+                    UniqueReferenceTransfer::IntoCallee,
+                    ReferenceTarget::Caller {
+                        caller_depth,
+                        register,
+                    },
+                ) => ReferenceTarget::Caller {
+                    caller_depth: caller_depth
+                        .checked_add(1)
+                        .ok_or(VmArtifactError::UnsupportedEscapingUniqueReference)?,
+                    register: *register,
+                },
+                (
+                    UniqueReferenceTransfer::ToCaller,
+                    ReferenceTarget::Caller {
+                        caller_depth: 0,
+                        register,
+                    },
+                ) => ReferenceTarget::Register(*register),
+                (
+                    UniqueReferenceTransfer::ToCaller,
+                    ReferenceTarget::Caller {
+                        caller_depth,
+                        register,
+                    },
+                ) => ReferenceTarget::Caller {
+                    caller_depth: caller_depth - 1,
+                    register: *register,
+                },
+                (_, ReferenceTarget::Captured(_))
+                | (UniqueReferenceTransfer::ToCaller, ReferenceTarget::Register(_)) => {
+                    return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
+                }
+            };
+            Ok(VmValue::Reference {
+                target,
+                fields: fields.clone(),
+                unique: true,
+                referent: referent.clone(),
+            })
+        }
+        VmValue::Reference { .. } => freeze_frame_value(value, registers),
+        VmValue::Tuple(values) => Ok(VmValue::Tuple(
+            values
+                .iter()
+                .map(|value| transfer_call_frame_value(value, registers, transfer))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+        )),
+        VmValue::Array { values, capacity } => Ok(VmValue::Array {
+            values: values
+                .iter()
+                .map(|value| transfer_call_frame_value(value, registers, transfer))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+            capacity: *capacity,
+        }),
+        VmValue::Record {
+            definition,
+            fields,
+            signature,
+        } => Ok(VmValue::Record {
+            definition: *definition,
+            fields: fields
+                .iter()
+                .map(|value| transfer_call_frame_value(value, registers, transfer))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+            signature: signature.clone(),
+        }),
+        VmValue::Enum {
+            definition,
+            variant,
+            fields,
+            signature,
+        } => Ok(VmValue::Enum {
+            definition: *definition,
+            variant: *variant,
+            fields: fields
+                .iter()
+                .map(|value| transfer_call_frame_value(value, registers, transfer))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
             signature: signature.clone(),
@@ -9049,6 +9219,10 @@ fn format_vm_value(value: &VmValue) -> String {
         VmValue::Reference { target, fields, .. } => {
             let target = match target {
                 ReferenceTarget::Register(target) => format!("register@{target}"),
+                ReferenceTarget::Caller {
+                    caller_depth,
+                    register,
+                } => format!("caller-{caller_depth}@{register}"),
                 ReferenceTarget::Captured(_) => "captured".into(),
             };
             format!("reference@{target}[fields={}]", fields.len())
@@ -10146,7 +10320,7 @@ fn execute(
             | VmInstruction::ArrayCapacity { .. }
             | VmInstruction::ArrayReserve { .. }
             | VmInstruction::ArrayFinishDrained { .. }) => {
-                execute_array_primitive(&mut registers, &instruction, budget)?
+                execute_array_primitive(&mut registers, &mut [], &instruction, budget)?
             }
             VmInstruction::U32CheckedAdd { dst, left, right } => {
                 u32_checked_binary(&mut registers, dst, left, right, u32::checked_add)?
@@ -10964,6 +11138,7 @@ fn execute(
             } => {
                 registers[dst as usize] = Some(borrow_value(
                     &registers,
+                    &[],
                     src,
                     registers[src as usize].as_ref().expect("verified register"),
                     &fields,
@@ -10981,7 +11156,7 @@ fn execute(
                     });
                 };
                 registers[dst as usize] = Some(project_reference(
-                    reference_target(&registers, target)?,
+                    reference_target(&registers, &[], target)?,
                     fields,
                 )?);
             }
@@ -12926,7 +13101,7 @@ fn execute_with_arguments(
             | VmInstruction::ArrayCapacity { .. }
             | VmInstruction::ArrayReserve { .. }
             | VmInstruction::ArrayFinishDrained { .. }) => {
-                execute_array_primitive(&mut registers, instruction, budget)?
+                execute_array_primitive(&mut registers, &mut callers, instruction, budget)?
             }
             VmInstruction::U32CheckedAdd { dst, left, right } => {
                 u32_checked_binary(&mut registers, *dst, *left, *right, u32::checked_add)?
@@ -13797,6 +13972,7 @@ fn execute_with_arguments(
             } => {
                 registers[*dst as usize] = Some(borrow_value(
                     &registers,
+                    &callers,
                     *src,
                     registers[*src as usize]
                         .as_ref()
@@ -13816,7 +13992,7 @@ fn execute_with_arguments(
                     });
                 };
                 registers[*dst as usize] = Some(project_reference(
-                    reference_target(&registers, target)?,
+                    reference_target(&registers, &callers, target)?,
                     fields,
                 )?);
             }
@@ -13834,23 +14010,19 @@ fn execute_with_arguments(
                         register: *reference,
                     });
                 };
-                let ReferenceTarget::Register(target) = target else {
-                    return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
-                };
-                let (target, fields) = (*target, fields.clone());
+                let (target, fields) = (target.clone(), fields.clone());
                 let replacement = registers[*src as usize]
                     .as_ref()
                     .expect("verified register")
                     .clone();
-                let updated = store_reference(
-                    registers[target as usize]
-                        .as_ref()
-                        .expect("live reference target"),
+                store_reference_target(
+                    &mut registers,
+                    &mut callers,
+                    &target,
                     &fields,
                     replacement,
                     budget,
                 )?;
-                registers[target as usize] = Some(updated);
             }
             VmInstruction::NotBool { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::Bool(!expect_bool(
@@ -14375,7 +14547,13 @@ fn execute_with_arguments(
                             .ok_or(VmArtifactError::ReadBeforeWrite {
                                 register: *argument,
                             })
-                            .and_then(|value| freeze_frame_value(&value, &registers))
+                            .and_then(|value| {
+                                transfer_call_frame_value(
+                                    &value,
+                                    &registers,
+                                    UniqueReferenceTransfer::IntoCallee,
+                                )
+                            })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 if depth.saturating_add(callers.len() as u32).saturating_add(1)
@@ -14459,7 +14637,13 @@ fn execute_with_arguments(
                                 .as_ref()
                                 .expect("verified register")
                         })
-                        .map(|value| freeze_frame_value(value, &registers))
+                        .map(|value| {
+                            transfer_call_frame_value(
+                                value,
+                                &registers,
+                                UniqueReferenceTransfer::IntoCallee,
+                            )
+                        })
                         .collect::<Result<Vec<_>, _>>()?,
                 );
                 if depth.saturating_add(callers.len() as u32).saturating_add(1)
@@ -14545,7 +14729,11 @@ fn execute_with_arguments(
                     {
                         return Err(VmArtifactError::HandlerStillActive);
                     }
-                    let value = freeze_frame_value(&value, &registers)?;
+                    let value = transfer_call_frame_value(
+                        &value,
+                        &registers,
+                        UniqueReferenceTransfer::ToCaller,
+                    )?;
                     let caller = callers.pop().expect("checked nonempty call stack");
                     definition = caller.definition;
                     registers = caller.registers;
