@@ -185,6 +185,48 @@ fn bytes_runtime_manifest() -> RuntimeManifestInput {
     }
 }
 
+fn text_bytes_runtime_manifest() -> RuntimeManifestInput {
+    RuntimeManifestInput {
+        standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
+        selectors: [
+            (PrimitiveRole::TextByteLen, "__g1_text_byte_len"),
+            (PrimitiveRole::TextConcat, "__g1_text_concat"),
+            (PrimitiveRole::TextEq, "__g1_text_eq"),
+            (
+                PrimitiveRole::TextFromUtf8Checked,
+                "__g1_text_from_utf8_checked",
+            ),
+            (PrimitiveRole::TextAsBytes, "__g1_text_as_bytes"),
+            (
+                PrimitiveRole::CharFromU32Checked,
+                "__g1_char_from_u32_checked",
+            ),
+            (PrimitiveRole::CharToU32, "__g1_char_to_u32"),
+            (PrimitiveRole::BytesLen, "__g1_bytes_len"),
+            (PrimitiveRole::BytesConcat, "__g1_bytes_concat"),
+            (PrimitiveRole::BytesGet, "__g1_bytes_get"),
+            (PrimitiveRole::BytesSlice, "__g1_bytes_slice"),
+            (
+                PrimitiveRole::BytesFromArrayMove,
+                "__g1_bytes_from_array_move",
+            ),
+            (PrimitiveRole::BytesToArray, "__g1_bytes_to_array"),
+            (
+                PrimitiveRole::BytesUtf8ValidUpTo,
+                "__g1_bytes_utf8_valid_up_to",
+            ),
+        ]
+        .into_iter()
+        .map(|(role, name)| PrimitiveSelector {
+            role,
+            module_path: "crate".into(),
+            name: name.into(),
+        })
+        .collect(),
+    }
+}
+
 fn u32_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
@@ -1132,6 +1174,8 @@ const PRIVATE_TEXT_RUNTIME_LEAVES: &str = "fn branch_bool<T>(condition: Bool, on
 
 const BYTES_RUNTIME_LEAVES: &str = "pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_bytes_len(value: Bytes) -> usize { () } pub fn __g1_bytes_concat(left: Bytes, right: Bytes) -> Bytes { () } pub fn __g1_bytes_get(bytes: Bytes, index: usize) -> u8 { () } pub fn __g1_bytes_slice(bytes: Bytes, start: usize, end: usize) -> Bytes { () } pub fn __g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () } pub fn __g1_bytes_to_array(value: Bytes) -> Array<u8> { () } pub fn __g1_bytes_utf8_valid_up_to(value: Bytes) -> usize { () } ";
 
+const TEXT_BYTES_RUNTIME_LEAVES: &str = "pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () } pub fn __g1_bytes_len(value: Bytes) -> usize { () } pub fn __g1_bytes_concat(left: Bytes, right: Bytes) -> Bytes { () } pub fn __g1_bytes_get(bytes: Bytes, index: usize) -> u8 { () } pub fn __g1_bytes_slice(bytes: Bytes, start: usize, end: usize) -> Bytes { () } pub fn __g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () } pub fn __g1_bytes_to_array(value: Bytes) -> Array<u8> { () } pub fn __g1_bytes_utf8_valid_up_to(value: Bytes) -> usize { () } ";
+
 const ARRAY_RUNTIME_LEAVES: &str = "pub fn __g1_array_new<T>(length: usize, fill: T) -> Array<T> where T: Use<[0, *]> { () } pub fn __g1_array_len<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_get_copy<T>(value: &Array<T>, index: usize) -> T where T: Use<[0, *]> { () } pub fn __g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T { () } pub fn __g1_array_get_borrow_shared<T>(value: &Array<T>, index: usize) -> &T { () } pub fn __g1_array_get_borrow_unique<T>(value: &mut Array<T>, index: usize) -> &mut T { () } pub fn __g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) { () } pub fn __g1_array_empty<T>() -> Array<T> { () } pub fn __g1_array_push_move<T>(value: &mut Array<T>, item: T) { () } pub fn __g1_array_pop_move<T>(value: &mut Array<T>) -> T { () } pub fn __g1_array_capacity<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_reserve<T>(value: &mut Array<T>, additional: usize) { () } pub fn __g1_array_finish_drained<T>(value: Array<T>) { () } ";
 
 fn array_runtime_manifest() -> RuntimeManifestInput {
@@ -1413,6 +1457,114 @@ fn manifest_bound_bytes_family_round_trips_and_executes_checked_operations() {
             .unwrap(),
         b'h'
     );
+}
+
+#[test]
+fn public_text_bytes_helpers_preserve_utf8_and_array_ownership_across_calls() {
+    let source = format!(
+        "{TEXT_BYTES_RUNTIME_LEAVES} \
+         pub fn text_concat(left: Text, right: Text) -> Text {{ __g1_text_concat(move left, move right) }} \
+         pub fn text_bytes(value: Text) -> Bytes {{ __g1_text_as_bytes(move value) }} \
+         pub fn text_from_bytes(value: Bytes) -> Text {{ __g1_text_from_utf8_checked(move value) }} \
+         pub fn bytes_to_array(value: Bytes) -> Array<u8> {{ __g1_bytes_to_array(move value) }} \
+         pub fn bytes_from_array(value: Array<u8>) -> Bytes {{ __g1_bytes_from_array_move(move value) }} \
+         pub fn bytes_slice(value: Bytes, start: usize, end: usize) -> Bytes {{ __g1_bytes_slice(move value, start, end) }} \
+         pub fn normalize(value: Text) -> Text {{ let bytes = text_bytes(value); let copied = bytes_to_array(bytes); text_from_bytes(bytes_from_array(move copied)) }} \
+         pub fn main() -> Text {{ let joined = text_concat(\"a\", \"🦀\"); let bytes = text_bytes(joined); let slice = bytes_slice(bytes, __g1_text_byte_len(\"\"), __g1_text_byte_len(\"a🦀\")); normalize(text_from_bytes(slice)) }}"
+    );
+    let mut input = request(&source);
+    input.runtime_manifest = Some(text_bytes_runtime_manifest());
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("public Text/Bytes wrappers must cross ordinary VM calls")
+        .artifact
+        .expect("build must publish a VM artifact");
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                VmInstruction::TextAsBytes { .. }
+                    | VmInstruction::TextFromUtf8Checked { .. }
+                    | VmInstruction::BytesToArray { .. }
+                    | VmInstruction::BytesFromArrayMove { .. }
+            )
+        })
+    }));
+    assert_eq!(artifact.run_text().unwrap(), "a🦀");
+}
+
+#[test]
+fn public_text_bytes_helpers_trap_on_invalid_utf8_and_byte_bounds() {
+    // Both failures are dynamic: typed wrappers may publish their artifact,
+    // but the sealed VM leaves reject malformed bytes and indexes at execution.
+    let invalid_utf8 = format!(
+        "{TEXT_BYTES_RUNTIME_LEAVES} \
+         pub fn text_from_bytes(value: Bytes) -> Text {{ __g1_text_from_utf8_checked(move value) }} \
+         pub fn bytes_from_array(value: Array<u8>) -> Bytes {{ __g1_bytes_from_array_move(move value) }} \
+         pub fn invalid_array() -> Array<u8> {{ [255] }} \
+         pub fn main() -> Text {{ text_from_bytes(bytes_from_array(invalid_array())) }}"
+    );
+    let mut input = request(&invalid_utf8);
+    input.runtime_manifest = Some(text_bytes_runtime_manifest());
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("invalid UTF-8 is a checked runtime failure")
+        .artifact
+        .expect("build must publish a VM artifact");
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::ConstU8 { value: 255, .. }))
+    }));
+    let mut forged = program;
+    let (function_key, constant) = forged
+        .functions
+        .iter()
+        .find_map(|(key, function)| {
+            function
+                .instructions
+                .iter()
+                .find_map(|instruction| match instruction {
+                    VmInstruction::ConstU8 { dst, .. } => Some((key.clone(), *dst)),
+                    _ => None,
+                })
+        })
+        .expect("the invalid UTF-8 array contains a typed byte literal");
+    forged
+        .functions
+        .get_mut(&function_key)
+        .expect("selected function belongs to decoded program")
+        .registers[constant as usize] = VmType::I64;
+    forged.fingerprint = forged.computed_fingerprint();
+    assert!(
+        decode_and_verify_program(&encode_program(&forged)).is_err(),
+        "a ConstU8 destination must retain its byte register type"
+    );
+    assert!(matches!(
+        artifact.run_text(),
+        Err(VmArtifactError::InvalidUtf8)
+    ));
+
+    let out_of_bounds = format!(
+        "{TEXT_BYTES_RUNTIME_LEAVES} \
+         pub fn text_bytes(value: Text) -> Bytes {{ __g1_text_as_bytes(move value) }} \
+         pub fn byte_at(value: Bytes, index: usize) -> u8 {{ __g1_bytes_get(move value, index) }} \
+         pub fn main() -> u8 {{ byte_at(text_bytes(\"hi\"), __g1_text_byte_len(\"hi\")) }}"
+    );
+    let mut input = request(&out_of_bounds);
+    input.runtime_manifest = Some(text_bytes_runtime_manifest());
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("out-of-bounds byte access is a runtime failure")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert!(matches!(
+        artifact.run_u8(),
+        Err(VmArtifactError::InvalidRegister { .. })
+    ));
 }
 
 #[test]

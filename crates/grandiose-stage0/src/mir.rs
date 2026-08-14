@@ -98,6 +98,10 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: i64,
     },
+    ConstU8 {
+        dst: MirLocal,
+        value: u8,
+    },
     ConstU32 {
         dst: MirLocal,
         value: u32,
@@ -1566,6 +1570,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
     match instruction {
         MirInstruction::ConstUnit { dst }
         | MirInstruction::ConstI64 { dst, .. }
+        | MirInstruction::ConstU8 { dst, .. }
         | MirInstruction::ConstU32 { dst, .. }
         | MirInstruction::ConstU64 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
@@ -3685,6 +3690,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::I64ToI128Wrapping { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
+        | MirInstruction::ConstU8 { .. }
         | MirInstruction::ConstU32 { .. }
         | MirInstruction::ConstU64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -4379,6 +4385,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
     match value {
         MirInstruction::ConstUnit { dst }
         | MirInstruction::ConstI64 { dst, .. }
+        | MirInstruction::ConstU8 { dst, .. }
         | MirInstruction::ConstU32 { dst, .. }
         | MirInstruction::ConstU64 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
@@ -13490,6 +13497,15 @@ impl Lowerer<'_> {
                         return None;
                     }
                 },
+                Type::Scalar(crate::types::ScalarType::U8) => match parse_u8_literal(&text) {
+                    Ok(value) => self
+                        .instructions
+                        .push(MirInstruction::ConstU8 { dst, value }),
+                    Err(_) => {
+                        self.error("G6003", "invalid u8 literal at MIR lowering");
+                        return None;
+                    }
+                },
                 Type::Scalar(crate::types::ScalarType::U32) => match parse_u32_literal(&text) {
                     Ok(value) => self
                         .instructions
@@ -13549,10 +13565,9 @@ impl Lowerer<'_> {
                     }
                 },
                 _ => {
-                    self.error(
-                        "G6003",
-                        "literal type has no runtime representation in this MIR",
-                    );
+                    let message =
+                        format!("literal type has no runtime representation in this MIR: {ty:?}");
+                    self.error("G6003", &message);
                     return None;
                 }
             },
@@ -17122,6 +17137,11 @@ fn parse_i64_literal(text: &str) -> Result<i64, ()> {
 fn parse_u32_literal(text: &str) -> Result<u32, ()> {
     let (radix, digits) = normalized_integer_literal(text);
     u32::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn parse_u8_literal(text: &str) -> Result<u8, ()> {
+    let (radix, digits) = normalized_integer_literal(text);
+    u8::from_str_radix(&digits, radix).map_err(|_| ())
 }
 
 fn parse_u64_literal(text: &str) -> Result<u64, ()> {

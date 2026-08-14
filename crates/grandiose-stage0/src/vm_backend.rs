@@ -255,6 +255,10 @@ pub enum VmInstruction {
         dst: u32,
         value: i64,
     },
+    ConstU8 {
+        dst: u32,
+        value: u8,
+    },
     ConstU32 {
         dst: u32,
         value: u32,
@@ -3408,6 +3412,10 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.i64()?,
             }),
+            157 => Ok(VmInstruction::ConstU8 {
+                dst: self.u32()?,
+                value: self.byte()?,
+            }),
             151 => Ok(VmInstruction::ConstU32 {
                 dst: self.u32()?,
                 value: self.u32()?,
@@ -4819,6 +4827,10 @@ fn lower_instruction(
             dst: dst.0,
             value: *value,
         },
+        MirInstruction::ConstU8 { dst, value } => VmInstruction::ConstU8 {
+            dst: dst.0,
+            value: *value,
+        },
         MirInstruction::ConstU32 { dst, value } => VmInstruction::ConstU32 {
             dst: dst.0,
             value: *value,
@@ -6116,6 +6128,10 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::ConstI64 { dst, .. } => {
                 expect_type(function, *dst, VmType::I64)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::ConstU8 { dst, .. } => {
+                expect_type(function, *dst, VmType::U8)?;
                 write(&mut states, *dst)?
             }
             VmInstruction::ConstU32 { dst, .. } => {
@@ -10127,6 +10143,9 @@ fn execute(
             VmInstruction::ConstI64 { dst, value } => {
                 registers[dst as usize] = Some(VmValue::I64(value))
             }
+            VmInstruction::ConstU8 { dst, value } => {
+                registers[dst as usize] = Some(VmValue::U8(value))
+            }
             VmInstruction::ConstU32 { dst, value } => {
                 registers[dst as usize] = Some(VmValue::U32(value))
             }
@@ -11851,6 +11870,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes())
         }
+        VmInstruction::ConstU8 { dst, value } => {
+            output.push(157);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.push(*value)
+        }
         VmInstruction::ConstU32 { dst, value } => {
             output.push(151);
             output.extend_from_slice(&dst.to_le_bytes());
@@ -12903,6 +12927,9 @@ fn execute_with_arguments(
             VmInstruction::ConstUnit { dst } => registers[*dst as usize] = Some(VmValue::Unit),
             VmInstruction::ConstI64 { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::I64(*value))
+            }
+            VmInstruction::ConstU8 { dst, value } => {
+                registers[*dst as usize] = Some(VmValue::U8(*value))
             }
             VmInstruction::ConstU32 { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::U32(*value))
