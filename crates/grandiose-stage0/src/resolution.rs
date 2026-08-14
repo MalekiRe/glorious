@@ -69,6 +69,7 @@ pub struct DefinitionIndex {
     /// fully-qualified path.
     module_visibility: BTreeMap<ModuleKey, bool>,
     imports: BTreeMap<ModuleKey, Vec<ImportBinding>>,
+    owners: BTreeMap<DefKey, ModuleKey>,
     type_generic_arities: BTreeMap<DefKey, u32>,
     type_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
     trait_generic_arities: BTreeMap<DefKey, u32>,
@@ -117,6 +118,9 @@ impl DefinitionIndex {
     fn extend(&mut self, interface: &PackageInterface) {
         self.modules.insert(interface.module.clone(), ());
         for definition in &interface.definitions {
+            self.owners
+                .entry(definition.key)
+                .or_insert_with(|| definition.module.clone());
             if definition.namespace == Some(DefinitionNamespace::Module)
                 && let Some(name) = &definition.name
             {
@@ -197,6 +201,12 @@ impl DefinitionIndex {
                     .push(entry);
             }
         }
+    }
+
+    /// Immutable declaration ownership used by coherence and package-boundary
+    /// checks. Duplicate keys retain their first canonical owner.
+    pub fn owner(&self, key: DefKey) -> Option<&ModuleKey> {
+        self.owners.get(&key)
     }
 
     fn canonicalize(&mut self) {
