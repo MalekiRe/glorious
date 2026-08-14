@@ -38,6 +38,87 @@ fn unification_is_occurs_checked_and_zonks_body_local_uncertainty() {
 }
 
 #[test]
+fn occurs_checks_cover_callable_effect_and_nominal_generic_edges() {
+    let effect = DefKey(Digest::of_bytes(b"recursive-inference-effect"));
+    let nominal = DefKey(Digest::of_bytes(b"recursive-inference-nominal"));
+
+    let mut inference = InferContext::default();
+    let recursive_callable = inference.fresh();
+    let Type::Infer(callable_variable) = recursive_callable.clone() else {
+        unreachable!()
+    };
+    let callable = Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects: EffectRow::closed_instances([EffectInstance {
+            definition: effect,
+            arguments: vec![GenericArgument::Type(Type::Infer(callable_variable))],
+        }]),
+        invocation: Quantity::ONCE,
+    };
+    assert!(matches!(
+        inference.unify(recursive_callable.clone(), callable),
+        Err(TypeError::Occurs(_, _))
+    ));
+    assert!(matches!(
+        inference.zonk(recursive_callable),
+        Err(TypeError::Unresolved(_))
+    ));
+
+    let recursive_nominal = inference.fresh();
+    let Type::Infer(nominal_variable) = recursive_nominal.clone() else {
+        unreachable!()
+    };
+    let nominal_with_open_effect_argument = Type::Nominal {
+        definition: nominal,
+        arguments: vec![GenericArgument::EffectRow(EffectRow::closed_instances([
+            EffectInstance {
+                definition: effect,
+                arguments: vec![GenericArgument::Type(Type::Infer(nominal_variable))],
+            },
+        ]))],
+    };
+    assert!(matches!(
+        inference.unify(recursive_nominal.clone(), nominal_with_open_effect_argument),
+        Err(TypeError::Occurs(_, _))
+    ));
+    assert!(matches!(
+        inference.zonk(recursive_nominal),
+        Err(TypeError::Unresolved(_))
+    ));
+}
+
+#[test]
+fn effect_occurs_checks_follow_nested_callable_effect_rows() {
+    let effect = DefKey(Digest::of_bytes(b"recursive-effect-row"));
+    let mut inference = InferContext::default();
+    let open_effects = inference.fresh_effects();
+    let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects,
+        invocation: Quantity::ONCE,
+    };
+    let row_that_carries_its_own_open_tail = EffectRow::closed_instances([EffectInstance {
+        definition: effect,
+        arguments: vec![GenericArgument::Type(callable(open_effects.clone()))],
+    }]);
+    assert!(matches!(
+        inference.unify(
+            callable(open_effects.clone()),
+            callable(row_that_carries_its_own_open_tail)
+        ),
+        Err(TypeError::EffectOccurs(_, _))
+    ));
+    assert!(matches!(
+        inference.zonk_effects(open_effects),
+        Err(TypeError::UnresolvedEffect(_))
+    ));
+}
+
+#[test]
 fn callable_unification_requires_effect_and_invocation_agreement() {
     let callable = Type::Callable {
         lifetime_binders: 0,

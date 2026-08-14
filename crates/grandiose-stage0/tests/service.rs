@@ -2431,6 +2431,22 @@ fn service_rejects_wrong_generic_effect_operation_arity() {
 }
 
 #[test]
+fn service_rejects_source_self_application_without_recursive_inference() {
+    let source = "pub fn main() -> i64 { let self_apply = { value => value(value) }; 0 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("self application unexpectedly formed an executable recursive callable type")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4105"),
+        "self application must fail structurally before any recursive inference can escape: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_a_direct_one_resume_lowering_for_an_exact_two_shot_contract() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => k(42) } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

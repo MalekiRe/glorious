@@ -1202,8 +1202,99 @@ impl InferContext {
     }
 
     fn effect_occurs(&mut self, variable: EffectVar, effects: &EffectRow) -> bool {
+        self.effect_occurs_in_row(variable, effects)
+    }
+
+    /// Effect variables do not live only in a row tail: an effect row can be
+    /// carried as a generic argument, and a type argument can itself be a
+    /// callable with an open effect row.  Follow every mixed-kind edge before
+    /// binding the variable, otherwise later zonking can recurse forever.
+    fn effect_occurs_in_row(&mut self, variable: EffectVar, effects: &EffectRow) -> bool {
         let effects = self.resolve_effects(effects.clone());
         effects.tail == Some(EffectTail::Infer(variable))
+            || effects.effects.iter().any(|effect| {
+                effect
+                    .arguments
+                    .iter()
+                    .any(|argument| self.effect_occurs_in_generic_argument(variable, argument))
+            })
+            || effects.projections.iter().any(|projection| {
+                self.effect_occurs_in_type(variable, &projection.subject)
+                    || projection
+                        .trait_arguments
+                        .iter()
+                        .any(|argument| self.effect_occurs_in_type(variable, argument))
+                    || projection
+                        .item_arguments
+                        .iter()
+                        .any(|argument| self.effect_occurs_in_type(variable, argument))
+            })
+    }
+
+    fn effect_occurs_in_generic_argument(
+        &mut self,
+        variable: EffectVar,
+        argument: &GenericArgument,
+    ) -> bool {
+        match argument {
+            GenericArgument::Type(value) => self.effect_occurs_in_type(variable, value),
+            GenericArgument::EffectRow(value) => self.effect_occurs_in_row(variable, value),
+            GenericArgument::Lifetime(_)
+            | GenericArgument::ConstU32(_)
+            | GenericArgument::ConstU32Expr(_)
+            | GenericArgument::ConstQuantity(_)
+            | GenericArgument::ConstGeneric { .. } => false,
+        }
+    }
+
+    fn effect_occurs_in_type(&mut self, variable: EffectVar, value: &Type) -> bool {
+        match self.resolve(value.clone()) {
+            Type::Nominal { arguments, .. } => arguments
+                .iter()
+                .any(|argument| self.effect_occurs_in_generic_argument(variable, argument)),
+            Type::Tuple(elements) => elements
+                .iter()
+                .any(|element| self.effect_occurs_in_type(variable, element)),
+            Type::Projection {
+                subject,
+                trait_arguments,
+                item_arguments,
+                ..
+            } => {
+                self.effect_occurs_in_type(variable, &subject)
+                    || trait_arguments
+                        .iter()
+                        .any(|argument| self.effect_occurs_in_type(variable, argument))
+                    || item_arguments
+                        .iter()
+                        .any(|argument| self.effect_occurs_in_type(variable, argument))
+            }
+            Type::Array(element)
+            | Type::Reference {
+                referent: element, ..
+            } => self.effect_occurs_in_type(variable, &element),
+            Type::Callable {
+                parameters,
+                result,
+                effects,
+                ..
+            } => {
+                parameters
+                    .iter()
+                    .any(|parameter| self.effect_occurs_in_type(variable, parameter))
+                    || self.effect_occurs_in_type(variable, &result)
+                    || self.effect_occurs_in_row(variable, &effects)
+            }
+            Type::Unit
+            | Type::Never
+            | Type::Scalar(_)
+            | Type::ConstU32(_)
+            | Type::ConstQuantity(_)
+            | Type::ConstGeneric { .. }
+            | Type::Generic(_)
+            | Type::Infer(_)
+            | Type::Error => false,
+        }
     }
 
     fn occurs(&mut self, variable: InferVar, value: &Type) -> bool {
@@ -1234,12 +1325,16 @@ impl InferContext {
                 referent: element, ..
             } => self.occurs(variable, &element),
             Type::Callable {
-                parameters, result, ..
+                parameters,
+                result,
+                effects,
+                ..
             } => {
                 parameters
                     .iter()
                     .any(|parameter| self.occurs(variable, parameter))
                     || self.occurs(variable, &result)
+                    || self.effect_row_type_occurs(variable, &effects)
             }
             _ => false,
         }
@@ -1274,30 +1369,36 @@ impl InferContext {
     fn generic_argument_occurs(&mut self, variable: InferVar, argument: &GenericArgument) -> bool {
         match argument {
             GenericArgument::Type(value) => self.occurs(variable, value),
-            GenericArgument::EffectRow(value) => {
-                value.effects.iter().any(|effect| {
-                    effect
-                        .arguments
-                        .iter()
-                        .any(|argument| self.generic_argument_occurs(variable, argument))
-                }) || value.projections.iter().any(|projection| {
-                    self.occurs(variable, &projection.subject)
-                        || projection
-                            .trait_arguments
-                            .iter()
-                            .any(|argument| self.occurs(variable, argument))
-                        || projection
-                            .item_arguments
-                            .iter()
-                            .any(|argument| self.occurs(variable, argument))
-                })
-            }
+            GenericArgument::EffectRow(value) => self.effect_row_type_occurs(variable, value),
             GenericArgument::Lifetime(_)
             | GenericArgument::ConstU32(_)
             | GenericArgument::ConstU32Expr(_)
             | GenericArgument::ConstQuantity(_)
             | GenericArgument::ConstGeneric { .. } => false,
         }
+    }
+
+    /// A type inference variable can be nested in an effect row through an
+    /// effect instance, associated-row projection, or a callable carried by
+    /// either.  Keep this traversal beside the ordinary occurs check so none
+    /// of the mixed-kind generic slots becomes an unchecked back edge.
+    fn effect_row_type_occurs(&mut self, variable: InferVar, effects: &EffectRow) -> bool {
+        effects.effects.iter().any(|effect| {
+            effect
+                .arguments
+                .iter()
+                .any(|argument| self.generic_argument_occurs(variable, argument))
+        }) || effects.projections.iter().any(|projection| {
+            self.occurs(variable, &projection.subject)
+                || projection
+                    .trait_arguments
+                    .iter()
+                    .any(|argument| self.occurs(variable, argument))
+                || projection
+                    .item_arguments
+                    .iter()
+                    .any(|argument| self.occurs(variable, argument))
+        })
     }
 }
 

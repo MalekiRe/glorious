@@ -1,10 +1,10 @@
 use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
     ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, CorePlace, DeclarationScan,
-    DefKey, DefinitionIndex, Digest, EffectRow, ElaboratedInterface, EnvironmentBrand, EscapeFlow,
-    FileKey, FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime,
-    LogicalPath, MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity,
-    ScalarType, Span, Type, TypedBody, implementation_method_key,
+    DefKey, DefinitionIndex, Digest, EffectInstance, EffectRow, ElaboratedInterface,
+    EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind, GenericArgument, InferVar, InterfaceSet,
+    LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering, MirPattern, PackageKey,
+    PlaceFlow, Quantity, ScalarType, Span, Type, TypedBody, implementation_method_key,
 };
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
@@ -400,6 +400,42 @@ fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4181"),
         "inference hidden in Core metadata must not reach lowering"
+    );
+}
+
+#[test]
+fn typed_core_validation_rejects_inference_in_callable_effect_arguments() {
+    let package = PackageKey("core-callable-effect-inference@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let body = TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Literal("0".into()),
+            ty: Type::Callable {
+                lifetime_binders: 0,
+                parameters: vec![],
+                result: Box::new(Type::Unit),
+                effects: EffectRow::closed_instances([EffectInstance {
+                    definition: DefKey(Digest::of_bytes(b"hidden-inference-effect")),
+                    arguments: vec![GenericArgument::Type(Type::Infer(InferVar(17)))],
+                }]),
+                invocation: Quantity::ONCE,
+            },
+            span,
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4181"),
+        "callable effect arguments must not conceal body-local inference"
     );
 }
 

@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use grandiose_stage0::{
-    CoreId, DefKey, Digest, GenericArgument, InferVar, Lifetime, MirBlock, MirBlockId, MirEditor,
-    MirFunction, MirInstruction, MirLocal, MirLocalDecl, MirPattern, MirProgram, MirTerminator,
-    ScalarType, Type, optimize_mir,
+    CoreId, DefKey, Digest, EffectInstance, EffectRow, GenericArgument, InferVar, Lifetime,
+    MirBlock, MirBlockId, MirEditor, MirFunction, MirInstruction, MirLocal, MirLocalDecl,
+    MirPattern, MirProgram, MirTerminator, Quantity, ScalarType, Type, optimize_mir,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -112,6 +112,27 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
             .validate()
             .is_err_and(|error| error.contains("unresolved inference")),
         "nested generic call metadata must not bypass MIR program validation"
+    );
+}
+
+#[test]
+fn mir_validation_rejects_inference_nested_in_callable_effect_arguments() {
+    let mut function = graph();
+    function.locals.push(local(Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects: EffectRow::closed_instances([EffectInstance {
+            definition: DefKey(Digest::of_bytes(b"mir-hidden-inference-effect")),
+            arguments: vec![GenericArgument::Type(Type::Infer(InferVar(23)))],
+        }]),
+        invocation: Quantity::ONCE,
+    }));
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("unresolved inference")),
+        "MIR must reject inference hidden inside callable effect metadata"
     );
 }
 
