@@ -75,3 +75,42 @@ fn coherence_counts_lifetime_binders_used_by_negative_impl_heads() {
         "{unconstrained:#?}"
     );
 }
+
+#[test]
+fn coherence_uses_solver_satisfiability_for_where_bound_overlap() {
+    let disjoint = collect(
+        "trait Left {} trait Right {} trait Render {} impl Left for i64 {} impl Right for Text {} impl<T> Render for T where T: Left {} impl<T> Render for T where T: Right {}",
+    );
+    assert!(
+        disjoint
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G3404"),
+        "disjoint bound domains must not overlap: {disjoint:#?}"
+    );
+
+    let overlapping = collect(
+        "trait Left {} trait Right {} trait Render {} impl<T> Left for T {} impl<T> Right for T {} impl<T> Render for T where T: Left {} impl<T> Render for T where T: Right {}",
+    );
+    assert!(
+        overlapping
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3404"),
+        "jointly satisfiable bound domains must overlap: {overlapping:#?}"
+    );
+}
+
+#[test]
+fn coherence_treats_refuted_bounds_as_disjoint_from_positive_heads() {
+    let coherence = collect(
+        "trait Gate {} trait Render {} impl !Gate for i64 {} impl Render for i64 where i64: Gate {} impl Render for i64 {}",
+    );
+    assert!(
+        coherence
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G3404" && diagnostic.code != "G3406"),
+        "a refuted implementation bound cannot create an overlap: {coherence:#?}"
+    );
+}

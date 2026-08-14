@@ -11,7 +11,10 @@ use crate::{
     identity::{DefKey, ModuleKey},
     interface::{DefinitionNamespace, PackageInterface},
     resolution::{DefinitionIndex, ResolutionState},
+    signature::{ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface},
     source::Span,
+    trait_solver::{TraitAnswer, TraitGoal, TraitSolver},
+    types::{GenericArgument, Type},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -42,6 +45,24 @@ impl CoherenceSet {
     pub fn collect<'a>(
         interfaces: impl IntoIterator<Item = &'a PackageInterface>,
         index: &DefinitionIndex,
+    ) -> Self {
+        let interfaces = interfaces.into_iter().collect::<Vec<_>>();
+        let signatures = ElaboratedInterface::merge(
+            interfaces
+                .iter()
+                .map(|interface| ElaboratedInterface::elaborate_with_index(interface, index)),
+        );
+        Self::collect_with_signatures(interfaces, index, &signatures)
+    }
+
+    /// Collect coherence facts using the same frozen signatures consumed by
+    /// trait selection.  This keeps overlap legality independent of header
+    /// traversal and lets combined implementation bounds be checked through
+    /// the canonical solver rather than guessed from syntax alone.
+    pub fn collect_with_signatures<'a>(
+        interfaces: impl IntoIterator<Item = &'a PackageInterface>,
+        index: &DefinitionIndex,
+        signatures: &ElaboratedInterface,
     ) -> Self {
         let mut result = Self::default();
         let mut pending = vec![];
@@ -94,7 +115,8 @@ impl CoherenceSet {
         let heads = result.implementations.values().cloned().collect::<Vec<_>>();
         for (offset, left) in heads.iter().enumerate() {
             for right in &heads[offset + 1..] {
-                if left.trait_definition != right.trait_definition || !heads_may_unify(left, right)
+                if left.trait_definition != right.trait_definition
+                    || !implementations_may_overlap(left, right, signatures)
                 {
                     continue;
                 }
@@ -335,6 +357,479 @@ fn heads_may_unify(left: &ImplHead, right: &ImplHead) -> bool {
         .all(|(left, right)| {
             unify_generic_argument(left, right, &left_generics, &right_generics, &mut bindings)
         })
+}
+
+/// Decide overlap from a canonical common head and the satisfiability of the
+/// two implementations' combined bounds.  Head unification alone is too
+/// coarse: `impl<T> Display for T where T: Left` and the corresponding
+/// `T: Right` implementation are disjoint when no type can prove both
+/// relations.  Conversely, merely syntactic differences in bounds must not
+/// hide an actual shared witness.
+fn implementations_may_overlap(
+    left_head: &ImplHead,
+    right_head: &ImplHead,
+    signatures: &ElaboratedInterface,
+) -> bool {
+    if !heads_may_unify(left_head, right_head) {
+        return false;
+    }
+    let Some(ElaboratedHeader::Implementation(left)) =
+        signatures.definitions.get(&left_head.definition)
+    else {
+        // A malformed signature is handled by header diagnostics. Preserve
+        // the former conservative head-only result rather than making an
+        // invalid interface accidentally coherent.
+        return true;
+    };
+    let Some(ElaboratedHeader::Implementation(right)) =
+        signatures.definitions.get(&right_head.definition)
+    else {
+        return true;
+    };
+    let right_offset = left.generics;
+    let right = rebase_implementation_generics(right, right_offset);
+    if left.relation.definition != right.relation.definition
+        || left.relation.arguments.len() != right.relation.arguments.len()
+    {
+        return false;
+    }
+    let mut bindings = OverlapBindings::default();
+    let Some(subject) = unify_overlap_type(&left.self_ty, &right.self_ty, &mut bindings) else {
+        return false;
+    };
+    let Some(arguments) = left
+        .relation
+        .arguments
+        .iter()
+        .zip(&right.relation.arguments)
+        .map(|(left, right)| unify_overlap_argument(left, right, &mut bindings))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let witness = TraitGoal {
+        relation: crate::ElaboratedTraitReference {
+            definition: left.relation.definition,
+            arguments,
+        },
+        subject,
+    };
+    let mut solver = TraitSolver::new(signatures);
+    left.where_bounds
+        .iter()
+        .chain(&right.where_bounds)
+        .all(|(subject, relation)| {
+            matches!(
+                solver.solve(TraitGoal {
+                    relation: resolve_overlap_relation(relation, &bindings),
+                    subject: resolve_overlap_type(subject, &bindings),
+                }),
+                TraitAnswer::Proven { .. }
+            )
+        })
+        // Keep the common head construction explicit in this boundary.  It
+        // guarantees all relation arguments were unified even if neither
+        // implementation has a where-bound today.
+        && witness.relation.definition == left.relation.definition
+}
+
+#[derive(Default)]
+struct OverlapBindings {
+    types: BTreeMap<u32, Type>,
+}
+
+fn unify_overlap_argument(
+    left: &GenericArgument,
+    right: &GenericArgument,
+    bindings: &mut OverlapBindings,
+) -> Option<GenericArgument> {
+    match (left, right) {
+        (GenericArgument::Type(left), GenericArgument::Type(right)) => {
+            unify_overlap_type(left, right, bindings).map(GenericArgument::Type)
+        }
+        (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) if left == right => {
+            Some(GenericArgument::EffectRow(left.clone()))
+        }
+        (GenericArgument::Lifetime(left), GenericArgument::Lifetime(right)) if left == right => {
+            Some(GenericArgument::Lifetime(*left))
+        }
+        (GenericArgument::ConstU32(left), GenericArgument::ConstU32(right)) if left == right => {
+            Some(GenericArgument::ConstU32(*left))
+        }
+        (GenericArgument::ConstQuantity(left), GenericArgument::ConstQuantity(right))
+            if left == right =>
+        {
+            Some(GenericArgument::ConstQuantity(*left))
+        }
+        (
+            GenericArgument::ConstGeneric {
+                index: left_index,
+                kind: left_kind,
+            },
+            GenericArgument::ConstGeneric {
+                index: right_index,
+                kind: right_kind,
+            },
+        ) if left_index == right_index && left_kind == right_kind => Some(left.clone()),
+        _ => None,
+    }
+}
+
+fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings) -> Option<Type> {
+    let left = resolve_overlap_type(left, bindings);
+    let right = resolve_overlap_type(right, bindings);
+    match (&left, &right) {
+        (Type::Generic(left), Type::Generic(right)) if left == right => Some(Type::Generic(*left)),
+        (Type::Generic(index), value) => bind_overlap_type(*index, value.clone(), bindings),
+        (value, Type::Generic(index)) => bind_overlap_type(*index, value.clone(), bindings),
+        (
+            Type::Nominal {
+                definition: left_definition,
+                arguments: left_arguments,
+            },
+            Type::Nominal {
+                definition: right_definition,
+                arguments: right_arguments,
+            },
+        ) if left_definition == right_definition
+            && left_arguments.len() == right_arguments.len() =>
+        {
+            left_arguments
+                .iter()
+                .zip(right_arguments)
+                .map(|(left, right)| unify_overlap_type(left, right, bindings))
+                .collect::<Option<Vec<_>>>()
+                .map(|arguments| Type::Nominal {
+                    definition: *left_definition,
+                    arguments,
+                })
+        }
+        (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => left
+            .iter()
+            .zip(right)
+            .map(|(left, right)| unify_overlap_type(left, right, bindings))
+            .collect::<Option<Vec<_>>>()
+            .map(Type::Tuple),
+        (Type::Array(left), Type::Array(right)) => {
+            unify_overlap_type(left, right, bindings).map(|value| Type::Array(Box::new(value)))
+        }
+        (
+            Type::Reference {
+                mutability: left_mutability,
+                lifetime: left_lifetime,
+                referent: left_referent,
+            },
+            Type::Reference {
+                mutability: right_mutability,
+                lifetime: right_lifetime,
+                referent: right_referent,
+            },
+        ) if left_mutability == right_mutability && left_lifetime == right_lifetime => {
+            unify_overlap_type(left_referent, right_referent, bindings).map(|referent| {
+                Type::Reference {
+                    mutability: *left_mutability,
+                    lifetime: *left_lifetime,
+                    referent: Box::new(referent),
+                }
+            })
+        }
+        (
+            Type::Projection {
+                subject: left_subject,
+                trait_definition: left_trait,
+                trait_arguments: left_trait_arguments,
+                name: left_name,
+                item_arguments: left_item_arguments,
+            },
+            Type::Projection {
+                subject: right_subject,
+                trait_definition: right_trait,
+                trait_arguments: right_trait_arguments,
+                name: right_name,
+                item_arguments: right_item_arguments,
+            },
+        ) if left_trait == right_trait
+            && left_name == right_name
+            && left_trait_arguments.len() == right_trait_arguments.len()
+            && left_item_arguments.len() == right_item_arguments.len() =>
+        {
+            let subject = unify_overlap_type(left_subject, right_subject, bindings)?;
+            let trait_arguments = left_trait_arguments
+                .iter()
+                .zip(right_trait_arguments)
+                .map(|(left, right)| unify_overlap_type(left, right, bindings))
+                .collect::<Option<Vec<_>>>()?;
+            let item_arguments = left_item_arguments
+                .iter()
+                .zip(right_item_arguments)
+                .map(|(left, right)| unify_overlap_type(left, right, bindings))
+                .collect::<Option<Vec<_>>>()?;
+            Some(Type::Projection {
+                subject: Box::new(subject),
+                trait_definition: *left_trait,
+                trait_arguments,
+                name: left_name.clone(),
+                item_arguments,
+            })
+        }
+        (left, right) if left == right => Some(left.clone()),
+        _ => None,
+    }
+}
+
+fn bind_overlap_type(index: u32, value: Type, bindings: &mut OverlapBindings) -> Option<Type> {
+    if value == Type::Generic(index) {
+        return Some(value);
+    }
+    if contains_overlap_generic(&value, index, bindings) {
+        return None;
+    }
+    bindings.types.insert(index, value.clone());
+    Some(value)
+}
+
+fn contains_overlap_generic(value: &Type, index: u32, bindings: &OverlapBindings) -> bool {
+    match resolve_overlap_type(value, bindings) {
+        Type::Generic(found) => found == index,
+        Type::Nominal { arguments, .. } | Type::Tuple(arguments) => arguments
+            .iter()
+            .any(|argument| contains_overlap_generic(argument, index, bindings)),
+        Type::Array(value) => contains_overlap_generic(&value, index, bindings),
+        Type::Reference { referent, .. } => contains_overlap_generic(&referent, index, bindings),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            contains_overlap_generic(&subject, index, bindings)
+                || trait_arguments
+                    .iter()
+                    .chain(&item_arguments)
+                    .any(|argument| contains_overlap_generic(argument, index, bindings))
+        }
+        Type::Callable {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .any(|parameter| contains_overlap_generic(parameter, index, bindings))
+                || contains_overlap_generic(&result, index, bindings)
+        }
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Infer(_)
+        | Type::Error => false,
+    }
+}
+
+fn resolve_overlap_relation(
+    relation: &crate::ElaboratedTraitReference,
+    bindings: &OverlapBindings,
+) -> crate::ElaboratedTraitReference {
+    crate::ElaboratedTraitReference {
+        definition: relation.definition,
+        arguments: relation
+            .arguments
+            .iter()
+            .map(|argument| resolve_overlap_argument(argument, bindings))
+            .collect(),
+    }
+}
+
+fn resolve_overlap_argument(
+    argument: &GenericArgument,
+    bindings: &OverlapBindings,
+) -> GenericArgument {
+    match argument {
+        GenericArgument::Type(value) => {
+            GenericArgument::Type(resolve_overlap_type(value, bindings))
+        }
+        argument => argument.clone(),
+    }
+}
+
+fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
+    match value {
+        Type::Generic(index) => bindings
+            .types
+            .get(index)
+            .map(|value| resolve_overlap_type(value, bindings))
+            .unwrap_or_else(|| value.clone()),
+        Type::Nominal {
+            definition,
+            arguments,
+        } => Type::Nominal {
+            definition: *definition,
+            arguments: arguments
+                .iter()
+                .map(|argument| resolve_overlap_type(argument, bindings))
+                .collect(),
+        },
+        Type::Tuple(values) => Type::Tuple(
+            values
+                .iter()
+                .map(|value| resolve_overlap_type(value, bindings))
+                .collect(),
+        ),
+        Type::Array(value) => Type::Array(Box::new(resolve_overlap_type(value, bindings))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability: *mutability,
+            lifetime: *lifetime,
+            referent: Box::new(resolve_overlap_type(referent, bindings)),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } => Type::Projection {
+            subject: Box::new(resolve_overlap_type(subject, bindings)),
+            trait_definition: *trait_definition,
+            trait_arguments: trait_arguments
+                .iter()
+                .map(|argument| resolve_overlap_type(argument, bindings))
+                .collect(),
+            name: name.clone(),
+            item_arguments: item_arguments
+                .iter()
+                .map(|argument| resolve_overlap_type(argument, bindings))
+                .collect(),
+        },
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            lifetime_binders: *lifetime_binders,
+            parameters: parameters
+                .iter()
+                .map(|parameter| resolve_overlap_type(parameter, bindings))
+                .collect(),
+            result: Box::new(resolve_overlap_type(result, bindings)),
+            effects: effects.clone(),
+            invocation: *invocation,
+        },
+        value => value.clone(),
+    }
+}
+
+fn rebase_implementation_generics(
+    implementation: &ElaboratedImplementation,
+    offset: u32,
+) -> ElaboratedImplementation {
+    let mut implementation = implementation.clone();
+    implementation.self_ty = rebase_overlap_type(&implementation.self_ty, offset);
+    implementation.relation = rebase_overlap_relation(&implementation.relation, offset);
+    implementation.where_bounds = implementation
+        .where_bounds
+        .iter()
+        .map(|(subject, relation)| {
+            (
+                rebase_overlap_type(subject, offset),
+                rebase_overlap_relation(relation, offset),
+            )
+        })
+        .collect();
+    implementation
+}
+
+fn rebase_overlap_relation(
+    relation: &crate::ElaboratedTraitReference,
+    offset: u32,
+) -> crate::ElaboratedTraitReference {
+    crate::ElaboratedTraitReference {
+        definition: relation.definition,
+        arguments: relation
+            .arguments
+            .iter()
+            .map(|argument| match argument {
+                GenericArgument::Type(value) => {
+                    GenericArgument::Type(rebase_overlap_type(value, offset))
+                }
+                argument => argument.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
+    match value {
+        Type::Generic(index) => Type::Generic(index.saturating_add(offset)),
+        Type::Nominal {
+            definition,
+            arguments,
+        } => Type::Nominal {
+            definition: *definition,
+            arguments: arguments
+                .iter()
+                .map(|argument| rebase_overlap_type(argument, offset))
+                .collect(),
+        },
+        Type::Tuple(values) => Type::Tuple(
+            values
+                .iter()
+                .map(|value| rebase_overlap_type(value, offset))
+                .collect(),
+        ),
+        Type::Array(value) => Type::Array(Box::new(rebase_overlap_type(value, offset))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability: *mutability,
+            lifetime: *lifetime,
+            referent: Box::new(rebase_overlap_type(referent, offset)),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } => Type::Projection {
+            subject: Box::new(rebase_overlap_type(subject, offset)),
+            trait_definition: *trait_definition,
+            trait_arguments: trait_arguments
+                .iter()
+                .map(|argument| rebase_overlap_type(argument, offset))
+                .collect(),
+            name: name.clone(),
+            item_arguments: item_arguments
+                .iter()
+                .map(|argument| rebase_overlap_type(argument, offset))
+                .collect(),
+        },
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            lifetime_binders: *lifetime_binders,
+            parameters: parameters
+                .iter()
+                .map(|parameter| rebase_overlap_type(parameter, offset))
+                .collect(),
+            result: Box::new(rebase_overlap_type(result, offset)),
+            effects: effects.clone(),
+            invocation: *invocation,
+        },
+        value => value.clone(),
+    }
 }
 
 fn unify_generic_argument(
