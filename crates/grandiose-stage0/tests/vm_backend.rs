@@ -3,12 +3,61 @@ use grandiose_stage0::{
     DefinitionIndex, Digest, ElaboratedInterface, FileKey, InterfaceSet, LabelBrand, LexedFile,
     LogicalPath, MirBlock, MirBlockId, MirCleanupPlan, MirFunction, MirInstruction, MirLocal,
     MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey, PlaceFlow, ScalarType, Type,
-    TypedBody, VmArtifactError, VmCleanupPlace, VmCleanupProof, VmFunction, VmInstruction,
-    VmPattern, VmType, decode_and_verify_artifact, decode_and_verify_program, decode_artifact,
-    decode_program, emit_vm, emit_vm_program, encode_artifact, encode_program, verify_vm,
-    verify_vm_program,
+    TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmFunction,
+    VmInstruction, VmPattern, VmType, decode_and_verify_artifact, decode_and_verify_program,
+    decode_artifact, decode_program, emit_vm, emit_vm_program, encode_artifact, encode_program,
+    verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
+
+#[derive(Clone, Copy)]
+struct LeaveFixtureOffsets {
+    brand_owner: usize,
+    target: usize,
+    destination_count: usize,
+    moved_field_count: usize,
+    loan_owner_tag: usize,
+    loan_field_count: usize,
+}
+
+/// Byte positions for the intentionally fixed-shape `Leave` fixture below.
+/// Keeping these offsets alongside the fixture makes every hostile mutation
+/// explicit and protects against silently testing a different instruction.
+fn leave_fixture_offsets(bytes: &[u8]) -> LeaveFixtureOffsets {
+    // Envelope: magic (8), schema (4), fingerprint (32), no manifest (1),
+    // payload size (8). Function: definition (32), captures/parameters (8),
+    // two I64 register types (10), instruction count (8), ConstI64 (13).
+    let leave_opcode = 53 + 32 + 8 + 10 + 8 + 13;
+    assert_eq!(bytes[leave_opcode], 55, "fixture no longer encodes Leave");
+    let brand_owner = leave_opcode + 1;
+    let target = brand_owner + 32 + 4;
+    let argument_count = target + 4;
+    let destination_count = argument_count + 8 + 4;
+    let cleanup = destination_count + 8 + 4;
+    let moved_root_length = cleanup + 8;
+    let moved_fields = moved_root_length + 8 + b"value".len();
+    let loan_count = moved_fields + 8 + 4;
+    let loan_owner_tag = loan_count + 8;
+    let loan_root_length = loan_owner_tag + 1;
+    let loan_fields = loan_root_length + 8 + b"loan".len();
+    LeaveFixtureOffsets {
+        brand_owner,
+        target,
+        destination_count,
+        moved_field_count: moved_fields,
+        loan_owner_tag,
+        loan_field_count: loan_fields,
+    }
+}
+
+/// Candidate decoding deliberately does not authenticate the fingerprint;
+/// replacing it lets a test isolate verifier rejection of a canonical payload
+/// mutation rather than merely testing the integrity check.
+fn rebind_artifact_fingerprint(bytes: &mut Vec<u8>) {
+    let mut artifact = decode_artifact(bytes).expect("canonical hostile mutation decodes");
+    artifact.fingerprint = artifact.computed_fingerprint();
+    *bytes = encode_artifact(&artifact);
+}
 
 /// One small schema-26 artifact whose payload contains every fixed `Leave`
 /// header field plus both parallel register vectors and a cleanup proof. Tests
@@ -35,7 +84,12 @@ fn encoded_leave_fixture() -> Vec<u8> {
                             root: "value".into(),
                             fields: vec![0],
                         }],
-                        active_loans: vec![],
+                        active_loans: vec![VmCleanupLoan {
+                            owner: None,
+                            root: "loan".into(),
+                            fields: vec![1],
+                            unique: false,
+                        }],
                     },
                 },
                 VmInstruction::Return { value: 1 },
@@ -62,6 +116,63 @@ fn schema_26_leave_bytes_reject_every_truncation_and_fingerprint_tampering() {
     tampered[12] ^= 1;
     assert!(matches!(
         decode_and_verify_artifact(&tampered),
+        Err(VmArtifactError::FingerprintMismatch)
+    ));
+}
+
+#[test]
+fn schema_26_leave_payload_mutations_reject_before_vm_execution() {
+    let bytes = encoded_leave_fixture();
+    let offsets = leave_fixture_offsets(&bytes);
+
+    let mut invalid_owner_tag = bytes.clone();
+    invalid_owner_tag[offsets.loan_owner_tag] = 2;
+    assert!(matches!(
+        decode_and_verify_artifact(&invalid_owner_tag),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "invalid cleanup loan owner tag"
+        })
+    ));
+
+    for (field_count, label) in [
+        (offsets.moved_field_count, "moved-place"),
+        (offsets.loan_field_count, "active-loan"),
+    ] {
+        let mut impossible_fields = bytes.clone();
+        impossible_fields[field_count..field_count + 8].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert!(
+            matches!(
+                decode_and_verify_artifact(&impossible_fields),
+                Err(VmArtifactError::DecodeLimit { .. })
+            ),
+            "impossible {label} fields reached the VM boundary"
+        );
+    }
+
+    let mut malformed_parallel_payload = bytes.clone();
+    malformed_parallel_payload[offsets.destination_count..offsets.destination_count + 8]
+        .copy_from_slice(&0_u64.to_le_bytes());
+    assert!(matches!(
+        decode_and_verify_artifact(&malformed_parallel_payload),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "leave arguments and destinations differ in length"
+        })
+    ));
+
+    let mut invalid_target = bytes.clone();
+    invalid_target[offsets.target..offsets.target + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    rebind_artifact_fingerprint(&mut invalid_target);
+    assert!(matches!(
+        decode_and_verify_artifact(&invalid_target),
+        Err(VmArtifactError::InvalidInstructionTarget { target: u32::MAX })
+    ));
+
+    // Label brands are immutable artifact payload. A raw owner substitution is
+    // rejected by the verifier's fingerprint gate before any control transfer.
+    let mut unknown_brand_owner = bytes;
+    unknown_brand_owner[offsets.brand_owner] ^= 1;
+    assert!(matches!(
+        decode_and_verify_artifact(&unknown_brand_owner),
         Err(VmArtifactError::FingerprintMismatch)
     ));
 }
