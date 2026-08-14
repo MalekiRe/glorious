@@ -92,6 +92,7 @@ runtime_manifest=(
     --runtime-leaf int-equal crate __g1_int_equal
     --runtime-leaf int-less crate __g1_int_less
     --runtime-leaf int-greater crate __g1_int_greater
+    --runtime-leaf int-bit-and crate __g1_int_bit_and
 )
 
 case "$mode" in

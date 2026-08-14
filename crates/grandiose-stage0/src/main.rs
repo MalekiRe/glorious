@@ -275,6 +275,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
                             PrimitiveRole::IntEqual,
                             PrimitiveRole::IntLess,
                             PrimitiveRole::IntGreater,
+                            PrimitiveRole::IntBitAnd,
                         ]
                         .map(PrimitiveRole::selector_name)
                         .join(", ")
