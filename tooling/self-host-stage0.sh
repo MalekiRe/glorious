@@ -73,8 +73,12 @@ canonical_source="$temporary_directory/compiler.glorious"
     --output "$canonical_source" \
     --grc "$seed"
 
+# Honor an explicitly isolated Cargo target directory. This keeps the
+# hermetic regression usable in constrained CI/worktree environments without
+# silently rebuilding into a caller's checkout-local `target` tree.
+stage0_target="${CARGO_TARGET_DIR:-$repo_root/target}"
 (cd "$repo_root" && cargo build -q -p grandiose-stage0 --bin grc-stage0)
-stage0="$repo_root/target/debug/grc-stage0"
+stage0="$stage0_target/debug/grc-stage0"
 
 runtime_manifest=(
     --runtime-standard-library command@0.1.0
@@ -92,5 +96,24 @@ case "$mode" in
     emit)
         "$stage0" "${runtime_manifest[@]}" emit-bootstrap-vm \
             "$canonical_source" "$artifact" "$manifest"
+        # Do not trust the emitting invocation to validate its own output.
+        # The program has crossed a file boundary here, so verify the exact
+        # serialized bytes independently before treating this bootstrap edge
+        # as publishable.
+        "$stage0" verify-vm "$artifact"
+
+        # Also prove that the manifest is actually bound to this artifact.
+        # Supplying a deliberately damaged adjacent manifest must fail before
+        # convergence comparison; accepting it would make a green `emit`
+        # result insufficient evidence for the stage-one bootstrap edge.
+        invalid_manifest="$temporary_directory/invalid-adjacent.manifest"
+        cp -- "$manifest" "$invalid_manifest"
+        printf '\0' >> "$invalid_manifest"
+        if "$stage0" verify-bootstrap \
+            "$artifact" "$manifest" "$artifact" "$invalid_manifest" \
+            >/dev/null 2>&1; then
+            echo "self-host-stage0: bootstrap verification accepted a corrupted adjacent manifest" >&2
+            exit 1
+        fi
         ;;
 esac
