@@ -64,9 +64,10 @@ retained below but scheduled after the core language and tooling tranche.
 ### 5.4 Bytecode peepholes and validation
 
 - move-chain collapse beyond straight-line independent transfer snapshots
-  (target-safe NOP/fallthrough-jump removal, non-entry transfer-temporary
-  `Move`/`Copy` chains across independent parallel snapshots, and direct
-  selection without empty switch-transfer blocks are implemented);
+  (target-safe NOP/fallthrough-jump removal, identity edge-transfer omission,
+  non-entry transfer-temporary `Move`/`Copy` chains across independent
+  parallel snapshots, and direct selection without empty switch-transfer
+  blocks are implemented);
 - redundant `EndBorrow` removal and constant-pool-aware rewrites beyond the
   implemented target-safe retargeting of one-use constant transfer temporaries;
 - cleanup/label/handler-safe repatching;
