@@ -28,6 +28,23 @@ fn callable_headers_share_generic_and_type_grammar_without_parsing_the_body() {
 }
 
 #[test]
+fn callable_headers_retain_generic_kind_metadata() {
+    let package = PackageKey("header-generic-kinds@0.1.0".into());
+    let source = "pub fn relay<T, e: EffectRow>(value: T) -> i64 / { | e } { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert_eq!(header.generics, ["T", "e"]);
+    assert!(!header.generics.is_effect_row("T"));
+    assert!(header.generics.is_effect_row("e"));
+}
+
+#[test]
 fn callable_types_are_header_facts_with_tuple_parameters_and_result() {
     let package = PackageKey("header-callable-type@0.1.0".into());
     let source = "pub fn apply(value: (i64, Bool) -> Text) -> Text { value }";
