@@ -5,7 +5,7 @@ use grandiose_stage0::{
     DiagnosticClass, Digest, InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport,
     Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmContinuationPolicy,
     VmExecutionLimits, VmGenericArgument, VmInstruction, VmType, decode_and_verify_program,
-    decode_program,
+    decode_program, encode_program,
 };
 use std::collections::BTreeMap;
 
@@ -3655,6 +3655,101 @@ fn service_cancellation_frame_keeps_the_operation_result_type_across_a_call() {
         }
     )));
     assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_cancels_a_generic_multi_operation_call_through_distinct_vm_frames() {
+    let source = "effect Console<T> { [0, 1] read(value: T) -> Text; [0, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let text = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { handle helper(40) { Console<i64>::read(_) with _ => 42, Console<i64>::write(_) with _ => 0 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    let frames = entry
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction {
+            VmInstruction::InstallHandler {
+                effect_arguments,
+                operation,
+                resume_type,
+                continuation: VmContinuationPolicy::Consume,
+                ..
+            } if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)] => {
+                Some((*operation, resume_type))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(frames, vec![(0, &VmType::Text), (1, &VmType::I64)]);
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::UninstallHandler))
+            .count(),
+        2,
+        "normal completion must clean up every installed cancellation frame"
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::Cancel))
+            .count(),
+        2,
+        "each distinct operation frame needs its own cancellation target"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_cancels_a_generic_multi_operation_function_value_through_vm_frames() {
+    let source = "effect Console<T> { [0, 1] read(value: T) -> Text; [0, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let text = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Console<i64>::read(_) with _ => 42, Console<i64>::write(_) with _ => 0 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        "the generic function value must retain its dynamic call boundary"
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_a_forged_missing_multi_operation_cancellation_cleanup() {
+    let source = "effect Console { [0, 1] read() -> Text; [0, 1] write() -> i64; } pub fn helper() -> i64 / Console { let text = Console::read(); Console::write() } pub fn main() -> i64 { handle helper() { Console::read() with _ => 42, Console::write() with _ => 0 } }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap()
+        .artifact
+        .unwrap();
+    let mut forged = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = forged.functions.get_mut(&forged.entry).unwrap();
+    let cleanup = entry
+        .instructions
+        .iter()
+        .rposition(|instruction| matches!(instruction, VmInstruction::UninstallHandler))
+        .expect("generated multi-operation caller has cleanup");
+    entry.instructions.remove(cleanup);
+    forged.fingerprint = forged.computed_fingerprint();
+    assert!(
+        decode_and_verify_program(&encode_program(&forged)).is_err(),
+        "a forged caller cannot return with a live cancellation frame"
+    );
 }
 
 #[test]
