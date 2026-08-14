@@ -11,6 +11,7 @@ pub mod bootstrap;
 pub mod coherence;
 pub mod core;
 pub mod diagnostic;
+pub mod escape;
 pub mod fixity;
 pub mod header;
 pub mod identity;
@@ -50,6 +51,7 @@ pub use core::{
     CorePatternField, CorePlace, TypedBody,
 };
 pub use diagnostic::{Diagnostic, DiagnosticClass, DiagnosticCode, Severity, SourceSpan};
+pub use escape::{EscapeDiagnostic, EscapeFlow};
 pub use fixity::{Fixity, FixityPosition, FixityTable};
 pub use header::{
     AssociatedTypeDefinitionHeader, AssociatedTypeHeader, CallableHeader, EffectHeader,

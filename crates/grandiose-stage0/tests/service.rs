@@ -2644,3 +2644,90 @@ fn service_rejects_incoherent_impl_heads_before_body_elaboration() {
             .any(|diagnostic| diagnostic.code == "G3404")
     );
 }
+
+#[test]
+fn service_rejects_references_to_body_locals_in_returned_aggregates() {
+    let source = r#"
+        pub struct Pair { left: i64, right: i64 }
+        pub fn bad() -> (&i64, i64) {
+            let pair = Pair { left: 1, right: 2 };
+            (&pair.left, pair.right)
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("body-local aggregate reference unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_closure_and_effect_payload_lifetime_escapes() {
+    let closure = r#"
+        pub fn bad() -> () -> &i64 {
+            let value = 1;
+            let loan = &value;
+            () -> &i64 { loan }
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(closure))
+    else {
+        panic!("closure borrowing a body local unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5014"),
+        "{diagnostics:#?}"
+    );
+
+    let payload = r#"
+        effect Store { save(value: &i64); }
+        pub fn bad() -> i64 / {Store} {
+            let value = 1;
+            Store::save(&value);
+            0
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(payload))
+    else {
+        panic!("effect payload borrowing a body local unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5015"),
+        "{diagnostics:#?}"
+    );
+
+    let handler = r#"
+        effect Tick { tick() -> i64; }
+        pub fn bad() -> &i64 / {Tick} {
+            let value = 1;
+            handle Tick::tick() { Tick::tick() => &value }
+        }
+        pub fn main() -> i64 { 0 }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(handler))
+    else {
+        panic!("handler result borrowing a body local unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "{diagnostics:#?}"
+    );
+}

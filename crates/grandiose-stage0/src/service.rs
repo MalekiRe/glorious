@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{
     BodySyntax, BootstrapManifest, CoherenceSet, CompilationMode, CompilationRequest,
     CompilerDatabase, DefKey, DefinitionIndex, DiagnosticClass, Digest, ElaboratedHeader,
-    ElaboratedInterface, FixityTable, InputError, MirFunction, MirLowering, MirProgram,
+    ElaboratedInterface, EscapeFlow, FixityTable, InputError, MirFunction, MirLowering, MirProgram,
     ModuleGraph, ParsedHeader, PlaceFlow, RevisionError, RevisionId, Severity, SourceSpan, Span,
     TrustedRuntimeManifest, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program,
     implementation_method_key, verify_vm_program,
@@ -684,6 +684,14 @@ impl StageZeroCompiler {
                         Some(diagnostic.span),
                     )
                 }));
+                let escapes = EscapeFlow::analyze(&core, &flow);
+                diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| {
+                    CompileDiagnostic::source(
+                        diagnostic.code,
+                        diagnostic.message.clone(),
+                        Some(diagnostic.span),
+                    )
+                }));
                 let uses = UseFlow::analyze(&core, &flow);
                 diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| {
                     CompileDiagnostic::source(
@@ -693,6 +701,7 @@ impl StageZeroCompiler {
                     )
                 }));
                 let valid = flow.diagnostics.is_empty()
+                    && escapes.diagnostics.is_empty()
                     && uses.diagnostics.is_empty()
                     && core.diagnostics.is_empty()
                     && body.diagnostics.is_empty();
@@ -790,6 +799,14 @@ impl StageZeroCompiler {
                             Some(diagnostic.span),
                         )
                     }));
+                    let escapes = EscapeFlow::analyze(&core, &flow);
+                    diagnostics.extend(escapes.diagnostics.iter().map(|diagnostic| {
+                        CompileDiagnostic::source(
+                            diagnostic.code,
+                            diagnostic.message.clone(),
+                            Some(diagnostic.span),
+                        )
+                    }));
                     let uses = UseFlow::analyze(&core, &flow);
                     diagnostics.extend(uses.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(
@@ -799,6 +816,7 @@ impl StageZeroCompiler {
                         )
                     }));
                     let valid = flow.diagnostics.is_empty()
+                        && escapes.diagnostics.is_empty()
                         && uses.diagnostics.is_empty()
                         && core.diagnostics.is_empty()
                         && body.diagnostics.is_empty();

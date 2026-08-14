@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     BodySyntax, CaptureMode, CoreHandlerResumption, CoreKind, DeclarationScan, DefinitionIndex,
-    ElaboratedInterface, FileKey, FlowEventKind, InterfaceSet, LexedFile, Lifetime, LogicalPath,
-    MirInstruction, MirLowering, PackageKey, PlaceFlow, Quantity, Type, TypedBody,
+    ElaboratedInterface, EscapeFlow, FileKey, FlowEventKind, InterfaceSet, LexedFile, Lifetime,
+    LogicalPath, MirInstruction, MirLowering, PackageKey, PlaceFlow, Quantity, Type, TypedBody,
     implementation_method_key,
 };
 
@@ -2115,6 +2115,15 @@ fn mir_lowering_rejects_cancellation_that_violates_a_frozen_required_resume_cont
             }),
         "lowering accepted cancellation that contradicted its frozen contract: {lowered:#?}"
     );
+}
+
+#[test]
+fn escapeflow_allows_returning_an_incoming_reference_without_deriving_a_body_loan() {
+    let source = "pub fn main(value: &i64) -> &i64 { value }";
+    let core = core_for("core-escape-incoming-reference@0.1.0", source);
+    let flow = PlaceFlow::analyze(&core);
+    let escapes = EscapeFlow::analyze(&core, &flow);
+    assert!(escapes.diagnostics.is_empty(), "{:#?}", escapes.diagnostics);
 }
 
 #[test]
