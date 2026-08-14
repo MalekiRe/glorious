@@ -4211,22 +4211,35 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let (outer_computation, outer_clauses, root_prefix) =
+        let (outer_computation, outer_clauses, root_prefix, root_suffix) =
             match self.body.expression(root).kind.clone() {
                 CoreKind::Handle {
                     computation,
                     clauses,
-                } => (computation, clauses, Vec::new()),
+                } => (computation, clauses, Vec::new(), Vec::new()),
                 CoreKind::Block(values) => {
-                    let (outer, prefix) = values.split_last()?;
+                    let outer_index = values.iter().position(|value| {
+                        matches!(self.body.expression(*value).kind, CoreKind::Handle { .. })
+                    })?;
+                    let outer = values[outer_index];
                     let CoreKind::Handle {
                         computation,
                         clauses,
-                    } = self.body.expression(*outer).kind.clone()
+                    } = self.body.expression(outer).kind.clone()
                     else {
                         return None;
                     };
-                    (computation, clauses, prefix.to_vec())
+                    if values[outer_index + 1..].iter().any(|value| {
+                        matches!(self.body.expression(*value).kind, CoreKind::Handle { .. })
+                    }) {
+                        return None;
+                    }
+                    (
+                        computation,
+                        clauses,
+                        values[..outer_index].to_vec(),
+                        values[outer_index + 1..].to_vec(),
+                    )
                 }
                 _ => return None,
             };
@@ -4380,11 +4393,26 @@ impl Lowerer<'_> {
         let inner_instructions = std::mem::take(&mut self.instructions);
         self.named = inner_named;
 
+        let final_result = if root_suffix.is_empty() {
+            result
+        } else {
+            self.instructions = Vec::new();
+            let (last, statements) = root_suffix.split_last()?;
+            for statement in statements {
+                self.statement(*statement)?;
+            }
+            let suffix_result = self.value(*last)?;
+            entry.extend(std::mem::take(&mut self.instructions));
+            suffix_result
+        };
+
         let mut blocks = vec![
             MirBlock {
                 parameters: vec![],
                 instructions: entry,
-                terminator: MirTerminator::Return { value: result },
+                terminator: MirTerminator::Return {
+                    value: final_result,
+                },
             },
             MirBlock {
                 parameters: vec![],
