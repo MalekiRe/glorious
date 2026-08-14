@@ -1161,6 +1161,7 @@ impl StageZeroCompiler {
                         crate::PrimitiveRole::UsizeToU32Checked,
                         crate::PrimitiveRole::IntCheckedAdd,
                         crate::PrimitiveRole::IntWrappingAdd,
+                        crate::PrimitiveRole::IntEqual,
                     ]
                     .iter()
                     .any(|role| manifest.primitives.get(role) == Some(&declaration.key))
