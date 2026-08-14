@@ -477,6 +477,43 @@ fn manifest_bound_checked_i64_to_i8_converts_and_rejects_out_of_range_values() {
 }
 
 #[test]
+fn manifest_bound_checked_i64_to_u64_converts_and_rejects_negative_values() {
+    let mut input = request(
+        "fn __g1_int_convert_checked_to_u64<T>(value: T) -> u64 { () } pub fn main() -> u64 { __g1_int_convert_checked_to_u64<i64>(9223372036854775807) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertCheckedToU64,
+        "__g1_int_convert_checked_to_u64",
+    ));
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_u64()
+            .unwrap(),
+        i64::MAX as u64
+    );
+    let mut negative = request(
+        "fn __g1_int_convert_checked_to_u64<T>(value: T) -> u64 { () } pub fn main() -> u64 { __g1_int_convert_checked_to_u64<i64>(-1) }",
+    );
+    negative.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertCheckedToU64,
+        "__g1_int_convert_checked_to_u64",
+    ));
+    assert!(matches!(
+        StageZeroCompiler::new()
+            .compile(negative)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_u64(),
+        Err(VmArtifactError::ArithmeticOverflow)
+    ));
+}
+
+#[test]
 fn manifest_bound_wrapping_i64_to_i8_truncates_twos_complement_bits() {
     let mut input = request(
         "fn __g1_int_convert_wrapping_to_i8<T>(value: T) -> i8 { () } pub fn main() -> i8 { __g1_int_convert_wrapping_to_i8<i64>(255) }",

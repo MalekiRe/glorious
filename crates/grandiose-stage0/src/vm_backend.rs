@@ -40,6 +40,7 @@ pub enum VmType {
     I16,
     I32,
     I8,
+    U64,
     F64,
     Bool,
     Char,
@@ -474,6 +475,10 @@ pub enum VmInstruction {
         value: u32,
     },
     I64ToI8Wrapping {
+        dst: u32,
+        value: u32,
+    },
+    I64ToU64Checked {
         dst: u32,
         value: u32,
     },
@@ -1166,7 +1171,7 @@ impl CandidateVmArtifact {
 /// independently verified before the VM can see an execution image.
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
-/// Schema 70 adds opcode 129 for manifest-bound wrapping i64-to-i8 conversion. Schema 69 adds opcode 128 for manifest-bound checked i64-to-i8 conversion. Schema 68 adds opcode 127 for manifest-bound wrapping i64-to-i32 conversion. Schema 67 adds opcode 126 for manifest-bound checked i64-to-i32 conversion. Schema 66 adds opcode 125 for manifest-bound wrapping i64-to-i16 conversion. Schema 65 adds opcode 124 for manifest-bound checked i64-to-i16 conversion. Schema 64 adds opcode 123 for manifest-bound wrapping i64-to-u16 conversion,
+/// Schema 71 adds opcode 130 for manifest-bound checked i64-to-u64 conversion. Schema 70 adds opcode 129 for manifest-bound wrapping i64-to-i8 conversion. Schema 69 adds opcode 128 for manifest-bound checked i64-to-i8 conversion. Schema 68 adds opcode 127 for manifest-bound wrapping i64-to-i32 conversion. Schema 67 adds opcode 126 for manifest-bound checked i64-to-i32 conversion. Schema 66 adds opcode 125 for manifest-bound wrapping i64-to-i16 conversion. Schema 65 adds opcode 124 for manifest-bound checked i64-to-i16 conversion. Schema 64 adds opcode 123 for manifest-bound wrapping i64-to-u16 conversion,
 /// retaining the low two's-complement bits. Schema 63 adds opcode 122 for
 /// manifest-bound checked i64-to-u16 conversion,
 /// rejecting negative and out-of-range values deterministically. Schema 62
@@ -1214,7 +1219,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 70;
+pub const STAGE0_VM_SCHEMA: u32 = 71;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -1420,6 +1425,9 @@ impl VerifiedVmArtifact {
     pub fn run_i8(&self) -> Result<i8, VmArtifactError> {
         expect_i8(self.execute_with_limits(VmExecutionLimits::default())?)
     }
+    pub fn run_u64(&self) -> Result<u64, VmArtifactError> {
+        expect_u64(self.execute_with_limits(VmExecutionLimits::default())?)
+    }
     pub fn run_i64_with_limits(&self, limits: VmExecutionLimits) -> Result<i64, VmArtifactError> {
         expect_i64(self.execute_with_limits(limits)?)
     }
@@ -1575,6 +1583,20 @@ impl VerifiedVmProgram {
             allocated_elements: 0,
         };
         expect_i8(execute_with_arguments(
+            &self.program,
+            self.program.entry,
+            &[],
+            0,
+            &mut budget,
+        )?)
+    }
+    pub fn run_u64(&self) -> Result<u64, VmArtifactError> {
+        let mut budget = ExecutionBudget {
+            limits: VmExecutionLimits::default(),
+            instructions: 0,
+            allocated_elements: 0,
+        };
+        expect_u64(execute_with_arguments(
             &self.program,
             self.program.entry,
             &[],
@@ -2049,6 +2071,7 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
         Type::Scalar(ScalarType::I16) => Ok(VmType::I16),
         Type::Scalar(ScalarType::I32) => Ok(VmType::I32),
         Type::Scalar(ScalarType::I8) => Ok(VmType::I8),
+        Type::Scalar(ScalarType::U64) => Ok(VmType::U64),
         Type::Scalar(ScalarType::F64) => Ok(VmType::F64),
         Type::Scalar(ScalarType::Bool) => Ok(VmType::Bool),
         Type::Scalar(ScalarType::Char) => Ok(VmType::Char),
@@ -2283,6 +2306,7 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::I16 => 21,
         VmType::I32 => 22,
         VmType::I8 => 23,
+        VmType::U64 => 24,
         VmType::F64 => 2,
         VmType::Bool => 3,
         VmType::Char => 4,
@@ -2716,6 +2740,7 @@ impl<'a> Decoder<'a> {
             21 => Ok(VmType::I16),
             22 => Ok(VmType::I32),
             23 => Ok(VmType::I8),
+            24 => Ok(VmType::U64),
             2 => Ok(VmType::F64),
             3 => Ok(VmType::Bool),
             4 => Ok(VmType::Char),
@@ -3702,6 +3727,10 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.u32()?,
             }),
+            130 => Ok(VmInstruction::I64ToU64Checked {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
             25 => self.bool_equality(|dst, left, right| VmInstruction::EqText { dst, left, right }),
             26 => self.bool_equality(|dst, left, right| VmInstruction::NeText { dst, left, right }),
             27 => self.i64_arithmetic(|dst, left, right| VmInstruction::ConcatText {
@@ -4634,6 +4663,10 @@ fn lower_instruction(
             value: value.0,
         },
         MirInstruction::I64ToI8Wrapping { dst, value } => VmInstruction::I64ToI8Wrapping {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::I64ToU64Checked { dst, value } => VmInstruction::I64ToU64Checked {
             dst: dst.0,
             value: value.0,
         },
@@ -5737,6 +5770,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::I64ToI8Wrapping { dst, value } => {
                 read(&states, *value)?;
                 expect_type(function, *dst, VmType::I8)?;
+                expect_type(function, *value, VmType::I64)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::I64ToU64Checked { dst, value } => {
+                read(&states, *value)?;
+                expect_type(function, *dst, VmType::U64)?;
                 expect_type(function, *value, VmType::I64)?;
                 write(&mut states, *dst)?
             }
@@ -6955,6 +6994,7 @@ fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
         | VmType::I16
         | VmType::I32
         | VmType::I8
+        | VmType::U64
         | VmType::F64
         | VmType::Bool
         | VmType::Char
@@ -7343,6 +7383,7 @@ enum VmValue {
     I16(i16),
     I32(i32),
     I8(i8),
+    U64(u64),
     F64(f64),
     Bool(bool),
     Char(char),
@@ -7469,6 +7510,7 @@ impl VmValue {
             Self::I16(_) => VmType::I16,
             Self::I32(_) => VmType::I32,
             Self::I8(_) => VmType::I8,
+            Self::U64(_) => VmType::U64,
             Self::F64(_) => VmType::F64,
             Self::Bool(_) => VmType::Bool,
             Self::Char(_) => VmType::Char,
@@ -7678,6 +7720,7 @@ fn format_vm_value(value: &VmValue) -> String {
         VmValue::I16(value) => value.to_string(),
         VmValue::I32(value) => value.to_string(),
         VmValue::I8(value) => value.to_string(),
+        VmValue::U64(value) => value.to_string(),
         VmValue::F64(value) => value.to_string(),
         VmValue::Bool(value) => value.to_string(),
         VmValue::Char(value) => format!("{value:?}"),
@@ -7812,6 +7855,15 @@ fn expect_i8(value: impl Borrow<VmValue>) -> Result<i8, VmArtifactError> {
         VmValue::I8(value) => Ok(*value),
         value => Err(VmArtifactError::ResultType {
             expected: VmType::I8,
+            found: value.ty(),
+        }),
+    }
+}
+fn expect_u64(value: impl Borrow<VmValue>) -> Result<u64, VmArtifactError> {
+    match value.borrow() {
+        VmValue::U64(value) => Ok(*value),
+        value => Err(VmArtifactError::ResultType {
+            expected: VmType::U64,
             found: value.ty(),
         }),
     }
@@ -8060,6 +8112,7 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         VmType::I16 => matches!(value, VmValue::I16(_)),
         VmType::I32 => matches!(value, VmValue::I32(_)),
         VmType::I8 => matches!(value, VmValue::I8(_)),
+        VmType::U64 => matches!(value, VmValue::U64(_)),
         VmType::F64 => matches!(value, VmValue::F64(_)),
         VmType::Bool => matches!(value, VmValue::Bool(_)),
         VmType::Char => matches!(value, VmValue::Char(_)),
@@ -8700,6 +8753,15 @@ fn execute(
                         .as_ref()
                         .expect("verified register"),
                 )? as i8));
+            }
+            VmInstruction::I64ToU64Checked { dst, value } => {
+                let value = u64::try_from(expect_i64(
+                    registers[value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?)
+                .map_err(|_| VmArtifactError::ArithmeticOverflow)?;
+                registers[dst as usize] = Some(VmValue::U64(value));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
@@ -10522,6 +10584,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmInstruction::I64ToU64Checked { dst, value } => {
+            output.push(130);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::MakeCallable {
             dst,
             callee,
@@ -11091,6 +11158,15 @@ fn execute_with_arguments(
                         .as_ref()
                         .expect("verified register"),
                 )? as i8));
+            }
+            VmInstruction::I64ToU64Checked { dst, value } => {
+                let value = u64::try_from(expect_i64(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?)
+                .map_err(|_| VmArtifactError::ArithmeticOverflow)?;
+                registers[*dst as usize] = Some(VmValue::U64(value));
             }
             VmInstruction::MakeTuple { dst, fields } => {
                 budget.reserve_value("tuple fields", fields.len())?;
