@@ -2898,6 +2898,25 @@ fn escapeflow_allows_returning_an_incoming_reference_without_deriving_a_body_loa
 }
 
 #[test]
+fn escapeflow_rejects_storing_a_body_loan_through_external_reference_storage() {
+    let core = core_for(
+        "core-external-store-drop-check@0.1.0",
+        "pub fn main(slot: &mut &i64) -> i64 { let value = 1; *slot = &value; 0 }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let escapes = EscapeFlow::analyze(&core, &flow);
+    assert!(
+        escapes
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5022"),
+        "frozen Core let a body-local loan enter caller-owned storage: {escapes:#?}"
+    );
+}
+
+#[test]
 fn call_lifetime_instantiation_preserves_a_generic_reference_relationship() {
     let source = r#"
         pub fn relay<'a>(value: &'a i64) -> &'a i64 { value }

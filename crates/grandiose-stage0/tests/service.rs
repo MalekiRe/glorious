@@ -698,6 +698,44 @@ fn reference_to_body_local_cannot_escape_as_a_return_value() {
 }
 
 #[test]
+fn body_local_reference_cannot_be_stored_through_a_caller_owned_reference() {
+    let diagnostics = match StageZeroCompiler::new().compile(request(
+        "pub fn bad(slot: &mut &i64) -> i64 { let value = 1; *slot = &value; 0 } pub fn main() -> i64 { 0 }",
+    )) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("body-local reference unexpectedly escaped through caller storage: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5022"),
+        "missing external-store drop-check diagnostic: {diagnostics:#?}"
+    );
+
+    let local_slot = StageZeroCompiler::new()
+        .compile(request(
+            "pub fn main() -> i64 { let first = 1; let second = 42; let reference = &first; let slot = &mut reference; *slot = &second; *reference }",
+        ))
+        .expect("a local reference slot is destroyed with its referents");
+    assert!(
+        local_slot.diagnostics.is_empty(),
+        "{:#?}",
+        local_slot.diagnostics
+    );
+
+    let external_value = StageZeroCompiler::new()
+        .compile(request(
+            "pub fn relay(slot: &mut &i64, value: &i64) -> i64 { *slot = value; 0 } pub fn main() -> i64 { 0 }",
+        ))
+        .expect("caller-owned storage may retain a reference supplied by the caller");
+    assert!(
+        external_value.diagnostics.is_empty(),
+        "{:#?}",
+        external_value.diagnostics
+    );
+}
+
+#[test]
 fn active_unique_loan_rejects_move_of_its_referent() {
     let diagnostics = match StageZeroCompiler::new().compile(request(
         "pub fn main() -> i64 { let value = 1; let reference = &mut value; move value; *reference }",

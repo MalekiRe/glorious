@@ -329,6 +329,9 @@ impl Analyzer<'_> {
     }
 
     fn assign(&mut self, place: CorePlace, value: Value, span: Span) {
+        if self.place_targets_external_storage(&place) {
+            self.report_external_store_escape(&value, span);
+        }
         match place {
             CorePlace::Local { name, .. } => {
                 self.values.insert(name, value);
@@ -351,6 +354,19 @@ impl Analyzer<'_> {
                 self.value(reference);
             }
             CorePlace::Error => {}
+        }
+    }
+
+    /// Whether this assignment reaches storage supplied by the caller. Field
+    /// projections preserve their base, so `slot.field = &local` must carry
+    /// the same destruction/outlives obligation as `*slot = &local`.
+    fn place_targets_external_storage(&mut self, place: &CorePlace) -> bool {
+        match place {
+            CorePlace::Local { .. } | CorePlace::Error => false,
+            CorePlace::Field { base, .. } => self.place_targets_external_storage(base),
+            CorePlace::Deref { reference, .. } => {
+                value_contains_external_reference(&self.value(*reference))
+            }
         }
     }
 
@@ -397,6 +413,29 @@ impl Analyzer<'_> {
                 "G5015",
                 format!("effect payload carries closure environment {environment:?} borrowing body-local place `{root}` across a suspension boundary"),
             );
+        }
+    }
+
+    fn report_external_store_escape(&mut self, value: &Value, span: Span) {
+        let mut emitted = BTreeSet::new();
+        for root in borrowed_roots(value) {
+            if emitted.insert(("reference", root.clone())) {
+                self.error(
+                    span,
+                    "G5022",
+                    format!(
+                        "assignment through caller-owned reference stores a borrow of body-local place `{root}` past this body's destruction"
+                    ),
+                );
+            }
+        }
+        for Capture::Borrowed { root, environment } in closure_captures(value) {
+            let message = format!(
+                "assignment through caller-owned reference stores closure environment {environment:?} borrowing body-local place `{root}` past this body's destruction"
+            );
+            if emitted.insert(("closure", message.clone())) {
+                self.error(span, "G5022", message);
+            }
         }
     }
 
@@ -477,6 +516,19 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
             }
         }
         Value::Closure { .. } | Value::None | Value::ExternalBorrowed => {}
+    }
+}
+
+/// A reference coming from a parameter may name caller-owned storage. Joins
+/// are conservative: if any dynamic predecessor exposes external storage, a
+/// body-local borrow cannot safely be written through the merged receiver.
+fn value_contains_external_reference(value: &Value) -> bool {
+    match value {
+        Value::ExternalBorrowed => true,
+        Value::Aggregate(values) | Value::Joined(values) => {
+            values.iter().any(value_contains_external_reference)
+        }
+        Value::None | Value::Borrowed { .. } | Value::Closure { .. } => false,
     }
 }
 
