@@ -1151,6 +1151,80 @@ fn typed_core_resolves_deep_handler_operations_payloads_and_resumptions() {
 }
 
 #[test]
+fn typed_core_interprets_with_wildcard_as_resumption_discard() {
+    let package = PackageKey("core-handler-with-wildcard@0.1.0".into());
+    let source = "effect Log { [0, 1] write(value: i64) -> i64; } pub fn main() -> i64 { handle Log::write(1) { Log::write(value) with _ => 0 } }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let clause = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Handle { clauses, .. } => clauses.first(),
+            _ => None,
+        })
+        .expect("handler clause");
+    assert!(matches!(
+        clause.resumption,
+        CoreHandlerResumption::Discard { .. }
+    ));
+}
+
+#[test]
+fn typed_core_rejects_a_continuation_that_shadows_a_payload_binder() {
+    let package = PackageKey("core-handler-duplicate-continuation@0.1.0".into());
+    let source = "effect Log { [1, 1] write(value: i64) -> i64; } pub fn main() -> i64 { handle Log::write(1) { Log::write(value) with value => value(0) } }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    assert!(
+        body.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4017"),
+        "parser accepted duplicate handler binder: {:#?}",
+        body.diagnostics
+    );
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4160"),
+        "typed Core accepted duplicate handler binder: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn handler_coverage_tracks_direct_operations_but_calls_require_total_protocol_coverage() {
     let package = PackageKey("core-handler-coverage@0.1.0".into());
     let source = "effect Console { read() -> i64; write(value: i64) -> i64; } effect Stop { abort() -> !; } pub fn worker() -> i64 / Console { Console::write(0) } pub fn partial() -> i64 { handle Console::read() { Console::read() => 1 } } pub fn partial_call() -> i64 { handle worker() { Console::read() => 1 } } pub fn terminal() -> i64 { handle Stop::abort() { Stop::abort() with resume => 42 } }";

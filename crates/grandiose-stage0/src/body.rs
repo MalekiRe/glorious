@@ -551,11 +551,31 @@ impl Parser<'_> {
                     self.lexed.tokens[self.tokens[self.position - 1]].span,
                 ),
             );
-            let resumption = if self.word() == Some("with") {
+            let (resumption, discard_resumption) = if self.word() == Some("with") {
                 self.position += 1;
-                Some(self.expect_identifier()?)
+                let continuation = self.current()?;
+                let name = self.expect_identifier()?;
+                // `_` is the explicit full-control spelling for abandoning a
+                // continuation.  It is not a source-level callable named
+                // `_`: preserving that distinction lets Core enforce the
+                // operation's quantitative cancellation contract.
+                if name == "_" {
+                    (None, true)
+                } else {
+                    // Payload patterns and the explicit continuation inhabit
+                    // one handler-clause scope.  Do not silently shadow a
+                    // payload binder with the generated callable identity.
+                    if !binders.insert(name.clone()) {
+                        self.error_at(
+                            self.lexed.tokens[continuation].span,
+                            "G4017",
+                            "duplicate binder in one handler clause",
+                        );
+                    }
+                    (Some(name), false)
+                }
             } else {
-                None
+                (None, false)
             };
             if !self.at_operator("=>") {
                 self.error_current("G4024", "expected `=>` before handler clause body");
@@ -577,7 +597,7 @@ impl Parser<'_> {
                 operation_arguments,
                 patterns,
                 resumption,
-                discard_resumption: false,
+                discard_resumption,
                 body,
                 span,
             });

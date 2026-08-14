@@ -3363,7 +3363,25 @@ impl Elaborator<'_> {
                 self.recovered |= elaboration.recovered;
                 elaboration
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // `BodySyntax` normally rejects this while parsing, but Typed Core is
+        // also an API boundary used by recovered and tooling syntax.  Keep
+        // the handler environment sound even when a caller supplies a body
+        // directly: an explicit generated continuation must not overwrite a
+        // payload binder in the same clause scope.
+        if let Some(resumption) = &source.resumption
+            && patterns
+                .iter()
+                .flat_map(|pattern| &pattern.plan.bindings)
+                .any(|binding| binding.name == *resumption)
+        {
+            self.error(
+                source.span,
+                "G4160",
+                "handler continuation binder conflicts with a payload binder",
+            );
+            self.recovered = true;
+        }
         ResolvedHandlerClause {
             source,
             effect: EffectInstance {

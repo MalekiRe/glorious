@@ -125,6 +125,33 @@ fn body_parser_preserves_structural_handler_arms_and_legacy_perform_spelling() {
 }
 
 #[test]
+fn body_parser_treats_with_wildcard_as_an_explicit_continuation_discard() {
+    let body = parse("{ handle perform Console::read() { Console::read() with _ => 0 } }");
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected block");
+    };
+    let ExprKind::Handle { clauses, .. } = &body.expression(values[0]).kind else {
+        panic!("expected handler expression");
+    };
+    assert!(clauses[0].resumption.is_none());
+    assert!(clauses[0].discard_resumption);
+}
+
+#[test]
+fn body_parser_rejects_continuation_name_that_duplicates_a_payload_binder() {
+    let body =
+        parse("{ handle perform Console::read(1) { Console::read(value) with value => 0 } }");
+    assert!(
+        body.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4017"),
+        "duplicate handler binder was accepted: {:#?}",
+        body.diagnostics
+    );
+}
+
+#[test]
 fn body_parser_keeps_literal_and_tuple_completion_arms_distinct_from_operations() {
     let body = parse("{ handle 1 { 1 => 2, (left, right) => left } }");
     assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
