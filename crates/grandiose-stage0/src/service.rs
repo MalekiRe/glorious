@@ -715,7 +715,7 @@ impl StageZeroCompiler {
         for source in snapshot.world().sources.iter() {
             dependencies.record(DependencyNode::Input(source.key), source.digest, vec![]);
         }
-        let graph = ModuleGraph::build_with_interface_transaction(
+        let mut graph = ModuleGraph::build_with_interface_transaction(
             snapshot.world(),
             &snapshot.world().root_package,
             interfaces,
@@ -728,16 +728,6 @@ impl StageZeroCompiler {
                 CompileDiagnostic::source(diagnostic.code, diagnostic.message, diagnostic.span)
             })
             .collect::<Vec<_>>();
-        let Some(root) = graph.modules.get(&graph.root) else {
-            return Err(failed(input_fingerprint, diagnostics, &source_lengths));
-        };
-        for node in graph.modules.values() {
-            dependencies.record(
-                DependencyNode::Interface(node.key.clone()),
-                node.interface.interface.public_fingerprint,
-                vec![DependencyNode::Input(node.file)],
-            );
-        }
         for node in graph.modules.values() {
             session.checkpoint(0)?;
             diagnostics.extend(node.interface.diagnostics.iter().map(|diagnostic| {
@@ -751,6 +741,25 @@ impl StageZeroCompiler {
         let index = DefinitionIndex::from_interfaces(
             graph.modules.values().map(|node| &node.interface.interface),
         );
+        // Local collection cannot know the transitive public surface of a
+        // module alias or glob until every interface in the module graph has
+        // been frozen. Seal that surface before publishing dependency facts:
+        // a public member added behind `pub use api::*` must invalidate the
+        // facade/root interface even though the facade source did not change.
+        for node in graph.modules.values_mut() {
+            node.interface.interface.public_fingerprint =
+                index.sealed_public_fingerprint(&node.interface.interface);
+        }
+        let Some(root) = graph.modules.get(&graph.root) else {
+            return Err(failed(input_fingerprint, diagnostics, &source_lengths));
+        };
+        for node in graph.modules.values() {
+            dependencies.record(
+                DependencyNode::Interface(node.key.clone()),
+                node.interface.interface.public_fingerprint,
+                vec![DependencyNode::Input(node.file)],
+            );
+        }
         diagnostics.extend(index.validate_imports().into_iter().map(|diagnostic| {
             CompileDiagnostic::source(diagnostic.code, diagnostic.message, Some(diagnostic.span))
         }));

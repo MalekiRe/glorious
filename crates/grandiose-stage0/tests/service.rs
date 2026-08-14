@@ -423,6 +423,173 @@ fn service_tracks_private_body_edits_without_invalidating_public_products() {
 }
 
 #[test]
+fn service_invalidates_public_glob_facades_when_the_target_api_changes() {
+    let compiler = StageZeroCompiler::new();
+    let root = "pub mod api; pub mod facade; pub fn main() -> i64 { 42 }";
+    let parent = compiler
+        .import_revision(
+            request_with_logical_sources(
+                root,
+                &[
+                    ("src/api/api.glorious", "pub fn answer() -> i64 { 1 }"),
+                    ("src/facade/facade.glorious", "pub use crate::api::*;"),
+                ],
+            ),
+            None,
+        )
+        .unwrap();
+    compiler.compile_revision(parent).unwrap();
+    let child = compiler
+        .import_revision(
+            request_with_logical_sources(
+                root,
+                &[
+                    (
+                        "src/api/api.glorious",
+                        "pub fn answer() -> i64 { 1 } pub fn later() -> i64 { 2 }",
+                    ),
+                    ("src/facade/facade.glorious", "pub use crate::api::*;"),
+                ],
+            ),
+            Some(parent),
+        )
+        .unwrap();
+    compiler.compile_revision(child).unwrap();
+
+    let package = PackageKey("app@0.1.0".into());
+    for path in ["crate", "crate::facade"] {
+        let module = ModuleKey {
+            package: package.clone(),
+            path: path.into(),
+        };
+        assert!(matches!(
+            compiler
+                .dependency_trace(child, &DependencyNode::Interface(module))
+                .unwrap()
+                .status,
+            DependencyStatus::Red { .. }
+        ));
+    }
+}
+
+#[test]
+fn service_keeps_public_glob_facades_green_for_private_target_edits() {
+    let compiler = StageZeroCompiler::new();
+    let root = "pub mod api; pub mod facade; pub fn main() -> i64 { 42 }";
+    let parent = compiler
+        .import_revision(
+            request_with_logical_sources(
+                root,
+                &[
+                    (
+                        "src/api/api.glorious",
+                        "pub fn answer() -> i64 { 1 } fn hidden() -> i64 { 1 }",
+                    ),
+                    ("src/facade/facade.glorious", "pub use crate::api::*;"),
+                ],
+            ),
+            None,
+        )
+        .unwrap();
+    compiler.compile_revision(parent).unwrap();
+    let child = compiler
+        .import_revision(
+            request_with_logical_sources(
+                root,
+                &[
+                    (
+                        "src/api/api.glorious",
+                        "pub fn answer() -> i64 { 1 } fn hidden() -> i64 { 2 }",
+                    ),
+                    ("src/facade/facade.glorious", "pub use crate::api::*;"),
+                ],
+            ),
+            Some(parent),
+        )
+        .unwrap();
+    compiler.compile_revision(child).unwrap();
+
+    let package = PackageKey("app@0.1.0".into());
+    for path in ["crate", "crate::api", "crate::facade"] {
+        let module = ModuleKey {
+            package: package.clone(),
+            path: path.into(),
+        };
+        assert!(matches!(
+            compiler
+                .dependency_trace(child, &DependencyNode::Interface(module))
+                .unwrap()
+                .status,
+            DependencyStatus::Green { parent: green_parent } if green_parent == parent
+        ));
+    }
+}
+
+#[test]
+fn service_invalidates_explicit_and_module_reexports_with_their_target_contract() {
+    let compiler = StageZeroCompiler::new();
+    let root = "pub mod api; pub mod explicit; pub mod module; pub fn main() -> i64 { 42 }";
+    let parent = compiler
+        .import_revision(
+            request_with_logical_sources(
+                root,
+                &[
+                    ("src/api/api.glorious", "pub fn answer() -> i64 { 1 }"),
+                    (
+                        "src/explicit/explicit.glorious",
+                        "pub use crate::api::answer;",
+                    ),
+                    (
+                        "src/module/module.glorious",
+                        "pub use crate::api as client;",
+                    ),
+                ],
+            ),
+            None,
+        )
+        .unwrap();
+    compiler.compile_revision(parent).unwrap();
+    let child = compiler
+        .import_revision(
+            request_with_logical_sources(
+                root,
+                &[
+                    (
+                        "src/api/api.glorious",
+                        "pub fn answer(value: i64) -> i64 { value }",
+                    ),
+                    (
+                        "src/explicit/explicit.glorious",
+                        "pub use crate::api::answer;",
+                    ),
+                    (
+                        "src/module/module.glorious",
+                        "pub use crate::api as client;",
+                    ),
+                ],
+            ),
+            Some(parent),
+        )
+        .unwrap();
+    compiler.compile_revision(child).unwrap();
+
+    let package = PackageKey("app@0.1.0".into());
+    for path in ["crate", "crate::explicit", "crate::module"] {
+        let module = ModuleKey {
+            package: package.clone(),
+            path: path.into(),
+        };
+        assert!(matches!(
+            compiler
+                .dependency_trace(child, &DependencyNode::Interface(module))
+                .unwrap()
+                .status,
+            DependencyStatus::Red { .. }
+        ));
+    }
+}
+
+#[test]
 fn service_traces_concrete_instances_and_invalidates_changed_callee_edges() {
     let compiler = StageZeroCompiler::new();
     let parent = compiler

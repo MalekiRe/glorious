@@ -468,6 +468,75 @@ fn public_globs_make_public_child_modules_traversable_without_source_order() {
 }
 
 #[test]
+fn sealed_public_interfaces_include_transitive_module_alias_and_glob_surfaces() {
+    let package = PackageKey("resolution-sealed-public-surface@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod api; pub mod facade;");
+    let facade = collect("crate::facade", "pub use crate::api as client;");
+    let api_before = collect("crate::api", "pub fn answer() { () } fn private() { () }");
+    let api_after = collect(
+        "crate::api",
+        "pub fn answer() { () } pub fn newly_exported() { () } fn private() { () }",
+    );
+
+    let before = DefinitionIndex::from_interfaces([&root, &facade, &api_before]);
+    let after = DefinitionIndex::from_interfaces([&root, &facade, &api_after]);
+
+    assert_ne!(
+        before.sealed_public_fingerprint(&facade),
+        after.sealed_public_fingerprint(&facade),
+        "a public module alias must carry the target's exported API"
+    );
+    assert_ne!(
+        before.sealed_public_fingerprint(&root),
+        after.sealed_public_fingerprint(&root),
+        "a public module edge must carry its recursively reachable API"
+    );
+
+    let glob = collect("crate::facade", "pub use crate::api::*;");
+    let glob_before = DefinitionIndex::from_interfaces([&root, &glob, &api_before]);
+    let glob_after = DefinitionIndex::from_interfaces([&root, &glob, &api_after]);
+    assert_ne!(
+        glob_before.sealed_public_fingerprint(&glob),
+        glob_after.sealed_public_fingerprint(&glob),
+        "a public glob must carry the exact exported names it introduces"
+    );
+}
+
+#[test]
+fn sealed_public_interfaces_exclude_private_members_behind_public_modules() {
+    let package = PackageKey("resolution-sealed-private-surface@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod api; pub mod facade;");
+    let facade = collect("crate::facade", "pub use crate::api::*;");
+    let api_before = collect("crate::api", "pub fn answer() { () } fn hidden() { 1 }");
+    let api_after = collect("crate::api", "pub fn answer() { () } fn hidden() { 2 }");
+
+    let before = DefinitionIndex::from_interfaces([&root, &facade, &api_before]);
+    let after = DefinitionIndex::from_interfaces([&root, &facade, &api_after]);
+    assert_eq!(
+        before.sealed_public_fingerprint(&facade),
+        after.sealed_public_fingerprint(&facade),
+        "private target implementation changes must not churn a public facade ABI"
+    );
+    assert_eq!(
+        before.sealed_public_fingerprint(&root),
+        after.sealed_public_fingerprint(&root),
+        "private target implementation changes must not churn the package surface"
+    );
+}
+
+#[test]
 fn glob_imports_expand_deterministically_and_contribute_import_occurrences() {
     let package = PackageKey("resolution-glob@0.1.0".into());
     let collect = |module: &str, source: &str| {

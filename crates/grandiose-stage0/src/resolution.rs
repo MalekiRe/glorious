@@ -72,8 +72,14 @@ pub struct DefinitionIndex {
     /// inside a private module from becoming reachable merely by spelling its
     /// fully-qualified path.
     module_visibility: BTreeMap<ModuleKey, bool>,
+    /// Module declarations retain the concrete child they introduce.  A
+    /// public module binding is an exported traversal capability, so sealing
+    /// an interface must include the public surface behind that binding rather
+    /// than only its syntactic `mod name` header.
+    module_targets: BTreeMap<DefKey, ModuleKey>,
     imports: BTreeMap<ModuleKey, Vec<ImportBinding>>,
     owners: BTreeMap<DefKey, ModuleKey>,
+    definition_contracts: BTreeMap<DefKey, DefinitionContract>,
     type_generic_arities: BTreeMap<DefKey, u32>,
     type_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
     trait_generic_arities: BTreeMap<DefKey, u32>,
@@ -88,6 +94,12 @@ struct IndexedDefinition {
     key: DefKey,
     module: ModuleKey,
     public: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct DefinitionContract {
+    header_fingerprint: crate::identity::Digest,
+    constant_value_fingerprint: Option<crate::identity::Digest>,
 }
 
 /// An explicit source-level import binding, retained independently of body
@@ -130,6 +142,12 @@ impl DefinitionIndex {
             self.owners
                 .entry(definition.key)
                 .or_insert_with(|| definition.module.clone());
+            self.definition_contracts
+                .entry(definition.key)
+                .or_insert(DefinitionContract {
+                    header_fingerprint: definition.header_fingerprint,
+                    constant_value_fingerprint: definition.constant_value_fingerprint,
+                });
             if definition.namespace == Some(DefinitionNamespace::Module)
                 && let Some(name) = &definition.name
             {
@@ -141,9 +159,10 @@ impl DefinitionIndex {
                 // interface error.  Never let a later recovered duplicate
                 // widen access while that error is present.
                 self.module_visibility
-                    .entry(child)
+                    .entry(child.clone())
                     .and_modify(|public| *public &= definition.public)
                     .or_insert(definition.public);
+                self.module_targets.entry(definition.key).or_insert(child);
             }
             if definition.namespace == Some(DefinitionNamespace::Type) {
                 let (arity, kinds) = match &definition.syntax.header {
@@ -251,6 +270,123 @@ impl DefinitionIndex {
 
     pub fn resolve(&self, namespace: DefinitionNamespace, name: &str) -> ResolutionState {
         self.classify(self.entries.get(&(namespace, name.to_owned())), None)
+    }
+
+    /// Seal a module's exported semantic surface after the complete module
+    /// graph has been indexed. Interface collection intentionally runs before
+    /// that graph is complete, so its local header fingerprint cannot know
+    /// what a `pub use api::*` or `pub use api as facade` eventually exposes.
+    ///
+    /// The returned digest includes the frozen local header contract and the
+    /// exact externally visible names reachable through public declarations,
+    /// re-exports, and public module edges. Private names/imports are
+    /// deliberately absent. This is the value published to dependency
+    /// tracking and package-interface consumers; otherwise changing a public
+    /// item behind a public glob could leave an unchanged facade ABI.
+    pub fn sealed_public_fingerprint(
+        &self,
+        interface: &PackageInterface,
+    ) -> crate::identity::Digest {
+        let requester = ModuleKey {
+            package: interface.module.package.clone(),
+            path: "<dependency>".into(),
+        };
+        let mut active = BTreeSet::new();
+        let surface = self.public_module_surface(&interface.module, &requester, &mut active);
+        crate::identity::Digest::of_parts([
+            b"grandiose-stage0-interface-sealed-v1".as_slice(),
+            interface.public_fingerprint.as_bytes().as_slice(),
+            surface.as_bytes().as_slice(),
+        ])
+    }
+
+    fn public_module_surface(
+        &self,
+        module: &ModuleKey,
+        requester: &ModuleKey,
+        active: &mut BTreeSet<ModuleKey>,
+    ) -> crate::identity::Digest {
+        if !active.insert(module.clone()) {
+            // A cycle has no source-order-dependent fallback. Export
+            // validation reports invalid value re-export cycles; retaining a
+            // canonical marker here also makes malformed interface products
+            // deterministic and prevents recursive fingerprinting.
+            return crate::identity::Digest::of_parts([
+                b"grandiose-stage0-public-surface-cycle-v1".as_slice(),
+                module.package.0.as_bytes(),
+                module.path.as_bytes(),
+            ]);
+        }
+
+        let mut bytes = Vec::new();
+        append_surface(&mut bytes, b"grandiose-stage0-public-module-surface-v1");
+        append_surface(&mut bytes, module.package.0.as_bytes());
+        append_surface(&mut bytes, module.path.as_bytes());
+        for namespace in all_namespaces() {
+            let names = self.module_member_names(module, namespace, &mut BTreeSet::new());
+            for name in names {
+                let state = self.resolve_member(
+                    namespace,
+                    module,
+                    &name,
+                    requester,
+                    true,
+                    &mut BTreeSet::new(),
+                );
+                match state {
+                    ResolutionState::Resolved(key) => {
+                        append_surface(&mut bytes, b"resolved");
+                        append_surface(&mut bytes, &[namespace as u8]);
+                        append_surface(&mut bytes, name.as_bytes());
+                        self.append_definition_contract(&mut bytes, key);
+                        if namespace == DefinitionNamespace::Module
+                            && let Some(target) = self.module_targets.get(&key)
+                        {
+                            let nested = self.public_module_surface(target, requester, active);
+                            append_surface(&mut bytes, b"module-surface");
+                            append_surface(&mut bytes, nested.as_bytes().as_slice());
+                        }
+                    }
+                    ResolutionState::Ambiguous(mut candidates) => {
+                        canonicalize_keys(&mut candidates);
+                        append_surface(&mut bytes, b"ambiguous");
+                        append_surface(&mut bytes, &[namespace as u8]);
+                        append_surface(&mut bytes, name.as_bytes());
+                        for candidate in candidates {
+                            self.append_definition_contract(&mut bytes, candidate);
+                        }
+                    }
+                    // Inaccessible and absent names are not exported facts.
+                    ResolutionState::Unresolved
+                    | ResolutionState::Inaccessible(_)
+                    | ResolutionState::Recovered => {}
+                }
+            }
+        }
+        active.remove(module);
+        crate::identity::Digest::of_bytes(&bytes)
+    }
+
+    fn append_definition_contract(&self, bytes: &mut Vec<u8>, key: DefKey) {
+        let Some(definition) = self.definition_contracts.get(&key) else {
+            // A forged or internally inconsistent index cannot silently turn
+            // into an empty contract. Keep the stable key as a fail-closed
+            // fingerprint marker; normal index construction always finds the
+            // corresponding declaration.
+            append_surface(bytes, b"missing-definition-contract");
+            append_surface(bytes, key.0.as_bytes().as_slice());
+            return;
+        };
+        append_surface(bytes, b"definition-contract");
+        append_surface(bytes, key.0.as_bytes().as_slice());
+        append_surface(bytes, definition.header_fingerprint.as_bytes().as_slice());
+        match definition.constant_value_fingerprint {
+            Some(value) => {
+                append_surface(bytes, b"constant-value");
+                append_surface(bytes, value.as_bytes().as_slice());
+            }
+            None => append_surface(bytes, b"no-constant-value"),
+        }
     }
 
     /// Binder arity is an interface fact, not a property recovered from a
@@ -1217,6 +1353,11 @@ fn module_is_descendant_of(module: &ModuleKey, ancestor: &str) -> bool {
 fn canonicalize_keys(keys: &mut Vec<DefKey>) {
     keys.sort();
     keys.dedup();
+}
+
+fn append_surface(output: &mut Vec<u8>, bytes: &[u8]) {
+    output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+    output.extend_from_slice(bytes);
 }
 
 fn all_namespaces() -> [DefinitionNamespace; 6] {
