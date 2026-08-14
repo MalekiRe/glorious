@@ -3526,6 +3526,25 @@ fn service_replays_a_cross_call_continuation_with_resume_return() {
 }
 
 #[test]
+fn service_replays_a_heterogeneous_operation_result_across_a_call() {
+    let source = "effect Read { [2,2] read() -> Text; } pub fn helper() -> i64 / Read { let text = Read::read(); 40 } pub fn main() -> i64 { handle { let value = helper(); value + 1 } { Read::read(k) => k(\"one\") + k(\"two\") } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            resume_type: VmType::Text,
+            continuation: VmContinuationPolicy::Replay,
+            ..
+        }
+    )));
+    assert_eq!(artifact.run_i64().unwrap(), 82);
+}
+
+#[test]
 fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

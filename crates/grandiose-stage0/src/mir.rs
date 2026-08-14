@@ -7836,12 +7836,6 @@ impl Lowerer<'_> {
             return None;
         }
         let continuation = clause.continuation.as_ref()?;
-        if continuation.parameter != self.body.expression(call).ty {
-            // The continuation input is the performed operation's result, not
-            // merely an arbitrary helper return type. Do not guess a runtime
-            // frame type when the frozen source contract disagrees.
-            return None;
-        }
         for expression in root_prefix.iter().chain(prefix.iter()) {
             self.statement(*expression)?;
         }
