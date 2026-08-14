@@ -3,7 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use grandiose_stage0::{
     CoreId, DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, GenericArgument,
     InferVar, Lifetime, MirBlock, MirBlockId, MirEditor, MirFunction, MirInstruction, MirLocal,
-    MirLocalDecl, MirPattern, MirProgram, MirTerminator, Quantity, ScalarType, Type, optimize_mir,
+    MirLocalDecl, MirPattern, MirPatternField, MirProgram, MirTerminator, Quantity, ScalarType,
+    Type, optimize_mir,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -62,6 +63,47 @@ fn cfg_validation_checks_typed_block_edges_and_returns() {
     };
     *then_arguments = vec![MirLocal(0)];
     assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn mir_validation_rejects_nominal_pattern_fields_outside_frozen_arity() {
+    let definition = DefKey(Digest::of_bytes(b"mir-pattern-arity"));
+    let nominal = Type::Nominal {
+        definition,
+        arguments: vec![],
+    };
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-pattern-arity-function")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(nominal), local(Type::Scalar(ScalarType::Bool))],
+        result: Type::Scalar(ScalarType::Bool),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![MirInstruction::PatternTest {
+                dst: MirLocal(1),
+                subject: MirLocal(0),
+                pattern: MirPattern::Record {
+                    definition,
+                    field_count: 1,
+                    fields: vec![MirPatternField {
+                        index: 1,
+                        ty: Type::Scalar(ScalarType::I64),
+                        pattern: MirPattern::Any,
+                    }],
+                },
+            }],
+            terminator: MirTerminator::Return { value: MirLocal(1) },
+        }],
+    };
+
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("outside its structural arity")),
+        "forged nominal field projections must not become executable MIR"
+    );
 }
 
 #[test]

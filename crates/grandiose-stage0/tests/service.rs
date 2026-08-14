@@ -1756,6 +1756,16 @@ fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
         .unwrap();
     assert!(outcome.diagnostics.is_empty());
     assert!(!outcome.artifact.unwrap().run_bool().unwrap());
+
+    let nested_generic_source = "pub struct Pair<T> { left: T, right: T } pub enum Result<T> { Ok(T), Err } pub fn main() -> Bool { Result<Pair<i64>>::Ok(Pair<i64> { left: 1, right: 42 }) is Result<Pair<i64>>::Ok(Pair<i64> { right: 42, left: 1 }) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(nested_generic_source))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert!(
+        outcome.artifact.unwrap().run_bool().unwrap(),
+        "nested generic enum/record patterns must retain their field layout proof through the VM"
+    );
 }
 
 #[test]

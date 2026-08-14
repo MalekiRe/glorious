@@ -122,11 +122,16 @@ pub enum VmPattern {
     Tuple(Vec<VmPattern>),
     Record {
         definition: DefKey,
+        /// Frozen aggregate arity. This lets the standalone verifier reject
+        /// forged field projections without consulting compiler interfaces.
+        field_count: u32,
         fields: Vec<VmPatternField>,
     },
     Enum {
         definition: DefKey,
         variant: u32,
+        /// Frozen payload arity for this exact variant.
+        field_count: u32,
         fields: Vec<VmPatternField>,
     },
 }
@@ -685,7 +690,10 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// 27 changed protocol identities to canonical tagged generic arguments.
 /// Older layouts cannot be decoded safely because `InstallHandler` changed
 /// in place.
-pub const STAGE0_VM_SCHEMA: u32 = 28;
+// Schema 29 carries the frozen nominal-pattern arity used by the standalone
+// verifier.  Older bytecode lacks that proof and must fail closed rather than
+// being decoded with shifted field data.
+pub const STAGE0_VM_SCHEMA: u32 = 29;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -1912,6 +1920,7 @@ impl<'a> Decoder<'a> {
             tag @ (3 | 4) => {
                 let definition = self.def_key()?;
                 let variant = (tag == 4).then(|| self.u32()).transpose()?;
+                let field_count = self.u32()?;
                 let count = self.count("nominal pattern fields", MAX_DECODE_REGISTERS)?;
                 let mut fields = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -1925,9 +1934,14 @@ impl<'a> Decoder<'a> {
                     Some(variant) => Ok(VmPattern::Enum {
                         definition,
                         variant,
+                        field_count,
                         fields,
                     }),
-                    None => Ok(VmPattern::Record { definition, fields }),
+                    None => Ok(VmPattern::Record {
+                        definition,
+                        field_count,
+                        fields,
+                    }),
                 }
             }
             _ => Err(VmArtifactError::MalformedEncoding {
@@ -3070,17 +3084,24 @@ fn lower_pattern(value: &MirPattern) -> VmPattern {
         MirPattern::Any => VmPattern::Any,
         MirPattern::Literal(value) => VmPattern::Literal(value.clone()),
         MirPattern::Tuple(values) => VmPattern::Tuple(values.iter().map(lower_pattern).collect()),
-        MirPattern::Record { definition, fields } => VmPattern::Record {
+        MirPattern::Record {
+            definition,
+            field_count,
+            fields,
+        } => VmPattern::Record {
             definition: *definition,
+            field_count: *field_count,
             fields: lower_pattern_fields(fields),
         },
         MirPattern::Enum {
             definition,
             variant,
+            field_count,
             fields,
         } => VmPattern::Enum {
             definition: *definition,
             variant: *variant,
+            field_count: *field_count,
             fields: lower_pattern_fields(fields),
         },
     }
@@ -3142,13 +3163,20 @@ fn verify_pattern(pattern: &VmPattern, subject: &VmType) -> Result<(), VmArtifac
                 found: subject.clone(),
             }),
         },
-        VmPattern::Record { definition, fields }
+        VmPattern::Record {
+            definition,
+            field_count,
+            fields,
+        }
         | VmPattern::Enum {
-            definition, fields, ..
+            definition,
+            field_count,
+            fields,
+            ..
         } => match subject {
             VmType::Nominal {
                 definition: actual, ..
-            } if actual == definition => verify_pattern_fields(fields),
+            } if actual == definition => verify_pattern_fields(fields, *field_count),
             _ => Err(VmArtifactError::TypeMismatch {
                 register: 0,
                 expected: VmType::Nominal {
@@ -3160,12 +3188,20 @@ fn verify_pattern(pattern: &VmPattern, subject: &VmType) -> Result<(), VmArtifac
         },
     }
 }
-fn verify_pattern_fields(fields: &[VmPatternField]) -> Result<(), VmArtifactError> {
+fn verify_pattern_fields(
+    fields: &[VmPatternField],
+    field_count: u32,
+) -> Result<(), VmArtifactError> {
     let mut previous = None;
     for field in fields {
         if previous.is_some_and(|previous| previous >= field.index) {
             return Err(VmArtifactError::MalformedEncoding {
                 message: "pattern fields are not strictly ordered",
+            });
+        }
+        if field.index >= field_count {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "pattern field is outside its structural arity",
             });
         }
         previous = Some(field.index);
@@ -5064,17 +5100,24 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
                 .all(|(value, pattern)| matches_pattern(value, pattern)),
             _ => false,
         },
-        VmPattern::Record { definition, fields } => match value {
+        VmPattern::Record {
+            definition,
+            field_count,
+            fields,
+        } => match value {
             VmValue::Record {
                 definition: actual,
                 fields: values,
                 ..
-            } if actual == definition => matches_pattern_fields(values, fields),
+            } if actual == definition && values.len() == *field_count as usize => {
+                matches_pattern_fields(values, fields)
+            }
             _ => false,
         },
         VmPattern::Enum {
             definition,
             variant,
+            field_count,
             fields,
         } => match value {
             VmValue::Enum {
@@ -5082,7 +5125,10 @@ fn matches_pattern(value: &VmValue, pattern: &VmPattern) -> bool {
                 variant: actual_variant,
                 fields: values,
                 ..
-            } if actual == definition && actual_variant == variant => {
+            } if actual == definition
+                && actual_variant == variant
+                && values.len() == *field_count as usize =>
+            {
                 matches_pattern_fields(values, fields)
             }
             _ => false,
@@ -6603,19 +6649,26 @@ fn encode_pattern(value: &VmPattern, output: &mut Vec<u8>) {
                 encode_pattern(value, output);
             }
         }
-        VmPattern::Record { definition, fields } => {
+        VmPattern::Record {
+            definition,
+            field_count,
+            fields,
+        } => {
             output.push(3);
             output.extend_from_slice(&definition.0.as_bytes());
+            output.extend_from_slice(&field_count.to_le_bytes());
             encode_pattern_fields(fields, output);
         }
         VmPattern::Enum {
             definition,
             variant,
+            field_count,
             fields,
         } => {
             output.push(4);
             output.extend_from_slice(&definition.0.as_bytes());
             output.extend_from_slice(&variant.to_le_bytes());
+            output.extend_from_slice(&field_count.to_le_bytes());
             encode_pattern_fields(fields, output);
         }
     }

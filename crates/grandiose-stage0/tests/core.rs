@@ -1,11 +1,11 @@
 use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
-    ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, CorePlace, DeclarationScan,
-    DefKey, DefinitionIndex, Digest, EffectInstance, EffectRow, EffectRowProjection, EffectTail,
-    ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind, GenericArgument,
-    InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering,
-    MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span, StructuralU32Expr, Type,
-    TypedBody, implementation_method_key,
+    ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, CorePattern, CorePlace,
+    DeclarationScan, DefKey, DefinitionIndex, Digest, EffectInstance, EffectRow,
+    EffectRowProjection, EffectTail, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey,
+    FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath,
+    MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span,
+    StructuralU32Expr, Type, TypedBody, implementation_method_key,
 };
 use std::collections::BTreeSet;
 
@@ -345,6 +345,39 @@ fn typed_core_validation_rejects_impossible_structural_projection() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4183"),
         "invalid structural arity must be rejected before MIR lowering"
+    );
+}
+
+#[test]
+fn typed_core_validation_rejects_out_of_range_nominal_pattern_fields() {
+    let mut body = core_for(
+        "core-pattern-arity-validation@0.1.0",
+        "pub struct Pair { left: i64 } pub fn main(value: Pair) -> bool { value is Pair { left: _ } }",
+    );
+    let pattern = body
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::PatternTest { pattern, .. } => Some(pattern),
+            _ => None,
+        })
+        .expect("source is-pattern must elaborate to Core");
+    let CorePattern::Record {
+        field_count,
+        fields,
+        ..
+    } = pattern
+    else {
+        panic!("source record pattern must preserve its nominal shape")
+    };
+    assert_eq!(*field_count, 1);
+    fields[0].index = 1;
+
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4183"),
+        "forged Core nominal pattern field must be rejected before MIR lowering"
     );
 }
 

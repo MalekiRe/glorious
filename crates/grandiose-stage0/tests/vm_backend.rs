@@ -5,9 +5,9 @@ use grandiose_stage0::{
     MirInstruction, MirLocal, MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey,
     PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace,
     VmCleanupProof, VmContinuationPolicy, VmExecutionLimits, VmFunction, VmGenericArgument,
-    VmInstruction, VmPattern, VmType, decode_and_verify_artifact, decode_and_verify_program,
-    decode_artifact, decode_program, emit_vm, emit_vm_program, encode_artifact, encode_program,
-    verify_vm, verify_vm_program,
+    VmInstruction, VmPattern, VmPatternField, VmType, decode_and_verify_artifact,
+    decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
+    encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
 
@@ -1440,6 +1440,63 @@ fn structural_pattern_tests_round_trip_through_the_independent_vm_decoder() {
             .unwrap()
             .run_bool()
             .unwrap()
+    );
+}
+
+#[test]
+fn vm_verifier_rejects_nominal_pattern_fields_outside_frozen_arity() {
+    let definition = DefKey(Digest::of_bytes(b"vm-pattern-arity"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"vm-pattern-arity-function")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Nominal {
+                    definition,
+                    arguments: vec![],
+                },
+                VmType::Bool,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeRecord {
+                    dst: 1,
+                    definition,
+                    fields: vec![0],
+                    field_types: vec![VmType::I64],
+                },
+                VmInstruction::PatternTest {
+                    dst: 2,
+                    subject: 1,
+                    pattern: VmPattern::Record {
+                        definition,
+                        field_count: 1,
+                        fields: vec![VmPatternField {
+                            index: 1,
+                            ty: VmType::I64,
+                            pattern: VmPattern::Any,
+                        }],
+                    },
+                },
+                VmInstruction::Return { value: 2 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"vm-pattern-arity-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+
+    assert!(
+        verify_vm(candidate).is_err_and(|error| matches!(
+            error,
+            VmArtifactError::MalformedEncoding {
+                message: "pattern field is outside its structural arity"
+            }
+        )),
+        "serialized bytecode must fail closed before an invalid pattern can execute"
     );
 }
 

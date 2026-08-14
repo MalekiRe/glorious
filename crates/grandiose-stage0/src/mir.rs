@@ -30,11 +30,17 @@ pub enum MirPattern {
     Tuple(Vec<MirPattern>),
     Record {
         definition: DefKey,
+        /// Frozen structural layout proof inherited from Typed Core.  MIR
+        /// cannot consult source interface tables, so every selected field
+        /// must remain bounded by this arity at the hostile-MIR boundary.
+        field_count: u32,
         fields: Vec<MirPatternField>,
     },
     Enum {
         definition: DefKey,
         variant: u32,
+        /// Payload arity for this exact enum variant.
+        field_count: u32,
         fields: Vec<MirPatternField>,
     },
 }
@@ -11709,7 +11715,9 @@ fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
             .collect::<Option<Vec<_>>>()
             .map(MirPattern::Tuple),
         CorePattern::Record {
-            definition, fields, ..
+            definition,
+            field_count,
+            fields,
         } => fields
             .into_iter()
             .map(|field| {
@@ -11720,10 +11728,15 @@ fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
                 })
             })
             .collect::<Option<Vec<_>>>()
-            .map(|fields| MirPattern::Record { definition, fields }),
+            .map(|fields| MirPattern::Record {
+                definition,
+                field_count,
+                fields,
+            }),
         CorePattern::Enum {
             definition,
             variant,
+            field_count,
             fields,
             ..
         } => fields
@@ -11739,6 +11752,7 @@ fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
             .map(|fields| MirPattern::Enum {
                 definition,
                 variant,
+                field_count,
                 fields,
             }),
         CorePattern::Error => None,
@@ -11759,28 +11773,38 @@ fn validate_pattern(pattern: &MirPattern, subject: &Type) -> Result<(), String> 
                 .try_for_each(|(pattern, ty)| validate_pattern(pattern, ty)),
             _ => Err("MIR tuple pattern has an incompatible subject type".into()),
         },
-        MirPattern::Record { definition, fields } => match subject {
-            Type::Nominal {
-                definition: actual, ..
-            } if actual == definition => validate_pattern_fields(fields),
-            _ => Err("MIR record pattern has an incompatible subject type".into()),
-        },
-        MirPattern::Enum {
-            definition, fields, ..
+        MirPattern::Record {
+            definition,
+            field_count,
+            fields,
         } => match subject {
             Type::Nominal {
                 definition: actual, ..
-            } if actual == definition => validate_pattern_fields(fields),
+            } if actual == definition => validate_pattern_fields(fields, *field_count),
+            _ => Err("MIR record pattern has an incompatible subject type".into()),
+        },
+        MirPattern::Enum {
+            definition,
+            field_count,
+            fields,
+            ..
+        } => match subject {
+            Type::Nominal {
+                definition: actual, ..
+            } if actual == definition => validate_pattern_fields(fields, *field_count),
             _ => Err("MIR enum pattern has an incompatible subject type".into()),
         },
     }
 }
 
-fn validate_pattern_fields(fields: &[MirPatternField]) -> Result<(), String> {
+fn validate_pattern_fields(fields: &[MirPatternField], field_count: u32) -> Result<(), String> {
     let mut previous = None;
     for field in fields {
         if previous.is_some_and(|previous| previous >= field.index) {
             return Err("MIR pattern fields are not strictly ordered".into());
+        }
+        if field.index >= field_count {
+            return Err("MIR pattern field is outside its structural arity".into());
         }
         previous = Some(field.index);
         validate_pattern(&field.pattern, &field.ty)?;
