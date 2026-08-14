@@ -96,6 +96,49 @@ fn cli_binds_private_runtime_leaves_only_from_explicit_host_manifest() {
 }
 
 #[test]
+fn cli_binds_a_private_standard_library_leaf_from_an_explicit_package_source() {
+    let directory = temporary_directory();
+    let root = directory.join("main.glorious");
+    let standard = directory.join("std.glorious");
+    fs::write(
+        &root,
+        "use std::byte_len; pub fn main() -> usize { byte_len(\"a🦀\") }",
+    )
+    .unwrap();
+    fs::write(
+        &standard,
+        "fn __g1_text_byte_len(value: Text) -> usize { () } pub fn byte_len(value: Text) -> usize { __g1_text_byte_len(value) }",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_grc-stage0"))
+        .args([
+            "--root-package",
+            "app@0.1.0",
+            "--source",
+            "std@0.1.0",
+            "src/lib.glorious",
+            standard.to_str().unwrap(),
+            "--runtime-standard-library",
+            "std@0.1.0",
+            "--runtime-leaf",
+            "text-byte-len",
+            "crate",
+            "__g1_text_byte_len",
+            "run",
+            root.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "package runtime-manifest run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "5\n");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn cli_renders_invalid_request_failures_as_stable_diagnostics() {
     let directory = temporary_directory();
     let source = directory.join("invalid-utf8.glorious");

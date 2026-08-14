@@ -14,16 +14,35 @@ enum DiagnosticFormat {
     Json,
 }
 
+struct CliSource {
+    package: PackageKey,
+    logical_path: LogicalPath,
+    file: String,
+}
+
+struct CliOptions {
+    diagnostic_format: DiagnosticFormat,
+    runtime_manifest: Option<RuntimeManifestInput>,
+    root_package: PackageKey,
+    additional_sources: Vec<CliSource>,
+    positional: Vec<String>,
+}
+
 fn main() -> ExitCode {
-    let (diagnostic_format, runtime_manifest, arguments) =
-        match split_cli_options(env::args().skip(1)) {
-            Ok(arguments) => arguments,
-            Err(message) => {
-                eprintln!("grc-stage0: {message}");
-                usage();
-                return ExitCode::from(2);
-            }
-        };
+    let CliOptions {
+        diagnostic_format,
+        runtime_manifest,
+        root_package,
+        additional_sources,
+        positional: arguments,
+    } = match split_cli_options(env::args().skip(1)) {
+        Ok(arguments) => arguments,
+        Err(message) => {
+            eprintln!("grc-stage0: {message}");
+            usage();
+            return ExitCode::from(2);
+        }
+    };
     let mut arguments = arguments.into_iter();
     let Some(command) = arguments.next() else {
         usage();
@@ -64,7 +83,25 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let package = PackageKey("command@0.1.0".into());
+    let mut sources = vec![SourceInput::new(
+        root_package.clone(),
+        LogicalPath::parse("src/main.glorious").expect("static logical path is valid"),
+        bytes,
+    )];
+    for additional in additional_sources {
+        let bytes = match fs::read(&additional.file) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                eprintln!("grc-stage0: cannot read {}: {error}", additional.file);
+                return ExitCode::from(1);
+            }
+        };
+        sources.push(SourceInput::new(
+            additional.package,
+            additional.logical_path,
+            bytes,
+        ));
+    }
     let request = CompilationRequest {
         build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"grandiose-stage0-command-v6")),
         mode: if matches!(command.as_str(), "run" | "emit-vm") {
@@ -72,14 +109,11 @@ fn main() -> ExitCode {
         } else {
             CompilationMode::Check
         },
-        root_package: package.clone(),
-        // The CLI is a host adapter. It maps its one explicit file input into
-        // the compiler's logical source universe; semantic phases see no path.
-        sources: vec![SourceInput::new(
-            package,
-            LogicalPath::parse("src/main.glorious").expect("static logical path is valid"),
-            bytes,
-        )],
+        root_package,
+        // The CLI owns all host paths and maps them into an explicit logical
+        // source world. Semantic phases receive only immutable package/path
+        // identities and source bytes.
+        sources,
         target: "stage0-vm".into(),
         semantic_options: BTreeMap::new(),
         codegen_options: BTreeMap::new(),
@@ -119,13 +153,13 @@ fn main() -> ExitCode {
     }
 }
 
-fn split_cli_options(
-    arguments: impl IntoIterator<Item = String>,
-) -> Result<(DiagnosticFormat, Option<RuntimeManifestInput>, Vec<String>), String> {
+fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliOptions, String> {
     let mut format = DiagnosticFormat::Text;
     let mut seen_format = false;
     let mut standard_library = None;
     let mut selectors = Vec::new();
+    let mut root_package = None;
+    let mut additional_sources = Vec::new();
     let mut positional = Vec::new();
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
@@ -172,6 +206,35 @@ fn split_cli_options(
                 });
                 continue;
             }
+            if argument == "--root-package" {
+                if root_package.is_some() {
+                    return Err("--root-package may be specified at most once".into());
+                }
+                let Some(package) = arguments.next() else {
+                    return Err("--root-package requires a PACKAGE".into());
+                };
+                root_package = Some(PackageKey(package));
+                continue;
+            }
+            if argument == "--source" {
+                let Some(package) = arguments.next() else {
+                    return Err("--source requires PACKAGE LOGICAL_PATH FILE".into());
+                };
+                let Some(logical_path) = arguments.next() else {
+                    return Err("--source requires PACKAGE LOGICAL_PATH FILE".into());
+                };
+                let Some(file) = arguments.next() else {
+                    return Err("--source requires PACKAGE LOGICAL_PATH FILE".into());
+                };
+                let logical_path = LogicalPath::parse(logical_path)
+                    .map_err(|error| format!("--source has invalid LOGICAL_PATH: {error}"))?;
+                additional_sources.push(CliSource {
+                    package: PackageKey(package),
+                    logical_path,
+                    file,
+                });
+                continue;
+            }
             positional.push(argument);
             continue;
         }
@@ -196,7 +259,13 @@ fn split_cli_options(
         None if selectors.is_empty() => None,
         None => return Err("--runtime-leaf requires --runtime-standard-library PACKAGE".into()),
     };
-    Ok((format, runtime_manifest, positional))
+    Ok(CliOptions {
+        diagnostic_format: format,
+        runtime_manifest,
+        root_package: root_package.unwrap_or_else(|| PackageKey("command@0.1.0".into())),
+        additional_sources,
+        positional,
+    })
 }
 
 fn render_diagnostics(diagnostics: &[CompileDiagnostic], format: DiagnosticFormat) {
@@ -238,4 +307,6 @@ fn usage() {
     eprintln!("       grc-stage0 [--diagnostics text|json] verify-vm PROGRAM");
     eprintln!("RUNTIME: --runtime-standard-library PACKAGE");
     eprintln!("         --runtime-leaf ROLE MODULE NAME  (repeatable)");
+    eprintln!("SOURCES: --root-package PACKAGE");
+    eprintln!("         --source PACKAGE LOGICAL_PATH FILE  (repeatable)");
 }
