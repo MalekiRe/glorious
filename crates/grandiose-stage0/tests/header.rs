@@ -606,6 +606,21 @@ fn callable_where_bounds_preserve_named_type_and_effect_bindings() {
 }
 
 #[test]
+fn canonical_unit_arrow_before_a_callable_body_does_not_parse_a_brace_as_a_type() {
+    let package = PackageKey("header-unit-arrow@0.1.0".into());
+    let source = "pub fn clear(value: &mut i64) -> { *value = 0; }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header");
+    };
+    assert!(header.result.is_none());
+}
+
+#[test]
 fn malformed_named_associated_binding_reports_the_type_frontier() {
     let package = PackageKey("header-malformed-associated-binding@0.1.0".into());
     let source = "pub fn apply<F>() where F: Fn<(), Output = > { 0 }";

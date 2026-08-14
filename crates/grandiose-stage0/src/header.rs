@@ -749,7 +749,7 @@ impl Parser<'_> {
             });
             let method_generics = self.generics();
             let parameters = self.callable_parameters();
-            let result = self.operator("->").then(|| self.ty());
+            let result = self.callable_result();
             let method = CallableHeader {
                 generics: method_generics,
                 parameters,
@@ -898,7 +898,7 @@ impl Parser<'_> {
                     });
                     let generics = body_parser.generics();
                     let parameters = body_parser.callable_parameters();
-                    let result = body_parser.operator("->").then(|| body_parser.ty());
+                    let result = body_parser.callable_result();
                     let signature = CallableHeader {
                         generics,
                         parameters,
@@ -1382,7 +1382,7 @@ impl Parser<'_> {
         if !self.punctuation(')') {
             self.error("G3204", "expected `)` after callable parameters");
         }
-        let result = self.operator("->").then(|| self.ty());
+        let result = self.callable_result();
         let effects = self.effect_row_annotation();
         let where_bounds = self.where_bounds();
         CallableHeader {
@@ -1404,6 +1404,25 @@ impl Parser<'_> {
             };
         }
         self.effect_row_literal()
+    }
+    /// A canonical callable may spell its unit result as `-> { body }`.
+    /// The brace is the already-scanned body delimiter, not a malformed type;
+    /// retain the same `None => Unit` interface representation as an omitted
+    /// result annotation.
+    fn callable_result(&mut self) -> Option<HeaderType> {
+        if !self.operator("->") {
+            return None;
+        }
+        if self.current().is_none()
+            || self.at_punctuation('{')
+            || self.word() == Some("where")
+            || self.at_operator("/")
+            || self.at_punctuation(';')
+        {
+            None
+        } else {
+            Some(self.ty())
+        }
     }
     fn effect_row_literal(&mut self) -> EffectRowHeader {
         if !self.punctuation('{') {
