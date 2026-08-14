@@ -582,6 +582,76 @@ impl InferContext {
         .canonicalized())
     }
 
+    /// Constrain `required` to be admitted by `allowed`.  Closed rows use
+    /// ordinary set inclusion; an inference-owned required tail is solved to
+    /// the remaining allowed row, while declaration-owned generic tails stay
+    /// rigid.  This gives callers a precise subset relation without silently
+    /// erasing projections or mixed-kind effect arguments.
+    pub fn constrain_effect_subset(
+        &mut self,
+        required: EffectRow,
+        allowed: EffectRow,
+    ) -> Result<EffectRow, TypeError> {
+        let required = self.resolve_effects(required).canonicalized();
+        let allowed = self.resolve_effects(allowed).canonicalized();
+        let (required_only, allowed_only) =
+            self.partition_effect_instances(&required.effects, &allowed.effects)?;
+        if !required_only.is_empty() {
+            return Err(TypeError::EffectRow {
+                expected: allowed,
+                found: required,
+            });
+        }
+        let Some(projections) = self.constrain_effect_row_projections(
+            required.projections.clone(),
+            allowed.projections.clone(),
+        )?
+        else {
+            return Err(TypeError::EffectRow {
+                expected: allowed,
+                found: required,
+            });
+        };
+        match (required.tail, allowed.tail) {
+            (None, _) => Ok(EffectRow {
+                effects: required.effects,
+                projections,
+                tail: None,
+            }
+            .canonicalized()),
+            (Some(EffectTail::Generic(left)), Some(EffectTail::Generic(right)))
+                if left == right =>
+            {
+                Ok(EffectRow {
+                    effects: required.effects,
+                    projections,
+                    tail: Some(EffectTail::Generic(left)),
+                }
+                .canonicalized())
+            }
+            (Some(EffectTail::Infer(variable)), tail) => {
+                self.bind_effect(
+                    variable,
+                    EffectRow {
+                        effects: allowed_only,
+                        projections: allowed.projections,
+                        tail,
+                    },
+                )?;
+                Ok(EffectRow {
+                    effects: required.effects,
+                    projections,
+                    tail: Some(EffectTail::Infer(variable)),
+                }
+                .canonicalized())
+            }
+            _ => Err(TypeError::EffectRow {
+                expected: allowed,
+                found: required,
+            }),
+        }
+    }
+
     fn unify_many(&mut self, left: Vec<Type>, right: Vec<Type>) -> Result<Vec<Type>, TypeError> {
         if left.len() != right.len() {
             return Err(TypeError::Arity {
@@ -748,6 +818,42 @@ impl InferContext {
                 item_arguments: self.unify_many(
                     left_projection.item_arguments,
                     right_projection.item_arguments,
+                )?,
+            });
+        }
+        Ok(Some(unified))
+    }
+
+    fn constrain_effect_row_projections(
+        &mut self,
+        required: Vec<EffectRowProjection>,
+        allowed: Vec<EffectRowProjection>,
+    ) -> Result<Option<Vec<EffectRowProjection>>, TypeError> {
+        let mut unmatched = allowed;
+        let mut unified = Vec::with_capacity(required.len());
+        for required_projection in required {
+            let Some(index) = unmatched.iter().position(|candidate| {
+                candidate.trait_definition == required_projection.trait_definition
+                    && candidate.name == required_projection.name
+                    && candidate.trait_arguments.len() == required_projection.trait_arguments.len()
+                    && candidate.item_arguments.len() == required_projection.item_arguments.len()
+            }) else {
+                return Ok(None);
+            };
+            let allowed_projection = unmatched.remove(index);
+            unified.push(EffectRowProjection {
+                subject: Box::new(
+                    self.unify(*required_projection.subject, *allowed_projection.subject)?,
+                ),
+                trait_definition: required_projection.trait_definition,
+                trait_arguments: self.unify_many(
+                    required_projection.trait_arguments,
+                    allowed_projection.trait_arguments,
+                )?,
+                name: required_projection.name,
+                item_arguments: self.unify_many(
+                    required_projection.item_arguments,
+                    allowed_projection.item_arguments,
                 )?,
             });
         }

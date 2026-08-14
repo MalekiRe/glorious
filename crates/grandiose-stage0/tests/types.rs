@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use grandiose_stage0::{
-    DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, GenericArgument, InferContext,
-    Lifetime, Quantity, ScalarType, Type, TypeError,
+    DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, EffectTail, GenericArgument,
+    InferContext, Lifetime, Quantity, ScalarType, Type, TypeError,
 };
 
 #[test]
@@ -115,6 +115,61 @@ fn open_effect_rows_unify_without_becoming_type_holes() {
         callable(closed),
         "the shared residual effect variable is solved by the closed context"
     );
+}
+
+#[test]
+fn effect_row_subset_constraints_preserve_open_tail_remainders() {
+    let trace = DefKey(Digest::of_bytes(b"Trace"));
+    let log = DefKey(Digest::of_bytes(b"Log"));
+    let mut inference = InferContext::default();
+    let required_tail = inference.fresh_effects();
+    let variable = required_tail.tail;
+    let mut required = required_tail;
+    required.effects.insert(EffectInstance {
+        definition: trace,
+        arguments: vec![],
+    });
+    let allowed = EffectRow::closed([trace, log]);
+    inference
+        .constrain_effect_subset(required, allowed)
+        .expect("open row must solve to the allowed remainder");
+    let zonked = inference.zonk_effects(match variable {
+        Some(EffectTail::Infer(variable)) => EffectRow {
+            effects: BTreeSet::from([EffectInstance {
+                definition: trace,
+                arguments: vec![],
+            }]),
+            projections: vec![],
+            tail: Some(EffectTail::Infer(variable)),
+        },
+        _ => unreachable!(),
+    });
+    assert_eq!(zonked.unwrap(), EffectRow::closed([trace, log]));
+}
+
+#[test]
+fn effect_row_subset_rejects_rigid_generic_tail_mismatches() {
+    let trace = DefKey(Digest::of_bytes(b"Trace"));
+    let required = EffectRow {
+        effects: BTreeSet::from([EffectInstance {
+            definition: trace,
+            arguments: vec![],
+        }]),
+        projections: vec![],
+        tail: Some(EffectTail::Generic(1)),
+    };
+    let allowed = EffectRow {
+        effects: BTreeSet::from([EffectInstance {
+            definition: trace,
+            arguments: vec![],
+        }]),
+        projections: vec![],
+        tail: Some(EffectTail::Generic(2)),
+    };
+    assert!(matches!(
+        InferContext::default().constrain_effect_subset(required, allowed),
+        Err(TypeError::EffectRow { .. })
+    ));
 }
 
 #[test]
