@@ -1015,6 +1015,33 @@ fn service_forwards_through_an_arbitrary_depth_one_shot_handler_chain() {
 }
 
 #[test]
+fn service_tries_ordered_refutable_clauses_at_every_deep_one_shot_handler_layer() {
+    let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle { handle Ask::ask(40) { Ask::ask(0) with k => k(0), Ask::ask(2) with k => k(2) } } { Ask::ask(0) with k => k(0), Ask::ask(1) with k => k(1) } } { Ask::ask(0) with k => k(0), Ask::ask(value) with k => k(value + 2) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .count(),
+        3
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::Forward))
+            .count(),
+        2
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_preserves_lexical_setup_at_every_deep_one_shot_handler_layer() {
     let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { let outer_seed = 40; handle { let middle_seed = outer_seed; handle { let inner_seed = middle_seed; Ask::ask(inner_seed) } { Ask::ask(0) with k => k(0) } } { Ask::ask(1) with k => k(1) } } { Ask::ask(value) with k => k(value + 2) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

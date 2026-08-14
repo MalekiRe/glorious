@@ -3116,9 +3116,11 @@ impl Lowerer<'_> {
     /// direct value substitution. Lexical setup expressions are retained at
     /// every layer and run immediately after their owning frame installs, so
     /// values they bind remain available to the enclosed frame and direct
-    /// performance. Multiple sibling arms, completion clauses, and non-linear
-    /// resumptions deliberately remain on the more general lowering paths
-    /// below.
+    /// performance. Each layer may contain an ordered, refutable sequence of
+    /// clauses for that direct operation: failed clauses advance locally and
+    /// only the final miss forwards outward. Completion clauses, unrelated
+    /// operation groups, and non-linear resumptions deliberately remain on
+    /// the more general lowering paths below.
     fn lower_root_runtime_deep_one_shot_handler(
         &mut self,
         root: CoreId,
@@ -3133,20 +3135,20 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
-        let mut layers = Vec::<CoreHandlerClause>::new();
+        let mut layers = Vec::<Vec<CoreHandlerClause>>::new();
         let mut layer_setups = Vec::<Vec<CoreId>>::new();
         while let CoreKind::Handle {
             computation,
             clauses,
         } = self.body.expression(current).kind.clone()
         {
-            // This direct-chain specialization has one operational arm per
-            // layer and no completion behavior to preserve. The ordinary
-            // lowering remains responsible for richer handler shapes.
-            if clauses.len() != 1 || clauses[0].terminal {
+            // This direct-chain specialization has no completion behavior to
+            // preserve. The operation group is checked once the protected
+            // direct performance is known below.
+            if clauses.is_empty() || clauses.iter().any(|clause| clause.terminal) {
                 return None;
             }
-            layers.push(clauses[0].clone());
+            layers.push(clauses);
             current = match self.body.expression(computation).kind.clone() {
                 CoreKind::Handle { .. } => {
                     layer_setups.push(Vec::new());
@@ -3175,18 +3177,32 @@ impl Lowerer<'_> {
         else {
             return None;
         };
-        for clause in &layers {
-            let quantity = match &clause.resumption {
-                CoreHandlerResumption::Explicit { quantity, .. }
-                | CoreHandlerResumption::Tail { quantity } => *quantity,
-                CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => {
-                    return None;
-                }
-            };
-            if quantity != crate::quantity::Quantity::ONCE
-                || clause.patterns.len() != clause.payload_types.len()
+        for clauses in &mut layers {
+            if clauses
+                .iter()
+                .any(|clause| clause.effect != effect || clause.operation != operation)
             {
                 return None;
+            }
+            if let Some(fallback) = clauses
+                .iter()
+                .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable))
+            {
+                clauses.truncate(fallback + 1);
+            }
+            for clause in clauses {
+                let quantity = match &clause.resumption {
+                    CoreHandlerResumption::Explicit { quantity, .. }
+                    | CoreHandlerResumption::Tail { quantity } => *quantity,
+                    CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => {
+                        return None;
+                    }
+                };
+                if quantity != crate::quantity::Quantity::ONCE
+                    || clause.patterns.len() != clause.payload_types.len()
+                {
+                    return None;
+                }
             }
         }
 
@@ -3196,8 +3212,8 @@ impl Lowerer<'_> {
         let resume_type = self.body.expression(current).ty.clone();
         let payloads = layers
             .iter()
-            .map(|clause| {
-                clause
+            .map(|clauses| {
+                clauses[0]
                     .payload_types
                     .iter()
                     .map(|ty| self.alloc(ty.clone(), current))
@@ -3207,68 +3223,93 @@ impl Lowerer<'_> {
         let tests = layers
             .iter()
             .zip(&payloads)
-            .map(|(clause, payloads)| {
-                if clause.patterns.iter().all(pattern_is_irrefutable) {
-                    return Some(Vec::new());
-                }
-                clause
-                    .patterns
+            .map(|(clauses, payloads)| {
+                clauses
                     .iter()
-                    .cloned()
-                    .zip(payloads.iter().copied())
-                    .map(|(pattern, subject)| {
-                        Some((
-                            self.alloc(Type::Scalar(crate::types::ScalarType::Bool), current),
-                            subject,
-                            lower_pattern(pattern)?,
-                        ))
+                    .map(|clause| {
+                        if clause.patterns.iter().all(pattern_is_irrefutable) {
+                            return Some(Vec::new());
+                        }
+                        clause
+                            .patterns
+                            .iter()
+                            .cloned()
+                            .zip(payloads.iter().copied())
+                            .map(|(pattern, subject)| {
+                                Some((
+                                    self.alloc(
+                                        Type::Scalar(crate::types::ScalarType::Bool),
+                                        current,
+                                    ),
+                                    subject,
+                                    lower_pattern(pattern)?,
+                                ))
+                            })
+                            .collect::<Option<Vec<_>>>()
                     })
                     .collect::<Option<Vec<_>>>()
             })
             .collect::<Option<Vec<_>>>()?;
 
-        let body_blocks = (0..layers.len())
-            .map(|index| MirBlockId(index as u32 + 1))
+        let body_blocks = layers
+            .iter()
+            .map(|clauses| vec![MirBlockId(0); clauses.len()])
             .collect::<Vec<_>>();
-        let mut next_block = body_blocks.len() as u32 + 1;
+        let mut next_block = 1u32;
+        let mut body_blocks = body_blocks;
+        for blocks in &mut body_blocks {
+            for block in blocks {
+                *block = MirBlockId(next_block);
+                next_block += 1;
+            }
+        }
         let test_blocks = tests
             .iter()
-            .map(|tests| {
-                (0..tests.len())
-                    .map(|_| {
-                        let block = MirBlockId(next_block);
-                        next_block += 1;
-                        block
+            .map(|clauses| {
+                clauses
+                    .iter()
+                    .map(|tests| {
+                        (0..tests.len())
+                            .map(|_| {
+                                let block = MirBlockId(next_block);
+                                next_block += 1;
+                                block
+                            })
+                            .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
         let forward_blocks = tests
             .iter()
-            .map(|tests| {
-                (!tests.is_empty()).then(|| {
-                    let block = MirBlockId(next_block);
-                    next_block += 1;
-                    block
-                })
+            .map(|clauses| {
+                clauses
+                    .last()
+                    .is_some_and(|tests| !tests.is_empty())
+                    .then(|| {
+                        let block = MirBlockId(next_block);
+                        next_block += 1;
+                        block
+                    })
             })
             .collect::<Vec<_>>();
 
         let mut entry = std::mem::take(&mut self.instructions);
-        for ((((clause, payloads), tests), body), setup) in layers
+        for ((((clauses, payloads), tests), bodies), setup) in layers
             .iter()
             .zip(&payloads)
             .zip(&test_blocks)
             .zip(&body_blocks)
             .zip(&layer_setups)
         {
+            let clause = &clauses[0];
             entry.push(MirInstruction::InstallHandler {
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
                 payload_destinations: payloads.clone(),
                 resume_type: resume_type.clone(),
-                target: tests.first().copied().unwrap_or(*body),
+                target: tests[0].first().copied().unwrap_or(bodies[0]),
             });
             self.instructions = Vec::new();
             for expression in setup {
@@ -3295,16 +3336,18 @@ impl Lowerer<'_> {
 
         let base_named = self.named.clone();
         let base_values = self.values.clone();
-        let mut bodies = Vec::with_capacity(layers.len());
-        for (clause, payloads) in layers.iter().zip(&payloads) {
-            self.instructions = Vec::new();
-            self.named = base_named.clone();
-            self.values = base_values.clone();
-            self.bind_handler_patterns(&clause.patterns, payloads)?;
-            let resumed = self.direct_handler_clause_value(clause)?;
-            self.instructions
-                .push(MirInstruction::Resume { value: resumed });
-            bodies.push(std::mem::take(&mut self.instructions));
+        let mut bodies = Vec::new();
+        for (clauses, payloads) in layers.iter().zip(&payloads) {
+            for clause in clauses {
+                self.instructions = Vec::new();
+                self.named = base_named.clone();
+                self.values = base_values.clone();
+                self.bind_handler_patterns(&clause.patterns, payloads)?;
+                let resumed = self.direct_handler_clause_value(clause)?;
+                self.instructions
+                    .push(MirInstruction::Resume { value: resumed });
+                bodies.push(std::mem::take(&mut self.instructions));
+            }
         }
         self.named = base_named;
         self.values = base_values;
@@ -3321,28 +3364,43 @@ impl Lowerer<'_> {
                 terminator: MirTerminator::Unreachable,
             });
         }
-        for (layer_index, (tests, test_block_ids)) in tests.into_iter().zip(test_blocks).enumerate()
+        for (layer_index, (clauses, clause_test_blocks)) in
+            tests.into_iter().zip(test_blocks).enumerate()
         {
-            for (index, (condition, subject, pattern)) in tests.into_iter().enumerate() {
-                blocks.push(MirBlock {
-                    parameters: vec![],
-                    instructions: vec![MirInstruction::PatternTest {
-                        dst: condition,
-                        subject,
-                        pattern,
-                    }],
-                    terminator: MirTerminator::SwitchBool {
-                        condition,
-                        then_target: test_block_ids
-                            .get(index + 1)
-                            .copied()
-                            .unwrap_or(body_blocks[layer_index]),
-                        then_arguments: vec![],
-                        else_target: forward_blocks[layer_index]
-                            .expect("refutable handler has a forward block"),
-                        else_arguments: vec![],
-                    },
-                });
+            for (clause_index, clause_tests) in clauses.into_iter().enumerate() {
+                let test_block_ids = &clause_test_blocks[clause_index];
+                if clause_tests.is_empty() {
+                    continue;
+                }
+                let failure_target = clause_test_blocks
+                    .get(clause_index + 1)
+                    .and_then(|tests| tests.first())
+                    .copied()
+                    .or_else(|| body_blocks[layer_index].get(clause_index + 1).copied())
+                    .or(forward_blocks[layer_index])
+                    .expect("ordered handler dispatch has a following clause or forward block");
+                for (test_index, (condition, subject, pattern)) in
+                    clause_tests.into_iter().enumerate()
+                {
+                    blocks.push(MirBlock {
+                        parameters: vec![],
+                        instructions: vec![MirInstruction::PatternTest {
+                            dst: condition,
+                            subject,
+                            pattern,
+                        }],
+                        terminator: MirTerminator::SwitchBool {
+                            condition,
+                            then_target: test_block_ids
+                                .get(test_index + 1)
+                                .copied()
+                                .unwrap_or(body_blocks[layer_index][clause_index]),
+                            then_arguments: vec![],
+                            else_target: failure_target,
+                            else_arguments: vec![],
+                        },
+                    });
+                }
             }
         }
         for forward in forward_blocks {
