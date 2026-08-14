@@ -4658,12 +4658,47 @@ impl Lowerer<'_> {
         else {
             return None;
         };
+        let (computation_prefix, perform, resumed_binding, residual) =
+            match self.body.expression(computation).kind.clone() {
+                CoreKind::Perform {
+                    terminal: false, ..
+                } => (Vec::new(), computation, None, Vec::new()),
+                CoreKind::Block(computation_values) => {
+                    let position = computation_values.iter().position(|candidate| {
+                        matches!(
+                            self.body.expression(*candidate).kind,
+                            CoreKind::Let {
+                                value,
+                                ..
+                            } if matches!(
+                                self.body.expression(value).kind,
+                                CoreKind::Perform { terminal: false, .. }
+                            )
+                        )
+                    })?;
+                    let CoreKind::Let { name, value } = self
+                        .body
+                        .expression(computation_values[position])
+                        .kind
+                        .clone()
+                    else {
+                        unreachable!("the performance probe only selects let bindings");
+                    };
+                    (
+                        computation_values[..position].to_vec(),
+                        value,
+                        Some(name),
+                        computation_values[position + 1..].to_vec(),
+                    )
+                }
+                _ => return None,
+            };
         let CoreKind::Perform {
             effect,
             operation,
             arguments: argument_ids,
             terminal: false,
-        } = self.body.expression(computation).kind.clone()
+        } = self.body.expression(perform).kind.clone()
         else {
             return None;
         };
@@ -4701,25 +4736,30 @@ impl Lowerer<'_> {
         for expression in &values[..handler_index] {
             self.statement(*expression)?;
         }
-        let arguments = argument_ids
-            .iter()
-            .map(|argument| self.value(*argument))
-            .collect::<Option<Vec<_>>>()?;
         let payload_destinations = clause
             .payload_types
             .iter()
-            .map(|ty| self.alloc(ty.clone(), computation))
+            .map(|ty| self.alloc(ty.clone(), perform))
             .collect::<Vec<_>>();
-        let resumed = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let resumed = self.alloc(self.body.expression(perform).ty.clone(), perform);
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
             payload_destinations: payload_destinations.clone(),
-            resume_type: self.body.expression(computation).ty.clone(),
+            resume_type: self.body.expression(perform).ty.clone(),
             target: MirBlockId(1),
         });
+        self.instructions = Vec::new();
+        for expression in &computation_prefix {
+            self.statement(*expression)?;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        entry.extend(std::mem::take(&mut self.instructions));
         entry.push(MirInstruction::Perform {
             dst: resumed,
             effect: effect.definition,
@@ -4727,7 +4767,6 @@ impl Lowerer<'_> {
             operation,
             arguments,
         });
-        entry.push(MirInstruction::UninstallHandler);
 
         // Preserve the exact lexical environment at the handler boundary for
         // its arm. The suffix is intentionally lowered only after that
@@ -4736,6 +4775,19 @@ impl Lowerer<'_> {
         let boundary_named = self.named.clone();
         let boundary_values = self.values.clone();
         self.instructions = Vec::new();
+        if let Some(binding) = resumed_binding {
+            self.named.insert(binding, resumed);
+        }
+        if let Some((last, statements)) = residual.split_last() {
+            for statement in statements {
+                self.statement(*statement)?;
+            }
+            // A statement handler discards the protected computation's final
+            // value, but its residual still has to execute before the frame
+            // can leave scope.
+            let _ = self.value(*last)?;
+        }
+        self.instructions.push(MirInstruction::UninstallHandler);
         let (last, statements) = values[handler_index + 1..].split_last()?;
         for statement in statements {
             self.statement(*statement)?;

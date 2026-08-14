@@ -1300,6 +1300,22 @@ fn service_keeps_a_statement_handler_alias_closed_before_later_shadowing() {
 }
 
 #[test]
+fn service_resumes_statement_handler_residual_before_outer_suffix() {
+    let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle { let answer = Ask::ask(); answer + 1 } { Ask::ask() with k => k(41) }; let saved = (value: i64) -> i64 { value + 1 }; saved(41) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_restores_statement_handler_residual_through_an_aliased_snapshot() {
+    let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle { let answer = Ask::ask(); answer + 1 } { Ask::ask() with k => { let saved = k; saved(41) } }; 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_composes_a_direct_operation_arm_with_a_normal_completion_arm() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 1, Ask::ask() => 41 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
