@@ -527,6 +527,27 @@ fn generic_kinds_reject_crossing_type_and_effect_row_positions() {
 }
 
 #[test]
+fn effect_row_binders_are_rejected_outside_callable_declarations() {
+    let package = PackageKey("signature-effect-row-binder-context@0.1.0".into());
+    let source = "struct Invalid<e: EffectRow> {} trait AlsoInvalid<e: EffectRow> {} type Alias<e: EffectRow> = i64;";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert_eq!(
+        signatures
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "G3314")
+            .count(),
+        3,
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn callable_effect_rows_resolve_effect_declaration_identities() {
     let package = PackageKey("signature-effect-row@0.1.0".into());
     let source = "effect Console { write() } effect Trace { note() } pub fn run() -> i64 / { Trace, Console } { 42 }";

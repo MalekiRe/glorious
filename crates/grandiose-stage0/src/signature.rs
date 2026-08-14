@@ -781,6 +781,7 @@ impl Elaborator<'_> {
         match &definition.syntax.header {
             ParsedHeader::Function(header) => ElaboratedHeader::Callable(self.callable(header)),
             ParsedHeader::TypeAlias { generics, target } => {
+                self.require_type_generics(generics, "type aliases");
                 self.bind_generics(generics);
                 ElaboratedHeader::Alias {
                     generics: generics.len() as u32,
@@ -791,6 +792,7 @@ impl Elaborator<'_> {
                 ElaboratedHeader::Constant(ty.as_ref().map(|value| self.ty(value)))
             }
             ParsedHeader::Nominal { generics, layout } => {
+                self.require_type_generics(generics, "nominal declarations");
                 self.bind_generics(generics);
                 ElaboratedHeader::Nominal {
                     generics: generics.len() as u32,
@@ -830,6 +832,7 @@ impl Elaborator<'_> {
         }
     }
     fn trait_header(&mut self, header: &TraitHeader) -> ElaboratedTrait {
+        self.require_type_generics(&header.generics, "trait declarations");
         self.bind_generics(&header.generics);
         let methods = header
             .methods
@@ -883,6 +886,7 @@ impl Elaborator<'_> {
                 .associated_types
                 .iter()
                 .map(|item| {
+                    self.require_type_generics(&item.generics, "associated type declarations");
                     (
                         item.name.clone(),
                         ElaboratedAssociatedType {
@@ -896,6 +900,7 @@ impl Elaborator<'_> {
         }
     }
     fn implementation(&mut self, header: &ImplementationHeader) -> ElaboratedImplementation {
+        self.require_type_generics(&header.generics, "implementation declarations");
         self.bind_generics(&header.generics);
         let relation = self.trait_ref(&header.relation);
         let self_ty = self.ty(&header.self_ty);
@@ -909,6 +914,7 @@ impl Elaborator<'_> {
             .iter()
             .filter(|item| item.effect_row_value.is_none())
             .map(|item| {
+                self.require_type_generics(&item.generics, "associated type definitions");
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
                 let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
@@ -935,6 +941,7 @@ impl Elaborator<'_> {
             .iter()
             .filter_map(|item| {
                 let row = item.effect_row_value.as_ref()?;
+                self.require_type_generics(&item.generics, "associated effect-row definitions");
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
                 let base = (outer_generics.len() + outer_effect_row_generics.len()) as u32;
@@ -1009,6 +1016,7 @@ impl Elaborator<'_> {
         }
     }
     fn effect_header(&mut self, header: &EffectHeader) -> ElaboratedEffect {
+        self.require_type_generics(&header.generics, "effect declarations");
         self.bind_generics(&header.generics);
         let declaration_generics = self.generics.clone();
         let declaration_effect_row_generics = self.effect_row_generics.clone();
@@ -1255,6 +1263,17 @@ impl Elaborator<'_> {
             } else {
                 self.generics.insert(name.clone(), index as u32);
             }
+        }
+    }
+    fn require_type_generics(&mut self, parameters: &GenericParameters, context: &str) {
+        for name in parameters
+            .iter()
+            .filter(|name| parameters.is_effect_row(name))
+        {
+            self.error(
+                "G3314",
+                format!("effect-row binder `{name}` is only valid on a callable, not {context}"),
+            );
         }
     }
     fn extend_generics(
