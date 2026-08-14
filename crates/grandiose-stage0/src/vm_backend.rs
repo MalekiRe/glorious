@@ -553,7 +553,8 @@ pub struct VmCleanupLoan {
 }
 impl VmCleanupProof {
     pub fn from_mir(plan: &crate::MirCleanupPlan) -> Self {
-        let mut moved_places = plan
+        debug_assert!(plan.validate().is_ok());
+        let moved_places = plan
             .moved_places
             .iter()
             .map(|place| VmCleanupPlace {
@@ -561,7 +562,7 @@ impl VmCleanupProof {
                 fields: place.fields.clone(),
             })
             .collect::<Vec<_>>();
-        let mut active_loans = plan
+        let active_loans = plan
             .active_loans
             .iter()
             .map(|loan| VmCleanupLoan {
@@ -571,18 +572,35 @@ impl VmCleanupProof {
                 unique: loan.unique,
             })
             .collect::<Vec<_>>();
-        moved_places.sort();
-        moved_places.dedup();
-        active_loans.sort();
-        active_loans.dedup();
         Self {
             moved_places,
             active_loans,
         }
     }
     pub fn validate(&self) -> bool {
-        self.moved_places.windows(2).all(|pair| pair[0] < pair[1])
-            && self.active_loans.windows(2).all(|pair| pair[0] < pair[1])
+        if self.moved_places.iter().any(|place| place.root.is_empty())
+            || self.active_loans.iter().any(|loan| loan.root.is_empty())
+            || !self.moved_places.windows(2).all(|pair| pair[0] < pair[1])
+            || !self.active_loans.windows(2).all(|pair| pair[0] < pair[1])
+        {
+            return false;
+        }
+        if self.moved_places.iter().enumerate().any(|(index, place)| {
+            self.moved_places[index + 1..].iter().any(|other| {
+                place.root == other.root
+                    && (place.fields.starts_with(&other.fields)
+                        || other.fields.starts_with(&place.fields))
+            })
+        }) {
+            return false;
+        }
+        !self.moved_places.iter().any(|moved| {
+            self.active_loans.iter().any(|loan| {
+                moved.root == loan.root
+                    && (moved.fields.starts_with(&loan.fields)
+                        || loan.fields.starts_with(&moved.fields))
+            })
+        })
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]

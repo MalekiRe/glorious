@@ -563,6 +563,50 @@ pub struct MirCleanupPlan {
     pub moved_places: Vec<crate::MoveFact>,
     pub active_loans: Vec<crate::LoanFact>,
 }
+
+impl MirCleanupPlan {
+    /// Validate the ownership facts carried across a non-local exit.
+    ///
+    /// A moved place is a disarmed cleanup slot.  It is therefore not enough
+    /// for those paths merely to be sorted: a parent and one of its children
+    /// would describe the same storage twice and would run drop glue twice
+    /// once the value runtime grows destructors.  Likewise, a live loan may
+    /// not overlap a disarmed slot.  PlaceFlow establishes both properties
+    /// for source programs; checking them again here keeps forged MIR from
+    /// manufacturing an impossible destruction proof.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.moved_places.iter().any(|place| place.root.is_empty()) {
+            return Err("MIR leave cleanup plan has an empty moved-place root");
+        }
+        if self.active_loans.iter().any(|loan| loan.root.is_empty()) {
+            return Err("MIR leave cleanup plan has an empty loan root");
+        }
+        if self.moved_places.windows(2).any(|pair| pair[0] >= pair[1])
+            || self.active_loans.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err("MIR leave cleanup plan is not canonically sorted");
+        }
+        if self.moved_places.iter().enumerate().any(|(index, place)| {
+            self.moved_places[index + 1..].iter().any(|other| {
+                place.root == other.root
+                    && (place.fields.starts_with(&other.fields)
+                        || other.fields.starts_with(&place.fields))
+            })
+        }) {
+            return Err("MIR leave cleanup plan has overlapping moved places");
+        }
+        if self.moved_places.iter().any(|moved| {
+            self.active_loans.iter().any(|loan| {
+                moved.root == loan.root
+                    && (moved.fields.starts_with(&loan.fields)
+                        || loan.fields.starts_with(&moved.fields))
+            })
+        }) {
+            return Err("MIR leave cleanup plan moves a place with a live loan");
+        }
+        Ok(())
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirBlock {
     pub parameters: Vec<MirLocal>,
@@ -2319,17 +2363,7 @@ impl MirFunction {
                 cleanup,
                 ..
             } => {
-                if cleanup
-                    .moved_places
-                    .windows(2)
-                    .any(|pair| pair[0] >= pair[1])
-                    || cleanup
-                        .active_loans
-                        .windows(2)
-                        .any(|pair| pair[0] >= pair[1])
-                {
-                    return Err("MIR leave cleanup plan is not canonical".into());
-                }
+                cleanup.validate()?;
                 self.validate_edge(*target, arguments)
             }
             MirTerminator::SwitchBool {

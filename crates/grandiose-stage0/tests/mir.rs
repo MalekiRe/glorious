@@ -3,10 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use grandiose_stage0::{
     CallableId, CaptureMode, ConstKind, CoreId, DefKey, Digest, EffectInstance, EffectRow,
     EffectRowProjection, EnvironmentBrand, GenericArgument, GenericKind, InferVar, InstanceKey,
-    Lifetime, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment, MirContinuationPolicy,
-    MirEditor, MirFunction, MirInstance, MirInstruction, MirLocal, MirLocalDecl, MirPattern,
-    MirPatternField, MirProgram, MirTerminator, Mutability, Quantity, ScalarType, Type,
-    VmArtifactError, emit_vm, emit_vm_program, optimize_mir, verify_vm,
+    Lifetime, LoanFact, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment, MirCleanupPlan,
+    MirContinuationPolicy, MirEditor, MirFunction, MirInstance, MirInstruction, MirLocal,
+    MirLocalDecl, MirPattern, MirPatternField, MirProgram, MirTerminator, MoveFact, Mutability,
+    Quantity, ScalarType, Type, VmArtifactError, emit_vm, emit_vm_program, optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -47,6 +47,74 @@ fn mir_rejects_a_forged_nonfinite_replay_budget() {
         ],
     };
     assert!(function.validate().is_err());
+}
+
+#[test]
+fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
+    let leave = |cleanup| MirFunction {
+        definition: DefKey(Digest::of_bytes(b"forged-mir-cleanup")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(Type::Scalar(ScalarType::I64))],
+        result: Type::Scalar(ScalarType::I64),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Leave {
+                    brand: grandiose_stage0::LabelBrand {
+                        owner: DefKey(Digest::of_bytes(b"forged-mir-cleanup-owner")),
+                        label: 0,
+                    },
+                    target: MirBlockId(1),
+                    arguments: vec![MirLocal(0)],
+                    cleanup,
+                },
+            },
+            MirBlock {
+                parameters: vec![MirLocal(0)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(0) },
+            },
+        ],
+    };
+    let overlapping_moves = MirCleanupPlan {
+        moved_places: vec![
+            MoveFact {
+                root: "pair".into(),
+                fields: vec![],
+            },
+            MoveFact {
+                root: "pair".into(),
+                fields: vec![0],
+            },
+        ],
+        active_loans: vec![],
+    };
+    assert!(
+        leave(overlapping_moves)
+            .validate()
+            .is_err_and(|error| error.contains("overlapping moved places"))
+    );
+
+    let moved_live_loan = MirCleanupPlan {
+        moved_places: vec![MoveFact {
+            root: "pair".into(),
+            fields: vec![0],
+        }],
+        active_loans: vec![LoanFact {
+            owner: Some("loan".into()),
+            root: "pair".into(),
+            fields: vec![],
+            unique: false,
+        }],
+    };
+    assert!(
+        leave(moved_live_loan)
+            .validate()
+            .is_err_and(|error| error.contains("live loan"))
+    );
 }
 
 fn graph() -> MirFunction {

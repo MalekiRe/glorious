@@ -3998,6 +3998,71 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
 }
 
 #[test]
+fn lowered_partial_move_leave_keeps_only_the_residual_aggregate_cleanup() {
+    let package = PackageKey("vm-partial-move-cleanup@0.1.0".into());
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; label done { move pair.left; transfer done pair.right; 0 } }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert_eq!(
+        flow.moved_places,
+        vec![grandiose_stage0::MoveFact {
+            root: "pair".into(),
+            fields: vec![0],
+        }]
+    );
+    let mir = MirLowering::lower(definition.key, &core, &flow)
+        .function
+        .expect("partial move with leave lowers");
+    let artifact = emit_vm(&mir).expect("partial move cleanup emits");
+    let cleanup = artifact
+        .function
+        .instructions
+        .iter()
+        .find_map(|instruction| match instruction {
+            VmInstruction::Leave { cleanup, .. } => Some(cleanup),
+            _ => None,
+        })
+        .expect("label transfer retains cleanup proof");
+    assert!(cleanup.validate(), "{cleanup:#?}");
+    assert_eq!(
+        cleanup.moved_places,
+        vec![VmCleanupPlace {
+            root: "pair".into(),
+            fields: vec![0],
+        }]
+    );
+    let bytes = encode_artifact(&artifact);
+    assert_eq!(
+        decode_and_verify_artifact(&bytes)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
 fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
     let effect = DefKey(Digest::of_bytes(b"leave-reject-effect"));
     let owner = DefKey(Digest::of_bytes(b"leave-reject-owner"));
@@ -4081,6 +4146,69 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
     assert!(matches!(
         verify_vm(enters_clause),
         Err(VmArtifactError::HandlerTargetReachedByControlFlow { target: 3 })
+    ));
+}
+
+#[test]
+fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
+    let owner = DefKey(Digest::of_bytes(b"leave-cleanup-overlap-owner"));
+    let candidate = |cleanup| {
+        let mut artifact = CandidateVmArtifact {
+            schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+            runtime_manifest: None,
+            function: VmFunction {
+                definition: DefKey(Digest::of_bytes(b"leave-cleanup-overlap")),
+                captures: 0,
+                parameters: 0,
+                registers: vec![VmType::I64, VmType::I64],
+                instructions: vec![
+                    VmInstruction::ConstI64 { dst: 0, value: 1 },
+                    VmInstruction::Leave {
+                        brand_owner: owner,
+                        brand_label: 0,
+                        target: 2,
+                        arguments: vec![0],
+                        destinations: vec![1],
+                        cleanup,
+                    },
+                    VmInstruction::Return { value: 1 },
+                ],
+            },
+            fingerprint: Digest::of_bytes(b"stale-leave-cleanup-overlap"),
+        };
+        artifact.fingerprint = artifact.computed_fingerprint();
+        artifact
+    };
+    assert!(matches!(
+        verify_vm(candidate(VmCleanupProof {
+            moved_places: vec![
+                VmCleanupPlace {
+                    root: "pair".into(),
+                    fields: vec![]
+                },
+                VmCleanupPlace {
+                    root: "pair".into(),
+                    fields: vec![0]
+                },
+            ],
+            active_loans: vec![],
+        })),
+        Err(VmArtifactError::MalformedEncoding { .. })
+    ));
+    assert!(matches!(
+        verify_vm(candidate(VmCleanupProof {
+            moved_places: vec![VmCleanupPlace {
+                root: "pair".into(),
+                fields: vec![0]
+            }],
+            active_loans: vec![VmCleanupLoan {
+                owner: Some("loan".into()),
+                root: "pair".into(),
+                fields: vec![],
+                unique: false,
+            }],
+        })),
+        Err(VmArtifactError::MalformedEncoding { .. })
     ));
 }
 
