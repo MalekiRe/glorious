@@ -4,7 +4,8 @@ use std::{collections::BTreeMap, env, fs, process::ExitCode};
 
 use grandiose_stage0::{
     CompilationMode, CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, Digest,
-    LogicalPath, PackageKey, SourceInput, StageZeroCompiler, decode_and_verify_program,
+    LogicalPath, PackageKey, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput, SourceInput,
+    StageZeroCompiler, decode_and_verify_program,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -14,14 +15,15 @@ enum DiagnosticFormat {
 }
 
 fn main() -> ExitCode {
-    let (diagnostic_format, arguments) = match split_diagnostic_format(env::args().skip(1)) {
-        Ok(arguments) => arguments,
-        Err(message) => {
-            eprintln!("grc-stage0: {message}");
-            usage();
-            return ExitCode::from(2);
-        }
-    };
+    let (diagnostic_format, runtime_manifest, arguments) =
+        match split_cli_options(env::args().skip(1)) {
+            Ok(arguments) => arguments,
+            Err(message) => {
+                eprintln!("grc-stage0: {message}");
+                usage();
+                return ExitCode::from(2);
+            }
+        };
     let mut arguments = arguments.into_iter();
     let Some(command) = arguments.next() else {
         usage();
@@ -82,7 +84,7 @@ fn main() -> ExitCode {
         semantic_options: BTreeMap::new(),
         codegen_options: BTreeMap::new(),
         capability_manifest: vec![],
-        runtime_manifest: None,
+        runtime_manifest,
     };
     match StageZeroCompiler::new().compile(request) {
         Ok(outcome) => {
@@ -117,15 +119,59 @@ fn main() -> ExitCode {
     }
 }
 
-fn split_diagnostic_format(
+fn split_cli_options(
     arguments: impl IntoIterator<Item = String>,
-) -> Result<(DiagnosticFormat, Vec<String>), String> {
+) -> Result<(DiagnosticFormat, Option<RuntimeManifestInput>, Vec<String>), String> {
     let mut format = DiagnosticFormat::Text;
     let mut seen_format = false;
+    let mut standard_library = None;
+    let mut selectors = Vec::new();
     let mut positional = Vec::new();
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         if argument != "--diagnostics" {
+            if argument == "--runtime-standard-library" {
+                if standard_library.is_some() {
+                    return Err("--runtime-standard-library may be specified at most once".into());
+                }
+                let Some(package) = arguments.next() else {
+                    return Err("--runtime-standard-library requires a PACKAGE".into());
+                };
+                standard_library = Some(PackageKey(package));
+                continue;
+            }
+            if argument == "--runtime-leaf" {
+                let Some(role) = arguments.next() else {
+                    return Err("--runtime-leaf requires ROLE MODULE NAME".into());
+                };
+                let Some(module_path) = arguments.next() else {
+                    return Err("--runtime-leaf requires ROLE MODULE NAME".into());
+                };
+                let Some(name) = arguments.next() else {
+                    return Err("--runtime-leaf requires ROLE MODULE NAME".into());
+                };
+                let Some(role) = PrimitiveRole::parse_selector_name(&role) else {
+                    return Err(format!(
+                        "unknown runtime leaf role `{role}` (expected {})",
+                        [
+                            PrimitiveRole::BranchBool,
+                            PrimitiveRole::TextByteLen,
+                            PrimitiveRole::TextConcat,
+                            PrimitiveRole::TextEq,
+                            PrimitiveRole::TextFromUtf8Checked,
+                            PrimitiveRole::TextAsBytes,
+                        ]
+                        .map(PrimitiveRole::selector_name)
+                        .join(", ")
+                    ));
+                };
+                selectors.push(PrimitiveSelector {
+                    role,
+                    module_path,
+                    name,
+                });
+                continue;
+            }
             positional.push(argument);
             continue;
         }
@@ -142,7 +188,15 @@ fn split_diagnostic_format(
         };
         seen_format = true;
     }
-    Ok((format, positional))
+    let runtime_manifest = match standard_library {
+        Some(standard_library) => Some(RuntimeManifestInput {
+            standard_library,
+            selectors,
+        }),
+        None if selectors.is_empty() => None,
+        None => return Err("--runtime-leaf requires --runtime-standard-library PACKAGE".into()),
+    };
+    Ok((format, runtime_manifest, positional))
 }
 
 fn render_diagnostics(diagnostics: &[CompileDiagnostic], format: DiagnosticFormat) {
@@ -179,7 +233,9 @@ fn verify_program(path: &str) -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("usage: grc-stage0 [--diagnostics text|json] <check|run> FILE");
-    eprintln!("       grc-stage0 [--diagnostics text|json] emit-vm SOURCE OUTPUT");
+    eprintln!("usage: grc-stage0 [--diagnostics text|json] [RUNTIME] <check|run> FILE");
+    eprintln!("       grc-stage0 [--diagnostics text|json] [RUNTIME] emit-vm SOURCE OUTPUT");
     eprintln!("       grc-stage0 [--diagnostics text|json] verify-vm PROGRAM");
+    eprintln!("RUNTIME: --runtime-standard-library PACKAGE");
+    eprintln!("         --runtime-leaf ROLE MODULE NAME  (repeatable)");
 }

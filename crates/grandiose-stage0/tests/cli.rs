@@ -65,6 +65,37 @@ fn cli_emits_verifies_and_runs_verified_vm_programs() {
 }
 
 #[test]
+fn cli_binds_private_runtime_leaves_only_from_explicit_host_manifest() {
+    let directory = temporary_directory();
+    let source = directory.join("runtime.glorious");
+    fs::write(
+        &source,
+        "fn __g1_text_byte_len(value: Text) -> usize { () } pub fn main() -> usize { __g1_text_byte_len(\"a🦀\") }",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_grc-stage0"))
+        .args([
+            "--runtime-standard-library",
+            "command@0.1.0",
+            "--runtime-leaf",
+            "text-byte-len",
+            "crate",
+            "__g1_text_byte_len",
+            "run",
+            source.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "runtime-manifest run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "5\n");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn cli_renders_invalid_request_failures_as_stable_diagnostics() {
     let directory = temporary_directory();
     let source = directory.join("invalid-utf8.glorious");

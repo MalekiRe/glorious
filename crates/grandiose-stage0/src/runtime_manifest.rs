@@ -34,6 +34,31 @@ pub enum PrimitiveRole {
     /// Borrow-free frozen byte snapshot of a UTF-8 text value.
     TextAsBytes,
 }
+
+impl PrimitiveRole {
+    pub const fn selector_name(self) -> &'static str {
+        match self {
+            Self::BranchBool => "branch-bool",
+            Self::TextByteLen => "text-byte-len",
+            Self::TextConcat => "text-concat",
+            Self::TextEq => "text-eq",
+            Self::TextFromUtf8Checked => "text-from-utf8-checked",
+            Self::TextAsBytes => "text-as-bytes",
+        }
+    }
+
+    pub fn parse_selector_name(value: &str) -> Option<Self> {
+        Some(match value {
+            "branch-bool" => Self::BranchBool,
+            "text-byte-len" => Self::TextByteLen,
+            "text-concat" => Self::TextConcat,
+            "text-eq" => Self::TextEq,
+            "text-from-utf8-checked" => Self::TextFromUtf8Checked,
+            "text-as-bytes" => Self::TextAsBytes,
+            _ => return None,
+        })
+    }
+}
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PrimitiveSelector {
     pub role: PrimitiveRole,
