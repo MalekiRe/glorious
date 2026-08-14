@@ -1867,6 +1867,54 @@ fn service_transfers_callable_obligations_through_a_typed_argument_boundary() {
 }
 
 #[test]
+fn service_transfers_an_exact_callable_obligation_out_of_a_tuple_field_move() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn take(function: (i64) -> i64) -> i64 { let pair = Pair { function: function, value: 0 }; let taken = move pair.function; taken(41) } pub fn main() -> i64 { take(add_one) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_overwriting_an_unfulfilled_aggregate_callable_obligation() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn replace(function: (i64) -> i64) -> i64 { let pair = Pair { function: function, value: 0 }; pair.function = (value: i64) -> i64 { value }; 0 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn main() -> i64 { replace(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("overwriting an exact aggregate callback unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5014"),
+        "missing aggregate overwrite obligation diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_counts_callable_obligations_captured_through_an_aggregate_closure() {
+    let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn through(function: (i64) -> i64) -> i64 { let pair = Pair { function: function, value: 0 }; let call = (value: i64) -> i64 { pair.function(value) }; call(41) } pub fn main() -> i64 { through(add_one) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_checks_aggregate_callable_obligations_at_handler_branch_exits() {
+    let source = "effect Pick { [0,1] pick(value: Bool) -> i64; } pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn choose(value: Bool, function: (i64) -> i64) -> i64 { let pair = Pair { function: function, value: 0 }; handle Pick::pick(value) { Pick::pick(true) => pair.function(41), Pick::pick(false) => 0 } } pub fn main() -> i64 { choose(true, add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("handler-optional aggregate callback use unexpectedly satisfied exact lower bound");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing aggregate handler-join obligation diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_materializes_a_concretely_instantiated_generic_function_value() {
     let source = "pub fn identity<T>(value: T) -> T { value } pub fn apply(function: (i64) -> i64) -> i64 { function(42) } pub fn main() -> i64 { apply(identity) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

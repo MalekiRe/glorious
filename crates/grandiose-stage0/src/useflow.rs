@@ -8,8 +8,8 @@
 //! compose at one semantic boundary before MIR.
 
 use crate::{
-    core::{CallableId, CoreHandlerResumption, CoreId, CoreKind, TypedBody},
-    placeflow::PlaceFlow,
+    core::{CallableId, CoreHandlerResumption, CoreId, CoreKind, CorePlace, TypedBody},
+    placeflow::{FlowEventKind, MoveFact, PlaceFlow},
     quantity::{Quantity, QuantityError},
     source::Span,
     types::Type,
@@ -33,6 +33,27 @@ pub struct CallableUseFact {
     pub span: Span,
     /// `true` when this fact is the generated continuation of a handler arm.
     pub resumption: bool,
+}
+
+/// A principal callable-use obligation attached to a canonical PlaceFlow
+/// projection.  This is the bridge from callable capabilities to aggregate
+/// ownership: the place identity is frozen by PlaceFlow, never rebuilt from a
+/// field expression by UseFlow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ValueUseFact {
+    pub place: MoveFact,
+    pub declared: Quantity,
+    pub actual: Quantity,
+    pub span: Span,
+    pub disposition: ValueUseDisposition,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ValueUseDisposition {
+    Live,
+    Transferred,
+    Overwritten,
+    Borrowed,
 }
 
 /// One explicit transfer of a callable-use obligation to another semantic
@@ -63,6 +84,7 @@ pub enum CallableEscapeBoundary {
 pub struct UseFlow {
     pub callable_uses: Vec<CallableUseFact>,
     pub callable_escapes: Vec<CallableEscapeFact>,
+    pub value_obligations: Vec<ValueUseFact>,
     pub diagnostics: Vec<UseDiagnostic>,
 }
 
@@ -77,21 +99,20 @@ impl UseFlow {
         }
         let mut analyzer = Analyzer {
             body,
+            ownership,
             next_key: 0,
             contracts: BTreeMap::new(),
             facts: BTreeMap::new(),
             escapes: BTreeMap::new(),
             escaped_closures: BTreeSet::new(),
+            value_obligations: vec![],
             diagnostics: vec![],
         };
         let mut environment = Environment::default();
         for (name, ty) in &body.parameters {
-            if let Some(invocation) = callable_invocation(ty) {
-                let key =
-                    analyzer.contract(name, invocation, body.expression(body.root).span, false);
-                environment
-                    .bindings
-                    .insert(name.clone(), Binding::Contract(key));
+            let binding = analyzer.binding_for_type(name, ty, body.expression(body.root).span);
+            if !matches!(binding, Binding::Other) {
+                environment.bindings.insert(name.clone(), binding);
             }
         }
         let summary = analyzer.expression(body.root, &mut environment);
@@ -178,6 +199,11 @@ struct ClosureValue {
 enum Binding {
     Contract(ContractKey),
     Closure(ClosureValue),
+    /// Aggregate ownership is structurally decomposed only for callable
+    /// leaves.  `PlaceFlow` remains authoritative for whether the enclosing
+    /// projection is live/moved/borrowed; this map only preserves the
+    /// callable-use obligation while the aggregate is live.
+    Aggregate(BTreeMap<u32, Binding>),
     /// A callable created by a named declaration is globally reusable. Its
     /// invocation field describes the invocation itself, not a consumable
     /// body-local capability, so no local quantity fact is created here.
@@ -192,11 +218,13 @@ struct Environment {
 
 struct Analyzer<'a> {
     body: &'a TypedBody,
+    ownership: &'a PlaceFlow,
     next_key: u32,
     contracts: BTreeMap<ContractKey, Contract>,
     facts: BTreeMap<ContractKey, Quantity>,
     escapes: BTreeMap<ContractKey, Vec<(Option<Quantity>, Span, CallableEscapeBoundary)>>,
     escaped_closures: BTreeSet<CallableId>,
+    value_obligations: Vec<ValueUseFact>,
     diagnostics: Vec<UseDiagnostic>,
 }
 
@@ -300,25 +328,72 @@ impl Analyzer<'_> {
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => Summary::default(),
-            CoreKind::Closure { .. } => Summary::default(),
+            CoreKind::Closure { captures, .. } => {
+                // PlaceFlow supplies the canonical captured root.  The
+                // environment supplies only the obligation carried by that
+                // root, so this records capture transfer without rebuilding
+                // a source projection in UseFlow.
+                for capture in captures {
+                    let binding = environment
+                        .bindings
+                        .get(&capture.name)
+                        .cloned()
+                        .unwrap_or(Binding::Other);
+                    if let Some(place) = self.closure_place_fact(
+                        expression.span,
+                        &capture.name,
+                        matches!(capture.mode, crate::core::CaptureMode::Move),
+                    ) {
+                        match capture.mode {
+                            crate::core::CaptureMode::Move => {
+                                self.record_transfer(&binding, place, expression.span);
+                                environment.bindings.insert(capture.name, Binding::Other);
+                            }
+                            crate::core::CaptureMode::SharedBorrow
+                            | crate::core::CaptureMode::UniqueBorrow => {
+                                self.record_borrow(&binding, place, expression.span);
+                            }
+                        }
+                    }
+                }
+                Summary::default()
+            }
             CoreKind::Let { name, value } => {
                 let summary = self.expression(value, environment);
                 let binding = self.binding_for_value(value, environment);
+                if matches!(self.body.expression(value).kind, CoreKind::Move(_)) {
+                    if let Some(place) = self.move_place_fact(self.body.expression(value).span) {
+                        self.record_transfer(&binding, place, expression.span);
+                    }
+                    self.take_moved_binding(value, environment);
+                }
                 environment.bindings.insert(name, binding);
                 summary
             }
-            CoreKind::Assign { value, .. } => {
+            CoreKind::Assign { place, value } => {
                 let summary = self.expression(value, environment);
                 // Assignment stores a capability beyond this expression's
                 // direct invocation site. Until place summaries model the
                 // destination's exact callable contract, treat it as an
                 // opaque transfer rather than silently dropping a must-use
                 // obligation.
-                self.escape_value(value, environment, None, CallableEscapeBoundary::Assignment);
+                let replacement = self.binding_for_value(value, environment);
+                if let Some(place_fact) = self.assignment_place_fact(expression.span) {
+                    let previous = self.binding_at_place(&place, environment);
+                    self.record_overwrite(&previous, place_fact, expression.span);
+                }
+                self.assign_binding(&place, replacement, environment);
                 summary
             }
-            CoreKind::Borrow { value, .. }
-            | CoreKind::Move(value)
+            CoreKind::Borrow { unique, value } => {
+                let summary = self.expression(value, environment);
+                if let Some(place) = self.borrow_place_fact(expression.span, unique) {
+                    let binding = self.binding_for_value(value, environment);
+                    self.record_borrow(&binding, place, expression.span);
+                }
+                summary
+            }
+            CoreKind::Move(value)
             | CoreKind::Unary { value, .. }
             | CoreKind::Field { base: value, .. }
             | CoreKind::PatternTest { subject: value, .. } => self.expression(value, environment),
@@ -502,7 +577,7 @@ impl Analyzer<'_> {
                 let body = self.repeat(span, body, closure.invocation);
                 self.compose(span, summary, body)
             }
-            Binding::GlobalCallable | Binding::Other => {
+            Binding::Aggregate(_) | Binding::GlobalCallable | Binding::Other => {
                 self.escape_arguments(callee, &arguments, environment);
                 summary
             }
@@ -518,6 +593,24 @@ impl Analyzer<'_> {
                 .cloned()
                 .unwrap_or(Binding::Other),
             CoreKind::Function(_) | CoreKind::TraitMethod { .. } => Binding::GlobalCallable,
+            CoreKind::Field { base, index, .. } => match self.binding_for_value(*base, environment)
+            {
+                Binding::Aggregate(fields) => fields.get(index).cloned().unwrap_or(Binding::Other),
+                _ => Binding::Other,
+            },
+            CoreKind::Tuple(values)
+            | CoreKind::Array(values)
+            | CoreKind::Record { fields: values, .. }
+            | CoreKind::Enum { fields: values, .. } => Binding::Aggregate(
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        (index as u32, self.binding_for_value(*value, environment))
+                    })
+                    .collect(),
+            ),
+            CoreKind::Move(value) => self.binding_for_value(*value, environment),
             CoreKind::Closure {
                 callable,
                 parameters,
@@ -549,12 +642,243 @@ impl Analyzer<'_> {
         }
     }
 
+    fn binding_for_type(&mut self, name: &str, ty: &Type, span: Span) -> Binding {
+        match ty {
+            Type::Callable { invocation, .. } => {
+                Binding::Contract(self.contract(name, *invocation, span, false))
+            }
+            Type::Tuple(fields) => Binding::Aggregate(
+                fields
+                    .iter()
+                    .enumerate()
+                    .map(|(index, field)| {
+                        (
+                            index as u32,
+                            self.binding_for_type(&format!("{name}.{index}"), field, span),
+                        )
+                    })
+                    .collect(),
+            ),
+            _ => Binding::Other,
+        }
+    }
+
     fn callable_parameters(&self, callee: CoreId) -> Vec<Option<Quantity>> {
         match &self.body.expression(callee).ty {
             Type::Callable { parameters, .. } => {
                 parameters.iter().map(callable_invocation).collect()
             }
             _ => vec![],
+        }
+    }
+
+    fn assignment_place_fact(&self, span: Span) -> Option<MoveFact> {
+        self.ownership.events.iter().find_map(|event| {
+            matches!(event.kind, FlowEventKind::Assign(_))
+                .then_some(())
+                .filter(|_| event.span == span)
+                .and(event.place.clone())
+        })
+    }
+
+    fn move_place_fact(&self, span: Span) -> Option<MoveFact> {
+        self.ownership.events.iter().find_map(|event| {
+            matches!(event.kind, FlowEventKind::Move(_))
+                .then_some(())
+                .filter(|_| event.span == span)
+                .and(event.place.clone())
+        })
+    }
+
+    fn borrow_place_fact(&self, span: Span, unique: bool) -> Option<MoveFact> {
+        self.ownership.events.iter().find_map(|event| {
+            let matches_kind = matches!(
+                (&event.kind, unique),
+                (FlowEventKind::BorrowUnique(_), true) | (FlowEventKind::BorrowShared(_), false)
+            );
+            matches_kind
+                .then_some(())
+                .filter(|_| event.span == span)
+                .and(event.place.clone())
+        })
+    }
+
+    fn closure_place_fact(&self, span: Span, root: &str, moved: bool) -> Option<MoveFact> {
+        self.ownership.events.iter().find_map(|event| {
+            let matches_kind = matches!(
+                (&event.kind, moved),
+                (FlowEventKind::Move(name), true)
+                    | (FlowEventKind::BorrowShared(name), false)
+                    | (FlowEventKind::BorrowUnique(name), false)
+                    if name == root
+            );
+            matches_kind
+                .then_some(())
+                .filter(|_| event.span == span)
+                .and(event.place.clone())
+        })
+    }
+
+    fn binding_at_place(&self, place: &CorePlace, environment: &Environment) -> Binding {
+        match place {
+            CorePlace::Local { name, .. } => environment
+                .bindings
+                .get(name)
+                .cloned()
+                .unwrap_or(Binding::Other),
+            CorePlace::Field { base, index, .. } => {
+                match self.binding_at_place(base, environment) {
+                    Binding::Aggregate(fields) => {
+                        fields.get(index).cloned().unwrap_or(Binding::Other)
+                    }
+                    _ => Binding::Other,
+                }
+            }
+            CorePlace::Error => Binding::Other,
+        }
+    }
+
+    fn assign_binding(
+        &mut self,
+        place: &CorePlace,
+        replacement: Binding,
+        environment: &mut Environment,
+    ) {
+        match place {
+            CorePlace::Local { name, .. } => {
+                environment.bindings.insert(name.clone(), replacement);
+            }
+            CorePlace::Field { base, index, .. } => {
+                let mut aggregate = self.binding_at_place(base, environment);
+                if let Binding::Aggregate(fields) = &mut aggregate {
+                    fields.insert(*index, replacement);
+                    self.assign_binding(base, aggregate, environment);
+                }
+            }
+            CorePlace::Error => {}
+        }
+    }
+
+    fn take_moved_binding(&mut self, id: CoreId, environment: &mut Environment) {
+        match &self.body.expression(id).kind {
+            CoreKind::Move(value) => self.take_moved_binding(*value, environment),
+            CoreKind::Local(name) => {
+                environment.bindings.insert(name.clone(), Binding::Other);
+            }
+            CoreKind::Field { base, index, .. } => {
+                let mut aggregate = self.binding_for_value(*base, environment);
+                if let Binding::Aggregate(fields) = &mut aggregate {
+                    fields.insert(*index, Binding::Other);
+                    self.replace_expression_binding(*base, aggregate, environment);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn replace_expression_binding(
+        &mut self,
+        id: CoreId,
+        replacement: Binding,
+        environment: &mut Environment,
+    ) {
+        match &self.body.expression(id).kind {
+            CoreKind::Local(name) => {
+                environment.bindings.insert(name.clone(), replacement);
+            }
+            CoreKind::Field { base, index, .. } => {
+                let mut aggregate = self.binding_for_value(*base, environment);
+                if let Binding::Aggregate(fields) = &mut aggregate {
+                    fields.insert(*index, replacement);
+                    self.replace_expression_binding(*base, aggregate, environment);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn record_overwrite(&mut self, binding: &Binding, place: MoveFact, span: Span) {
+        match binding {
+            Binding::Contract(key) => {
+                let Some(contract) = self.contracts.get(key) else {
+                    return;
+                };
+                self.value_obligations.push(ValueUseFact {
+                    place: place.clone(),
+                    declared: contract.declared,
+                    actual: Quantity::ZERO,
+                    span,
+                    disposition: ValueUseDisposition::Overwritten,
+                });
+                if contract.declared.requires_positive_use() {
+                    self.error(
+                        span,
+                        "G5014",
+                        format!(
+                            "assignment overwrites `{}` and abandons its required callable-use obligation [{}, {}]",
+                            display_place(&place),
+                            contract.declared.lower,
+                            display_upper(contract.declared.upper),
+                        ),
+                    );
+                }
+            }
+            Binding::Aggregate(fields) => {
+                for (field, binding) in fields {
+                    let mut child = place.clone();
+                    child.fields.push(*field);
+                    self.record_overwrite(binding, child, span);
+                }
+            }
+            Binding::Closure(_) | Binding::GlobalCallable | Binding::Other => {}
+        }
+    }
+
+    fn record_transfer(&mut self, binding: &Binding, place: MoveFact, span: Span) {
+        match binding {
+            Binding::Contract(key) => {
+                if let Some(contract) = self.contracts.get(key) {
+                    self.value_obligations.push(ValueUseFact {
+                        place,
+                        declared: contract.declared,
+                        actual: Quantity::ZERO,
+                        span,
+                        disposition: ValueUseDisposition::Transferred,
+                    });
+                }
+            }
+            Binding::Aggregate(fields) => {
+                for (field, binding) in fields {
+                    let mut child = place.clone();
+                    child.fields.push(*field);
+                    self.record_transfer(binding, child, span);
+                }
+            }
+            Binding::Closure(_) | Binding::GlobalCallable | Binding::Other => {}
+        }
+    }
+
+    fn record_borrow(&mut self, binding: &Binding, place: MoveFact, span: Span) {
+        match binding {
+            Binding::Contract(key) => {
+                if let Some(contract) = self.contracts.get(key) {
+                    self.value_obligations.push(ValueUseFact {
+                        place,
+                        declared: contract.declared,
+                        actual: Quantity::ZERO,
+                        span,
+                        disposition: ValueUseDisposition::Borrowed,
+                    });
+                }
+            }
+            Binding::Aggregate(fields) => {
+                for (field, binding) in fields {
+                    let mut child = place.clone();
+                    child.fields.push(*field);
+                    self.record_borrow(binding, child, span);
+                }
+            }
+            Binding::Closure(_) | Binding::GlobalCallable | Binding::Other => {}
         }
     }
 
@@ -619,6 +943,11 @@ impl Analyzer<'_> {
             Binding::Closure(closure) => {
                 self.escape_closure(closure, self.body.expression(id).span)
             }
+            Binding::Aggregate(fields) => {
+                for binding in fields.values() {
+                    self.escape_binding(binding, required, self.body.expression(id).span, boundary);
+                }
+            }
             Binding::GlobalCallable | Binding::Other => match &self.body.expression(id).kind {
                 CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
                     for value in values {
@@ -632,6 +961,25 @@ impl Analyzer<'_> {
                 }
                 _ => {}
             },
+        }
+    }
+
+    fn escape_binding(
+        &mut self,
+        binding: &Binding,
+        required: Option<Quantity>,
+        span: Span,
+        boundary: CallableEscapeBoundary,
+    ) {
+        match binding {
+            Binding::Contract(key) => self.escape_contract(*key, required, span, boundary),
+            Binding::Closure(closure) => self.escape_closure(closure.clone(), span),
+            Binding::Aggregate(fields) => {
+                for binding in fields.values() {
+                    self.escape_binding(binding, required, span, boundary);
+                }
+            }
+            Binding::GlobalCallable | Binding::Other => {}
         }
     }
 
@@ -753,11 +1101,19 @@ impl Analyzer<'_> {
                 .cmp(&right.span.start)
                 .then(left.name.cmp(&right.name))
         });
+        self.value_obligations.sort_by(|left, right| {
+            left.span
+                .start
+                .cmp(&right.span.start)
+                .then(left.place.root.cmp(&right.place.root))
+                .then(left.place.fields.cmp(&right.place.fields))
+        });
         self.diagnostics
             .sort_by_key(|diagnostic| diagnostic.span.start);
         UseFlow {
             callable_uses,
             callable_escapes,
+            value_obligations: self.value_obligations,
             diagnostics: self.diagnostics,
         }
     }
@@ -789,6 +1145,17 @@ fn display_boundary(boundary: CallableEscapeBoundary) -> &'static str {
         CallableEscapeBoundary::Assignment => "an assigned place",
         CallableEscapeBoundary::Closure => "a closure environment",
     }
+}
+
+fn display_place(place: &MoveFact) -> String {
+    place
+        .fields
+        .iter()
+        .fold(place.root.clone(), |mut value, field| {
+            value.push('.');
+            value.push_str(&field.to_string());
+            value
+        })
 }
 
 #[cfg(test)]

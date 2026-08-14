@@ -98,6 +98,10 @@ pub enum FlowEventKind {
 pub struct FlowEvent {
     pub kind: FlowEventKind,
     pub span: Span,
+    /// Exact canonical place identity when this event operates on a static
+    /// projection. Consumers such as UseFlow must use this fact rather than
+    /// reconstructing projection paths from syntax.
+    pub place: Option<MoveFact>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FlowDiagnostic {
@@ -196,10 +200,31 @@ impl Analyzer<'_> {
             CoreKind::Closure { captures, .. } => {
                 for capture in captures {
                     self.capture_reference_loan(&capture.name, e.span);
+                    let place = Projection {
+                        root: capture.name.clone(),
+                        fields: vec![],
+                    };
                     match capture.mode {
-                        CaptureMode::SharedBorrow => self.borrow(&capture.name, false, e.span),
-                        CaptureMode::UniqueBorrow => self.borrow(&capture.name, true, e.span),
-                        CaptureMode::Move => self.move_(&capture.name, e.span),
+                        CaptureMode::SharedBorrow => {
+                            self.borrow(&capture.name, false, e.span);
+                            self.place_event(
+                                FlowEventKind::BorrowShared(capture.name),
+                                place,
+                                e.span,
+                            );
+                        }
+                        CaptureMode::UniqueBorrow => {
+                            self.borrow(&capture.name, true, e.span);
+                            self.place_event(
+                                FlowEventKind::BorrowUnique(capture.name),
+                                place,
+                                e.span,
+                            );
+                        }
+                        CaptureMode::Move => {
+                            self.move_(&capture.name, e.span);
+                            self.place_event(FlowEventKind::Move(capture.name), place, e.span);
+                        }
                     }
                 }
             }
@@ -591,7 +616,22 @@ impl Analyzer<'_> {
         }
     }
     fn event(&mut self, kind: FlowEventKind, span: Span) {
-        self.events.push(FlowEvent { kind, span })
+        self.events.push(FlowEvent {
+            kind,
+            span,
+            place: None,
+        })
+    }
+
+    fn place_event(&mut self, kind: FlowEventKind, place: Projection, span: Span) {
+        self.events.push(FlowEvent {
+            kind,
+            span,
+            place: Some(MoveFact {
+                root: place.root,
+                fields: place.fields,
+            }),
+        })
     }
 
     fn moved_place_overlapping(&self, place: &Projection) -> Option<Projection> {
@@ -724,7 +764,7 @@ impl Analyzer<'_> {
                     self.states.insert(place.root.clone(), LocalState::Moved);
                 }
                 self.record_move(place.clone());
-                self.event(FlowEventKind::Move(place.root), span);
+                self.place_event(FlowEventKind::Move(place.root.clone()), place, span);
             }
             Some(LocalState::Moved) => self.error(
                 span,
@@ -770,6 +810,15 @@ impl Analyzer<'_> {
         }
         if place.fields.is_empty() {
             self.borrow(&place.root, unique, span);
+            self.place_event(
+                if unique {
+                    FlowEventKind::BorrowUnique(place.root.clone())
+                } else {
+                    FlowEventKind::BorrowShared(place.root.clone())
+                },
+                place.clone(),
+                span,
+            );
             // Keep a precise whole-place fact only for a lexical reference
             // loan. Legacy temporary/capture loans remain represented solely
             // by LocalState until their Core lifetime is explicit.
@@ -810,16 +859,17 @@ impl Analyzer<'_> {
             }
         }
         self.projection_loans.push(ProjectionLoan {
-            place,
+            place: place.clone(),
             unique,
             owner,
         });
-        self.event(
+        self.place_event(
             if unique {
                 FlowEventKind::BorrowUnique(self.root_name(id))
             } else {
                 FlowEventKind::BorrowShared(self.root_name(id))
             },
+            place,
             span,
         );
     }
@@ -858,7 +908,11 @@ impl Analyzer<'_> {
                     self.states
                         .insert(projection.root.clone(), LocalState::Initialized);
                     self.reinitialize_place(&projection);
-                    self.event(FlowEventKind::Assign(projection.root), span);
+                    self.place_event(
+                        FlowEventKind::Assign(projection.root.clone()),
+                        projection,
+                        span,
+                    );
                 }
                 Some(LocalState::SharedBorrowed(_)) | Some(LocalState::UniquelyBorrowed) => self
                     .error(
@@ -877,7 +931,11 @@ impl Analyzer<'_> {
         match self.states.get(&projection.root).copied() {
             Some(LocalState::Initialized) => {
                 self.reinitialize_place(&projection);
-                self.event(FlowEventKind::Assign(projection.root), span);
+                self.place_event(
+                    FlowEventKind::Assign(projection.root.clone()),
+                    projection,
+                    span,
+                );
             }
             Some(LocalState::Moved) => self.error(
                 span,

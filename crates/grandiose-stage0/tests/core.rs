@@ -707,6 +707,14 @@ fn placeflow_tracks_partial_moves_without_consuming_disjoint_fields() {
     assert_eq!(flow.moved_places.len(), 1, "{:#?}", flow.moved_places);
     assert_eq!(flow.moved_places[0].root, "pair");
     assert_eq!(flow.moved_places[0].fields, vec![0]);
+    assert!(
+        flow.events.iter().any(|event| matches!(
+            (&event.kind, &event.place),
+            (FlowEventKind::Move(root), Some(place)) if root == "pair" && place.root == "pair" && place.fields == vec![0]
+        )),
+        "PlaceFlow must publish the canonical moved projection for downstream obligation analysis: {:#?}",
+        flow.events
+    );
 }
 
 #[test]

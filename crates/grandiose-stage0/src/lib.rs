@@ -120,6 +120,7 @@ pub use types::{
 };
 pub use useflow::{
     CallableEscapeBoundary, CallableEscapeFact, CallableUseFact, UseDiagnostic, UseFlow,
+    ValueUseDisposition, ValueUseFact,
 };
 pub use vm_backend::{
     CandidateVmArtifact, CandidateVmProgram, STAGE0_VM_SCHEMA, VerifiedVmArtifact,
