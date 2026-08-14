@@ -5409,6 +5409,29 @@ fn service_normalizes_transparent_aliases_imported_from_another_module() {
 }
 
 #[test]
+fn service_executes_effectful_callback_aliases_with_their_sealed_effect_row() {
+    let source = "effect Ask { [1,1] ask() -> i64; } type Callback = () -> i64 / Ask; pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn relay(callback: Callback) -> i64 / Ask { callback() } pub fn main() -> i64 { handle relay(leaf) { Ask::ask() with k => k(42) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_forwarding_an_effectful_callback_alias_through_an_empty_row() {
+    let source = "effect Ask { [1,1] ask() -> i64; } type Callback = () -> i64 / Ask; pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn relay(callback: Callback) -> i64 { callback() } pub fn main() -> i64 { relay(leaf) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("effectful callback alias escaped through an empty outward row")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4155"),
+        "missing outward-effect diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_lowers_f64_arithmetic_and_typed_calls_to_the_verified_vm() {
     let source = "pub fn double(value: f64) -> f64 { value * 2.0 } pub fn main() -> f64 { double(20.5) + 1.0 }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

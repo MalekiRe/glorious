@@ -2112,6 +2112,48 @@ fn transparent_aliases_are_normalized_inside_callable_effect_identities() {
 }
 
 #[test]
+fn transparent_aliases_preserve_effectful_callable_contracts() {
+    let package = PackageKey("signature-effectful-callable-alias@0.1.0".into());
+    let source = "type Message = Text; effect Log<T> { write(value: T); } type Callback<T> = (T) -> T / Log<T>; pub fn relay(callback: Callback<Message>) -> Message / Log<Message> { panic }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let relay = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("relay"))
+        .expect("relay declaration");
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&relay.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    let Type::Callable {
+        parameters,
+        result,
+        effects,
+        ..
+    } = &signature.parameters[0]
+    else {
+        panic!("alias did not normalize to callable contract")
+    };
+    assert_eq!(parameters, &[Type::Scalar(ScalarType::Text)]);
+    assert_eq!(result.as_ref(), &Type::Scalar(ScalarType::Text));
+    let effect = effects.effects.iter().next().expect("Log effect");
+    assert_eq!(
+        effect.arguments,
+        [GenericArgument::Type(Type::Scalar(ScalarType::Text))]
+    );
+    assert_eq!(effects, &signature.effects);
+}
+
+#[test]
 fn trait_self_is_instantiated_for_method_contracts_and_impl_members() {
     let package = PackageKey("signature-trait-self@0.1.0".into());
     let source = "trait Identity { fn apply(value: Self) -> Self; } struct Box {} impl Identity for Box { fn apply(value: Self) -> Self { value } }";

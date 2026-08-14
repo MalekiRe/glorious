@@ -54,6 +54,20 @@ fn public_fingerprint_changes_for_header_but_not_private_definition_changes() {
 }
 
 #[test]
+fn public_fingerprint_seals_effect_rows_inside_exported_callable_aliases() {
+    let first = collect(
+        "effect Read { read() -> i64; } effect Write { write() -> i64; } pub type Callback = () -> i64 / Read;",
+    );
+    let changed = collect(
+        "effect Read { read() -> i64; } effect Write { write() -> i64; } pub type Callback = () -> i64 / Write;",
+    );
+    assert_ne!(
+        first.interface.public_fingerprint, changed.interface.public_fingerprint,
+        "a callable alias's outward authority is part of its public contract"
+    );
+}
+
+#[test]
 fn public_projection_obligations_participate_in_interface_fingerprints() {
     let unconstrained = collect(
         "pub trait Source { type Item; } pub fn project<T>(value: T) -> <T as Source>::Item { ignored }",

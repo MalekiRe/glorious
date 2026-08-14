@@ -594,7 +594,10 @@ impl Elaborator<'_> {
             }),
             crate::HeaderType::Never => Some(Type::Never),
             crate::HeaderType::Callable {
-                parameters, result, ..
+                parameters,
+                result,
+                effects,
+                ..
             } => Some(Type::Callable {
                 lifetime_binders: 0,
                 parameters: parameters
@@ -602,7 +605,7 @@ impl Elaborator<'_> {
                     .map(|value| self.source_type(span, value))
                     .collect::<Option<Vec<_>>>()?,
                 result: Box::new(self.source_type(span, result)?),
-                effects: EffectRow::empty(),
+                effects: self.source_effect_row(span, effects)?,
                 invocation: crate::Quantity::AFFINE,
             }),
             crate::HeaderType::Projection {

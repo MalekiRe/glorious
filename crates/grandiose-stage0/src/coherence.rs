@@ -347,12 +347,23 @@ fn collect_generic_names(
             }
         }
         HeaderType::Callable {
-            parameters, result, ..
+            parameters,
+            result,
+            effects,
+            ..
         } => {
             for parameter in parameters {
                 collect_generic_names(parameter, declared, used);
             }
             collect_generic_names(result, declared, used);
+            for effect in &effects.effects {
+                collect_generic_names(effect, declared, used);
+            }
+            if let Some(tail) = &effects.tail
+                && declared.contains(tail)
+            {
+                used.insert(tail.clone());
+            }
         }
         HeaderType::Reference {
             lifetime, referent, ..

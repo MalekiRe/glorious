@@ -3721,6 +3721,7 @@ impl Elaborator<'_> {
                 lifetime_binders,
                 parameters,
                 result,
+                effects,
             } => {
                 let mut scope = std::collections::BTreeMap::new();
                 for (index, name) in lifetime_binders.iter().enumerate() {
@@ -3739,12 +3740,14 @@ impl Elaborator<'_> {
                     .map(|value| self.header_type(value))
                     .collect();
                 let result = Box::new(self.header_type(result));
+                let effects =
+                    self.closure_effects(effects, self.body.expression(self.body.root).span);
                 self.bound_lifetime_scopes.pop();
                 Type::Callable {
                     lifetime_binders: lifetime_binders.len() as u32,
                     parameters,
                     result,
-                    effects: crate::types::EffectRow::empty(),
+                    effects,
                     invocation: crate::quantity::Quantity::ONCE,
                 }
             }

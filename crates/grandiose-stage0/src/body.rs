@@ -1309,10 +1309,12 @@ impl Parser<'_> {
                     lifetime_binders,
                     parameters,
                     result,
+                    effects,
                 } => Some(HeaderType::Callable {
                     lifetime_binders: binders.into_iter().chain(lifetime_binders).collect(),
                     parameters,
                     result,
+                    effects,
                 }),
                 _ => {
                     self.error_current(
@@ -1394,10 +1396,13 @@ impl Parser<'_> {
             self.expect_punctuation(')')?;
             if self.at_operator("->") {
                 self.position += 1;
+                let result = self.closure_type()?;
+                let effects = self.closure_effect_row_annotation("G4017")?;
                 return Some(HeaderType::Callable {
                     lifetime_binders: vec![],
                     parameters: values,
-                    result: Box::new(self.closure_type()?),
+                    result: Box::new(result),
+                    effects,
                 });
             }
             return Some(HeaderType::Tuple(values));
@@ -1417,6 +1422,24 @@ impl Parser<'_> {
 
     fn closure_type_arguments(&mut self) -> Option<Vec<HeaderGenericArgument>> {
         self.parse_generic_arguments("G4009", "expected `>` in closure type application")
+    }
+
+    /// Parse the effect portion of a callable *type*.  Typed-closure
+    /// expressions use the same row grammar, but keeping this helper local to
+    /// type parsing prevents `(T) -> U / E` from being silently treated as an
+    /// effect-free callback followed by unrelated expression syntax.
+    fn closure_effect_row_annotation(&mut self, code: &'static str) -> Option<EffectRowHeader> {
+        if !self.at_operator("/") {
+            return Some(EffectRowHeader::default());
+        }
+        self.position += 1;
+        if self.at_punctuation('{') {
+            return self.closure_effect_row_literal(code);
+        }
+        Some(EffectRowHeader {
+            effects: vec![self.closure_type()?],
+            tail: None,
+        })
     }
 
     /// Parse the row-literal form of an explicit `EffectRow` argument.  This

@@ -3435,6 +3435,7 @@ impl Elaborator<'_> {
                 lifetime_binders,
                 parameters,
                 result,
+                effects,
             } => {
                 let mut scope = BTreeMap::new();
                 for (index, name) in lifetime_binders.iter().enumerate() {
@@ -3448,12 +3449,13 @@ impl Elaborator<'_> {
                 self.bound_lifetime_scopes.push(scope);
                 let parameters = parameters.iter().map(|value| self.ty(value)).collect();
                 let result = Box::new(self.ty(result));
+                let effects = self.effect_row(effects);
                 self.bound_lifetime_scopes.pop();
                 Type::Callable {
                     lifetime_binders: lifetime_binders.len() as u32,
                     parameters,
                     result,
-                    effects: EffectRow::empty(),
+                    effects,
                     invocation: Quantity::ONCE,
                 }
             }
@@ -3997,7 +3999,7 @@ fn normalize_alias_type(
                 stack,
                 diagnostics,
             )),
-            effects,
+            effects: normalize_effect_row(effects, definitions, diagnostics),
             invocation,
         },
         value => value,

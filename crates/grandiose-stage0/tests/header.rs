@@ -61,6 +61,7 @@ fn headers_parse_higher_ranked_callable_lifetime_scopes() {
             lifetime_binders,
             parameters,
             result,
+            ..
         } if lifetime_binders == &["'a"]
             && matches!(parameters.as_slice(), [HeaderType::Reference { lifetime: Some(name), .. }] if name == "'a")
             && matches!(result.as_ref(), HeaderType::Reference { lifetime: Some(name), .. } if name == "'a")
@@ -82,13 +83,36 @@ fn headers_merge_stacked_higher_ranked_binder_prefixes() {
     };
     assert!(matches!(
         &header.parameters[0].ty,
-        HeaderType::Callable { lifetime_binders, parameters, result }
+        HeaderType::Callable { lifetime_binders, parameters, result, .. }
             if lifetime_binders == &vec!["'a".to_owned(), "'b".to_owned()]
                 && matches!(parameters.as_slice(), [
                     HeaderType::Reference { lifetime: Some(first), .. },
                     HeaderType::Reference { lifetime: Some(second), .. },
                 ] if first == "'a" && second == "'b")
                 && matches!(result.as_ref(), HeaderType::Reference { lifetime: Some(name), .. } if name == "'a")
+    ));
+}
+
+#[test]
+fn headers_parse_effect_rows_on_callable_types() {
+    let package = PackageKey("header-callable-effects@0.1.0".into());
+    let source = "pub fn apply(callback: (i64) -> i64 / { Trace, Log<Text> }) -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert!(matches!(
+        &header.parameters[0].ty,
+        HeaderType::Callable { effects, .. }
+            if effects.effects.len() == 2
+                && matches!(&effects.effects[0], HeaderType::Path(path) if path == &["Trace"])
+                && matches!(&effects.effects[1], HeaderType::Application(base, arguments)
+                    if matches!(base.as_ref(), HeaderType::Path(path) if path == &["Log"])
+                        && matches!(arguments.as_slice(), [grandiose_stage0::HeaderGenericArgument::Type(HeaderType::Path(path))] if path == &["Text"]))
     ));
 }
 

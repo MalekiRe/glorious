@@ -104,6 +104,11 @@ pub enum HeaderType {
         lifetime_binders: Vec<String>,
         parameters: Vec<HeaderType>,
         result: Box<HeaderType>,
+        /// The callable contract's outward effect row.  Callable types are
+        /// semantic contracts, not merely parameter/result arrows: leaving
+        /// this at the implicit empty row would let a transparent alias erase
+        /// authority required by an indirect call.
+        effects: EffectRowHeader,
     },
     Reference {
         unique: bool,
@@ -1574,10 +1579,12 @@ impl Parser<'_> {
                     lifetime_binders: nested,
                     parameters,
                     result,
+                    effects,
                 } => HeaderType::Callable {
                     lifetime_binders: lifetime_binders.into_iter().chain(nested).collect(),
                     parameters,
                     result,
+                    effects,
                 },
                 _ => {
                     self.error(
@@ -1653,10 +1660,12 @@ impl Parser<'_> {
                 self.error("G3206", "expected `)` in tuple type");
             }
             if self.operator("->") {
+                let result = self.ty();
                 return HeaderType::Callable {
                     lifetime_binders: vec![],
                     parameters: values,
-                    result: Box::new(self.ty()),
+                    result: Box::new(result),
+                    effects: self.effect_row_annotation(),
                 };
             }
             return HeaderType::Tuple(values);
