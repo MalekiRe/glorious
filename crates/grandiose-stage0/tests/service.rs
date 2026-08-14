@@ -4013,6 +4013,38 @@ fn service_transfers_callable_obligations_through_a_typed_argument_boundary() {
 }
 
 #[test]
+fn service_rejects_sequential_callable_escapes_that_exceed_one_owner_contract() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(function: (i64) -> i64, value: i64) -> i64 { function(value) } pub fn relay(function: (i64) -> i64) -> i64 { apply(function, 20) + apply(function, 21) } pub fn main() -> i64 { relay(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("two sequential exact callable transfers unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "missing accumulated callable-escape diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_direct_callable_use_followed_by_a_typed_escape() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(function: (i64) -> i64, value: i64) -> i64 { function(value) } pub fn relay(function: (i64) -> i64) -> i64 { function(20) + apply(function, 21) } pub fn main() -> i64 { relay(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("a direct use followed by an exact callable transfer unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "missing combined direct-use and escape diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_transfers_an_exact_callable_obligation_out_of_a_tuple_field_move() {
     let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn take(function: (i64) -> i64) -> i64 { let pair = Pair { function: function, value: 0 }; let taken = move pair.function; taken(41) } pub fn main() -> i64 { take(add_one) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

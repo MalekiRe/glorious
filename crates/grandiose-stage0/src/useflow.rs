@@ -1552,14 +1552,11 @@ impl Analyzer<'_> {
             return;
         }
 
-        // A local use interval and each outgoing callable capability are
-        // separate declarative obligations. The receiver's callable type
-        // must be admitted by the source contract, and the local prefix may
-        // not already exceed the source upper bound. Lower bounds are then
-        // discharged by the typed receiver rather than silently forgotten.
-        if !upper_within(actual.upper, contract.declared.upper) {
-            self.contract_error(&contract, actual, "G5011");
-        }
+        // Direct invocations and outgoing callable capabilities consume the
+        // same source budget. A transfer may discharge a lower bound through
+        // its receiver, but it cannot make a preceding local invocation free.
+        let mut escaped_demand = Quantity::ZERO;
+        let mut escaped_at = None;
         for escape in escapes {
             let Some(required) = escape.required else {
                 self.error(
@@ -1589,24 +1586,59 @@ impl Analyzer<'_> {
                     unreachable!("quantity products are never empty")
                 }
             };
-            if contract.declared.contains(demanded) {
-                continue;
+            escaped_demand = match escaped_demand.sequence(demanded) {
+                Ok(total) => total,
+                Err(QuantityError::Overflow) => {
+                    self.error(
+                        escape.span,
+                        "G5010",
+                        "quantitative callable escape demand overflowed",
+                    );
+                    continue;
+                }
+                Err(QuantityError::EmptyInterval) => {
+                    unreachable!("quantity summaries are never empty")
+                }
+            };
+            escaped_at.get_or_insert((escape.span, escape.boundary));
+        }
+        if let Some((span, boundary)) = escaped_at {
+            let total_demand = match actual.sequence(escaped_demand) {
+                Ok(total) => total,
+                Err(QuantityError::Overflow) => {
+                    self.error(
+                        span,
+                        "G5010",
+                        "quantitative callable use and escape demand overflowed",
+                    );
+                    return;
+                }
+                Err(QuantityError::EmptyInterval) => {
+                    unreachable!("quantity summaries are never empty")
+                }
+            };
+            if !contract.declared.contains(total_demand) {
+                self.error(
+                    span,
+                    "G5013",
+                    format!(
+                        "callable `{}` has direct use [{}, {}] and escapes through {} with combined demand [{}, {}], exceeding its declared capability [{}, {}]",
+                        contract.name,
+                        actual.lower,
+                        display_upper(actual.upper),
+                        display_boundary(boundary),
+                        total_demand.lower,
+                        display_upper(total_demand.upper),
+                        contract.declared.lower,
+                        display_upper(contract.declared.upper),
+                    ),
+                );
             }
-            self.error(
-                escape.span,
-                "G5013",
-                format!(
-                    "callable `{}` escapes through {} [{}, {}] times with per-call requirement [{}, {}], exceeding its declared capability [{}, {}]",
-                    contract.name,
-                    display_boundary(escape.boundary),
-                    escape.actual.lower,
-                    display_upper(escape.actual.upper),
-                    required.lower,
-                    display_upper(required.upper),
-                    contract.declared.lower,
-                    display_upper(contract.declared.upper),
-                ),
-            );
+        } else if !upper_within(actual.upper, contract.declared.upper) {
+            // An unresolved receiver already has its own G5013 diagnostic.
+            // Preserve the local upper-bound check without treating its
+            // missing lower capability as a second contract violation.
+            self.contract_error(&contract, actual, "G5011");
         }
     }
 
@@ -1849,5 +1881,202 @@ mod tests {
             "unrestricted replay lost a forged move-captured exact callable: {uses:#?}"
         );
         assert_eq!(uses.callable_uses[0].actual.upper, None);
+    }
+
+    #[test]
+    fn frozen_core_cannot_split_one_exact_callable_obligation_across_two_escapes() {
+        let callback = callable(Quantity::ONCE);
+        let apply = Type::Callable {
+            lifetime_binders: 0,
+            parameters: vec![
+                callback.clone(),
+                Type::Scalar(crate::types::ScalarType::I64),
+            ],
+            result: Box::new(Type::Scalar(crate::types::ScalarType::I64)),
+            effects: EffectRow::empty(),
+            invocation: Quantity::UNRESTRICTED,
+        };
+        let i64 = Type::Scalar(crate::types::ScalarType::I64);
+        let call = |callee, callback, value| CoreExpr {
+            kind: CoreKind::Call {
+                callee,
+                arguments: vec![callback, value],
+                reference_contract: crate::core::CallReferenceOrigin::None,
+                reference_origin: crate::core::CallReferenceOrigin::None,
+                reference_shape: crate::core::CallReferenceShape::None,
+            },
+            ty: i64.clone(),
+            span: span(),
+        };
+        // This is deliberately constructed Core rather than parsed source:
+        // it exercises the frozen Core → PlaceFlow → UseFlow boundary that a
+        // cache or embedding host could otherwise try to bypass.
+        let body = TypedBody {
+            parameters: vec![("callback".into(), callback.clone())],
+            expressions: vec![
+                CoreExpr {
+                    kind: CoreKind::Function {
+                        definition: crate::DefKey(crate::Digest::of_bytes(b"apply")),
+                        arguments: vec![],
+                        host_import: None,
+                    },
+                    ty: apply.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Local("callback".into()),
+                    ty: callback.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Literal("20".into()),
+                    ty: i64.clone(),
+                    span: span(),
+                },
+                call(CoreId(0), CoreId(1), CoreId(2)),
+                CoreExpr {
+                    kind: CoreKind::Function {
+                        definition: crate::DefKey(crate::Digest::of_bytes(b"apply")),
+                        arguments: vec![],
+                        host_import: None,
+                    },
+                    ty: apply,
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Local("callback".into()),
+                    ty: callback,
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Literal("21".into()),
+                    ty: i64.clone(),
+                    span: span(),
+                },
+                call(CoreId(4), CoreId(5), CoreId(6)),
+                CoreExpr {
+                    kind: CoreKind::Binary {
+                        operator: "+".into(),
+                        left: CoreId(3),
+                        right: CoreId(7),
+                    },
+                    ty: i64,
+                    span: span(),
+                },
+            ],
+            root: CoreId(8),
+            diagnostics: vec![],
+            recovered: false,
+        };
+        assert!(
+            body.validate().is_empty(),
+            "forged Core must still be valid"
+        );
+        let ownership = PlaceFlow::analyze(&body);
+        assert!(ownership.diagnostics.is_empty(), "{ownership:#?}");
+        let uses = UseFlow::analyze(&body, &ownership);
+        assert!(
+            uses.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G5013"),
+            "two outgoing transfers must consume one combined owner budget: {uses:#?}"
+        );
+    }
+
+    #[test]
+    fn frozen_core_cannot_add_direct_use_to_an_outgoing_callable_transfer() {
+        let callback = callable(Quantity::ONCE);
+        let apply = Type::Callable {
+            lifetime_binders: 0,
+            parameters: vec![
+                callback.clone(),
+                Type::Scalar(crate::types::ScalarType::I64),
+            ],
+            result: Box::new(Type::Scalar(crate::types::ScalarType::I64)),
+            effects: EffectRow::empty(),
+            invocation: Quantity::UNRESTRICTED,
+        };
+        let i64 = Type::Scalar(crate::types::ScalarType::I64);
+        let body = TypedBody {
+            parameters: vec![("callback".into(), callback.clone())],
+            expressions: vec![
+                CoreExpr {
+                    kind: CoreKind::Local("callback".into()),
+                    ty: callback.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Literal("20".into()),
+                    ty: i64.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Call {
+                        callee: CoreId(0),
+                        arguments: vec![CoreId(1)],
+                        reference_contract: crate::core::CallReferenceOrigin::None,
+                        reference_origin: crate::core::CallReferenceOrigin::None,
+                        reference_shape: crate::core::CallReferenceShape::None,
+                    },
+                    ty: i64.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Function {
+                        definition: crate::DefKey(crate::Digest::of_bytes(b"apply")),
+                        arguments: vec![],
+                        host_import: None,
+                    },
+                    ty: apply,
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Local("callback".into()),
+                    ty: callback,
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Literal("21".into()),
+                    ty: i64.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Call {
+                        callee: CoreId(3),
+                        arguments: vec![CoreId(4), CoreId(5)],
+                        reference_contract: crate::core::CallReferenceOrigin::None,
+                        reference_origin: crate::core::CallReferenceOrigin::None,
+                        reference_shape: crate::core::CallReferenceShape::None,
+                    },
+                    ty: i64.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Binary {
+                        operator: "+".into(),
+                        left: CoreId(2),
+                        right: CoreId(6),
+                    },
+                    ty: i64,
+                    span: span(),
+                },
+            ],
+            root: CoreId(7),
+            diagnostics: vec![],
+            recovered: false,
+        };
+        assert!(
+            body.validate().is_empty(),
+            "forged Core must still be valid"
+        );
+        let ownership = PlaceFlow::analyze(&body);
+        assert!(ownership.diagnostics.is_empty(), "{ownership:#?}");
+        let uses = UseFlow::analyze(&body, &ownership);
+        assert!(
+            uses.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G5013"),
+            "direct invocation and outgoing transfer must consume one owner budget: {uses:#?}"
+        );
     }
 }
