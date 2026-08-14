@@ -5896,7 +5896,9 @@ impl Lowerer<'_> {
                     field_type: ty,
                 });
             }
-            CoreKind::PatternTest { subject, pattern } => {
+            CoreKind::PatternTest {
+                subject, pattern, ..
+            } => {
                 let subject = self.value(subject)?;
                 let Some(pattern) = lower_pattern(pattern) else {
                     self.error("G6005", "Typed Core contains an invalid structural pattern");
@@ -6244,6 +6246,20 @@ impl Lowerer<'_> {
                 let src = self.value(last)?;
                 self.instructions.push(MirInstruction::Copy { dst, src });
             }
+            // A label with no transfer is static scope evidence only and
+            // erases to its body. A transfer itself deliberately fails closed
+            // until MIR gains its checked cleanup-carrying leave terminator.
+            CoreKind::Label { body, .. } => {
+                let src = self.value(body)?;
+                self.instructions.push(MirInstruction::Copy { dst, src });
+            }
+            CoreKind::Transfer { .. } => {
+                self.error(
+                    "G6012",
+                    "MIR label transfer requires a cleanup-carrying nonlocal edge",
+                );
+                return None;
+            }
             _ => {
                 self.error("G6005", "Typed Core form has no MIR lowering yet");
                 return None;
@@ -6473,6 +6489,8 @@ impl Lowerer<'_> {
             | CoreKind::Field { base: value, .. }
             | CoreKind::PatternTest { subject: value, .. } => self.core_is_replay_safe(value),
             CoreKind::Let { value, .. } => self.core_is_replay_safe(value),
+            CoreKind::Label { body, .. } => self.core_is_replay_safe(body),
+            CoreKind::Transfer { .. } => false,
             CoreKind::Binary { left, right, .. } => {
                 self.core_is_replay_safe(left) && self.core_is_replay_safe(right)
             }
@@ -6521,6 +6539,8 @@ impl Lowerer<'_> {
             CoreKind::Let { value, .. } | CoreKind::Assign { value, .. } => {
                 self.core_is_effect_free(value)
             }
+            CoreKind::Label { body, .. } => self.core_is_effect_free(body),
+            CoreKind::Transfer { .. } => false,
             CoreKind::Binary { left, right, .. } => {
                 self.core_is_effect_free(left) && self.core_is_effect_free(right)
             }

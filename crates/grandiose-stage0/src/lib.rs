@@ -49,7 +49,8 @@ pub use coherence::{CoherenceDiagnostic, CoherenceSet, ImplHead};
 pub use core::{
     CallableBrand, CallableId, CaptureEnvironment, CaptureMode, ClosureCapture, CoreDiagnostic,
     CoreExpr, CoreHandlerClause, CoreHandlerContinuationContract, CoreHandlerResumption, CoreId,
-    CoreKind, CorePattern, CorePatternField, CorePlace, EnvironmentBrand, TypedBody,
+    CoreKind, CorePattern, CorePatternField, CorePlace, EnvironmentBrand, LabelBrand,
+    RefinementBrand, RefinementEnvironment, TypedBody,
 };
 pub use dependency::{DependencyLedger, DependencyNode, DependencyStatus, DependencyTrace};
 pub use diagnostic::{Diagnostic, DiagnosticClass, DiagnosticCode, Severity, SourceSpan};
@@ -83,6 +84,7 @@ pub use pattern::{
 };
 pub use placeflow::{
     FlowDiagnostic, FlowEvent, FlowEventKind, LoanFact, LocalState, MoveFact, PlaceFlow,
+    RefinementFact,
 };
 pub use quantity::{Quantity, QuantityError};
 pub use request::{

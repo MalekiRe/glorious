@@ -134,6 +134,9 @@ impl Analyzer<'_> {
                 self.values.insert(name, value);
                 Value::None
             }
+            CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
+                self.value(body)
+            }
             CoreKind::Assign { place, value } => {
                 let value = self.value(value);
                 self.assign(place, value);

@@ -362,6 +362,9 @@ impl Analyzer<'_> {
                 }
                 Summary::default()
             }
+            CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
+                self.expression(body, environment)
+            }
             CoreKind::Let { name, value } => {
                 let summary = self.expression(value, environment);
                 let binding = self.binding_for_value(value, environment);

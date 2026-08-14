@@ -38,6 +38,23 @@ pub struct EnvironmentBrand {
     pub owner: DefKey,
     pub callable: CallableId,
 }
+/// A fresh, owner-scoped proof namespace introduced by a structural pattern
+/// decision.  It is distinct from a label or callable environment: a fact in
+/// this namespace is valid only while the decision that produced it remains
+/// on the active control path.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RefinementBrand {
+    pub owner: DefKey,
+    pub refinement: u32,
+}
+/// A generative lexical destination identity. A source spelling is resolved
+/// only while its label scope is active; transfers carry this brand rather
+/// than a name so shadowing cannot retarget nonlocal control.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LabelBrand {
+    pub owner: DefKey,
+    pub label: u32,
+}
 /// The nominal identity of an executable body.  Named declarations already
 /// have a stable `DefKey`; anonymous and handler-generated bodies mint a
 /// fresh owner-local brand instead of borrowing a user-visible name.
@@ -67,6 +84,16 @@ pub struct ClosureCapture {
 pub struct CaptureEnvironment {
     pub brand: EnvironmentBrand,
     pub captures: Vec<ClosureCapture>,
+    pub sealed: bool,
+}
+/// Positive evidence produced by `is`. Bindings remain facts rather than
+/// ordinary locals until a branching consumer opens their lexical scope; this
+/// prevents a test expression from silently leaking a pattern binder.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RefinementEnvironment {
+    pub brand: RefinementBrand,
+    pub subject: Option<String>,
+    pub bindings: Vec<String>,
     pub sealed: bool,
 }
 impl CaptureEnvironment {
@@ -193,6 +220,12 @@ struct ResumptionUseTracker {
     identity: ActiveResumption,
     direct_uses: u64,
 }
+#[derive(Clone)]
+struct ActiveLabel {
+    name: String,
+    brand: LabelBrand,
+    result: Type,
+}
 
 /// A single callable invocation opens two distinct lifetime namespaces. Source
 /// declaration lifetimes are instantiated by the caller, while `for<'a>`
@@ -296,6 +329,7 @@ pub enum CoreKind {
     PatternTest {
         subject: CoreId,
         pattern: CorePattern,
+        refinement: RefinementEnvironment,
     },
     Closure {
         callable: CallableId,
@@ -305,6 +339,14 @@ pub enum CoreKind {
     },
     Let {
         name: String,
+        value: CoreId,
+    },
+    Label {
+        brand: LabelBrand,
+        body: CoreId,
+    },
+    Transfer {
+        brand: LabelBrand,
         value: CoreId,
     },
     /// A statement-shaped write; the source parser admits it only in a block.
@@ -576,9 +618,14 @@ impl CoreFingerprintEncoder<'_> {
                 self.bytes(&variant.to_le_bytes());
                 self.ids(fields);
             }
-            CoreKind::PatternTest { subject, pattern } => {
+            CoreKind::PatternTest {
+                subject,
+                pattern,
+                refinement,
+            } => {
                 self.bytes(b"pattern-test");
                 self.debug(pattern);
+                self.debug(refinement);
                 self.id(*subject);
             }
             CoreKind::Closure {
@@ -596,6 +643,16 @@ impl CoreFingerprintEncoder<'_> {
             CoreKind::Let { name, value } => {
                 self.bytes(b"let");
                 self.bytes(name.as_bytes());
+                self.id(*value);
+            }
+            CoreKind::Label { brand, body } => {
+                self.bytes(b"label");
+                self.debug(brand);
+                self.id(*body);
+            }
+            CoreKind::Transfer { brand, value } => {
+                self.bytes(b"transfer");
+                self.debug(brand);
                 self.id(*value);
             }
             CoreKind::Assign { place, value } => {
@@ -696,7 +753,10 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
         | CoreKind::Borrow { value: base, .. }
         | CoreKind::Unary { value: base, .. }
         | CoreKind::Move(base) => vec![*base],
-        CoreKind::Closure { body, .. } | CoreKind::Let { value: body, .. } => vec![*body],
+        CoreKind::Closure { body, .. }
+        | CoreKind::Let { value: body, .. }
+        | CoreKind::Label { body, .. }
+        | CoreKind::Transfer { value: body, .. } => vec![*body],
         CoreKind::Assign { value, .. } => vec![*value],
         CoreKind::Call { callee, arguments } => std::iter::once(*callee)
             .chain(arguments.iter().copied())
@@ -758,7 +818,11 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
             "Typed Core field projection index {index} is outside structural arity {field_count}"
         )),
         CoreKind::Assign { place, .. } => place_structural_error(place),
-        CoreKind::PatternTest { pattern, .. } => pattern_structural_error(pattern),
+        CoreKind::PatternTest {
+            pattern,
+            refinement,
+            ..
+        } => pattern_structural_error(pattern).or_else(|| refinement_environment_error(refinement)),
         CoreKind::Handle { clauses, .. } => handler_clause_error(clauses).or_else(|| {
             clauses
                 .iter()
@@ -770,6 +834,21 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
             .find_map(|clause| pattern_structural_error(&clause.pattern)),
         _ => None,
     }
+}
+
+fn refinement_environment_error(environment: &RefinementEnvironment) -> Option<String> {
+    if !environment.sealed {
+        return Some("Typed Core pattern test has an unsealed refinement environment".into());
+    }
+    let mut bindings = std::collections::BTreeSet::new();
+    for binding in &environment.bindings {
+        if !bindings.insert(binding) {
+            return Some(format!(
+                "Typed Core refinement environment repeats binding `{binding}`"
+            ));
+        }
+    }
+    None
 }
 
 fn handler_clause_error(clauses: &[CoreHandlerClause]) -> Option<String> {
@@ -990,6 +1069,8 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         | CoreKind::Field { .. }
         | CoreKind::Enum { .. }
         | CoreKind::Let { .. }
+        | CoreKind::Label { .. }
+        | CoreKind::Transfer { .. }
         | CoreKind::Call { .. }
         | CoreKind::Binary { .. }
         | CoreKind::Block(_)
@@ -1102,6 +1183,8 @@ impl TypedBody {
             recovered: body.recovered,
             next_callable: 0,
             next_resumption: 0,
+            next_refinement: 0,
+            next_label: 0,
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters,
             effect_row_parameters: definition
@@ -1161,6 +1244,8 @@ impl TypedBody {
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
             resumption_bindings: std::collections::BTreeMap::new(),
+            direct_resumption_callee: None,
+            active_labels: vec![],
             resumption_use_tracker: None,
         };
         let expected_result = signatures
@@ -1272,6 +1357,8 @@ impl TypedBody {
             recovered: body.recovered,
             next_callable: 0,
             next_resumption: 0,
+            next_refinement: 0,
+            next_label: 0,
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters,
             effect_row_parameters: {
@@ -1338,6 +1425,8 @@ impl TypedBody {
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
             resumption_bindings: std::collections::BTreeMap::new(),
+            direct_resumption_callee: None,
+            active_labels: vec![],
             resumption_use_tracker: None,
         };
         let mut parameters = vec![];
@@ -1405,6 +1494,8 @@ impl TypedBody {
             recovered: body.recovered,
             next_callable: 0,
             next_resumption: 0,
+            next_refinement: 0,
+            next_label: 0,
             function_arguments: std::collections::BTreeMap::new(),
             generic_parameters: std::collections::BTreeMap::new(),
             effect_row_parameters: std::collections::BTreeMap::new(),
@@ -1417,6 +1508,8 @@ impl TypedBody {
             handled_operations: std::collections::BTreeSet::new(),
             active_resumptions: vec![],
             resumption_bindings: std::collections::BTreeMap::new(),
+            direct_resumption_callee: None,
+            active_labels: vec![],
             resumption_use_tracker: None,
         };
         let expected = match signatures.definitions.get(&definition.key) {
@@ -1522,6 +1615,8 @@ struct Elaborator<'a> {
     recovered: bool,
     next_callable: u32,
     next_resumption: u32,
+    next_refinement: u32,
+    next_label: u32,
     function_arguments: std::collections::BTreeMap<CoreId, Vec<Type>>,
     /// Callable-declaration generic binders are lexically visible in its
     /// body, including effect applications such as `State<T>::get()`. They
@@ -1567,6 +1662,13 @@ struct Elaborator<'a> {
     /// generated identity. Scope generations are never reused, so stale
     /// entries cannot make a shadowing local resumptive.
     resumption_bindings: std::collections::BTreeMap<(String, u64), ActiveResumption>,
+    /// A frame-bound resumption is not yet a first-class closure value in the
+    /// runtime representation.  This short-lived authorization is installed
+    /// only while elaborating the callee of `k(value)` (or migration spelling
+    /// `resume(k, value)`).  Every other value use fails at Typed Core rather
+    /// than leaking to a later MIR-only failure.
+    direct_resumption_callee: Option<ActiveResumption>,
+    active_labels: Vec<ActiveLabel>,
     /// Installed only while one explicit handler arm is elaborated. Nested
     /// handler arms replace and restore it, preserving lexical continuation
     /// identity rather than counting an accidentally shadowed spelling.
@@ -1600,6 +1702,71 @@ impl Elaborator<'_> {
                         .insert((name.clone(), generation), identity);
                 }
                 self.alloc(CoreKind::Let { name, value }, Type::Unit, expression.span)
+            }
+            ExprKind::Label { name, body } => {
+                let brand = LabelBrand {
+                    owner: self.definition,
+                    label: self.next_label,
+                };
+                self.next_label += 1;
+                let result = self.inference.fresh();
+                self.active_labels.push(ActiveLabel {
+                    name,
+                    brand,
+                    result: result.clone(),
+                });
+                let body = self.expression(body);
+                let _active = self
+                    .active_labels
+                    .pop()
+                    .expect("label scope must outlive its body");
+                let body_type = self.expressions[body.0 as usize].ty.clone();
+                if self.inference.unify(result.clone(), body_type).is_err() {
+                    self.error(
+                        expression.span,
+                        "G4178",
+                        "label body and transfers have incompatible result types",
+                    );
+                    self.recovered = true;
+                }
+                self.alloc(CoreKind::Label { brand, body }, result, expression.span)
+            }
+            ExprKind::Transfer { name, value } => {
+                let value = self.expression(value);
+                let Some(label) = self
+                    .active_labels
+                    .iter()
+                    .rev()
+                    .find(|label| label.name == name)
+                    .cloned()
+                else {
+                    return self.fail(
+                        expression.span,
+                        "G4177",
+                        "transfer targets a label outside its lexical scope",
+                    );
+                };
+                let value_type = self.expressions[value.0 as usize].ty.clone();
+                if self
+                    .inference
+                    .unify(label.result.clone(), value_type)
+                    .is_err()
+                {
+                    self.error(
+                        expression.span,
+                        "G4178",
+                        "transfer value does not match its label result type",
+                    );
+                    self.recovered = true;
+                }
+                self.alloc(
+                    CoreKind::Transfer {
+                        brand: label.brand,
+                        value,
+                    },
+                    label.result,
+                    expression.span,
+                )
             }
             ExprKind::Assign { place, value } => {
                 // The RHS is elaborated before the destination, as specified
@@ -1699,14 +1866,25 @@ impl Elaborator<'_> {
                     self.error(diagnostic.span, diagnostic.code, &diagnostic.message);
                 }
                 self.recovered |= elaboration.recovered;
+                let names = elaboration
+                    .plan
+                    .bindings
+                    .iter()
+                    .map(|binding| (binding.key, binding.name.clone()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
                 let pattern = self.core_pattern(
                     elaboration.plan.decision,
                     subject_type,
                     expression.span,
-                    None,
+                    Some(&names),
                 );
+                let refinement = self.refinement_environment(subject, &pattern);
                 self.alloc(
-                    CoreKind::PatternTest { subject, pattern },
+                    CoreKind::PatternTest {
+                        subject,
+                        pattern,
+                        refinement,
+                    },
                     Type::Scalar(ScalarType::Bool),
                     expression.span,
                 )
@@ -2679,6 +2857,29 @@ impl Elaborator<'_> {
         }
         resolved
     }
+    fn refinement_environment(
+        &mut self,
+        subject: CoreId,
+        pattern: &CorePattern,
+    ) -> RefinementEnvironment {
+        let brand = RefinementBrand {
+            owner: self.definition,
+            refinement: self.next_refinement,
+        };
+        self.next_refinement += 1;
+        let subject = match &self.expressions[subject.0 as usize].kind {
+            CoreKind::Local(name) => Some(name.clone()),
+            _ => None,
+        };
+        let mut bindings = Vec::new();
+        collect_pattern_bindings(pattern, &mut bindings);
+        RefinementEnvironment {
+            brand,
+            subject,
+            bindings,
+            sealed: true,
+        }
+    }
     fn closure_captures(&self, body: CoreId, parameters: &[(String, Type)]) -> Vec<ClosureCapture> {
         let mut parameter_names = parameters
             .iter()
@@ -2768,6 +2969,9 @@ impl Elaborator<'_> {
             CoreKind::Let { name, value } => {
                 self.collect_captures(*value, locals, captures);
                 locals.insert(name.clone());
+            }
+            CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
+                self.collect_captures(*body, locals, captures)
             }
             CoreKind::Assign { place, value } => {
                 self.collect_captures(*value, locals, captures);
@@ -2888,6 +3092,7 @@ impl Elaborator<'_> {
                 }
             }
             CoreKind::Assign { place, .. } => self.zonk_place(place, span),
+            CoreKind::Label { .. } | CoreKind::Transfer { .. } => {}
             CoreKind::Perform { effect, .. } => {
                 effect.arguments = effect
                     .arguments
@@ -3125,8 +3330,9 @@ impl Elaborator<'_> {
                 .and_then(|bindings| bindings.get(&key))
                 .cloned()
                 .map(|name| CorePattern::Bind { name })
-                // `is` has no refinement environment, so its bind pattern is
-                // exactly an ordinary wildcard at Typed Core's test boundary.
+                // `is` and handler dispatch both preserve binder identity in
+                // Core.  A test's binders remain inside its refinement
+                // environment until a branch opens their lexical scope.
                 .unwrap_or(CorePattern::Any),
             PatternDecision::Literal(value) => CorePattern::Literal(value),
             PatternDecision::Tuple(values) => {
@@ -5359,6 +5565,23 @@ impl Elaborator<'_> {
             span,
             message: message.into(),
         });
+    }
+}
+
+fn collect_pattern_bindings(pattern: &CorePattern, bindings: &mut Vec<String>) {
+    match pattern {
+        CorePattern::Bind { name } => bindings.push(name.clone()),
+        CorePattern::Tuple(values) => {
+            for value in values {
+                collect_pattern_bindings(value, bindings);
+            }
+        }
+        CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
+            for field in fields {
+                collect_pattern_bindings(&field.pattern, bindings);
+            }
+        }
+        CorePattern::Any | CorePattern::Literal(_) | CorePattern::Error => {}
     }
 }
 

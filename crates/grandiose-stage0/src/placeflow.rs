@@ -1,7 +1,7 @@
 //! Ownership facts derived solely from Typed Core before MIR lowering.
 
 use crate::{
-    core::{CaptureMode, CoreId, CoreKind, CorePlace, TypedBody},
+    core::{CaptureMode, CoreId, CoreKind, CorePlace, RefinementBrand, TypedBody},
     source::Span,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -70,6 +70,17 @@ pub struct MoveFact {
     pub root: String,
     pub fields: Vec<u32>,
 }
+/// A lexical positive refinement observed while interpreting Core. It is an
+/// inspection fact, not a persistent binding: joins and callable boundaries
+/// intentionally do not retain it unless a later branch lowering proves the
+/// same brand on every predecessor.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RefinementFact {
+    pub brand: RefinementBrand,
+    pub subject: Option<String>,
+    pub bindings: Vec<String>,
+    pub span: Span,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LocalState {
@@ -117,6 +128,7 @@ pub struct PlaceFlow {
     /// information needed for partial moves and aggregate cleanup.
     pub moved_places: Vec<MoveFact>,
     pub active_loans: Vec<LoanFact>,
+    pub refinements: Vec<RefinementFact>,
     pub events: Vec<FlowEvent>,
     pub diagnostics: Vec<FlowDiagnostic>,
 }
@@ -128,6 +140,7 @@ impl PlaceFlow {
             projection_loans: vec![],
             moved_places: BTreeSet::new(),
             events: vec![],
+            refinements: vec![],
             diagnostics: vec![],
         };
         for (name, _) in &body.parameters {
@@ -157,6 +170,7 @@ impl PlaceFlow {
             final_states: a.states,
             moved_places,
             active_loans,
+            refinements: a.refinements,
             events: a.events,
             diagnostics: a.diagnostics,
         }
@@ -173,6 +187,7 @@ struct Analyzer<'a> {
     /// deliberately are not, because their siblings remain usable.
     moved_places: BTreeSet<Projection>,
     events: Vec<FlowEvent>,
+    refinements: Vec<RefinementFact>,
     diagnostics: Vec<FlowDiagnostic>,
 }
 
@@ -234,6 +249,9 @@ impl Analyzer<'_> {
                 }
             }
             CoreKind::Local(_) => self.read_place(id, e.span),
+            CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
+                self.visit_with_live_after(body, live_after)
+            }
             CoreKind::Let { name, value } => {
                 if let CoreKind::Borrow { unique, value } = self.body.expression(value).kind.clone()
                 {
@@ -368,8 +386,22 @@ impl Analyzer<'_> {
                 self.visit_sequence(&fields, live_after);
             }
             CoreKind::Field { .. } => self.read_place(id, e.span),
-            CoreKind::PatternTest { subject, .. } => {
-                self.visit_with_live_after(subject, live_after)
+            CoreKind::PatternTest {
+                subject,
+                refinement,
+                ..
+            } => {
+                self.visit_with_live_after(subject, live_after);
+                // `is` produces a scoped positive proof. The expression
+                // itself cannot introduce ordinary locals, so retaining this
+                // only as a branded observation makes escape and join errors
+                // visible without granting it authority past the test.
+                self.refinements.push(RefinementFact {
+                    brand: refinement.brand,
+                    subject: refinement.subject,
+                    bindings: refinement.bindings,
+                    span: e.span,
+                });
             }
             CoreKind::Binary { left, right, .. } => {
                 self.visit_sequence(&[left, right], live_after);
@@ -457,6 +489,9 @@ impl Analyzer<'_> {
                 for capture in &environment.captures {
                     uses.insert(capture.name.clone());
                 }
+            }
+            CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
+                self.collect_local_uses(*body, uses)
             }
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }

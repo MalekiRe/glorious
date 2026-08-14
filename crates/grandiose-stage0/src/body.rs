@@ -117,6 +117,17 @@ pub enum ExprKind {
         name: String,
         value: ExprId,
     },
+    /// A lexical, owner-scoped nonlocal destination. Its identity is minted
+    /// during Core elaboration; the parser retains only the ordinary spelling.
+    Label {
+        name: String,
+        body: ExprId,
+    },
+    /// Transfer one value to a lexically visible label destination.
+    Transfer {
+        name: String,
+        value: ExprId,
+    },
     Call {
         callee: ExprId,
         arguments: Vec<ExprId>,
@@ -394,6 +405,30 @@ impl Parser<'_> {
     }
 
     fn parse_prefix(&mut self) -> Option<ExprId> {
+        if self.word() == Some("label") {
+            let start = self.advance()?;
+            let name = self.expect_identifier()?;
+            if !self.at_punctuation('{') {
+                self.error_current("G4031", "expected `{` after label binder");
+                return None;
+            }
+            let body = self.parse_block(false)?;
+            return Some(self.alloc(
+                ExprKind::Label { name, body },
+                join(self.lexed.tokens[start].span, self.expression(body).span),
+            ));
+        }
+        if self.word() == Some("transfer") {
+            let start = self.advance()?;
+            let name = self.expect_identifier()?;
+            let value = self
+                .parse_prefix()
+                .unwrap_or_else(|| self.recover_expression());
+            return Some(self.alloc(
+                ExprKind::Transfer { name, value },
+                join(self.lexed.tokens[start].span, self.expression(value).span),
+            ));
+        }
         if self.word() == Some("handle") {
             return self.parse_handle();
         }

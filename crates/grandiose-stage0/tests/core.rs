@@ -2639,3 +2639,71 @@ fn handler_clauses_and_resumptions_receive_distinct_callable_brands() {
         Some(CallableBrand::Continuation { .. })
     ));
 }
+
+#[test]
+fn is_pattern_tests_publish_sealed_scoped_refinement_facts() {
+    let core = core_for(
+        "core-refinement-environment@0.1.0",
+        "pub fn main(value: i64) -> bool { value is bound }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let refinement = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::PatternTest { refinement, .. } => Some(refinement),
+            _ => None,
+        })
+        .expect("pattern test Core node");
+    assert!(refinement.sealed);
+    assert_eq!(refinement.subject.as_deref(), Some("value"));
+    assert_eq!(refinement.bindings, ["bound"]);
+    let flow = PlaceFlow::analyze(&core);
+    assert_eq!(flow.refinements.len(), 1);
+    assert_eq!(flow.refinements[0].brand, refinement.brand);
+    assert_eq!(flow.refinements[0].bindings, ["bound"]);
+}
+
+#[test]
+fn labels_mint_owner_scoped_brands_and_erase_when_no_transfer_is_taken() {
+    let core = core_for(
+        "core-label-brand@0.1.0",
+        "pub fn main() -> i64 { label done { 42 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let brand = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand),
+            _ => None,
+        })
+        .expect("label Core node");
+    let flow = PlaceFlow::analyze(&core);
+    let mir = MirLowering::lower(brand.owner, &core, &flow);
+    assert!(mir.diagnostics.is_empty(), "{:#?}", mir.diagnostics);
+}
+
+#[test]
+fn transfers_are_scoped_in_core_and_fail_closed_before_unchecked_mir_erasure() {
+    let core = core_for(
+        "core-label-transfer@0.1.0",
+        "pub fn main() -> i64 { label done { transfer done 42; 0 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label Core node");
+    let mir = MirLowering::lower(owner, &core, &flow);
+    assert!(
+        mir.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6012")
+    );
+}
