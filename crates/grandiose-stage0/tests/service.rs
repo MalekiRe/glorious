@@ -1072,6 +1072,12 @@ fn service_rejects_discard_of_a_required_pattern_slot_continuation() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4160")
     );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5012"),
+        "missing declarative cancellation quantity diagnostic: {diagnostics:#?}"
+    );
 }
 
 #[test]
@@ -1671,6 +1677,46 @@ fn service_multiplies_captured_callable_use_by_closure_invocations() {
             .any(|diagnostic| diagnostic.code == "G5011"),
         "missing captured callable-use diagnostic: {diagnostics:#?}"
     );
+}
+
+#[test]
+fn service_rejects_an_unfulfilled_callable_lower_bound_on_normal_exit() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn ignores(function: (i64) -> i64) -> i64 { 42 } pub fn main() -> i64 { ignores(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("unused exact callable unexpectedly satisfied its lower bound");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing callable lower-bound diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_checks_callable_lower_bounds_after_branch_hulls() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn choose(value: i64, function: (i64) -> i64) -> i64 { handle value { 0 => function(41), _ => 0 } } pub fn main() -> i64 { choose(0, add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("branch-optional callable use unexpectedly satisfied an exact lower bound");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing branch-hull callable lower-bound diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_transfers_callable_obligations_through_a_typed_argument_boundary() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(function: (i64) -> i64) -> i64 { function(41) } pub fn relay(function: (i64) -> i64) -> i64 { apply(function) } pub fn main() -> i64 { relay(add_one) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
 
 #[test]

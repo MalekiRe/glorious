@@ -14,7 +14,7 @@ use crate::{
     source::Span,
     types::Type,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One structured failure from quantitative Core analysis.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -35,11 +35,34 @@ pub struct CallableUseFact {
     pub resumption: bool,
 }
 
+/// One explicit transfer of a callable-use obligation to another semantic
+/// boundary.  Keeping this as data prevents escape from becoming an implicit
+/// exception to lower-bound checking.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CallableEscapeFact {
+    pub name: String,
+    pub declared: Quantity,
+    /// The callable contract carried by the receiver. `None` means the
+    /// boundary is opaque and cannot prove that it preserves the capability.
+    pub required: Option<Quantity>,
+    pub span: Span,
+    pub boundary: CallableEscapeBoundary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CallableEscapeBoundary {
+    Result,
+    Argument,
+    Assignment,
+    Closure,
+}
+
 /// The result of quantitative-use analysis.  Facts are retained for tooling
 /// and later ownership refinements even when a diagnostic prevents lowering.
 #[derive(Clone, Debug, Default)]
 pub struct UseFlow {
     pub callable_uses: Vec<CallableUseFact>,
+    pub callable_escapes: Vec<CallableEscapeFact>,
     pub diagnostics: Vec<UseDiagnostic>,
 }
 
@@ -57,6 +80,8 @@ impl UseFlow {
             next_key: 0,
             contracts: BTreeMap::new(),
             facts: BTreeMap::new(),
+            escapes: BTreeMap::new(),
+            escaped_closures: BTreeSet::new(),
             diagnostics: vec![],
         };
         let mut environment = Environment::default();
@@ -71,6 +96,13 @@ impl UseFlow {
         }
         let summary = analyzer.expression(body.root, &mut environment);
         analyzer.record(summary);
+        let required = callable_invocation(&body.expression(body.root).ty);
+        analyzer.escape_value(
+            body.root,
+            &environment,
+            required,
+            CallableEscapeBoundary::Result,
+        );
         analyzer.finish()
     }
 }
@@ -139,6 +171,7 @@ struct ClosureValue {
     body: CoreId,
     captures: BTreeMap<String, Binding>,
     parameters: Vec<(String, Type)>,
+    invocation: Quantity,
 }
 
 #[derive(Clone, Debug)]
@@ -162,6 +195,8 @@ struct Analyzer<'a> {
     next_key: u32,
     contracts: BTreeMap<ContractKey, Contract>,
     facts: BTreeMap<ContractKey, Quantity>,
+    escapes: BTreeMap<ContractKey, Vec<(Option<Quantity>, Span, CallableEscapeBoundary)>>,
+    escaped_closures: BTreeSet<CallableId>,
     diagnostics: Vec<UseDiagnostic>,
 }
 
@@ -272,8 +307,17 @@ impl Analyzer<'_> {
                 environment.bindings.insert(name, binding);
                 summary
             }
-            CoreKind::Assign { value, .. }
-            | CoreKind::Borrow { value, .. }
+            CoreKind::Assign { value, .. } => {
+                let summary = self.expression(value, environment);
+                // Assignment stores a capability beyond this expression's
+                // direct invocation site. Until place summaries model the
+                // destination's exact callable contract, treat it as an
+                // opaque transfer rather than silently dropping a must-use
+                // obligation.
+                self.escape_value(value, environment, None, CallableEscapeBoundary::Assignment);
+                summary
+            }
+            CoreKind::Borrow { value, .. }
             | CoreKind::Move(value)
             | CoreKind::Unary { value, .. }
             | CoreKind::Field { base: value, .. }
@@ -310,16 +354,55 @@ impl Analyzer<'_> {
                     let continuation_key = match &clause.resumption {
                         CoreHandlerResumption::Explicit { name, quantity } => {
                             let key = self.contract(name, *quantity, clause.span, true);
+                            // A generated continuation may intentionally
+                            // shadow an ordinary callable parameter. The
+                            // outer capability is still owned by the
+                            // enclosing callable boundary; do not mistake
+                            // lexical shadowing for an implicit zero-use
+                            // destruction of that boundary capability.
+                            if let Some(Binding::Contract(outer)) =
+                                arm_environment.bindings.get(name).cloned()
+                                && let Some(contract) = self.contracts.get(&outer)
+                            {
+                                self.escape_contract(
+                                    outer,
+                                    Some(contract.declared),
+                                    clause.span,
+                                    CallableEscapeBoundary::Closure,
+                                );
+                            }
                             arm_environment
                                 .bindings
                                 .insert(name.clone(), Binding::Contract(key));
                             Some(key)
                         }
-                        _ => None,
+                        // Tail and cancellation are continuation actions too,
+                        // not special exemptions from the quantity engine.
+                        // Materialize declarative zero/one-use obligations so
+                        // the same checker explains ordinary calls, replay,
+                        // implicit resumption, and cancellation.
+                        CoreHandlerResumption::Tail { quantity } => {
+                            Some(self.contract("<tail-resumption>", *quantity, clause.span, true))
+                        }
+                        CoreHandlerResumption::Discard { quantity } => Some(self.contract(
+                            "<cancelled-resumption>",
+                            *quantity,
+                            clause.span,
+                            true,
+                        )),
+                        CoreHandlerResumption::Terminal => None,
                     };
                     let arm = self.expression(clause.body, &mut arm_environment);
                     if let Some(key) = continuation_key {
-                        let actual = arm.uses.get(&key).copied().unwrap_or(Quantity::ZERO);
+                        let actual = match clause.resumption {
+                            CoreHandlerResumption::Tail { .. } => Quantity::ONCE,
+                            CoreHandlerResumption::Discard { .. } => Quantity::ZERO,
+                            CoreHandlerResumption::Explicit { .. }
+                            | CoreHandlerResumption::Terminal => {
+                                arm.uses.get(&key).copied().unwrap_or(Quantity::ZERO)
+                            }
+                        };
+                        self.facts.insert(key, actual);
                         self.check_contract(key, actual);
                     }
                     arms = Some(match arms {
@@ -376,33 +459,53 @@ impl Analyzer<'_> {
         // Evaluating a callee value does not execute its closure body. Its
         // captures execute only below after direct invocation is known.
         let mut summary = self.expression(callee, environment);
-        let arguments = self.sequence(arguments, environment, span);
-        summary = self.compose(span, summary, arguments);
+        let evaluated_arguments = self.sequence(arguments.clone(), environment, span);
+        summary = self.compose(span, summary, evaluated_arguments);
         match self.binding_for_value(callee, environment) {
-            Binding::Contract(key) => self.compose(span, summary, Summary::one(key)),
+            Binding::Contract(key) => {
+                self.escape_arguments(callee, &arguments, environment);
+                self.compose(span, summary, Summary::one(key))
+            }
             Binding::Closure(closure) => {
                 let mut closure_environment = Environment {
                     bindings: closure.captures.clone(),
                 };
-                for (name, ty) in &closure.parameters {
-                    let binding = callable_invocation(ty)
-                        .map(|quantity| {
-                            Binding::Contract(self.contract(
-                                &format!("{name}@closure{}", closure.callable.0),
-                                quantity,
-                                span,
-                                false,
-                            ))
+                for (index, (name, ty)) in closure.parameters.iter().enumerate() {
+                    // Preserve the caller's contract identity when a local
+                    // capability is passed through a closure. Creating a
+                    // fresh parameter contract here would lose the caller's
+                    // lower-bound obligation and undercount captures.
+                    let binding = arguments
+                        .get(index)
+                        .map(|argument| self.binding_for_value(*argument, environment))
+                        .filter(|binding| {
+                            matches!(binding, Binding::Contract(_) | Binding::Closure(_))
                         })
-                        .unwrap_or(Binding::Other);
+                        .unwrap_or_else(|| {
+                            callable_invocation(ty)
+                                .map(|quantity| {
+                                    Binding::Contract(self.contract(
+                                        &format!("{name}@closure{}", closure.callable.0),
+                                        quantity,
+                                        span,
+                                        false,
+                                    ))
+                                })
+                                .unwrap_or(Binding::Other)
+                        });
                     closure_environment.bindings.insert(name.clone(), binding);
                 }
                 let body = self.expression(closure.body, &mut closure_environment);
-                // Every direct call executes the closure body exactly once.
-                let body = self.repeat(span, body, Quantity::ONCE);
+                // A contextual closure can carry a finite, optional, or
+                // widened invocation interval from its expected callable
+                // type.  Replaying it multiplies every captured obligation.
+                let body = self.repeat(span, body, closure.invocation);
                 self.compose(span, summary, body)
             }
-            Binding::GlobalCallable | Binding::Other => summary,
+            Binding::GlobalCallable | Binding::Other => {
+                self.escape_arguments(callee, &arguments, environment);
+                summary
+            }
         }
     }
 
@@ -439,9 +542,96 @@ impl Analyzer<'_> {
                     body: *body,
                     captures,
                     parameters: parameters.clone(),
+                    invocation: callable_invocation(&expression.ty).unwrap_or(Quantity::ONCE),
                 })
             }
             _ => Binding::Other,
+        }
+    }
+
+    fn callable_parameters(&self, callee: CoreId) -> Vec<Option<Quantity>> {
+        match &self.body.expression(callee).ty {
+            Type::Callable { parameters, .. } => {
+                parameters.iter().map(callable_invocation).collect()
+            }
+            _ => vec![],
+        }
+    }
+
+    fn escape_arguments(
+        &mut self,
+        callee: CoreId,
+        arguments: &[CoreId],
+        environment: &Environment,
+    ) {
+        let parameter_capabilities = self.callable_parameters(callee);
+        for (index, argument) in arguments.iter().enumerate() {
+            self.escape_value(
+                *argument,
+                environment,
+                parameter_capabilities.get(index).copied().flatten(),
+                CallableEscapeBoundary::Argument,
+            );
+        }
+    }
+
+    fn escape_contract(
+        &mut self,
+        key: ContractKey,
+        required: Option<Quantity>,
+        span: Span,
+        boundary: CallableEscapeBoundary,
+    ) {
+        self.escapes
+            .entry(key)
+            .or_default()
+            .push((required, span, boundary));
+    }
+
+    fn escape_closure(&mut self, closure: ClosureValue, span: Span) {
+        if !self.escaped_closures.insert(closure.callable) {
+            return;
+        }
+        let mut environment = Environment {
+            bindings: closure.captures,
+        };
+        // Arguments belong to the receiver of the escaped closure. They are
+        // not body-local obligations of the enclosing declaration.
+        for (name, _) in closure.parameters {
+            environment.bindings.insert(name, Binding::Other);
+        }
+        let summary = self.expression(closure.body, &mut environment);
+        let summary = self.repeat(span, summary, closure.invocation);
+        self.record(summary);
+    }
+
+    fn escape_value(
+        &mut self,
+        id: CoreId,
+        environment: &Environment,
+        required: Option<Quantity>,
+        boundary: CallableEscapeBoundary,
+    ) {
+        match self.binding_for_value(id, environment) {
+            Binding::Contract(key) => {
+                self.escape_contract(key, required, self.body.expression(id).span, boundary)
+            }
+            Binding::Closure(closure) => {
+                self.escape_closure(closure, self.body.expression(id).span)
+            }
+            Binding::GlobalCallable | Binding::Other => match &self.body.expression(id).kind {
+                CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
+                    for value in values {
+                        self.escape_value(*value, environment, None, boundary);
+                    }
+                }
+                CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+                    for value in fields {
+                        self.escape_value(*value, environment, None, boundary);
+                    }
+                }
+                _ => {}
+            },
         }
     }
 
@@ -449,17 +639,50 @@ impl Analyzer<'_> {
         let Some(contract) = self.contracts.get(&key).cloned() else {
             return;
         };
-        // A callable parameter may be returned, stored in a closure, or
-        // otherwise transferred to a later caller.  This intrabody pass has
-        // no escape summary yet, so it can soundly reject only an excessive
-        // upper bound for ordinary capabilities. A generated continuation is
-        // frame-local and cannot escape Core, hence its full lower-and-upper
-        // contract is enforceable here.
-        if (contract.resumption && contract.declared.contains(actual))
-            || (!contract.resumption && upper_within(actual.upper, contract.declared.upper))
-        {
+        if contract.resumption {
+            if contract.declared.contains(actual) {
+                return;
+            }
+            self.contract_error(&contract, actual, "G5012");
             return;
         }
+
+        let escapes = self.escapes.get(&key).cloned().unwrap_or_default();
+        if escapes.is_empty() {
+            if contract.declared.contains(actual) {
+                return;
+            }
+            self.contract_error(&contract, actual, "G5011");
+            return;
+        }
+
+        // A local use interval and each outgoing callable capability are
+        // separate declarative obligations. The receiver's callable type
+        // must be admitted by the source contract, and the local prefix may
+        // not already exceed the source upper bound. Lower bounds are then
+        // discharged by the typed receiver rather than silently forgotten.
+        if !upper_within(actual.upper, contract.declared.upper) {
+            self.contract_error(&contract, actual, "G5011");
+        }
+        for (required, span, boundary) in escapes {
+            if required.is_some_and(|required| contract.declared.contains(required)) {
+                continue;
+            }
+            self.error(
+                span,
+                "G5013",
+                format!(
+                    "callable `{}` escapes through {} without a compatible callable-use capability; declared [{}, {}]",
+                    contract.name,
+                    display_boundary(boundary),
+                    contract.declared.lower,
+                    display_upper(contract.declared.upper),
+                ),
+            );
+        }
+    }
+
+    fn contract_error(&mut self, contract: &Contract, actual: Quantity, code: &'static str) {
         let subject = if contract.resumption {
             "handler continuation"
         } else {
@@ -467,11 +690,7 @@ impl Analyzer<'_> {
         };
         self.error(
             contract.span,
-            if contract.resumption {
-                "G5012"
-            } else {
-                "G5011"
-            },
+            code,
             format!(
                 "{subject} `{}` is invoked [{}, {}] but its declared quantity is [{}, {}]",
                 contract.name,
@@ -512,10 +731,33 @@ impl Analyzer<'_> {
                 .cmp(&right.span.start)
                 .then(left.name.cmp(&right.name))
         });
+        let mut callable_escapes = self
+            .escapes
+            .iter()
+            .flat_map(|(key, escapes)| {
+                let contract = &self.contracts[key];
+                escapes
+                    .iter()
+                    .map(move |(required, span, boundary)| CallableEscapeFact {
+                        name: contract.name.clone(),
+                        declared: contract.declared,
+                        required: *required,
+                        span: *span,
+                        boundary: *boundary,
+                    })
+            })
+            .collect::<Vec<_>>();
+        callable_escapes.sort_by(|left, right| {
+            left.span
+                .start
+                .cmp(&right.span.start)
+                .then(left.name.cmp(&right.name))
+        });
         self.diagnostics
             .sort_by_key(|diagnostic| diagnostic.span.start);
         UseFlow {
             callable_uses,
+            callable_escapes,
             diagnostics: self.diagnostics,
         }
     }
@@ -537,5 +779,112 @@ fn upper_within(actual: Option<u64>, declared: Option<u64>) -> bool {
         (_, None) => true,
         (Some(actual), Some(declared)) => actual <= declared,
         (None, Some(_)) => false,
+    }
+}
+
+fn display_boundary(boundary: CallableEscapeBoundary) -> &'static str {
+    match boundary {
+        CallableEscapeBoundary::Result => "the result boundary",
+        CallableEscapeBoundary::Argument => "a callable argument",
+        CallableEscapeBoundary::Assignment => "an assigned place",
+        CallableEscapeBoundary::Closure => "a closure environment",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        core::{CaptureMode, ClosureCapture, CoreExpr},
+        identity::{FileKey, PackageKey},
+        types::EffectRow,
+    };
+
+    fn span() -> Span {
+        Span {
+            file: FileKey::new(&PackageKey("useflow-test@0".into()), "main.glorious"),
+            start: 0,
+            end: 1,
+        }
+    }
+
+    fn callable(invocation: Quantity) -> Type {
+        Type::Callable {
+            lifetime_binders: 0,
+            parameters: vec![Type::Scalar(crate::types::ScalarType::I64)],
+            result: Box::new(Type::Scalar(crate::types::ScalarType::I64)),
+            effects: EffectRow::empty(),
+            invocation,
+        }
+    }
+
+    #[test]
+    fn widens_captured_uses_for_an_unrestricted_closure_invocation() {
+        let function = callable(Quantity::ONCE);
+        let closure = Type::Callable {
+            lifetime_binders: 0,
+            parameters: vec![],
+            result: Box::new(Type::Scalar(crate::types::ScalarType::I64)),
+            effects: EffectRow::empty(),
+            invocation: Quantity::UNRESTRICTED,
+        };
+        let body = TypedBody {
+            parameters: vec![("function".into(), function.clone())],
+            expressions: vec![
+                CoreExpr {
+                    kind: CoreKind::Local("function".into()),
+                    ty: function.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Literal("41".into()),
+                    ty: Type::Scalar(crate::types::ScalarType::I64),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Call {
+                        callee: CoreId(0),
+                        arguments: vec![CoreId(1)],
+                    },
+                    ty: Type::Scalar(crate::types::ScalarType::I64),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Closure {
+                        callable: CallableId(0),
+                        parameters: vec![],
+                        captures: vec![ClosureCapture {
+                            name: "function".into(),
+                            mode: CaptureMode::SharedBorrow,
+                            ty: function.clone(),
+                        }],
+                        body: CoreId(2),
+                    },
+                    ty: closure,
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Call {
+                        callee: CoreId(3),
+                        arguments: vec![],
+                    },
+                    ty: Type::Scalar(crate::types::ScalarType::I64),
+                    span: span(),
+                },
+            ],
+            root: CoreId(4),
+            diagnostics: vec![],
+            recovered: false,
+        };
+        let ownership = PlaceFlow::analyze(&body);
+        assert!(ownership.diagnostics.is_empty(), "{ownership:#?}");
+        let uses = UseFlow::analyze(&body, &ownership);
+        assert!(
+            uses.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G5011"),
+            "unrestricted closure replay did not widen its captured exact callable: {uses:#?}"
+        );
+        assert_eq!(uses.callable_uses[0].actual.upper, None);
     }
 }

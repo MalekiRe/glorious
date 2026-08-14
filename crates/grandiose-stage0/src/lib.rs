@@ -117,7 +117,9 @@ pub use types::{
     ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail, EffectVar, GenericKind,
     InferContext, InferVar, Lifetime, Mutability, ScalarType, Type, TypeError,
 };
-pub use useflow::{CallableUseFact, UseDiagnostic, UseFlow};
+pub use useflow::{
+    CallableEscapeBoundary, CallableEscapeFact, CallableUseFact, UseDiagnostic, UseFlow,
+};
 pub use vm_backend::{
     CandidateVmArtifact, CandidateVmProgram, STAGE0_VM_SCHEMA, VerifiedVmArtifact,
     VerifiedVmProgram, VmArtifactError, VmCompare, VmExecutionLimits, VmFunction, VmInstruction,
