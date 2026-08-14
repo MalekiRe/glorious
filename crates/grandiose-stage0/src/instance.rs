@@ -452,6 +452,11 @@ pub struct InstanceGraph {
     roots: BTreeMap<InstanceKey, String>,
     edges: BTreeMap<InstanceKey, BTreeSet<InstanceKey>>,
     pending: BTreeSet<InstanceKey>,
+    /// Admitted instances grouped by their source callable. This is a
+    /// resource-accounting index rather than part of instance identity: it
+    /// lets the per-definition policy remain transactional without rescanning
+    /// the complete graph on every discovered callee.
+    instances_per_callable: BTreeMap<DefKey, usize>,
 }
 
 impl InstanceGraph {
@@ -511,10 +516,10 @@ impl InstanceGraph {
             });
         }
         let count = self
-            .edges
-            .keys()
-            .filter(|existing| existing.callable == key.callable)
-            .count();
+            .instances_per_callable
+            .get(&key.callable)
+            .copied()
+            .unwrap_or(0);
         if count >= limits.per_definition {
             return Err(InstanceGraphError::PerDefinitionLimit {
                 callable: key.callable,
@@ -526,6 +531,7 @@ impl InstanceGraph {
             self.roots.insert(key.clone(), reason);
         }
         self.pending.insert(key.clone());
+        *self.instances_per_callable.entry(key.callable).or_default() += 1;
         self.edges.insert(key, BTreeSet::new());
         Ok(true)
     }
@@ -1115,6 +1121,54 @@ mod tests {
             Err(InstanceGraphError::TotalLimit { .. })
         ));
         assert!(graph.callees(&first).unwrap().is_empty());
+    }
+
+    #[test]
+    fn per_definition_limit_counts_only_admitted_distinct_instances() {
+        let kinds = [GenericKind::Type];
+        let instance = |scalar| {
+            InstanceKey::new(
+                definition(b"bounded"),
+                &kinds,
+                vec![InstanceArgument::Type(Type::Scalar(scalar))],
+            )
+            .unwrap()
+        };
+        let first = instance(ScalarType::I64);
+        let second = instance(ScalarType::U32);
+        let rejected = instance(ScalarType::Text);
+        let limits = InstanceLimits {
+            per_definition: 2,
+            ..InstanceLimits::default()
+        };
+        let mut graph = InstanceGraph::default();
+        graph
+            .discover_root(
+                InstanceRoot {
+                    key: first.clone(),
+                    reason: "entry".into(),
+                },
+                limits,
+            )
+            .unwrap();
+        graph
+            .discover_callee(&first, second.clone(), limits)
+            .unwrap();
+
+        assert!(matches!(
+            graph.discover_callee(&first, rejected, limits),
+            Err(InstanceGraphError::PerDefinitionLimit { .. })
+        ));
+        assert!(graph.callees(&first).unwrap().contains(&second));
+        assert_eq!(graph.ordered().len(), 2);
+
+        // A rejected insertion must not perturb accounting: an already
+        // admitted recursion remains a deduplicated edge, not a new charge.
+        assert!(
+            !graph
+                .discover_callee(&first, first.clone(), limits)
+                .unwrap()
+        );
     }
 
     #[test]
