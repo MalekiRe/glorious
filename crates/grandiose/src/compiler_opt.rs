@@ -32,6 +32,37 @@ use crate::compiler_mir::analyses::{
 fn validation_disabled() -> bool {
     std::env::var_os("G1_OPT_NO_VALIDATE").is_some()
 }
+
+/// Lightweight, opt-in optimizer phase timing. This is diagnostic-only: it
+/// does not participate in optimization scheduling, caching, or validation.
+struct OptimizerTimings {
+    enabled: bool,
+    started: Instant,
+    checkpoint: Instant,
+}
+
+impl OptimizerTimings {
+    fn from_environment() -> Self {
+        let now = Instant::now();
+        Self {
+            enabled: std::env::var_os("G1_OPT_TIMINGS").is_some(),
+            started: now,
+            checkpoint: now,
+        }
+    }
+
+    fn mark(&mut self, phase: &str) {
+        if self.enabled {
+            let now = Instant::now();
+            eprintln!(
+                "g1-opt {phase}: phase={:.3}s total={:.3}s",
+                now.duration_since(self.checkpoint).as_secs_f64(),
+                now.duration_since(self.started).as_secs_f64(),
+            );
+            self.checkpoint = now;
+        }
+    }
+}
 use crate::compiler_mir::mutation::{CheckedCfg, ResourceLimits, check_resource_limits};
 use crate::compiler_regions as regions;
 use crate::compiler_traits::HostImportRole;
@@ -11785,6 +11816,9 @@ fn run_transactional_whole_program_pass(
     inline_policy: &mut InlinePolicyState,
     plan: OptimizationPlan,
 ) -> PassReport {
+    // Whole-program passes publish invalidation directly on each rewritten
+    // body.  Keeping that authority with the pass avoids a second whole
+    // program clone merely to reconstruct a change set after the commit.
     let (outcome, work_units) = match pass {
         PassId::SpecializeDirectCalls => {
             specialize_forwarding_direct_calls(program, *global_remaining)
@@ -12984,7 +13018,6 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission_incremental(
         }
         if changed != changed_before {
             function.invalid_analyses |= analysis::ALL;
-            changed_mask[function_index] = true;
         }
     }
 
@@ -13353,7 +13386,6 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission_incremental(
                     });
                     changed += 1;
                     function.invalid_analyses |= analysis::ALL;
-                    changed_mask[function_index] = true;
                 }
             }
         }
@@ -13370,12 +13402,10 @@ pub(crate) fn canonicalize_dead_edge_copies_for_emission_incremental(
                 changed += (before - block.statements.len()) as u64;
             }
             function.invalid_analyses |= analysis::ALL;
-            changed_mask[function_index] = true;
         }
         if !cleanup_blocks.is_empty() {
             function.blocks.extend(cleanup_blocks);
             function.invalid_analyses |= analysis::ALL;
-            changed_mask[function_index] = true;
         }
     }
     refresh_invalidated_flow(program, types)?;
@@ -13437,6 +13467,7 @@ pub(crate) fn derive_program_serialization_cleanup_lists_except(
     types: &[Type],
     already_prepared: &BTreeSet<u32>,
 ) -> Result<Vec<Option<BTreeMap<u32, Vec<Vec<Register>>>>>, ValidationError> {
+    let _ps = Instant::now();
     let array_calls = regions::array_call_summaries(program, types);
     program
         .functions
@@ -13456,7 +13487,7 @@ pub(crate) fn derive_program_serialization_cleanup_lists_except(
                 refine_enum_switches: false,
             };
             Ok(Some(
-                regions::solve(&context, "serialization_cleanup_lists")
+                regions::solve(&context, "derive_program_serialization_cleanup_lists_except")
                     .map_err(|error| flow_to_validation(function, error))?
                     .cleanup_lists,
             ))
@@ -13869,6 +13900,8 @@ fn validate_bytecode_input_checkpoint(
 /// change ORs the invalidation mask, and this refresh is the only way the
 /// facts become trusted again.
 fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(), ValidationError> {
+    let _riff = Instant::now();
+    let mut _riff_n = 0_u64;
     // Most optimizer checkpoints follow an unchanged pass, or a pass that
     // invalidated only ephemeral metadata. Avoid deriving whole-program array
     // call summaries in those cases: the summaries are needed solely by the
@@ -14191,6 +14224,7 @@ pub(crate) fn optimize_program_with_control_tables_and_plan_incremental(
     plan: OptimizationPlan,
     mut incremental_cleanup: Option<&mut crate::compiler_session::IncrementalMirCache>,
 ) -> Result<OptimizationReport, ValidationError> {
+    let mut timings = OptimizerTimings::from_environment();
     validate_program(program, types, MirPhase::Raw)?;
     let initial_operations = operation_count(program);
     let mut passes = Vec::new();
