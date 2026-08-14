@@ -301,6 +301,61 @@ fn compile_diagnostic_canonicalization_presents_source_facts_by_span_then_severi
 }
 
 #[test]
+fn compile_diagnostic_error_limit_keeps_the_earliest_facts_and_reports_suppression() {
+    let request = request("pub fn main() -> i64 { missing_name }");
+    let file = request.sources[0].key;
+    let mut diagnostics = Vec::new();
+    for start in (0..5).rev() {
+        diagnostics.push(CompileDiagnostic {
+            code: "G4104",
+            message: format!("unresolved name at byte {start}"),
+            class: DiagnosticClass::Source,
+            severity: Severity::Error,
+            primary: Some(grandiose_stage0::SourceSpan {
+                file,
+                start,
+                end: start + 1,
+            }),
+            input_fingerprint: None,
+        });
+    }
+    diagnostics.push(CompileDiagnostic {
+        code: "G0002",
+        message: "context warning".into(),
+        class: DiagnosticClass::Source,
+        severity: Severity::Warning,
+        primary: None,
+        input_fingerprint: None,
+    });
+
+    let diagnostics = CompileDiagnostic::limit_errors(diagnostics, 3);
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .count(),
+        3
+    );
+    assert_eq!(
+        diagnostics
+            .iter()
+            .filter_map(|diagnostic| diagnostic.primary)
+            .map(|span| span.start)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "G7013"
+            && diagnostic.class == DiagnosticClass::Resource
+            && diagnostic.message
+                == "diagnostic error limit of 3 reached; 3 additional error(s) suppressed"
+    }));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.severity == Severity::Warning && diagnostic.message == "context warning"
+    }));
+}
+
+#[test]
 fn service_instantiates_generic_callable_signatures_at_each_direct_call() {
     let source =
         "pub fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { identity(42) }";

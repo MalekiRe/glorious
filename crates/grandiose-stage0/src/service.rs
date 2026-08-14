@@ -29,6 +29,12 @@ pub struct CompileDiagnostic {
     pub input_fingerprint: Option<Digest>,
 }
 impl CompileDiagnostic {
+    /// The maximum number of error diagnostics published for one failed
+    /// request. Keeping this bound at the service boundary protects hosts and
+    /// tools from pathological recovery cascades while preserving a single,
+    /// explicit explanation that additional facts were suppressed.
+    pub const DEFAULT_ERROR_LIMIT: usize = 100;
+
     fn source(code: &'static str, message: impl Into<String>, span: Option<Span>) -> Self {
         Self::new(code, message, DiagnosticClass::Source, span)
     }
@@ -47,6 +53,10 @@ impl CompileDiagnostic {
 
     fn input_corruption(code: &'static str, message: impl Into<String>) -> Self {
         Self::new(code, message, DiagnosticClass::InputCorruption, None)
+    }
+
+    fn resource(code: &'static str, message: impl Into<String>) -> Self {
+        Self::new(code, message, DiagnosticClass::Resource, None)
     }
 
     fn new(
@@ -83,6 +93,46 @@ impl CompileDiagnostic {
         diagnostics.dedup_by(|left, right| left.fact_key() == right.fact_key());
         diagnostics.sort_by(|left, right| left.presentation_key().cmp(&right.presentation_key()));
         diagnostics
+    }
+
+    /// Publish at most `limit` error facts from a canonical batch. Warnings
+    /// and notes remain useful context and do not consume the error budget.
+    /// If the limit is exceeded, the last error slot is reserved for a stable
+    /// resource diagnostic that states exactly how many errors were hidden.
+    pub fn limit_errors(diagnostics: Vec<Self>, limit: usize) -> Vec<Self> {
+        // A terminal resource fact must remain observable, so normalize an
+        // accidental zero configuration to the smallest meaningful budget.
+        let limit = limit.max(1);
+        let diagnostics = Self::canonicalize(diagnostics);
+        let error_count = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+            .count();
+        if error_count <= limit {
+            return diagnostics;
+        }
+
+        let retained_error_count = limit.saturating_sub(1);
+        let mut remaining_errors = retained_error_count;
+        let mut published = Vec::with_capacity(diagnostics.len());
+        let mut suppressed = 0usize;
+        for diagnostic in diagnostics {
+            if diagnostic.severity == Severity::Error {
+                if remaining_errors == 0 {
+                    suppressed += 1;
+                    continue;
+                }
+                remaining_errors -= 1;
+            }
+            published.push(diagnostic);
+        }
+        published.push(Self::resource(
+            "G7013",
+            format!(
+                "diagnostic error limit of {limit} reached; {suppressed} additional error(s) suppressed"
+            ),
+        ));
+        Self::canonicalize(published)
     }
 
     fn fact_key(
@@ -678,7 +728,14 @@ fn failed(input_fingerprint: Digest, mut diagnostics: Vec<CompileDiagnostic>) ->
     for diagnostic in &mut diagnostics {
         diagnostic.input_fingerprint = Some(input_fingerprint);
     }
-    ServiceError::Failed(CompileDiagnostic::canonicalize(diagnostics))
+    let mut diagnostics =
+        CompileDiagnostic::limit_errors(diagnostics, CompileDiagnostic::DEFAULT_ERROR_LIMIT);
+    // The resource fact is synthesized after provenance is attached to the
+    // phase-local batch, so give it the same immutable request identity.
+    for diagnostic in &mut diagnostics {
+        diagnostic.input_fingerprint = Some(input_fingerprint);
+    }
+    ServiceError::Failed(diagnostics)
 }
 
 fn constant_cycle(
