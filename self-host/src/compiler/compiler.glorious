@@ -1589,6 +1589,20 @@ minimal_interface_prelude(
     }
 }
 
+// A source bundle that already declares `Result` must retain its exact
+// declaration universe. Scalar names are built into the bootstrap language
+// profile, so the scalar-only branch is an owned copy rather than a second
+// textual prelude; keeping this operation explicit makes the two session
+// branches agree on ownership without minting a duplicate nominal.
+scalar_only_prelude(original: &String) -> String {
+    let output = ByteBuf::new();
+    ByteBuf::append_bytes(&mut output, &String::as_bytes(original));
+    handle String::from_utf8(ByteBuf::finish(output)) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
 // Thin wrapper so the bytecode-subset optimizer never has to specialize the
 // Result-detection dispatch inside the compiler orchestration module.
 result_prelude_missing(
@@ -1622,7 +1636,11 @@ session_source(original: &String) -> Result<String, CompileError> {
         Result::Ok(scalar_only_prelude(original))
     } else {
         // Scalar mirror plus the injected minimal `Result` nominal.
-        Result::Ok(minimal_interface_prelude(original))
+        Result::Ok(minimal_interface_prelude(
+            original,
+            &source,
+            &declarations
+        ))
     }
 }
 
