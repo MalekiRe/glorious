@@ -271,6 +271,39 @@ fn handler_payload_allocation_fixture(definition: DefKey) -> VmFunction {
     }
 }
 
+fn assert_continuation_budget_parity(function: VmFunction, max_instructions: u64) {
+    let definition = function.definition;
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: function.clone(),
+        fingerprint: Digest::of_bytes(b"continuation-budget-artifact"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    let limits = VmExecutionLimits {
+        max_instructions,
+        ..VmExecutionLimits::default()
+    };
+    assert!(matches!(
+        verify_vm(artifact).unwrap().run_i64_with_limits(limits),
+        Err(VmArtifactError::InstructionLimit { limit }) if limit == max_instructions
+    ));
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: definition,
+        functions: BTreeMap::from([(definition, function)]),
+        fingerprint: Digest::of_bytes(b"continuation-budget-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(program)
+            .unwrap()
+            .run_i64_with_limits(limits),
+        Err(VmArtifactError::InstructionLimit { limit }) if limit == max_instructions
+    ));
+}
+
 #[test]
 fn schema_26_leave_bytes_reject_every_truncation_and_fingerprint_tampering() {
     let bytes = encoded_leave_fixture();
@@ -889,6 +922,8 @@ fn verified_vm_executes_a_deep_one_shot_handler_frame() {
     candidate.fingerprint = candidate.computed_fingerprint();
     let encoded = encode_artifact(&candidate);
     assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    // The eighth step is the continuation's return, after direct `Resume`.
+    assert_continuation_budget_parity(candidate.function.clone(), 7);
     assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
 }
 
@@ -938,6 +973,8 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
     candidate.fingerprint = candidate.computed_fingerprint();
     let encoded = encode_artifact(&candidate);
     assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    // The seventh step is the restored continuation's return.
+    assert_continuation_budget_parity(candidate.function.clone(), 6);
     assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
 }
 
@@ -1217,6 +1254,9 @@ fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame()
     candidate.fingerprint = candidate.computed_fingerprint();
     let bytes = encode_artifact(&candidate);
     assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    // Forward crosses an inner frame, then outer Resume restores the original
+    // continuation; the thirteenth step is its final return.
+    assert_continuation_budget_parity(candidate.function.clone(), 12);
     assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
 }
 

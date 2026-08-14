@@ -4796,16 +4796,24 @@ fn execute(
                 let Some(continuation) = frame.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if let Some(leave) = continuation.pending_leave.clone() {
-                    registers = continuation.registers;
-                    handlers.extend(continuation.above);
+                let RuntimeContinuation {
+                    target,
+                    dst,
+                    registers: saved_registers,
+                    above,
+                    pending_leave,
+                    ..
+                } = continuation;
+                if let Some(leave) = pending_leave {
+                    registers = saved_registers;
+                    handlers.extend(above);
                     pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
                     continue;
                 }
-                registers = continuation.registers;
-                registers[continuation.dst as usize] = Some(resumed);
-                handlers.extend(continuation.above);
-                pc = continuation.target;
+                registers = saved_registers;
+                registers[dst as usize] = Some(resumed);
+                handlers.extend(above);
+                pc = target;
                 continue;
             }
             VmInstruction::CaptureResumption { dst } => {
@@ -4847,16 +4855,24 @@ fn execute(
                 // only the deep frames recorded at the original `Perform`
                 // are reinstated with the continuation.
                 handlers.truncate(index + 1);
-                if let Some(leave) = continuation.pending_leave.clone() {
-                    registers = continuation.registers;
-                    handlers.extend(continuation.above);
+                let RuntimeContinuation {
+                    target,
+                    dst,
+                    registers: saved_registers,
+                    above,
+                    pending_leave,
+                    ..
+                } = continuation;
+                if let Some(leave) = pending_leave {
+                    registers = saved_registers;
+                    handlers.extend(above);
                     pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
                     continue;
                 }
-                registers = continuation.registers;
-                registers[continuation.dst as usize] = Some(resumed);
-                handlers.extend(continuation.above);
-                pc = continuation.target;
+                registers = saved_registers;
+                registers[dst as usize] = Some(resumed);
+                handlers.extend(above);
+                pc = target;
                 continue;
             }
             VmInstruction::Forward => {
@@ -6182,16 +6198,24 @@ fn execute_with_arguments(
                 let Some(continuation) = frame.suspended.take() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                if let Some(leave) = continuation.pending_leave.clone() {
-                    registers = continuation.registers;
-                    handlers.extend(continuation.above);
+                let RuntimeContinuation {
+                    target,
+                    dst,
+                    registers: saved_registers,
+                    above,
+                    pending_leave,
+                    ..
+                } = continuation;
+                if let Some(leave) = pending_leave {
+                    registers = saved_registers;
+                    handlers.extend(above);
                     pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
                     continue;
                 }
-                registers = continuation.registers;
-                registers[continuation.dst as usize] = Some(resumed);
-                handlers.extend(continuation.above);
-                pc = continuation.target;
+                registers = saved_registers;
+                registers[dst as usize] = Some(resumed);
+                handlers.extend(above);
+                pc = target;
                 continue;
             }
             VmInstruction::CaptureResumption { dst } => {
@@ -6235,16 +6259,24 @@ fn execute_with_arguments(
                 // snapshot abandons dynamically newer frames before restoring
                 // the continuation's original deep-frame suffix.
                 handlers.truncate(index + 1);
-                if let Some(leave) = continuation.pending_leave.clone() {
-                    registers = continuation.registers;
-                    handlers.extend(continuation.above);
+                let RuntimeContinuation {
+                    target,
+                    dst,
+                    registers: saved_registers,
+                    above,
+                    pending_leave,
+                    ..
+                } = continuation;
+                if let Some(leave) = pending_leave {
+                    registers = saved_registers;
+                    handlers.extend(above);
                     pc = complete_pending_leave(&mut registers, &mut handlers, leave)?;
                     continue;
                 }
-                registers = continuation.registers;
-                registers[continuation.dst as usize] = Some(resumed);
-                handlers.extend(continuation.above);
-                pc = continuation.target;
+                registers = saved_registers;
+                registers[dst as usize] = Some(resumed);
+                handlers.extend(above);
+                pc = target;
                 continue;
             }
             VmInstruction::Forward => {
