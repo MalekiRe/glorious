@@ -873,6 +873,37 @@ impl StageZeroCompiler {
         diagnostics.extend(signatures.diagnostics.iter().map(|diagnostic| {
             CompileDiagnostic::source(diagnostic.code, diagnostic.message.clone(), None)
         }));
+        let runtime_manifest = snapshot
+            .world()
+            .runtime_manifest
+            .as_ref()
+            .and_then(|input| {
+                match input.bind(
+                    graphs
+                        .values()
+                        .flat_map(|graph| graph.modules.values())
+                        .map(|node| node.interface.interface.clone()),
+                    &signatures,
+                ) {
+                    Ok(manifest) => Some(manifest),
+                    Err(error) => {
+                        diagnostics.push(CompileDiagnostic::request(
+                            "G7011",
+                            format!("trusted runtime manifest is invalid: {error:?}"),
+                        ));
+                        None
+                    }
+                }
+            });
+        if let Some(manifest) = &runtime_manifest {
+            // A materialized bootstrap source may carry a seed-only `{ () }`
+            // placeholder where its original source declared `host CAP fn`.
+            // Only the trusted manifest can reattach that exact declaration
+            // identity to the frozen host ABI boundary.
+            signatures
+                .host_imports
+                .extend(manifest.host_imports.clone());
+        }
         // An evaluated top-level `let` has no declared result annotation.
         // Freeze its inferred Core result before ordinary bodies are read, so
         // all later value paths have a deterministic, interface-owned type.
@@ -929,37 +960,6 @@ impl StageZeroCompiler {
                     signatures.freeze_value_initializer(declaration.key, ty);
                 }
             }
-        }
-        let runtime_manifest = snapshot
-            .world()
-            .runtime_manifest
-            .as_ref()
-            .and_then(|input| {
-                match input.bind(
-                    graphs
-                        .values()
-                        .flat_map(|graph| graph.modules.values())
-                        .map(|node| node.interface.interface.clone()),
-                    &signatures,
-                ) {
-                    Ok(manifest) => Some(manifest),
-                    Err(error) => {
-                        diagnostics.push(CompileDiagnostic::request(
-                            "G7011",
-                            format!("trusted runtime manifest is invalid: {error:?}"),
-                        ));
-                        None
-                    }
-                }
-            });
-        if let Some(manifest) = &runtime_manifest {
-            // A materialized bootstrap source may carry a seed-only `{ () }`
-            // placeholder where its original source declared `host CAP fn`.
-            // Only the trusted manifest can reattach that exact declaration
-            // identity to the frozen host ABI boundary.
-            signatures
-                .host_imports
-                .extend(manifest.host_imports.clone());
         }
         // Host declarations are source-visible only when their exact frozen
         // capability is present in this request world.  This check happens
