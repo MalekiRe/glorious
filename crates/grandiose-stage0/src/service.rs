@@ -10,8 +10,9 @@ use crate::{
     BodySyntax, BootstrapManifest, CoherenceSet, CompilationMode, CompilationRequest,
     CompilerDatabase, DefKey, DefinitionIndex, DiagnosticClass, Digest, ElaboratedHeader,
     ElaboratedInterface, FixityTable, MirFunction, MirLowering, MirProgram, ModuleGraph,
-    ParsedHeader, PlaceFlow, RevisionError, Severity, SourceSpan, Span, TrustedRuntimeManifest,
-    TypedBody, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
+    ParsedHeader, PlaceFlow, RevisionError, RevisionId, Severity, SourceSpan, Span,
+    TrustedRuntimeManifest, TypedBody, VerifiedVmProgram, emit_vm_program,
+    implementation_method_key, verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,7 +98,39 @@ impl StageZeroCompiler {
         Self::default()
     }
     pub fn compile(&self, request: CompilationRequest) -> Result<CompilationOutcome, ServiceError> {
-        let revision = self.database.import(request, None)?;
+        self.compile_with_parent(request, None)
+    }
+
+    /// Import one immutable request world into this compiler's database. The
+    /// caller may explicitly link it to the revision it supersedes; this is
+    /// the only way incremental clients establish a parent/child relation.
+    pub fn import_revision(
+        &self,
+        request: CompilationRequest,
+        parent: Option<RevisionId>,
+    ) -> Result<RevisionId, ServiceError> {
+        Ok(self.database.import(request, parent)?)
+    }
+
+    /// Compile a newly imported child revision. This is the command-style
+    /// convenience path; editors and long-lived hosts may import first and
+    /// call [`Self::compile_revision`] later against the exact pinned world.
+    pub fn compile_with_parent(
+        &self,
+        request: CompilationRequest,
+        parent: Option<RevisionId>,
+    ) -> Result<CompilationOutcome, ServiceError> {
+        let revision = self.import_revision(request, parent)?;
+        self.compile_revision(revision)
+    }
+
+    /// Compile exactly one already-imported immutable revision. No source,
+    /// dependency, option, or parent state is read through ambient process
+    /// state after this boundary.
+    pub fn compile_revision(
+        &self,
+        revision: RevisionId,
+    ) -> Result<CompilationOutcome, ServiceError> {
         let snapshot = self.database.open(revision)?;
         let input_fingerprint = snapshot.world().fingerprint;
         let graph = ModuleGraph::build(snapshot.world(), &snapshot.world().root_package);

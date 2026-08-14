@@ -66,6 +66,22 @@ fn service_compiles_and_runs_a_verified_vm_artifact_from_an_immutable_request() 
 }
 
 #[test]
+fn service_compiles_explicit_parent_and_child_revisions_without_world_mixing() {
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(request("pub fn main() -> i64 { 40 + 2 }"), None)
+        .unwrap();
+    let parent_outcome = compiler.compile_revision(parent).unwrap();
+    assert_eq!(parent_outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let child = compiler
+        .import_revision(request("pub fn main() -> i64 { 40 + 3 }"), Some(parent))
+        .unwrap();
+    let child_outcome = compiler.compile_revision(child).unwrap();
+    assert_eq!(child_outcome.artifact.unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
 fn service_lowers_word_boolean_operators_as_short_circuit_cfg() {
     let false_and = StageZeroCompiler::new()
         .compile(request("pub fn main() -> Bool { false and (1 / 0 == 0) }"))
