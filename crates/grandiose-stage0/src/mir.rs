@@ -2009,6 +2009,22 @@ impl MirLowering {
         // Claim that full frame-aware edge before generic label or handler
         // probes inspect the body as an ordinary value expression.
         if let Some(function) =
+            lowerer.lower_root_label_refutable_handler_leaves(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) =
             lowerer.lower_root_label_handler_leave(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -5394,6 +5410,240 @@ impl Lowerer<'_> {
             blocks,
         })
     }
+    /// Lower an ordered refutable set of direct handler clauses whose every
+    /// selected body exits the same enclosing label. Pattern failure flows to
+    /// the next source clause (or the dynamic outer-frame `Forward` path),
+    /// never to a synthetic normal result. This keeps the operation frame
+    /// real while allowing refutable source dispatch before the Leave edge.
+    fn lower_root_label_refutable_handler_leaves(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (label, prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => (root, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Label { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let (computation, clauses, label_prefix) = self.lexical_handle(body)?;
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+            ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let mut matching = clauses
+            .iter()
+            .filter(|clause| clause.effect == effect && clause.operation == operation)
+            .collect::<Vec<_>>();
+        let first_refutable = matching
+            .iter()
+            .position(|clause| !clause.patterns.iter().all(pattern_is_irrefutable))?;
+        if let Some(fallback) = matching
+            .iter()
+            .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable))
+        {
+            matching.truncate(fallback + 1);
+        }
+        if first_refutable >= matching.len()
+            || matching.iter().any(|clause| {
+                clause.terminal
+                    || clause.patterns.len() != argument_ids.len()
+                    || !self.contains_label_transfer(clause.body, brand)
+            })
+        {
+            return None;
+        }
+        for value in prefix {
+            self.statement(value)?;
+        }
+        for value in label_prefix {
+            self.statement(value)?;
+        }
+        let payloads = matching[0]
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let performed = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let arguments = argument_ids
+            .iter()
+            .map(|id| self.value(*id))
+            .collect::<Option<Vec<_>>>()?;
+
+        let tests = matching
+            .iter()
+            .map(|clause| {
+                if clause.patterns.iter().all(pattern_is_irrefutable) {
+                    return Some(Vec::new());
+                }
+                clause
+                    .patterns
+                    .iter()
+                    .cloned()
+                    .zip(payloads.iter().copied())
+                    .map(|(pattern, subject)| {
+                        Some((
+                            self.alloc(Type::Scalar(crate::types::ScalarType::Bool), computation),
+                            subject,
+                            lower_pattern(pattern)?,
+                        ))
+                    })
+                    .collect::<Option<Vec<_>>>()
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut next_block = 2_u32;
+        let test_blocks = tests
+            .iter()
+            .map(|tests| {
+                (0..tests.len())
+                    .map(|_| {
+                        let id = MirBlockId(next_block);
+                        next_block += 1;
+                        id
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let body_blocks = (0..matching.len())
+            .map(|_| {
+                let id = MirBlockId(next_block);
+                next_block += 1;
+                id
+            })
+            .collect::<Vec<_>>();
+        let forward_block = (!matching
+            .last()
+            .expect("matching handler clauses are nonempty")
+            .patterns
+            .iter()
+            .all(pattern_is_irrefutable))
+        .then_some(MirBlockId(next_block));
+        let handler_target = test_blocks[0].first().copied().unwrap_or(body_blocks[0]);
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payloads.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: handler_target,
+        });
+        entry.push(MirInstruction::Perform {
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+
+        let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let mut bodies = Vec::with_capacity(matching.len());
+        for clause in &matching {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            let value = self.lower_label_transfer_path(clause.body, brand)?;
+            bodies.push((std::mem::take(&mut self.instructions), value));
+        }
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.instructions = Vec::new();
+
+        let mut blocks = vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: entry,
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![performed],
+                },
+            },
+            MirBlock {
+                parameters: vec![join],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: join },
+            },
+        ];
+        for (clause_index, clause_tests) in tests.iter().enumerate() {
+            for (test_index, (condition, subject, pattern)) in clause_tests.iter().enumerate() {
+                let next_clause = test_blocks
+                    .get(clause_index + 1)
+                    .and_then(|tests| tests.first())
+                    .copied()
+                    .or_else(|| body_blocks.get(clause_index + 1).copied())
+                    .or(forward_block)
+                    .expect("refutable handler dispatch has a next clause or forward block");
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: *condition,
+                        subject: *subject,
+                        pattern: pattern.clone(),
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition: *condition,
+                        then_target: clause_tests
+                            .get(test_index + 1)
+                            .map(|_| test_blocks[clause_index][test_index + 1])
+                            .unwrap_or(body_blocks[clause_index]),
+                        then_arguments: vec![],
+                        else_target: next_clause,
+                        else_arguments: vec![],
+                    },
+                });
+            }
+        }
+        for (instructions, value) in bodies {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions,
+                terminator: MirTerminator::Leave {
+                    brand,
+                    target: MirBlockId(1),
+                    arguments: vec![value],
+                    cleanup: MirCleanupPlan {
+                        moved_places: self.leave_cleanup.moved_places.clone(),
+                        active_loans: self.leave_cleanup.active_loans.clone(),
+                    },
+                },
+            });
+        }
+        if forward_block.is_some() {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward],
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+
     /// Lower the first frame-aware label boundary: one directly selected,
     /// irrefutable operation clause may leave an enclosing lexical label.
     /// The protected computation retains its ordinary uninstall path, while

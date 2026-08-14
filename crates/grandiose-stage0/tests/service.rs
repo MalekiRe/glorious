@@ -6402,6 +6402,25 @@ fn service_assignment_value_label_transfer_exits_before_the_store() {
 }
 
 #[test]
+fn service_refutable_handler_label_transfers_keep_source_order() {
+    let source = r#"
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub fn choose(value: i64) -> i64 {
+            label done {
+                1 + handle Ask::ask(value) {
+                    Ask::ask(1) => transfer done 41,
+                    Ask::ask(other) => transfer done other,
+                }
+            }
+        }
+        pub fn main() -> i64 { choose(1) + choose(2) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
 fn service_reborrows_each_nested_multi_variant_refinement_payload() {
     let source = r#"
         fn __g1_abort() -> ! { () }
