@@ -4,6 +4,8 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use grandiose_stage0::{BootstrapManifest, decode_and_verify_program};
+
 static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 
 fn temporary_directory() -> std::path::PathBuf {
@@ -61,6 +63,34 @@ fn cli_emits_verifies_and_runs_verified_vm_programs() {
     );
     assert_eq!(String::from_utf8(run.stdout).unwrap(), "\"glorious\"\n");
 
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn cli_emits_stage_one_artifact_with_bound_bootstrap_manifest() {
+    let directory = temporary_directory();
+    let source = directory.join("main.glorious");
+    let program = directory.join("stage1.g0vp");
+    let manifest = directory.join("stage1.g0bm");
+    fs::write(&source, "pub fn main() -> i64 { 42 }").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_grc-stage0"))
+        .args([
+            "emit-bootstrap-vm",
+            source.to_str().unwrap(),
+            program.to_str().unwrap(),
+            manifest.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stage-one emission failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let program = decode_and_verify_program(&fs::read(&program).unwrap()).unwrap();
+    let manifest = BootstrapManifest::decode(&fs::read(&manifest).unwrap()).unwrap();
+    assert_eq!(manifest.stage.ordinal, 1);
+    manifest.validate_verified_artifact(&program).unwrap();
     fs::remove_dir_all(directory).unwrap();
 }
 

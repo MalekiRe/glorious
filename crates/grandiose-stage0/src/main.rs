@@ -3,9 +3,9 @@
 use std::{collections::BTreeMap, env, fs, process::ExitCode};
 
 use grandiose_stage0::{
-    CompilationMode, CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, Digest,
-    LogicalPath, PackageKey, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput, SourceInput,
-    StageZeroCompiler, decode_and_verify_program,
+    BootstrapLimits, BootstrapStage, CompilationMode, CompilationRequest, CompileDiagnostic,
+    CompilerBuildIdentity, Digest, LogicalPath, PackageKey, PrimitiveRole, PrimitiveSelector,
+    RuntimeManifestInput, SourceInput, StageZeroCompiler, decode_and_verify_program,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -63,16 +63,30 @@ fn main() -> ExitCode {
         eprintln!("grc-stage0: {command} requires a source FILE");
         return ExitCode::from(2);
     };
-    let output = if command == "emit-vm" {
+    let output = if matches!(command.as_str(), "emit-vm" | "emit-bootstrap-vm") {
         let Some(output) = arguments.next() else {
-            eprintln!("grc-stage0: emit-vm requires an OUTPUT file");
+            eprintln!("grc-stage0: {command} requires an OUTPUT file");
             return ExitCode::from(2);
         };
         Some(output)
     } else {
         None
     };
-    if arguments.next().is_some() || !matches!(command.as_str(), "check" | "run" | "emit-vm") {
+    let bootstrap_manifest_output = if command == "emit-bootstrap-vm" {
+        let Some(manifest) = arguments.next() else {
+            eprintln!("grc-stage0: emit-bootstrap-vm requires a MANIFEST file");
+            return ExitCode::from(2);
+        };
+        Some(manifest)
+    } else {
+        None
+    };
+    if arguments.next().is_some()
+        || !matches!(
+            command.as_str(),
+            "check" | "run" | "emit-vm" | "emit-bootstrap-vm"
+        )
+    {
         usage();
         return ExitCode::from(2);
     }
@@ -102,13 +116,22 @@ fn main() -> ExitCode {
             bytes,
         ));
     }
+    let build = CompilerBuildIdentity::stage0(Digest::of_bytes(b"grandiose-stage0-command-v6"));
+    let mode = match command.as_str() {
+        "run" | "emit-vm" => CompilationMode::Build,
+        "emit-bootstrap-vm" => CompilationMode::Bootstrap(BootstrapStage {
+            ordinal: 1,
+            producer: build.compiler,
+            optimization_level: 0,
+            limits: BootstrapLimits::new(65_536, 4 * 1024 * 1024 * 1024),
+            expected_artifact: None,
+        }),
+        "check" => CompilationMode::Check,
+        _ => unreachable!("command was validated before request construction"),
+    };
     let request = CompilationRequest {
-        build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"grandiose-stage0-command-v6")),
-        mode: if matches!(command.as_str(), "run" | "emit-vm") {
-            CompilationMode::Build
-        } else {
-            CompilationMode::Check
-        },
+        build,
+        mode,
         root_package,
         // The CLI owns all host paths and maps them into an explicit logical
         // source world. Semantic phases receive only immutable package/path
@@ -142,6 +165,22 @@ fn main() -> ExitCode {
                 if let Err(error) = fs::write(&output, artifact.canonical_bytes()) {
                     eprintln!("grc-stage0: cannot write {output}: {error}");
                     return ExitCode::from(1);
+                }
+                if let Some(manifest_output) = bootstrap_manifest_output {
+                    let manifest = outcome
+                        .bootstrap_manifest
+                        .expect("successful bootstrap build has a manifest");
+                    let bytes = match manifest.encode() {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            eprintln!("grc-stage0: cannot encode bootstrap manifest: {error:?}");
+                            return ExitCode::from(1);
+                        }
+                    };
+                    if let Err(error) = fs::write(&manifest_output, bytes) {
+                        eprintln!("grc-stage0: cannot write {manifest_output}: {error}");
+                        return ExitCode::from(1);
+                    }
                 }
             }
             ExitCode::SUCCESS
@@ -304,6 +343,9 @@ fn verify_program(path: &str) -> ExitCode {
 fn usage() {
     eprintln!("usage: grc-stage0 [--diagnostics text|json] [RUNTIME] <check|run> FILE");
     eprintln!("       grc-stage0 [--diagnostics text|json] [RUNTIME] emit-vm SOURCE OUTPUT");
+    eprintln!(
+        "       grc-stage0 [--diagnostics text|json] [RUNTIME] emit-bootstrap-vm SOURCE OUTPUT MANIFEST"
+    );
     eprintln!("       grc-stage0 [--diagnostics text|json] verify-vm PROGRAM");
     eprintln!("RUNTIME: --runtime-standard-library PACKAGE");
     eprintln!("         --runtime-leaf ROLE MODULE NAME  (repeatable)");
