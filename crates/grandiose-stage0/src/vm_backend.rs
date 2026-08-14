@@ -2714,6 +2714,35 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
             message: "host capability declarations do not match host imports",
         });
     }
+    // The environment registry is a canonical target-side declaration set,
+    // not an advisory cache.  Require an exact producer union so a decoded
+    // artifact cannot carry orphaned callable authority or two conflicting
+    // layouts for one lifted target.
+    let mut produced_environments = BTreeMap::new();
+    for function in program.functions.values() {
+        for instruction in &function.instructions {
+            let VmInstruction::MakeCallable {
+                callee,
+                environment: Some(environment),
+                ..
+            } = instruction
+            else {
+                continue;
+            };
+            if let Some(previous) = produced_environments.insert(*callee, environment.clone())
+                && previous != *environment
+            {
+                return Err(VmArtifactError::InvalidCallableEnvironment {
+                    message: "lifted callable producers disagree on their sealed environment",
+                });
+            }
+        }
+    }
+    if program.callable_environments != produced_environments {
+        return Err(VmArtifactError::InvalidCallableEnvironment {
+            message: "callable environment registry does not exactly match producers",
+        });
+    }
     for (callee, environment) in &program.callable_environments {
         let Some(target) = program.functions.get(callee) else {
             return Err(VmArtifactError::MissingFunction {

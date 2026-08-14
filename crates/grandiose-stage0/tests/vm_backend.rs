@@ -3075,6 +3075,29 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         42
     );
 
+    let mut orphan_registry = valid.clone();
+    let orphan_owner = DefKey(Digest::of_bytes(b"orphan-callable-environment-owner"));
+    let orphan = DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable".as_slice(),
+        orphan_owner.0.as_bytes().as_slice(),
+        0_u32.to_le_bytes().as_slice(),
+    ]));
+    orphan_registry.callable_environments.insert(
+        orphan,
+        VmCaptureEnvironment {
+            owner: orphan_owner,
+            callable: 0,
+            captures: vec![],
+        },
+    );
+    orphan_registry.fingerprint = orphan_registry.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(orphan_registry),
+        Err(VmArtifactError::InvalidCallableEnvironment {
+            message: "callable environment registry does not exactly match producers"
+        })
+    ));
+
     let mut forged_brand = valid.clone();
     let instruction = &mut forged_brand.functions.get_mut(&entry).unwrap().instructions[1];
     let VmInstruction::MakeCallable { environment, .. } = instruction else {
