@@ -163,6 +163,12 @@ pub enum MirInstruction {
     Resume {
         value: MirLocal,
     },
+    /// Resume a replayable continuation and re-enter the handler clause once
+    /// that continuation completes, writing its result to `dst`.
+    ResumeReturn {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     /// Consume the continuation denoted by an explicit snapshot.  This is
     /// distinct from legacy `Resume`, which consumes the innermost frame and
     /// remains useful for tail-resumption lowering.
@@ -947,6 +953,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         MirInstruction::InstallHandler { .. }
         | MirInstruction::UninstallHandler
         | MirInstruction::Resume { .. }
+        | MirInstruction::ResumeReturn { .. }
         | MirInstruction::ResumeSnapshot { .. }
         | MirInstruction::Forward
         | MirInstruction::Cancel
@@ -1968,14 +1975,16 @@ fn validate_lowered_handler_contracts(
                 }
             }
             CoreHandlerResumption::Tail { .. } | CoreHandlerResumption::Explicit { .. } => {
-                if !declared_quantity.contains(crate::quantity::Quantity::ONCE)
-                    || (!exits.resume && !exits.forward)
+                let replay_return =
+                    exits.resume_return && declared_quantity.upper.is_some_and(|upper| upper >= 2);
+                if (!declared_quantity.contains(crate::quantity::Quantity::ONCE) && !replay_return)
+                    || (!exits.resume && !exits.forward && !replay_return)
                 {
                     return Err(
                         "MIR handler exit does not implement the frozen resumption contract".into(),
                     );
                 }
-                if exits.cancel {
+                if exits.cancel && !replay_return {
                     return Err(
                         "MIR cancellation is not permitted for a resumptive handler contract"
                             .into(),
@@ -2060,6 +2069,7 @@ fn generic_argument_contract_matches(
 #[derive(Default)]
 struct HandlerRegionExits {
     resume: bool,
+    resume_return: bool,
     forward: bool,
     cancel: bool,
 }
@@ -2083,6 +2093,7 @@ fn handler_region_exits(function: &MirFunction, start: MirBlockId) -> HandlerReg
                 MirInstruction::Resume { .. } | MirInstruction::ResumeSnapshot { .. } => {
                     exits.resume = true
                 }
+                MirInstruction::ResumeReturn { .. } => exits.resume_return = true,
                 MirInstruction::Forward => exits.forward = true,
                 MirInstruction::Cancel => exits.cancel = true,
                 _ => {}
@@ -2160,6 +2171,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::UninstallHandler => Vec::new(),
         MirInstruction::CaptureResumption { dst } => vec![*dst],
         MirInstruction::Resume { value } => vec![*value],
+        MirInstruction::ResumeReturn { dst, value } => vec![*dst, *value],
         MirInstruction::ResumeSnapshot { snapshot, value } => vec![*snapshot, *value],
         MirInstruction::Forward => Vec::new(),
         MirInstruction::Cancel => Vec::new(),
@@ -2260,6 +2272,9 @@ struct DirectResumptionState {
 #[derive(Clone, Debug)]
 enum DirectResumptionPlan {
     Identity,
+    /// A real VM replay frame. Each source call transfers into a fresh
+    /// continuation snapshot and returns its result to the clause callsite.
+    RuntimeReplay,
     PureResidual {
         binding: String,
         prefix: Vec<CoreId>,
@@ -6384,19 +6399,24 @@ impl Lowerer<'_> {
         let [clause] = matching.as_slice() else {
             return None;
         };
-        let cancellation = match &clause.resumption {
+        let (cancellation, replay) = match &clause.resumption {
             CoreHandlerResumption::Explicit { quantity, .. }
             | CoreHandlerResumption::Tail { quantity } => {
-                if *quantity != crate::quantity::Quantity::ONCE {
+                if *quantity == crate::quantity::Quantity::ONCE {
+                    (false, false)
+                } else if matches!(clause.resumption, CoreHandlerResumption::Explicit { .. })
+                    && quantity.upper.is_some_and(|upper| upper >= 2)
+                {
+                    (false, true)
+                } else {
                     return None;
                 }
-                false
             }
             CoreHandlerResumption::Discard { quantity } => {
                 if quantity.requires_positive_use() {
                     return None;
                 }
-                true
+                (true, false)
             }
             CoreHandlerResumption::Terminal => return None,
         };
@@ -6424,7 +6444,11 @@ impl Lowerer<'_> {
             operation,
             payload_destinations: payload_destinations.clone(),
             resume_type: self.body.expression(value).ty.clone(),
-            continuation: MirContinuationPolicy::Consume,
+            continuation: if replay {
+                MirContinuationPolicy::Replay
+            } else {
+                MirContinuationPolicy::Consume
+            },
             target: MirBlockId(2),
         });
         entry.push(MirInstruction::Perform {
@@ -6451,7 +6475,7 @@ impl Lowerer<'_> {
         let handler_named = self.named.clone();
         self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
         let handler_result = self.direct_handler_clause_value(clause)?;
-        self.instructions.push(if cancellation {
+        self.instructions.push(if cancellation || replay {
             MirInstruction::Cancel
         } else {
             MirInstruction::Resume {
@@ -6487,7 +6511,7 @@ impl Lowerer<'_> {
                 MirBlock {
                     parameters: vec![],
                     instructions: handler_instructions,
-                    terminator: if cancellation {
+                    terminator: if cancellation || replay {
                         MirTerminator::Return {
                             value: handler_result,
                         }
@@ -7407,7 +7431,9 @@ impl Lowerer<'_> {
                 self.value(clause.body)
             }
             CoreHandlerResumption::Explicit { name, quantity } => {
-                if !quantity.contains(crate::quantity::Quantity::ONCE) {
+                let replay = quantity.upper.is_some_and(|upper| upper >= 2)
+                    && !quantity.contains(crate::quantity::Quantity::ONCE);
+                if !quantity.contains(crate::quantity::Quantity::ONCE) && !replay {
                     self.error(
                         "G6005",
                         "direct resumption does not satisfy its declared quantity",
@@ -7419,7 +7445,11 @@ impl Lowerer<'_> {
                         name: name.clone(),
                         quantity: *quantity,
                         calls: 0,
-                        plan: DirectResumptionPlan::Identity,
+                        plan: if replay {
+                            DirectResumptionPlan::RuntimeReplay
+                        } else {
+                            DirectResumptionPlan::Identity
+                        },
                     });
                     let result = self.value(clause.body);
                     let state = self
@@ -7428,10 +7458,12 @@ impl Lowerer<'_> {
                         .expect("direct resumption state must outlive its clause body");
                     self.direct_resumption = previous;
                     let result = result?;
-                    if state.calls != 1 {
+                    let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls))
+                        .expect("direct resumption calls are representable");
+                    if !state.quantity.contains(actual) {
                         self.error(
                             "G6005",
-                            "direct resumptive handler must invoke its continuation exactly once",
+                            "direct resumptive handler calls do not satisfy its declared quantity",
                         );
                         return None;
                     }
@@ -8115,6 +8147,12 @@ impl Lowerer<'_> {
                         DirectResumptionPlan::Identity => {
                             self.instructions
                                 .push(MirInstruction::Copy { dst, src: argument });
+                        }
+                        DirectResumptionPlan::RuntimeReplay => {
+                            self.instructions.push(MirInstruction::ResumeReturn {
+                                dst,
+                                value: argument,
+                            });
                         }
                         DirectResumptionPlan::PureResidual {
                             binding,

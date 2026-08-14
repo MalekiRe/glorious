@@ -232,6 +232,13 @@ pub enum VmInstruction {
     Resume {
         value: u32,
     },
+    /// Invoke a replayable continuation as a callable operation. The resumed
+    /// computation returns to the handler clause and writes its result to
+    /// `dst`, allowing the clause to invoke the same snapshot again.
+    ResumeReturn {
+        dst: u32,
+        value: u32,
+    },
     /// Materialize an explicit token for the innermost suspended handler
     /// continuation. The token is callable-typed but frame-branded at runtime.
     CaptureResumption {
@@ -2139,6 +2146,10 @@ impl<'a> Decoder<'a> {
             }
             45 => Ok(VmInstruction::UninstallHandler),
             46 => Ok(VmInstruction::Resume { value: self.u32()? }),
+            51 => Ok(VmInstruction::ResumeReturn {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
             47 => Ok(VmInstruction::Forward),
             48 => Ok(VmInstruction::Cancel),
             49 => Ok(VmInstruction::CaptureResumption { dst: self.u32()? }),
@@ -2830,6 +2841,10 @@ fn lower_instruction(
             VmInstruction::CaptureResumption { dst: dst.0 }
         }
         MirInstruction::Resume { value } => VmInstruction::Resume { value: value.0 },
+        MirInstruction::ResumeReturn { dst, value } => VmInstruction::ResumeReturn {
+            dst: dst.0,
+            value: value.0,
+        },
         MirInstruction::ResumeSnapshot { snapshot, value } => VmInstruction::ResumeSnapshot {
             snapshot: snapshot.0,
             value: value.0,
@@ -3203,6 +3218,9 @@ struct VerifierState {
     snapshots: Vec<Option<u32>>,
     handlers: Vec<VerifierHandlerFrame>,
     pending_leave: Option<PendingLeave>,
+    /// Number of dynamic clause-return continuations currently being checked.
+    /// Their `Return` is consumed by `ResumeReturn`, not by the function.
+    resumption_return_depth: u32,
 }
 
 impl Deref for VerifierState {
@@ -3243,6 +3261,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             snapshots: vec![None; function.registers.len()],
             handlers: Vec::new(),
             pending_leave: None,
+            resumption_return_depth: 0,
         });
     }
     let mut worklist = if function.instructions.is_empty() {
@@ -3674,11 +3693,64 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         snapshots: continuation.snapshots,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
+                        resumption_return_depth: states.resumption_return_depth,
                     };
                     write(&mut resumed, continuation.dst)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
                 }
                 advances = false;
+            }
+            VmInstruction::ResumeReturn { dst, value } => {
+                read(&states, *value)?;
+                let Some(frame) = states.handlers.last() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.continuation != VmContinuationPolicy::Replay
+                    || frame.continuations.is_empty()
+                {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let continuation = frame
+                    .continuations
+                    .first()
+                    .expect("nonempty replay continuation")
+                    .clone();
+                let found = register_type(function, *value)?;
+                if found != frame.resume_type {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *value,
+                        expected: frame.resume_type.clone(),
+                        found,
+                    });
+                }
+                // The resume-return edge is verified by the source/MIR
+                // contract and preserves the clause state. Its result has
+                // the protected computation's type at the callsite.
+                let result = register_type(function, *dst)?;
+                if result != frame.resume_type {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *dst,
+                        expected: frame.resume_type.clone(),
+                        found: result,
+                    });
+                }
+                let mut resumed_handlers = states.handlers.clone();
+                resumed_handlers
+                    .last_mut()
+                    .expect("active replay handler exists")
+                    .continuations
+                    .clear();
+                resumed_handlers.extend(continuation.above.clone());
+                let mut resumed = VerifierState {
+                    registers: continuation.registers,
+                    snapshots: continuation.snapshots,
+                    handlers: resumed_handlers,
+                    pending_leave: continuation.pending_leave,
+                    resumption_return_depth: states.resumption_return_depth.saturating_add(1),
+                };
+                write(&mut resumed, continuation.dst)?;
+                propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
+                write(&mut states, *dst)?;
             }
             VmInstruction::CaptureResumption { dst } => {
                 let Some(frame) = states.handlers.last() else {
@@ -3759,6 +3831,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         snapshots: continuation.snapshots,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
+                        resumption_return_depth: states.resumption_return_depth,
                     };
                     write(&mut resumed, continuation.dst)?;
                     propagate_state(&mut incoming, &mut worklist, continuation.target, &resumed)?;
@@ -4102,6 +4175,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 if !states.handlers.is_empty() {
                     return Err(VmArtifactError::HandlerStillActive);
                 }
+                if states.resumption_return_depth != 0 {
+                    continue;
+                }
                 let found = register_type(function, *value)?;
                 if let Some(expected) = &returned {
                     if *expected != found {
@@ -4163,6 +4239,7 @@ fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifa
             VmInstruction::Return { .. }
             | VmInstruction::Trap
             | VmInstruction::Resume { .. }
+            | VmInstruction::ResumeReturn { .. }
             | VmInstruction::Forward
             | VmInstruction::Cancel => false,
             _ => targets.contains(&((pc + 1) as u32)),
@@ -4405,6 +4482,17 @@ struct RuntimeContinuation {
     performed: RuntimePerformed,
     above: Vec<RuntimeHandlerFrame>,
     pending_leave: Option<PendingLeave>,
+}
+
+/// A clause-side call frame for `ResumeReturn`.  It is intentionally separate
+/// from ordinary function calls: resumption return restores the handler
+/// environment captured immediately before the transfer, including the
+/// retained replay snapshot.
+struct RuntimeResumptionReturn {
+    pc: usize,
+    dst: u32,
+    registers: Vec<Option<VmValue>>,
+    handlers: Vec<RuntimeHandlerFrame>,
 }
 
 #[derive(Clone)]
@@ -4889,6 +4977,7 @@ fn execute(
     budget.reserve_allocation(function.registers.len())?;
     let mut registers = vec![None; function.registers.len()];
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
+    let mut resumption_returns = Vec::<RuntimeResumptionReturn>::new();
     let mut next_handler_id = 0u64;
     let mut pc = 0usize;
     while let Some(instruction) = function.instructions.get(pc).cloned() {
@@ -5236,6 +5325,49 @@ fn execute(
                 registers = saved_registers;
                 registers[dst as usize] = Some(resumed);
                 handlers.extend(above);
+                pc = target;
+                continue;
+            }
+            VmInstruction::ResumeReturn { dst, value } => {
+                let resumed = registers[value as usize]
+                    .clone()
+                    .ok_or(VmArtifactError::ReadBeforeWrite { register: value })?;
+                let Some(frame) = handlers.last() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.continuation != VmContinuationPolicy::Replay {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let continuation = frame
+                    .suspended
+                    .clone()
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                budget.reserve_allocation(registers.len())?;
+                let caller_handlers = handlers.clone();
+                resumption_returns.push(RuntimeResumptionReturn {
+                    pc: pc + 1,
+                    dst,
+                    registers: registers.clone(),
+                    handlers: caller_handlers,
+                });
+                let RuntimeContinuation {
+                    target,
+                    dst: continuation_dst,
+                    registers: saved_registers,
+                    above,
+                    pending_leave,
+                    ..
+                } = continuation;
+                if pending_leave.is_some() {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                // The active execution gets a clean handler frame so its
+                // protected `UninstallHandler` can run. The clause snapshot
+                // above retains the suspended continuation for the next use.
+                handlers.last_mut().expect("active frame exists").suspended = None;
+                handlers.extend(above);
+                registers = saved_registers;
+                registers[continuation_dst as usize] = Some(resumed);
                 pc = target;
                 continue;
             }
@@ -5757,6 +5889,17 @@ fn execute(
                 if !handlers.is_empty() {
                     return Err(VmArtifactError::HandlerStillActive);
                 }
+                if let Some(return_to_clause) = resumption_returns.pop() {
+                    let value = registers[value as usize]
+                        .as_ref()
+                        .expect("verified register")
+                        .clone();
+                    registers = return_to_clause.registers;
+                    registers[return_to_clause.dst as usize] = Some(value);
+                    handlers = return_to_clause.handlers;
+                    pc = return_to_clause.pc;
+                    continue;
+                }
                 return Ok(registers[value as usize]
                     .as_ref()
                     .expect("verified register")
@@ -5972,6 +6115,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         VmInstruction::UninstallHandler => output.push(45),
         VmInstruction::Resume { value } => {
             output.push(46);
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::ResumeReturn { dst, value } => {
+            output.push(51);
+            output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
         VmInstruction::Forward => output.push(47),
@@ -6312,6 +6460,7 @@ fn execute_with_arguments(
         registers[index] = Some(value.clone());
     }
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
+    let mut resumption_returns = Vec::<RuntimeResumptionReturn>::new();
     let mut next_handler_id = 0u64;
     let mut pc = 0usize;
     while let Some(instruction) = function.instructions.get(pc) {
@@ -6660,6 +6809,45 @@ fn execute_with_arguments(
                 registers = saved_registers;
                 registers[dst as usize] = Some(resumed);
                 handlers.extend(above);
+                pc = target;
+                continue;
+            }
+            VmInstruction::ResumeReturn { dst, value } => {
+                let resumed = registers[*value as usize]
+                    .clone()
+                    .ok_or(VmArtifactError::ReadBeforeWrite { register: *value })?;
+                let Some(frame) = handlers.last() else {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                };
+                if frame.continuation != VmContinuationPolicy::Replay {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                let continuation = frame
+                    .suspended
+                    .clone()
+                    .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                budget.reserve_allocation(registers.len())?;
+                resumption_returns.push(RuntimeResumptionReturn {
+                    pc: pc + 1,
+                    dst: *dst,
+                    registers: registers.clone(),
+                    handlers: handlers.clone(),
+                });
+                let RuntimeContinuation {
+                    target,
+                    dst: continuation_dst,
+                    registers: saved_registers,
+                    above,
+                    pending_leave,
+                    ..
+                } = continuation;
+                if pending_leave.is_some() {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                handlers.last_mut().expect("active frame exists").suspended = None;
+                handlers.extend(above);
+                registers = saved_registers;
+                registers[continuation_dst as usize] = Some(resumed);
                 pc = target;
                 continue;
             }
@@ -7259,6 +7447,17 @@ fn execute_with_arguments(
             VmInstruction::Return { value } => {
                 if !handlers.is_empty() {
                     return Err(VmArtifactError::HandlerStillActive);
+                }
+                if let Some(return_to_clause) = resumption_returns.pop() {
+                    let value = registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register")
+                        .clone();
+                    registers = return_to_clause.registers;
+                    registers[return_to_clause.dst as usize] = Some(value);
+                    handlers = return_to_clause.handlers;
+                    pc = return_to_clause.pc;
+                    continue;
                 }
                 return Ok(registers[*value as usize]
                     .as_ref()
