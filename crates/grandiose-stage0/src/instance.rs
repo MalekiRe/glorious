@@ -8,8 +8,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::{
-    ConstKind, DefKey, Digest, EffectRow, GenericKind, InferContext, Lifetime, Quantity, Type,
-    TypeError,
+    ConstKind, DefKey, Digest, EffectRow, EffectTail, GenericKind, InferContext, Lifetime,
+    Quantity, Type, TypeError,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -464,6 +464,10 @@ impl Default for SummaryLimits {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SummaryError {
+    IncompatibleEffectTails {
+        left: EffectTail,
+        right: EffectTail,
+    },
     DidNotConverge {
         component: Vec<InstanceKey>,
         limit: usize,
@@ -482,12 +486,24 @@ impl Default for CallSummary {
     }
 }
 impl CallSummary {
-    pub fn join(&self, other: &Self) -> Self {
+    pub fn join(&self, other: &Self) -> Result<Self, SummaryError> {
+        let tail = match (self.effects.tail, other.effects.tail) {
+            (Some(left), Some(right)) if left != right => {
+                return Err(SummaryError::IncompatibleEffectTails { left, right });
+            }
+            (Some(tail), _) | (_, Some(tail)) => Some(tail),
+            (None, None) => None,
+        };
         let mut effects = self.effects.clone();
         effects
             .effects
             .extend(other.effects.effects.iter().cloned());
-        Self {
+        effects
+            .projections
+            .extend(other.effects.projections.iter().cloned());
+        effects.tail = tail;
+        effects.canonicalize();
+        Ok(Self {
             effects,
             invocation: Quantity {
                 lower: self.invocation.lower.min(other.invocation.lower),
@@ -499,7 +515,7 @@ impl CallSummary {
             may_abort: self.may_abort || other.may_abort,
             may_control: self.may_control || other.may_control,
             may_escape: self.may_escape || other.may_escape,
-        }
+        })
     }
 }
 
@@ -519,7 +535,7 @@ pub fn solve_call_summaries(
         for _ in 0..limits.iterations_per_scc {
             let mut changed = false;
             for key in &scc {
-                let next = summaries[key].join(&transfer(key, &summaries));
+                let next = summaries[key].join(&transfer(key, &summaries))?;
                 if next != summaries[key] {
                     summaries.insert(key.clone(), next);
                     changed = true;
@@ -811,7 +827,9 @@ mod tests {
                 .into_iter()
                 .flatten()
                 .fold(direct, |summary, callee| {
-                    summary.join(known.get(callee).expect("SCC member has a seed summary"))
+                    summary
+                        .join(known.get(callee).expect("SCC member has a seed summary"))
+                        .expect("closed summary rows compose")
                 })
         })
         .unwrap();
@@ -858,6 +876,33 @@ mod tests {
         assert!(matches!(
             error,
             SummaryError::DidNotConverge { limit: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn summary_join_never_collapses_distinct_open_effect_rows() {
+        let left = CallSummary {
+            effects: EffectRow {
+                effects: BTreeSet::new(),
+                projections: vec![],
+                tail: Some(EffectTail::Generic(0)),
+            },
+            ..CallSummary::default()
+        };
+        let right = CallSummary {
+            effects: EffectRow {
+                effects: BTreeSet::new(),
+                projections: vec![],
+                tail: Some(EffectTail::Generic(1)),
+            },
+            ..CallSummary::default()
+        };
+        assert!(matches!(
+            left.join(&right),
+            Err(SummaryError::IncompatibleEffectTails {
+                left: EffectTail::Generic(0),
+                right: EffectTail::Generic(1),
+            })
         ));
     }
 }
