@@ -2878,6 +2878,47 @@ fn verifier_rejects_a_forged_three_frame_resume_that_skips_the_live_suffix() {
 }
 
 #[test]
+fn verifier_rejects_a_forged_partial_handler_forward_without_an_outer_frame() {
+    let effect = DefKey(Digest::of_bytes(b"forged-partial-forward"));
+    // A matrix miss is allowed to `Forward` only when an enclosing handler
+    // owns the suspended operation. A hostile clause cannot turn that edge
+    // into a resume-capability escape at the root of the handler stack.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"forged-partial-forward-root")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 3,
+                },
+                // This is not a clause reached from `Perform`, so the frame
+                // has no suspended continuation to decline.
+                VmInstruction::Forward,
+                VmInstruction::Return { value: 0 },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"forged-partial-forward-root-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
 fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame() {
     let effect = DefKey(Digest::of_bytes(b"Console-decline"));
     let mut candidate = CandidateVmArtifact {
