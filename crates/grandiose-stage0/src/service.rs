@@ -14,10 +14,11 @@ use crate::{
     BodySyntax, BootstrapManifest, Budget, BudgetError, CancellationToken, CoherenceSet,
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
     DefinitionIndex, DependencyNode, DependencyTrace, DiagnosticClass, Digest, ElaboratedHeader,
-    ElaboratedInterface, EscapeFlow, FixityTable, InputError, MirFunction, MirLowering, MirProgram,
-    ModuleGraph, ParsedHeader, PlaceFlow, PublicationGuard, RequestSession, RetentionReport,
-    RevisionError, RevisionId, Severity, SourceSpan, Span, TrustedRuntimeManifest, TypedBody,
-    UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
+    ElaboratedInterface, EscapeFlow, FixityTable, InputError, InstanceGraph, InstanceKey,
+    InstanceLimits, InstanceRoot, MirFunction, MirLowering, MirProgram, ModuleGraph, ParsedHeader,
+    PlaceFlow, PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId,
+    Severity, SourceSpan, Span, TrustedRuntimeManifest, TypedBody, UseFlow, VerifiedVmProgram,
+    emit_vm_program, implementation_method_key, verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -314,6 +315,8 @@ pub struct CompilationOutcome {
     /// Present only for `CompilationMode::Bootstrap`; this is the canonical
     /// evidence a host bootstrap driver persists and compares.
     pub bootstrap_manifest: Option<BootstrapManifest>,
+    /// Deterministic executable-instance discovery evidence.
+    pub instance_graph: Option<InstanceGraph>,
 }
 #[derive(Debug)]
 pub enum ServiceError {
@@ -1011,6 +1014,89 @@ impl StageZeroCompiler {
             .iter()
             .map(|(definition, _, _, core, _)| (*definition, core.clone()))
             .collect::<BTreeMap<_, _>>();
+        // Demand-discover the executable spine before lowering.  This is not
+        // monomorphization: it records only concrete callable identities and
+        // direct callable dependencies, leaving generic substitutions for the
+        // later instance materializer.
+        let mut instance_graph = InstanceGraph::default();
+        let limits = InstanceLimits::default();
+        let entry_kinds = match signatures.definitions.get(&entry) {
+            Some(ElaboratedHeader::Callable(signature)) => signature.generic_kinds.clone(),
+            _ => Vec::new(),
+        };
+        let entry_instance = InstanceKey::new(entry, &entry_kinds, vec![]).map_err(|error| {
+            failed(
+                input_fingerprint,
+                vec![CompileDiagnostic::invariant(
+                    "G7030",
+                    format!("entry instance is not concrete: {error:?}"),
+                )],
+                &source_lengths,
+            )
+        })?;
+        instance_graph
+            .discover_root(
+                InstanceRoot {
+                    key: entry_instance,
+                    reason: "executable entry".into(),
+                },
+                limits,
+            )
+            .map_err(|error| {
+                failed(
+                    input_fingerprint,
+                    vec![CompileDiagnostic::resource(
+                        "G7031",
+                        format!("instance discovery limit: {error:?}"),
+                    )],
+                    &source_lengths,
+                )
+            })?;
+        while let Some(caller) = instance_graph.pop_pending() {
+            let Some(body) = typed_bodies.get(&caller.callable) else {
+                continue;
+            };
+            for expression in &body.expressions {
+                let crate::core::CoreKind::Call { callee, .. } = expression.kind else {
+                    continue;
+                };
+                let crate::core::CoreKind::Function(callee) = body.expression(callee).kind else {
+                    continue;
+                };
+                let Some(ElaboratedHeader::Callable(signature)) =
+                    signatures.definitions.get(&callee)
+                else {
+                    continue;
+                };
+                if !signature.generic_kinds.is_empty() {
+                    continue;
+                }
+                let key = InstanceKey::new(callee, &signature.generic_kinds, vec![]).map_err(
+                    |error| {
+                        failed(
+                            input_fingerprint,
+                            vec![CompileDiagnostic::invariant(
+                                "G7030",
+                                format!("direct call instance is not concrete: {error:?}"),
+                            )],
+                            &source_lengths,
+                        )
+                    },
+                )?;
+                instance_graph
+                    .discover_callee(&caller, key, limits)
+                    .map_err(|error| {
+                        failed(
+                            input_fingerprint,
+                            vec![CompileDiagnostic::resource(
+                                "G7031",
+                                format!("instance discovery limit: {error:?}"),
+                            )],
+                            &source_lengths,
+                        )
+                    })?;
+            }
+        }
         for (definition, is_constant, valid, core, flow) in body_products {
             session.checkpoint(0)?;
             if !valid {
@@ -1098,6 +1184,7 @@ impl StageZeroCompiler {
                 artifact: None,
                 runtime_manifest,
                 bootstrap_manifest: None,
+                instance_graph: Some(instance_graph),
             });
         }
         let program = MirProgram {
@@ -1171,6 +1258,7 @@ impl StageZeroCompiler {
             artifact: Some(artifact),
             runtime_manifest,
             bootstrap_manifest,
+            instance_graph: Some(instance_graph),
         })
     }
 }
