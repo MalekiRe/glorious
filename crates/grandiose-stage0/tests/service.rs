@@ -7011,3 +7011,31 @@ fn service_reports_outlives_contract_failures_before_vm_lowering() {
         "{diagnostics:#?}"
     );
 }
+
+#[test]
+fn service_resolves_language_prelude_ownership_traits_by_fixed_identity() {
+    let source = r#"
+        struct Ticket {}
+        impl Use<[0, 1]> for Ticket {}
+        impl Drop for Ticket {}
+        pub fn main() -> i64 { 42 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("the language prelude must provide Use and Drop identities");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn source_trait_named_use_overrides_the_language_prelude_only_when_declared() {
+    let source = r#"
+        trait Use<T> {}
+        struct Ticket {}
+        impl Use<i64> for Ticket {}
+        pub fn main() -> i64 { 42 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a declared local trait must resolve before the language prelude");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}

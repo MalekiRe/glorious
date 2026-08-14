@@ -14,6 +14,42 @@ use crate::{
     types::GenericKind,
 };
 
+/// The language prelude owns the quantitative relation and destruction hook.
+///
+/// These are not source-spelling fallbacks: their identities and generic
+/// contracts are part of the language generation, just like scalar types.
+/// A source declaration with either name still wins normal resolution, which
+/// keeps the prelude from silently changing a package's declared interface.
+fn language_use_trait() -> DefKey {
+    DefKey(crate::Digest::of_bytes(
+        b"grandiose-stage0-language-prelude-use-v1",
+    ))
+}
+
+fn language_drop_trait() -> DefKey {
+    DefKey(crate::Digest::of_bytes(
+        b"grandiose-stage0-language-prelude-drop-v1",
+    ))
+}
+
+fn language_prelude_trait(path: &[String]) -> Option<DefKey> {
+    match path {
+        [name] if name == "Use" => Some(language_use_trait()),
+        [name] if name == "Drop" => Some(language_drop_trait()),
+        _ => None,
+    }
+}
+
+fn language_prelude_trait_kinds(definition: DefKey) -> Option<&'static [GenericKind]> {
+    match definition {
+        value if value == language_use_trait() => {
+            Some(&[GenericKind::Const(crate::types::ConstKind::Quantity)])
+        }
+        value if value == language_drop_trait() => Some(&[]),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolutionState {
     Resolved(DefKey),
@@ -523,11 +559,14 @@ impl DefinitionIndex {
     }
 
     pub fn trait_generic_arity(&self, definition: DefKey) -> Option<u32> {
-        self.trait_generic_arities.get(&definition).copied()
+        language_prelude_trait_kinds(definition)
+            .map(|kinds| kinds.len() as u32)
+            .or_else(|| self.trait_generic_arities.get(&definition).copied())
     }
 
     pub fn trait_generic_kinds(&self, definition: DefKey) -> Option<&[GenericKind]> {
-        self.trait_generic_kinds.get(&definition).map(Vec::as_slice)
+        language_prelude_trait_kinds(definition)
+            .or_else(|| self.trait_generic_kinds.get(&definition).map(Vec::as_slice))
     }
 
     /// Source-slot kinds of an associated item selected through a particular
@@ -580,7 +619,16 @@ impl DefinitionIndex {
             return ResolutionState::Unresolved;
         };
         let module = if path.len() == 1 {
-            return self.resolve_member(namespace, owner, name, owner, false, &mut BTreeSet::new());
+            let resolved =
+                self.resolve_member(namespace, owner, name, owner, false, &mut BTreeSet::new());
+            return match resolved {
+                ResolutionState::Unresolved if namespace == DefinitionNamespace::Trait => {
+                    language_prelude_trait(path)
+                        .map(ResolutionState::Resolved)
+                        .unwrap_or(ResolutionState::Unresolved)
+                }
+                other => other,
+            };
         } else {
             match self.lexical_module(owner, owner, &path[..path.len() - 1]) {
                 ModuleLookup::Found(module) => module,
