@@ -436,7 +436,29 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
             projections: vec![VmEffectRowProjection {
                 subject: VmType::Generic(1),
                 trait_definition,
-                trait_arguments: vec![VmGenericArgument::Type(VmType::Text)],
+                // The enclosing trait head is independently mixed-kind.  It
+                // must use the same tagged representation as the associated
+                // item's own arguments; otherwise schema 30 could still
+                // round-trip rows while silently erasing a head lifetime or
+                // structural constant.
+                trait_arguments: vec![
+                    VmGenericArgument::Type(VmType::Text),
+                    VmGenericArgument::EffectRow(VmEffectRow {
+                        effects: vec![],
+                        projections: vec![],
+                        tail: Some(EffectTail::Generic(4)),
+                    }),
+                    VmGenericArgument::Lifetime(Lifetime::Bound { depth: 2, index: 1 }),
+                    VmGenericArgument::ConstU32(13),
+                    VmGenericArgument::ConstQuantity {
+                        lower: 1,
+                        upper: Some(3),
+                    },
+                    VmGenericArgument::ConstGeneric {
+                        index: 8,
+                        kind: ConstKind::U32,
+                    },
+                ],
                 name: "Associated".into(),
                 item_arguments: vec![
                     VmGenericArgument::Lifetime(Lifetime::Bound { depth: 0, index: 0 }),
