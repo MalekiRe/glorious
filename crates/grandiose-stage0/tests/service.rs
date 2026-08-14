@@ -133,6 +133,27 @@ fn text_runtime_manifest() -> RuntimeManifestInput {
     }
 }
 
+fn char_runtime_manifest() -> RuntimeManifestInput {
+    RuntimeManifestInput {
+        standard_library: PackageKey("app@0.1.0".into()),
+        host_imports: vec![],
+        selectors: [
+            (
+                PrimitiveRole::CharFromU32Checked,
+                "__g1_char_from_u32_checked",
+            ),
+            (PrimitiveRole::CharToU32, "__g1_char_to_u32"),
+        ]
+        .into_iter()
+        .map(|(role, name)| PrimitiveSelector {
+            role,
+            module_path: "crate".into(),
+            name: name.into(),
+        })
+        .collect(),
+    }
+}
+
 fn bytes_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
@@ -1256,6 +1277,94 @@ fn manifest_bound_checked_char_family_round_trips_the_u32_abi() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn public_char_helpers_preserve_unicode_scalar_boundaries_and_ordering() {
+    const CHAR_HELPERS: &str = "\
+        fn __g1_char_from_u32_checked(value: u32) -> char { () } \
+        fn __g1_char_to_u32(value: char) -> u32 { () } \
+        pub fn char_from_u32(value: u32) -> char { __g1_char_from_u32_checked(move value) } \
+        pub fn char_to_u32(value: char) -> u32 { __g1_char_to_u32(move value) } ";
+
+    for value in [0, 55295, 57344, 1114111] {
+        let source = format!("{CHAR_HELPERS} pub fn main() -> char {{ char_from_u32({value}) }}");
+        let mut input = request(&source);
+        input.runtime_manifest = Some(char_runtime_manifest());
+        let artifact = StageZeroCompiler::new()
+            .compile(input)
+            .expect("public Char helper must compile")
+            .artifact
+            .expect("build must publish a VM artifact");
+        assert_eq!(artifact.run_char().unwrap(), char::from_u32(value).unwrap());
+        let program = decode_program(&artifact.canonical_bytes()).unwrap();
+        assert!(program.functions.values().any(|function| {
+            function
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::CharFromU32Checked { .. }))
+        }));
+    }
+
+    let mut round_trip = request(&format!(
+        "{CHAR_HELPERS} pub fn main() -> u32 {{ char_to_u32(char_from_u32(128640)) }}"
+    ));
+    round_trip.runtime_manifest = Some(char_runtime_manifest());
+    let artifact = StageZeroCompiler::new()
+        .compile(round_trip)
+        .expect("public Char conversion chain must compile")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_u32().unwrap(), 128640);
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CharToU32 { .. }))
+    }));
+
+    let mut ordering = request(&format!(
+        "{CHAR_HELPERS} pub fn main() -> Bool {{ char_from_u32(0) < char_from_u32(1114111) }}"
+    ));
+    ordering.runtime_manifest = Some(char_runtime_manifest());
+    let artifact = StageZeroCompiler::new()
+        .compile(ordering)
+        .expect("Char comparison through public helpers must compile")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert!(artifact.run_bool().unwrap());
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CompareChar { .. }))
+    }));
+}
+
+#[test]
+fn public_char_from_u32_rejects_surrogates_and_out_of_range_scalars() {
+    const CHAR_HELPERS: &str = "\
+        fn __g1_char_from_u32_checked(value: u32) -> char { () } \
+        fn __g1_char_to_u32(value: char) -> u32 { () } \
+        pub fn char_from_u32(value: u32) -> char { __g1_char_from_u32_checked(move value) } ";
+
+    for value in [55296, 1114112] {
+        let mut input = request(&format!(
+            "{CHAR_HELPERS} pub fn main() -> char {{ char_from_u32({value}) }}"
+        ));
+        input.runtime_manifest = Some(char_runtime_manifest());
+        let artifact = StageZeroCompiler::new()
+            .compile(input)
+            .expect("checked Char conversion is a runtime trap, not a compile failure")
+            .artifact
+            .expect("build must publish a VM artifact");
+        assert!(
+            matches!(artifact.run_char(), Err(VmArtifactError::InvalidChar { value: found }) if found == value),
+            "invalid Unicode scalar {value:#x} must trap at the VM boundary"
+        );
+    }
 }
 
 #[test]
