@@ -3003,6 +3003,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 if !frame.continuations.is_empty() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
+                expire_snapshot_brand(&mut states.snapshots, frame.id);
             }
             VmInstruction::Resume { value } => {
                 read(&states, *value)?;
@@ -3138,6 +3139,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         });
                     }
                     forwarded.registers = continuation.registers.clone();
+                    forwarded.snapshots = continuation.snapshots.clone();
                     for (destination, argument) in outer
                         .payload_destinations
                         .iter()
@@ -3168,6 +3170,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 if frame.continuations.is_empty() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
+                expire_snapshot_brand(&mut states.snapshots, frame.id);
             }
             VmInstruction::Copy { dst, src } => {
                 read(&states, *src)?;
@@ -3564,6 +3567,18 @@ fn merge_handler_states(
         });
     }
     Some(changed)
+}
+
+/// A continuation token is capability-bearing only while its branded handler
+/// activation remains live.  Clearing all aliases at the structural exit
+/// prevents a stale register from becoming valid if bytecode later revisits
+/// the same lexical `InstallHandler` instruction.
+fn expire_snapshot_brand(snapshots: &mut [Option<u32>], frame: u32) {
+    for snapshot in snapshots {
+        if *snapshot == Some(frame) {
+            *snapshot = None;
+        }
+    }
 }
 fn register_type(function: &VmFunction, register: u32) -> Result<VmType, VmArtifactError> {
     function
