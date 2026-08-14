@@ -535,37 +535,109 @@ fn placeflow_keeps_a_captured_reborrow_live_across_a_handler_join() {
 }
 
 #[test]
-fn placeflow_conservatively_consumes_a_root_after_a_projection_move() {
-    let package = PackageKey("core-projection-move@0.1.0".into());
+fn placeflow_tracks_partial_moves_without_consuming_disjoint_fields() {
     let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair.right }";
-    let file = FileKey::new(
-        &package,
-        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    let flow = flow_for("core-projection-partial-move@0.1.0", source);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert_eq!(flow.moved_places.len(), 1, "{:#?}", flow.moved_places);
+    assert_eq!(flow.moved_places[0].root, "pair");
+    assert_eq!(flow.moved_places[0].fields, vec![0]);
+}
+
+#[test]
+fn placeflow_rejects_whole_or_overlapping_use_after_partial_move() {
+    let whole = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; move pair; 0 }";
+    let flow = flow_for("core-partial-move-whole@0.1.0", whole);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5003"),
+        "moving an aggregate with an uninitialized field must fail: {:#?}",
+        flow.diagnostics
     );
-    let lexed = LexedFile::lex(file, source);
-    let scan = DeclarationScan::scan(&lexed, source);
-    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-    let signatures = ElaboratedInterface::elaborate(&interface);
-    let definition = interface
-        .definitions
-        .iter()
-        .find(|definition| definition.name.as_deref() == Some("main"))
-        .expect("main definition");
-    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
-    let core = TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
-    );
-    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
-    let flow = PlaceFlow::analyze(&core);
+
+    let overlap = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair.left }";
+    let flow = flow_for("core-partial-move-overlap@0.1.0", overlap);
     assert!(
         flow.diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "G5001"),
-        "a projection move must consume its root until partial moves are tracked: {:#?}",
+        "reading the moved field must fail: {:#?}",
         flow.diagnostics
+    );
+}
+
+#[test]
+fn placeflow_reinitializes_partial_moves_at_field_and_aggregate_boundaries() {
+    let field = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair.left = 3; pair.left }";
+    let flow = flow_for("core-partial-move-field-reinit@0.1.0", field);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert!(flow.moved_places.is_empty(), "{:#?}", flow.moved_places);
+
+    let aggregate = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair = Pair { left: 3, right: 4 }; pair.left }";
+    let flow = flow_for("core-partial-move-aggregate-reinit@0.1.0", aggregate);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert!(flow.moved_places.is_empty(), "{:#?}", flow.moved_places);
+}
+
+#[test]
+fn placeflow_tracks_nested_partial_moves_and_respects_projection_loans() {
+    let nested = "pub struct Pair { left: i64, right: i64 } pub struct Outer { pair: Pair, spare: i64 } pub fn main() -> i64 { let outer = Outer { pair: Pair { left: 1, right: 2 }, spare: 3 }; move outer.pair.left; outer.pair.right + outer.spare }";
+    let flow = flow_for("core-nested-partial-move@0.1.0", nested);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert!(
+        flow.moved_places
+            .iter()
+            .any(|place| place.root == "outer" && place.fields == vec![0, 0]),
+        "nested move path was not retained for aggregate cleanup: {:#?}",
+        flow.moved_places
+    );
+
+    let disjoint_loan = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.right; move pair.left; loan; 0 }";
+    let flow = flow_for("core-partial-move-disjoint-loan@0.1.0", disjoint_loan);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+
+    let overlapping_loan = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; move pair.left; loan; 0 }";
+    let flow = flow_for("core-partial-move-overlap-loan@0.1.0", overlapping_loan);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5004"),
+        "moving a live borrowed field must be rejected: {:#?}",
+        flow.diagnostics
+    );
+}
+
+#[test]
+fn placeflow_rejects_writes_through_a_moved_parent_projection() {
+    let source = "pub struct Pair { left: i64, right: i64 } pub struct Outer { pair: Pair } pub fn main() -> i64 { let outer = Outer { pair: Pair { left: 1, right: 2 } }; move outer.pair; outer.pair.left = 3; 0 }";
+    let flow = flow_for("core-partial-move-parent-write@0.1.0", source);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5009"),
+        "writing through a moved parent must require aggregate reinitialization: {:#?}",
+        flow.diagnostics
+    );
+}
+
+#[test]
+fn placeflow_joins_partial_moves_from_dynamic_handler_exits() {
+    let source = "effect Tick { tick() -> i64; } pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; handle Tick::tick() { Tick::tick() => move pair.left, Tick::tick() => 0 }; pair.left }";
+    let flow = flow_for("core-partial-move-handler-join@0.1.0", source);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5001"),
+        "a dynamically moved field must remain unavailable after the join: {:#?}",
+        flow.diagnostics
+    );
+    assert!(
+        flow.moved_places
+            .iter()
+            .any(|place| place.root == "pair" && place.fields == vec![0]),
+        "the frozen aggregate drop state lost the conditional field move: {:#?}",
+        flow.moved_places
     );
 }
 

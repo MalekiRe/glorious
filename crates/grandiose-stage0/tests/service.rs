@@ -210,6 +210,28 @@ fn assignment_reinitializes_a_local_after_a_whole_value_move() {
 }
 
 #[test]
+fn service_preserves_disjoint_aggregate_fields_after_a_partial_move() {
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair.right }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 2);
+}
+
+#[test]
+fn service_reports_overlapping_use_after_a_partial_move() {
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair.left }";
+    let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("partial move overlap unexpectedly compiled: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5001"),
+        "missing projection use-after-move diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rebuilds_and_stores_statically_selected_record_fields() {
     let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> Pair { let pair = Pair { left: 1, right: 2 }; pair.left = 42; pair }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

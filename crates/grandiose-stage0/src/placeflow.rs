@@ -21,6 +21,22 @@ impl Projection {
         self.root == other.root
             && (self.fields.starts_with(&other.fields) || other.fields.starts_with(&self.fields))
     }
+
+    fn is_strict_ancestor_of(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self.fields.len() < other.fields.len()
+            && other.fields.starts_with(&self.fields)
+    }
+
+    fn display(&self) -> String {
+        self.fields
+            .iter()
+            .fold(self.root.clone(), |mut text, field| {
+                text.push('.');
+                text.push_str(&field.to_string());
+                text
+            })
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -42,6 +58,17 @@ pub struct LoanFact {
     pub root: String,
     pub fields: Vec<u32>,
     pub unique: bool,
+}
+
+/// A frozen move path that remains uninitialized at the body exit. A path
+/// with no fields denotes a whole local; otherwise it denotes one statically
+/// selected aggregate field. Facts are canonical: no fact is a strict
+/// descendant of another fact, which makes them directly usable by future
+/// drop elaboration.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct MoveFact {
+    pub root: String,
+    pub fields: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,6 +108,10 @@ pub struct FlowDiagnostic {
 #[derive(Clone, Debug, Default)]
 pub struct PlaceFlow {
     pub final_states: BTreeMap<String, LocalState>,
+    /// Projection-granular uninitialized paths. `final_states` remains the
+    /// compact whole-local summary for existing consumers; this retains the
+    /// information needed for partial moves and aggregate cleanup.
+    pub moved_places: Vec<MoveFact>,
     pub active_loans: Vec<LoanFact>,
     pub events: Vec<FlowEvent>,
     pub diagnostics: Vec<FlowDiagnostic>,
@@ -91,6 +122,7 @@ impl PlaceFlow {
             body,
             states: BTreeMap::new(),
             projection_loans: vec![],
+            moved_places: BTreeSet::new(),
             events: vec![],
             diagnostics: vec![],
         };
@@ -109,8 +141,17 @@ impl PlaceFlow {
                 unique: loan.unique,
             })
             .collect();
+        let moved_places = a
+            .moved_places
+            .iter()
+            .map(|place| MoveFact {
+                root: place.root.clone(),
+                fields: place.fields.clone(),
+            })
+            .collect();
         Self {
             final_states: a.states,
+            moved_places,
             active_loans,
             events: a.events,
             diagnostics: a.diagnostics,
@@ -123,9 +164,21 @@ struct Analyzer<'a> {
     /// Every precise source loan, including a whole-local loan.  Whole-local
     /// entries are mirrored in `states` for the legacy compact summary.
     projection_loans: Vec<ProjectionLoan>,
+    /// Canonical paths that have been moved and have not since been
+    /// reinitialized. Whole-local moves are mirrored in `states`; field moves
+    /// deliberately are not, because their siblings remain usable.
+    moved_places: BTreeSet<Projection>,
     events: Vec<FlowEvent>,
     diagnostics: Vec<FlowDiagnostic>,
 }
+
+/// State observed at one dynamically selected handler/completion exit.
+type HandlerExit = (
+    BTreeMap<String, LocalState>,
+    Vec<ProjectionLoan>,
+    BTreeSet<Projection>,
+);
+
 impl Analyzer<'_> {
     /// Visit an expression while retaining only loans whose owner may be used
     /// by the continuation.  This is the first NLL region domain: a `let r =
@@ -170,23 +223,20 @@ impl Analyzer<'_> {
                 self.assign_place(&place, e.span);
             }
             CoreKind::Move(v) => {
-                self.visit_with_live_after(v, live_after);
-                // A field is a place projection into its root local.  The
-                // current flow domain does not retain per-field move paths,
-                // so consuming a projection must conservatively consume the
-                // owner too.  That preserves the essential ownership
-                // invariant until partial-move states are represented.
+                // A move of a static place is validated directly. Visiting a
+                // field first would turn a second move into an unrelated
+                // read-after-move diagnostic and obscure the precise path
+                // being consumed.
+                if self.projection(v).is_none() {
+                    self.visit_with_live_after(v, live_after);
+                }
                 self.move_place(v, e.span)
             }
             CoreKind::Unary { value, .. } => self.visit_with_live_after(value, live_after),
             CoreKind::Borrow { unique, value } => {
-                self.visit_with_live_after(value, live_after);
-                // A field projection is still a borrow of storage owned by
-                // its root local.  Until PlaceFlow has projection-disjoint
-                // loans, retain a loan on that root rather than silently
-                // treating `&record.field` as a borrow of a temporary value.
-                // This is conservative, but prevents moving or overwriting
-                // the enclosing record while a reference into it is live.
+                if self.projection(value).is_none() {
+                    self.visit_with_live_after(value, live_after);
+                }
                 self.borrow_place(value, unique, e.span, None)
             }
             CoreKind::Call { callee, arguments } => {
@@ -208,10 +258,12 @@ impl Analyzer<'_> {
                 self.visit_with_live_after(computation, &inside_handler);
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
+                let incoming_moves = self.moved_places.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
                     self.projection_loans = incoming_loans.clone();
+                    self.moved_places = incoming_moves.clone();
                     for (name, _) in clause.bindings {
                         self.states.insert(name, LocalState::Initialized);
                     }
@@ -221,16 +273,21 @@ impl Analyzer<'_> {
                         self.states.insert(name, LocalState::Initialized);
                     }
                     self.visit_with_live_after(clause.body, live_after);
-                    exits.push((self.states.clone(), self.projection_loans.clone()));
+                    exits.push((
+                        self.states.clone(),
+                        self.projection_loans.clone(),
+                        self.moved_places.clone(),
+                    ));
                 }
                 if !exits.is_empty() {
                     self.states = join_handler_exits(
                         &exits
                             .iter()
-                            .map(|(states, _)| states.clone())
+                            .map(|(states, _, _)| states.clone())
                             .collect::<Vec<_>>(),
                     );
                     self.projection_loans = join_handler_projection_loans(&exits, &incoming);
+                    self.moved_places = join_handler_moves(&exits, &incoming);
                 }
             }
             CoreKind::Completion {
@@ -244,24 +301,31 @@ impl Analyzer<'_> {
                 self.visit_with_live_after(computation, &inside_completion);
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
+                let incoming_moves = self.moved_places.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
                     self.projection_loans = incoming_loans.clone();
+                    self.moved_places = incoming_moves.clone();
                     for (name, _) in clause.bindings {
                         self.states.insert(name, LocalState::Initialized);
                     }
                     self.visit_with_live_after(clause.body, live_after);
-                    exits.push((self.states.clone(), self.projection_loans.clone()));
+                    exits.push((
+                        self.states.clone(),
+                        self.projection_loans.clone(),
+                        self.moved_places.clone(),
+                    ));
                 }
                 if !exits.is_empty() {
                     self.states = join_handler_exits(
                         &exits
                             .iter()
-                            .map(|(states, _)| states.clone())
+                            .map(|(states, _, _)| states.clone())
                             .collect::<Vec<_>>(),
                     );
                     self.projection_loans = join_handler_projection_loans(&exits, &incoming);
+                    self.moved_places = join_handler_moves(&exits, &incoming);
                 }
             }
             CoreKind::Tuple(values) | CoreKind::Array(values) => {
@@ -476,9 +540,25 @@ impl Analyzer<'_> {
         }
     }
     fn move_(&mut self, n: &str, s: Span) {
+        let place = Projection {
+            root: n.into(),
+            fields: vec![],
+        };
+        if let Some(moved) = self.moved_place_overlapping(&place) {
+            self.error(
+                s,
+                "G5003",
+                format!(
+                    "cannot move `{n}` because `{}` is already moved",
+                    moved.display()
+                ),
+            );
+            return;
+        }
         match self.states.get(n) {
             Some(LocalState::Initialized) => {
                 self.states.insert(n.into(), LocalState::Moved);
+                self.record_move(place);
                 self.event(FlowEventKind::Move(n.into()), s)
             }
             Some(LocalState::Moved) => {
@@ -510,20 +590,48 @@ impl Analyzer<'_> {
             (None, _) => self.error(s, "G5002", format!("unknown local `{n}` in PlaceFlow")),
         }
     }
-    fn assign(&mut self, n: &str, s: Span) {
-        match self.states.get(n).copied() {
-            Some(LocalState::Initialized) | Some(LocalState::Moved) => {
-                self.states.insert(n.into(), LocalState::Initialized);
-                self.event(FlowEventKind::Assign(n.into()), s)
-            }
-            Some(LocalState::SharedBorrowed(_)) | Some(LocalState::UniquelyBorrowed) => {
-                self.error(s, "G5007", format!("cannot assign to borrowed local `{n}`"))
-            }
-            None => self.error(s, "G5002", format!("unknown local `{n}` in PlaceFlow")),
-        }
-    }
     fn event(&mut self, kind: FlowEventKind, span: Span) {
         self.events.push(FlowEvent { kind, span })
+    }
+
+    fn moved_place_overlapping(&self, place: &Projection) -> Option<Projection> {
+        self.moved_places
+            .iter()
+            .find(|moved| moved.overlaps(place))
+            .cloned()
+    }
+
+    /// Returns a moved *proper prefix* of `place`. Writing the exact moved
+    /// field is a reinitialization, but writing through an already-moved
+    /// parent would require accessing uninitialized storage and is rejected.
+    fn moved_ancestor_of(&self, place: &Projection) -> Option<Projection> {
+        self.moved_places
+            .iter()
+            .find(|moved| moved.is_strict_ancestor_of(place))
+            .cloned()
+    }
+
+    fn record_move(&mut self, place: Projection) {
+        // A whole/parent move subsumes any child facts. Conversely, a child
+        // fact under an already moved parent cannot add information.
+        if self
+            .moved_places
+            .iter()
+            .any(|moved| place.fields.starts_with(&moved.fields) && moved.root == place.root)
+        {
+            return;
+        }
+        self.moved_places
+            .retain(|moved| !place.is_strict_ancestor_of(moved));
+        self.moved_places.insert(place);
+    }
+
+    fn reinitialize_place(&mut self, place: &Projection) {
+        // Replacing an aggregate initializes all of its descendants. Replacing
+        // one field initializes that field and any previously moved subfields,
+        // while intentionally leaving sibling move facts alone.
+        self.moved_places
+            .retain(|moved| !moved.fields.starts_with(&place.fields) || moved.root != place.root);
     }
 
     fn projection(&self, id: CoreId) -> Option<Projection> {
@@ -560,6 +668,14 @@ impl Analyzer<'_> {
         let Some(place) = self.projection(id) else {
             return;
         };
+        if let Some(moved) = self.moved_place_overlapping(&place) {
+            self.error(
+                span,
+                "G5001",
+                format!("use of moved place `{}`", moved.display()),
+            );
+            return;
+        }
         self.read(&place.root, span);
         if self
             .projection_loans
@@ -590,13 +706,56 @@ impl Analyzer<'_> {
             );
             return;
         }
-        self.move_(&place.root, span);
+        if let Some(moved) = self.moved_place_overlapping(&place) {
+            self.error(
+                span,
+                "G5003",
+                format!(
+                    "cannot move `{}` because `{}` is already moved",
+                    place.display(),
+                    moved.display()
+                ),
+            );
+            return;
+        }
+        match self.states.get(&place.root).copied() {
+            Some(LocalState::Initialized) => {
+                if place.fields.is_empty() {
+                    self.states.insert(place.root.clone(), LocalState::Moved);
+                }
+                self.record_move(place.clone());
+                self.event(FlowEventKind::Move(place.root), span);
+            }
+            Some(LocalState::Moved) => self.error(
+                span,
+                "G5003",
+                format!("local `{}` is moved more than once", place.root),
+            ),
+            Some(_) => self.error(
+                span,
+                "G5004",
+                format!("cannot move borrowed local `{}`", place.root),
+            ),
+            None => self.error(
+                span,
+                "G5002",
+                format!("unknown local `{}` in PlaceFlow", place.root),
+            ),
+        }
     }
 
     fn borrow_place(&mut self, id: CoreId, unique: bool, span: Span, owner: Option<String>) {
         let Some(place) = self.projection(id) else {
             return;
         };
+        if let Some(moved) = self.moved_place_overlapping(&place) {
+            self.error(
+                span,
+                "G5005",
+                format!("cannot borrow moved place `{}`", moved.display()),
+            );
+            return;
+        }
         if self
             .projection_loans
             .iter()
@@ -681,7 +840,64 @@ impl Analyzer<'_> {
             );
             return;
         }
-        self.assign(&projection.root, span);
+        if let Some(moved) = self.moved_ancestor_of(&projection) {
+            self.error(
+                span,
+                "G5009",
+                format!(
+                    "cannot assign through moved place `{}`; reinitialize `{}` first",
+                    moved.display(),
+                    moved.display()
+                ),
+            );
+            return;
+        }
+        if projection.fields.is_empty() {
+            match self.states.get(&projection.root).copied() {
+                Some(LocalState::Initialized) | Some(LocalState::Moved) => {
+                    self.states
+                        .insert(projection.root.clone(), LocalState::Initialized);
+                    self.reinitialize_place(&projection);
+                    self.event(FlowEventKind::Assign(projection.root), span);
+                }
+                Some(LocalState::SharedBorrowed(_)) | Some(LocalState::UniquelyBorrowed) => self
+                    .error(
+                        span,
+                        "G5007",
+                        format!("cannot assign to borrowed local `{}`", projection.root),
+                    ),
+                None => self.error(
+                    span,
+                    "G5002",
+                    format!("unknown local `{}` in PlaceFlow", projection.root),
+                ),
+            }
+            return;
+        }
+        match self.states.get(&projection.root).copied() {
+            Some(LocalState::Initialized) => {
+                self.reinitialize_place(&projection);
+                self.event(FlowEventKind::Assign(projection.root), span);
+            }
+            Some(LocalState::Moved) => self.error(
+                span,
+                "G5009",
+                format!(
+                    "cannot assign through moved local `{}`; reinitialize the local first",
+                    projection.root
+                ),
+            ),
+            Some(LocalState::SharedBorrowed(_)) | Some(LocalState::UniquelyBorrowed) => self.error(
+                span,
+                "G5007",
+                format!("cannot assign to borrowed local `{}`", projection.root),
+            ),
+            None => self.error(
+                span,
+                "G5002",
+                format!("unknown local `{}` in PlaceFlow", projection.root),
+            ),
+        }
     }
 
     fn root_name(&self, id: CoreId) -> String {
@@ -745,16 +961,46 @@ fn join_handler_exits(exits: &[BTreeMap<String, LocalState>]) -> BTreeMap<String
 /// references cannot escape their lexical arm merely because another arm uses
 /// the same spelling.
 fn join_handler_projection_loans(
-    exits: &[(BTreeMap<String, LocalState>, Vec<ProjectionLoan>)],
+    exits: &[HandlerExit],
     incoming: &BTreeMap<String, LocalState>,
 ) -> Vec<ProjectionLoan> {
     let mut loans = exits
         .iter()
-        .flat_map(|(_, loans)| loans)
+        .flat_map(|(_, loans, _)| loans)
         .filter(|loan| incoming.contains_key(&loan.place.root))
         .cloned()
         .collect::<Vec<_>>();
     loans.sort();
     loans.dedup();
     loans
+}
+
+/// Dynamic handler/completion selection may take any arm, so a field moved
+/// on one exit is unavailable after the join even if a sibling arm leaves it
+/// initialized. This is the aggregate analogue of the conservative whole
+/// local `Moved` join above. Clause-local roots are excluded because they
+/// cannot escape their arm.
+fn join_handler_moves(
+    exits: &[HandlerExit],
+    incoming: &BTreeMap<String, LocalState>,
+) -> BTreeSet<Projection> {
+    let mut moves = exits
+        .iter()
+        .flat_map(|(_, _, moves)| moves)
+        .filter(|place| incoming.contains_key(&place.root))
+        .cloned()
+        .collect::<Vec<_>>();
+    moves.sort();
+    moves.dedup();
+    let mut canonical = BTreeSet::new();
+    for place in moves {
+        if canonical.iter().any(|known: &Projection| {
+            known.root == place.root && place.fields.starts_with(&known.fields)
+        }) {
+            continue;
+        }
+        canonical.retain(|known| !place.is_strict_ancestor_of(known));
+        canonical.insert(place);
+    }
+    canonical
 }
