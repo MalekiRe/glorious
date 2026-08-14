@@ -87,12 +87,12 @@ pub enum HeaderType {
     Projection {
         subject: Box<HeaderType>,
         trait_path: Vec<String>,
-        trait_arguments: Vec<HeaderType>,
+        trait_arguments: Vec<HeaderGenericArgument>,
         name: String,
         /// Arguments applied to the selected associated item.  These remain
         /// distinct from trait arguments so `<S as Trait<T>>::Item<U>`
         /// preserves the complete projection identity through elaboration.
-        item_arguments: Vec<HeaderType>,
+        item_arguments: Vec<HeaderGenericArgument>,
     },
     Tuple(Vec<HeaderType>),
     Callable {
@@ -152,13 +152,14 @@ pub struct EffectRowHeader {
     pub tail: Option<String>,
 }
 
-/// A trait reference deliberately uses the header type grammar for arguments.
-/// It remains source-shaped until interface elaboration resolves the trait path
-/// to its stable declaration identity.
+/// A trait reference retains source-shaped generic arguments until interface
+/// elaboration resolves the trait path to its stable declaration identity.
+/// This includes structural constant arguments: `Sized<7>` must not be
+/// coerced through the type namespace before its binder kind is known.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TraitRefHeader {
     pub path: Vec<String>,
-    pub arguments: Vec<HeaderType>,
+    pub arguments: Vec<HeaderGenericArgument>,
     pub span: Span,
 }
 
@@ -841,18 +842,7 @@ impl Parser<'_> {
             .current()
             .unwrap_or_else(|| self.previous().unwrap_or(0));
         let path = self.path();
-        let mut arguments = vec![];
-        if self.operator("<") {
-            while self.current().is_some() && !self.at_operator(">") {
-                arguments.push(self.ty());
-                if !self.punctuation(',') {
-                    break;
-                }
-            }
-            if !self.operator(">") {
-                self.error("G3254", "expected `>` after trait arguments");
-            }
-        }
+        let arguments = self.generic_arguments();
         if path.is_empty() {
             self.error("G3255", "expected trait path");
         }
@@ -1358,7 +1348,7 @@ impl Parser<'_> {
                 self.error("G3210", "expected trait path in associated type projection");
                 return HeaderType::Recovered;
             }
-            let trait_arguments = self.type_arguments();
+            let trait_arguments = self.generic_arguments();
             if !self.operator(">") {
                 self.error("G3211", "expected `>` in associated type projection");
                 return HeaderType::Recovered;
@@ -1371,7 +1361,7 @@ impl Parser<'_> {
                 self.error("G3213", "expected associated type name");
                 return HeaderType::Recovered;
             };
-            let item_arguments = self.type_arguments();
+            let item_arguments = self.generic_arguments();
             return HeaderType::Projection {
                 subject: Box::new(subject),
                 trait_path,
@@ -1429,23 +1419,6 @@ impl Parser<'_> {
             value = HeaderType::Application(Box::new(value), arguments);
         }
         value
-    }
-    fn type_arguments(&mut self) -> Vec<HeaderType> {
-        if !self.at_operator("<") {
-            return vec![];
-        }
-        self.position += 1;
-        let mut arguments = vec![];
-        while self.current().is_some() && !self.at_operator(">") {
-            arguments.push(self.ty());
-            if !self.punctuation(',') {
-                break;
-            }
-        }
-        if !self.operator(">") {
-            self.error("G3208", "expected `>` after type arguments");
-        }
-        arguments
     }
     fn generic_arguments(&mut self) -> Vec<HeaderGenericArgument> {
         if !self.at_operator("<") {

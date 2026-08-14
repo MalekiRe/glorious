@@ -195,6 +195,94 @@ fn nominal_const_applications_reject_wrong_slot_kinds() {
 }
 
 #[test]
+fn trait_references_elaborate_structural_const_arguments_by_declared_kind() {
+    let package = PackageKey("signature-trait-const-generic-arguments@0.1.0".into());
+    let source = "pub trait Capacity<n: u32> {} pub trait Marker<T> {} pub struct Tag<n: u32> {} pub impl<n: u32> Capacity<n> for Tag<n> {} pub fn inherited<n: u32>() where Tag<n>: Capacity<n> {} pub fn literal() where Tag<7>: Capacity<7> {} pub fn wrong<T>() where T: Marker<7> {}";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let inherited = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("inherited"))
+        .expect("inherited definition");
+    let ElaboratedHeader::Callable(signature) = signatures
+        .definitions
+        .get(&inherited.key)
+        .expect("inherited signature")
+    else {
+        panic!("expected callable")
+    };
+    assert!(matches!(
+        signature.where_bounds[0].1.arguments.as_slice(),
+        [Type::ConstGeneric {
+            index: 0,
+            kind: ConstKind::U32
+        }]
+    ));
+    let literal = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("literal"))
+        .expect("literal definition");
+    let ElaboratedHeader::Callable(signature) = signatures
+        .definitions
+        .get(&literal.key)
+        .expect("literal signature")
+    else {
+        panic!("expected callable")
+    };
+    assert_eq!(
+        signature.where_bounds[0].1.arguments,
+        vec![Type::ConstU32(7)]
+    );
+    assert_eq!(
+        signatures
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "G3318")
+            .count(),
+        1,
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
+fn associated_type_projections_preserve_structural_const_item_arguments() {
+    let package = PackageKey("signature-associated-const-projection@0.1.0".into());
+    let source = "pub trait Family { type Out<n: u32>; } pub struct Tag {} pub type Pick = <Tag as Family>::Out<7>;";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let pick = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Pick"))
+        .expect("Pick alias");
+    let ElaboratedHeader::Alias { target, .. } = signatures
+        .definitions
+        .get(&pick.key)
+        .expect("Pick signature")
+    else {
+        panic!("expected alias")
+    };
+    assert!(matches!(
+        target,
+        Type::Projection { item_arguments, .. } if item_arguments == &vec![Type::ConstU32(7)]
+    ));
+}
+
+#[test]
 fn interfaces_preserve_declared_reference_lifetimes_without_type_slots() {
     let package = PackageKey("signature-reference-lifetimes@0.1.0".into());
     let source = "pub fn borrow<'a>(value: &'a i64, fallback: &i64) -> &'static i64 { value }";

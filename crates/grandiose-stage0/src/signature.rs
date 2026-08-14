@@ -1530,18 +1530,17 @@ impl Elaborator<'_> {
     fn trait_ref_parts(
         &mut self,
         path: &[String],
-        source_arguments: &[HeaderType],
+        source_arguments: &[HeaderGenericArgument],
     ) -> ElaboratedTraitReference {
-        let arguments = source_arguments
-            .iter()
-            .map(|argument| self.ty(argument))
-            .collect::<Vec<_>>();
         match self
             .index
             .resolve_path(DefinitionNamespace::Trait, self.module, path)
         {
             ResolutionState::Resolved(definition) => {
                 let expected = self.index.trait_generic_arity(definition).unwrap_or(0) as usize;
+                let kinds = self.index.trait_generic_kinds(definition).unwrap_or(&[]);
+                let name = path.last().map(String::as_str).unwrap_or("<trait>");
+                let arguments = self.elaborate_generic_arguments(name, source_arguments, kinds);
                 if expected != arguments.len() {
                     self.error(
                         "G3308",
@@ -1558,6 +1557,7 @@ impl Elaborator<'_> {
                 }
             }
             ResolutionState::Ambiguous(_) => {
+                let arguments = self.elaborate_unresolved_generic_arguments(source_arguments);
                 self.error("G3309", format!("ambiguous trait `{}`", path.join("::")));
                 ElaboratedTraitReference {
                     definition: DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait")),
@@ -1565,6 +1565,7 @@ impl Elaborator<'_> {
                 }
             }
             ResolutionState::Inaccessible(_) => {
+                let arguments = self.elaborate_unresolved_generic_arguments(source_arguments);
                 self.error("G3310", format!("private trait `{}`", path.join("::")));
                 ElaboratedTraitReference {
                     definition: DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait")),
@@ -1572,6 +1573,7 @@ impl Elaborator<'_> {
                 }
             }
             _ => {
+                let arguments = self.elaborate_unresolved_generic_arguments(source_arguments);
                 self.error("G3310", format!("unresolved trait `{}`", path.join("::")));
                 ElaboratedTraitReference {
                     definition: DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait")),
@@ -1579,6 +1581,28 @@ impl Elaborator<'_> {
                 }
             }
         }
+    }
+
+    /// Preserve ordinary type arguments for a trait that failed resolution,
+    /// while refusing to guess the kind of a structural argument.  A later
+    /// resolved interface is the sole authority for admitting const terms.
+    fn elaborate_unresolved_generic_arguments(
+        &mut self,
+        arguments: &[HeaderGenericArgument],
+    ) -> Vec<Type> {
+        arguments
+            .iter()
+            .map(|argument| match argument {
+                HeaderGenericArgument::Type(value) => self.ty(value),
+                HeaderGenericArgument::U32(_) | HeaderGenericArgument::Quantity(_) => {
+                    self.error(
+                        "G3318",
+                        "structural generic argument requires a resolved declaration".into(),
+                    );
+                    Type::Error
+                }
+            })
+            .collect()
     }
     fn effect_row(&mut self, value: &EffectRowHeader) -> EffectRow {
         let tail = value.tail.as_ref().and_then(|tail| {
@@ -1639,15 +1663,20 @@ impl Elaborator<'_> {
                 } => {
                     let subject = self.ty(subject);
                     let relation = self.trait_ref_parts(trait_path, trait_arguments);
+                    let item_kinds = self
+                        .index
+                        .associated_type_generic_kinds(relation.definition, name)
+                        .unwrap_or(&[]);
                     projections.push(EffectRowProjection {
                         subject: Box::new(subject),
                         trait_definition: relation.definition,
                         trait_arguments: relation.arguments,
                         name: name.clone(),
-                        item_arguments: item_arguments
-                            .iter()
-                            .map(|argument| self.ty(argument))
-                            .collect(),
+                        item_arguments: self.elaborate_generic_arguments(
+                            name,
+                            item_arguments,
+                            item_kinds,
+                        ),
                     });
                     continue;
                 }
@@ -1853,15 +1882,20 @@ impl Elaborator<'_> {
             } => {
                 let subject = self.ty(subject);
                 let relation = self.trait_ref_parts(trait_path, trait_arguments);
+                let item_kinds = self
+                    .index
+                    .associated_type_generic_kinds(relation.definition, name)
+                    .unwrap_or(&[]);
                 Type::Projection {
                     subject: Box::new(subject),
                     trait_definition: relation.definition,
                     trait_arguments: relation.arguments,
                     name: name.clone(),
-                    item_arguments: item_arguments
-                        .iter()
-                        .map(|argument| self.ty(argument))
-                        .collect(),
+                    item_arguments: self.elaborate_generic_arguments(
+                        name,
+                        item_arguments,
+                        item_kinds,
+                    ),
                 }
             }
             HeaderType::Path(path) => self.path(path, vec![]),

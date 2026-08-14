@@ -1329,19 +1329,11 @@ impl Elaborator<'_> {
         &mut self,
         subject: &crate::header::HeaderType,
         trait_path: &[String],
-        trait_arguments: &[crate::header::HeaderType],
+        trait_arguments: &[crate::header::HeaderGenericArgument],
         name: &str,
-        item_arguments: &[crate::header::HeaderType],
+        item_arguments: &[crate::header::HeaderGenericArgument],
     ) -> Type {
         let subject = self.header_type(subject);
-        let trait_arguments = trait_arguments
-            .iter()
-            .map(|argument| self.header_type(argument))
-            .collect::<Vec<_>>();
-        let item_arguments = item_arguments
-            .iter()
-            .map(|argument| self.header_type(argument))
-            .collect::<Vec<_>>();
         let trait_definition =
             match self
                 .index
@@ -1365,13 +1357,21 @@ impl Elaborator<'_> {
                     return Type::Error;
                 }
             };
+        let trait_kinds = self
+            .index
+            .trait_generic_kinds(trait_definition)
+            .unwrap_or(&[]);
+        let Some(trait_arguments) = self.header_generic_arguments(trait_arguments, trait_kinds)
+        else {
+            return Type::Error;
+        };
         let Some(ElaboratedHeader::Trait(trait_header)) =
             self.signatures.definitions.get(&trait_definition)
         else {
             self.projection_error("G4148", "associated type projection target is not a trait");
             return Type::Error;
         };
-        match trait_header.associated_types.get(name) {
+        let item = match trait_header.associated_types.get(name) {
             Some(item) if item.effect_row => {
                 self.projection_error(
                     "G4149",
@@ -1379,7 +1379,7 @@ impl Elaborator<'_> {
                 );
                 return Type::Error;
             }
-            Some(item) if item.generics == item_arguments.len() as u32 => {}
+            Some(item) if item.generics == item_arguments.len() as u32 => item,
             Some(_) => {
                 self.projection_error(
                     "G4149",
@@ -1391,7 +1391,12 @@ impl Elaborator<'_> {
                 self.projection_error("G4150", "trait does not declare this associated type");
                 return Type::Error;
             }
-        }
+        };
+        let Some(item_arguments) =
+            self.header_generic_arguments(item_arguments, &item.generic_kinds)
+        else {
+            return Type::Error;
+        };
         let projection = Type::Projection {
             subject: Box::new(subject),
             trait_definition,
@@ -1427,6 +1432,64 @@ impl Elaborator<'_> {
             TraitProjectionAnswer::Normalized { ty, .. } => ty,
             answer => self.projection_normalization_error(answer),
         }
+    }
+
+    /// Elaborate source generic arguments only after the declaration's
+    /// source-slot kinds are known.  This keeps const terms out of ordinary
+    /// type slots in body-local closure annotations as well as signatures.
+    fn header_generic_arguments(
+        &mut self,
+        arguments: &[crate::header::HeaderGenericArgument],
+        kinds: &[crate::GenericKind],
+    ) -> Option<Vec<Type>> {
+        if arguments.len() != kinds.len() {
+            self.projection_error(
+                "G4158",
+                "generic application has the wrong number of arguments",
+            );
+            return None;
+        }
+        Some(
+            arguments
+                .iter()
+                .zip(kinds)
+                .map(|(argument, kind)| match (argument, kind) {
+                    (
+                        crate::header::HeaderGenericArgument::Type(value),
+                        crate::GenericKind::Type,
+                    ) => self.header_type(value),
+                    (
+                        crate::header::HeaderGenericArgument::U32(value),
+                        crate::GenericKind::Const(crate::ConstKind::U32),
+                    ) => Type::ConstU32(*value),
+                    (
+                        crate::header::HeaderGenericArgument::Quantity(value),
+                        crate::GenericKind::Const(crate::ConstKind::Quantity),
+                    ) => Type::ConstQuantity(*value),
+                    (
+                        crate::header::HeaderGenericArgument::Type(
+                            crate::header::HeaderType::Path(path),
+                        ),
+                        crate::GenericKind::Const(kind),
+                    ) if path.len() == 1 => match self.const_parameters.get(&path[0]).copied() {
+                        Some((index, found)) if found == *kind => {
+                            Type::ConstGeneric { index, kind: *kind }
+                        }
+                        _ => {
+                            self.projection_error(
+                                "G4158",
+                                "const generic argument has the wrong kind",
+                            );
+                            Type::Error
+                        }
+                    },
+                    _ => {
+                        self.projection_error("G4158", "generic argument has the wrong kind");
+                        Type::Error
+                    }
+                })
+                .collect(),
+        )
     }
     fn header_path(
         &mut self,
@@ -1628,14 +1691,6 @@ impl Elaborator<'_> {
                     item_arguments,
                 } => {
                     let subject = self.header_type(subject);
-                    let trait_arguments = trait_arguments
-                        .iter()
-                        .map(|argument| self.header_type(argument))
-                        .collect::<Vec<_>>();
-                    let item_arguments = item_arguments
-                        .iter()
-                        .map(|argument| self.header_type(argument))
-                        .collect::<Vec<_>>();
                     let ResolutionState::Resolved(trait_definition) = self.index.resolve_path(
                         DefinitionNamespace::Trait,
                         self.module,
@@ -1647,6 +1702,15 @@ impl Elaborator<'_> {
                             "closure associated effect row has an unresolved trait",
                         );
                         self.recovered = true;
+                        continue;
+                    };
+                    let trait_kinds = self
+                        .index
+                        .trait_generic_kinds(trait_definition)
+                        .unwrap_or(&[]);
+                    let Some(trait_arguments) =
+                        self.header_generic_arguments(trait_arguments, trait_kinds)
+                    else {
                         continue;
                     };
                     let Some(ElaboratedHeader::Trait(trait_header)) =
@@ -1678,6 +1742,12 @@ impl Elaborator<'_> {
                         self.recovered = true;
                         continue;
                     }
+                    let item_kinds = item.generic_kinds.clone();
+                    let Some(item_arguments) =
+                        self.header_generic_arguments(item_arguments, &item_kinds)
+                    else {
+                        continue;
+                    };
                     if !projection_is_concrete(&subject)
                         || !trait_arguments.iter().all(projection_is_concrete)
                         || !item_arguments.iter().all(projection_is_concrete)

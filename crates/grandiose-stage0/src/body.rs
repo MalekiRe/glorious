@@ -7,6 +7,7 @@
 
 use crate::{
     header::{EffectRowHeader, HeaderGenericArgument, HeaderType},
+    quantity::Quantity,
     scanner::TokenRange,
     source::{LexedFile, Span, TokenKind},
 };
@@ -1160,23 +1161,38 @@ impl Parser<'_> {
             return Some(base);
         }
         let arguments = self.closure_type_arguments()?;
-        Some(HeaderType::Application(
-            Box::new(base),
-            arguments
-                .into_iter()
-                .map(HeaderGenericArgument::Type)
-                .collect(),
-        ))
+        Some(HeaderType::Application(Box::new(base), arguments))
     }
 
-    fn closure_type_arguments(&mut self) -> Option<Vec<HeaderType>> {
+    fn closure_type_arguments(&mut self) -> Option<Vec<HeaderGenericArgument>> {
         if !self.at_operator("<") {
             return Some(vec![]);
         }
         self.position += 1;
         let mut arguments = vec![];
         while !self.at_operator(">") && self.current().is_some() {
-            arguments.push(self.closure_type()?);
+            if self.at_punctuation('[') {
+                arguments.push(HeaderGenericArgument::Quantity(
+                    self.closure_structural_quantity_argument()?,
+                ));
+            } else if let Some(index) = self.current()
+                && self.lexed.tokens[index].kind == TokenKind::Integer
+            {
+                let text = self.text(index).to_owned();
+                self.position += 1;
+                match text.parse::<u32>() {
+                    Ok(value) => arguments.push(HeaderGenericArgument::U32(value)),
+                    Err(_) => {
+                        self.error_current(
+                            "G4009",
+                            "structural u32 generic argument is out of range",
+                        );
+                        return None;
+                    }
+                }
+            } else {
+                arguments.push(HeaderGenericArgument::Type(self.closure_type()?));
+            }
             if !self.at_punctuation(',') {
                 break;
             }
@@ -1188,6 +1204,49 @@ impl Parser<'_> {
         }
         self.position += 1;
         Some(arguments)
+    }
+
+    fn closure_structural_quantity_argument(&mut self) -> Option<Quantity> {
+        debug_assert!(self.at_punctuation('['));
+        self.position += 1;
+        let lower = self.closure_u32("expected a non-negative quantity lower bound")?;
+        if !self.at_punctuation(',') {
+            self.error_current("G4009", "expected `,` in structural quantity argument");
+            return None;
+        }
+        self.position += 1;
+        let upper = if self.at_operator("*") {
+            self.position += 1;
+            None
+        } else {
+            Some(self.closure_u32("expected a non-negative quantity upper bound")?)
+        };
+        if !self.at_punctuation(']') {
+            self.error_current("G4009", "expected `]` after structural quantity argument");
+            return None;
+        }
+        self.position += 1;
+        match Quantity::new(u64::from(lower), upper.map(u64::from)) {
+            Ok(value) => Some(value),
+            Err(_) => {
+                self.error_current("G4009", "quantity upper bound is below its lower bound");
+                None
+            }
+        }
+    }
+
+    fn closure_u32(&mut self, message: &'static str) -> Option<u32> {
+        let index = self.current()?;
+        if self.lexed.tokens[index].kind != TokenKind::Integer {
+            self.error_current("G4009", message);
+            return None;
+        }
+        let value = self.text(index).parse().ok();
+        self.position += 1;
+        value.or_else(|| {
+            self.error_current("G4009", message);
+            None
+        })
     }
 
     fn parse_call(&mut self, callee: ExprId) -> Option<ExprId> {

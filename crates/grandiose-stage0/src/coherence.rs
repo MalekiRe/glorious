@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    header::{HeaderType, ImplementationHeader, ParsedHeader},
+    header::{HeaderGenericArgument, HeaderType, ImplementationHeader, ParsedHeader},
     identity::{DefKey, ModuleKey},
     interface::{DefinitionNamespace, PackageInterface},
     resolution::{DefinitionIndex, ResolutionState},
@@ -27,7 +27,7 @@ pub struct ImplHead {
     pub trait_definition: DefKey,
     pub negative: bool,
     pub self_ty: HeaderType,
-    pub trait_arguments: Vec<HeaderType>,
+    pub trait_arguments: Vec<HeaderGenericArgument>,
     pub generics: BTreeSet<String>,
     pub span: Span,
 }
@@ -184,7 +184,7 @@ fn validate_negative_generics(
     let mut used = BTreeSet::new();
     collect_generic_names(&header.self_ty, &declared, &mut used);
     for argument in &header.relation.arguments {
-        collect_generic_names(argument, &declared, &mut used);
+        collect_generic_argument_names(argument, &declared, &mut used);
     }
     for name in declared.difference(&used) {
         diagnostics.push(CoherenceDiagnostic {
@@ -222,10 +222,10 @@ fn collect_generic_names(
         } => {
             collect_generic_names(subject, declared, used);
             for argument in trait_arguments {
-                collect_generic_names(argument, declared, used);
+                collect_generic_argument_names(argument, declared, used);
             }
             for argument in item_arguments {
-                collect_generic_names(argument, declared, used);
+                collect_generic_argument_names(argument, declared, used);
             }
         }
         HeaderType::Tuple(values) => {
@@ -257,6 +257,16 @@ fn collect_generic_names(
     }
 }
 
+fn collect_generic_argument_names(
+    value: &HeaderGenericArgument,
+    declared: &BTreeSet<String>,
+    used: &mut BTreeSet<String>,
+) {
+    if let HeaderGenericArgument::Type(value) = value {
+        collect_generic_names(value, declared, used);
+    }
+}
+
 fn heads_may_unify(left: &ImplHead, right: &ImplHead) -> bool {
     if left.trait_arguments.len() != right.trait_arguments.len() {
         return false;
@@ -275,8 +285,27 @@ fn heads_may_unify(left: &ImplHead, right: &ImplHead) -> bool {
         .iter()
         .zip(&right.trait_arguments)
         .all(|(left, right)| {
-            unify_type(left, right, &left_generics, &right_generics, &mut bindings)
+            unify_generic_argument(left, right, &left_generics, &right_generics, &mut bindings)
         })
+}
+
+fn unify_generic_argument(
+    left: &HeaderGenericArgument,
+    right: &HeaderGenericArgument,
+    left_generics: &BTreeSet<String>,
+    right_generics: &BTreeSet<String>,
+    bindings: &mut Bindings,
+) -> bool {
+    match (left, right) {
+        (HeaderGenericArgument::Type(left), HeaderGenericArgument::Type(right)) => {
+            unify_type(left, right, left_generics, right_generics, bindings)
+        }
+        (HeaderGenericArgument::U32(left), HeaderGenericArgument::U32(right)) => left == right,
+        (HeaderGenericArgument::Quantity(left), HeaderGenericArgument::Quantity(right)) => {
+            left == right
+        }
+        _ => false,
+    }
 }
 
 #[derive(Default)]

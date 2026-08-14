@@ -89,6 +89,26 @@ fn tabled_solver_substitutes_structural_const_impl_binders_into_where_obligation
 }
 
 #[test]
+fn tabled_solver_matches_structural_const_trait_arguments() {
+    let (interface, signatures) = signatures(
+        "trait Capacity<n: u32> {} struct Tag<n: u32> {} impl<n: u32> Capacity<n> for Tag<n> {}",
+    );
+    let capacity = key(&interface, "Capacity");
+    let tag = key(&interface, "Tag");
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: capacity,
+            arguments: vec![Type::ConstU32(7)],
+        },
+        subject: Type::Nominal {
+            definition: tag,
+            arguments: vec![Type::ConstU32(7)],
+        },
+    });
+    assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
+}
+
+#[test]
 fn tabled_solver_does_not_bind_const_impl_binders_to_ordinary_types() {
     let (interface, signatures) =
         signatures("trait Ready {} struct Tag<n: u32> {} impl<n: u32> Ready for Tag<n> {}");

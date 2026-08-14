@@ -57,6 +57,7 @@ pub struct DefinitionIndex {
     type_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
     trait_generic_arities: BTreeMap<DefKey, u32>,
     trait_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
+    associated_type_generic_kinds: BTreeMap<(DefKey, String), Vec<GenericKind>>,
     effect_generic_arities: BTreeMap<DefKey, u32>,
     effect_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
 }
@@ -117,6 +118,10 @@ impl DefinitionIndex {
                         .insert(definition.key, header.generics.len() as u32);
                     self.trait_generic_kinds
                         .insert(definition.key, header.generics.kinds());
+                    for item in &header.associated_types {
+                        self.associated_type_generic_kinds
+                            .insert((definition.key, item.name.clone()), item.generics.kinds());
+                    }
                 }
                 ParsedHeader::Effect(header) => {
                     self.effect_generic_arities
@@ -202,6 +207,19 @@ impl DefinitionIndex {
 
     pub fn trait_generic_kinds(&self, definition: DefKey) -> Option<&[GenericKind]> {
         self.trait_generic_kinds.get(&definition).map(Vec::as_slice)
+    }
+
+    /// Source-slot kinds of an associated item selected through a particular
+    /// trait.  Projection elaboration uses this rather than treating an item
+    /// argument as an ordinary type before the trait contract is known.
+    pub fn associated_type_generic_kinds(
+        &self,
+        trait_definition: DefKey,
+        name: &str,
+    ) -> Option<&[GenericKind]> {
+        self.associated_type_generic_kinds
+            .get(&(trait_definition, name.to_owned()))
+            .map(Vec::as_slice)
     }
 
     pub fn effect_generic_arity(&self, definition: DefKey) -> Option<u32> {
