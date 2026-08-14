@@ -124,6 +124,27 @@ fn text_runtime_manifest() -> RuntimeManifestInput {
 
 const TEXT_RUNTIME_LEAVES: &str = "pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { let ignored = on_true(); on_false() } pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } ";
 
+const PRIVATE_TEXT_RUNTIME_LEAVES: &str = "fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T { let ignored = on_true(); on_false() } fn __g1_text_byte_len(value: Text) -> usize { () } fn __g1_text_concat(left: Text, right: Text) -> Text { () } fn __g1_text_eq(left: Text, right: Text) -> u32 { () } fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } fn __g1_text_as_bytes(value: Text) -> Bytes { () } ";
+
+#[test]
+fn manifest_binds_private_standard_library_leaves_by_exact_identity() {
+    let mut input = request(&format!(
+        "{PRIVATE_TEXT_RUNTIME_LEAVES} pub fn main() -> usize {{ __g1_text_byte_len(\"a🦀\") }}"
+    ));
+    input.runtime_manifest = Some(text_runtime_manifest());
+    let outcome = StageZeroCompiler::new()
+        .compile(input)
+        .expect("a private trusted layer-1 leaf must lower through its manifest identity");
+    assert_eq!(
+        outcome
+            .artifact
+            .expect("build must publish a VM artifact")
+            .run_usize()
+            .unwrap(),
+        5
+    );
+}
+
 #[test]
 fn manifest_bound_text_byte_len_leaf_lowers_to_the_capability_free_vm_opcode() {
     let mut input = request(&format!(

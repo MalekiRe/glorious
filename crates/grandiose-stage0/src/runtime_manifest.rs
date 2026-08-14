@@ -63,9 +63,6 @@ pub enum ManifestError {
         module_path: String,
         name: String,
     },
-    NonPublicDeclaration {
-        definition: DefKey,
-    },
     IncompatibleSignature {
         role: PrimitiveRole,
         definition: DefKey,
@@ -130,11 +127,13 @@ impl RuntimeManifestInput {
                     });
                 }
             };
-            if !definition.public {
-                return Err(ManifestError::NonPublicDeclaration {
-                    definition: definition.key,
-                });
-            }
+            // Runtime authority is a host-supplied binding to one exact
+            // declaration in the distinguished standard-library package.
+            // It is intentionally independent of ordinary source visibility:
+            // canonical layer-1 leaves are private implementation details,
+            // while downstream callers reach public wrappers.  Requiring
+            // `pub` here would make the bootstrap source unable to bind its
+            // own trusted leaves without incorrectly exporting them.
             let Some(ElaboratedHeader::Callable(signature)) =
                 signatures.definitions.get(&definition.key)
             else {
