@@ -1179,6 +1179,32 @@ impl MirLowering {
         // request to inline or re-derive the callee's body.  Install the
         // caller's lexical frames around the ordinary call so the VM can
         // dispatch a later callee `Perform` through its real call stack.
+        if let Some(function) = lowerer
+            .lower_root_interprocedural_ordered_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_interprocedural_one_shot_handler(body.root, parameters.clone())
         {
@@ -7187,6 +7213,277 @@ impl Lowerer<'_> {
     /// used here. It authorizes only exact, closed protocol instances; open
     /// tails and delayed projections deliberately remain unsupported rather
     /// than being guessed from a callee body. This keeps calls, functions,
+    /// Lower an ordered, possibly partial, one-shot handler around an
+    /// ordinary call with a closed single-operation effect summary.
+    ///
+    /// The tests are real VM CFG blocks, so a failed refutable clause leaves
+    /// the suspended performance intact for the next source clause. When the
+    /// matrix is partial, the final failure explicitly `Forward`s the same
+    /// suspended performance to the caller's enclosing dynamic frame. This
+    /// deliberately accepts only the matrix shape the VM can represent
+    /// without reordering source clauses or replaying a continuation.
+    fn lower_root_interprocedural_ordered_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        // This is a single operation pattern matrix. A row with another
+        // operation needs sibling-frame dispatch, and an open/projected row
+        // cannot be soundly approximated at this boundary.
+        if effects.effects.len() != 1 {
+            return None;
+        }
+        let effect = effects
+            .effects
+            .iter()
+            .next()
+            .expect("single-element effect row has one effect");
+        if effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let matching = clauses
+            .iter()
+            .filter(|clause| !clause.terminal && clause.effect == *effect)
+            .collect::<Vec<_>>();
+        if matching.is_empty()
+            || matching
+                .iter()
+                .any(|clause| clause.operation != matching[0].operation)
+            || clauses.len() != matching.len()
+        {
+            return None;
+        }
+        let fallback = matching
+            .iter()
+            .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable));
+        if let Some(index) = fallback {
+            // Clauses after an irrefutable arm are unreachable; leaving this
+            // form to the source-level matrix diagnostics preserves their
+            // ordering rather than silently discarding them here.
+            if index + 1 != matching.len() {
+                return None;
+            }
+        }
+        if matching.iter().any(|clause| {
+            clause.patterns.len() != clause.payload_types.len()
+                || !matches!(
+                    clause.resumption,
+                    CoreHandlerResumption::Tail {
+                        quantity: crate::quantity::Quantity::ONCE
+                    } | CoreHandlerResumption::Explicit {
+                        quantity: crate::quantity::Quantity::ONCE,
+                        ..
+                    }
+                )
+                || self.handler_body_uses_snapshot_alias(clause.body)
+        }) {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let payloads = matching[0]
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let body_blocks = (0..matching.len())
+            .map(|index| MirBlockId(1 + index as u32))
+            .collect::<Vec<_>>();
+        let mut next = 1 + matching.len() as u32;
+        let test_blocks = matching
+            .iter()
+            .map(|clause| {
+                (0..if clause.patterns.iter().all(pattern_is_irrefutable) {
+                    0
+                } else {
+                    clause.patterns.len()
+                })
+                    .map(|_| {
+                        let id = MirBlockId(next);
+                        next += 1;
+                        id
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let forward_block = fallback.is_none().then_some(MirBlockId(next));
+        let target = test_blocks[0].first().copied().unwrap_or(body_blocks[0]);
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation: matching[0].operation,
+            payload_destinations: payloads.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target,
+        });
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: result,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        entry.push(MirInstruction::UninstallHandler);
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let mut bodies = Vec::new();
+        for clause in &matching {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            let value = self.direct_handler_clause_value(clause)?;
+            self.instructions.push(MirInstruction::Resume { value });
+            bodies.push(std::mem::take(&mut self.instructions));
+        }
+        self.named = boundary_named;
+        self.values = boundary_values;
+        let mut tests = Vec::new();
+        for (clause, ids) in matching.iter().zip(&test_blocks) {
+            let values = clause
+                .patterns
+                .iter()
+                .cloned()
+                .zip(payloads.iter().copied())
+                .zip(ids.iter().copied())
+                .map(|((pattern, subject), id)| {
+                    Some((
+                        id,
+                        self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root),
+                        subject,
+                        lower_pattern(pattern)?,
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            tests.push(values);
+        }
+        let mut blocks = vec![MirBlock {
+            parameters: vec![],
+            instructions: entry,
+            terminator: MirTerminator::Return { value: result },
+        }];
+        blocks.extend(bodies.into_iter().map(|instructions| MirBlock {
+            parameters: vec![],
+            instructions,
+            terminator: MirTerminator::Unreachable,
+        }));
+        for (index, values) in tests.into_iter().enumerate() {
+            for (test_index, (id, condition, subject, pattern)) in values.into_iter().enumerate() {
+                let failure = test_blocks[index]
+                    .get(test_index + 1)
+                    .copied()
+                    .or_else(|| {
+                        test_blocks
+                            .get(index + 1)
+                            .and_then(|ids| ids.first())
+                            .copied()
+                    })
+                    .or_else(|| body_blocks.get(index + 1).copied())
+                    .or(forward_block)
+                    .expect("partial dispatch has a following clause or forwarding edge");
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: condition,
+                        subject,
+                        pattern,
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: test_blocks[index]
+                            .get(test_index + 1)
+                            .copied()
+                            .unwrap_or(body_blocks[index]),
+                        then_arguments: vec![],
+                        else_target: failure,
+                        else_arguments: vec![],
+                    },
+                });
+                debug_assert_eq!(id.0, blocks.len() as u32 - 1);
+            }
+        }
+        if forward_block.is_some() {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward],
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+
     /// and function values as genuine VM calls while allowing a caller's
     /// handler to intercept a callee performance dynamically.
     fn lower_root_interprocedural_one_shot_handler(
