@@ -247,6 +247,14 @@ pub struct TypedBody {
     pub recovered: bool,
 }
 
+/// Frozen method facts that must travel together while one implementation
+/// body is elaborated.
+pub(crate) struct ImplementationMethodContext<'a> {
+    pub implementation_header: &'a crate::header::ImplementationHeader,
+    pub method: &'a crate::header::ImplementationMethodHeader,
+    pub signature: &'a crate::signature::CallableSignature,
+}
+
 impl TypedBody {
     pub fn elaborate(
         definition: &Definition,
@@ -351,6 +359,81 @@ impl TypedBody {
     }
     pub fn expression(&self, id: CoreId) -> &CoreExpr {
         &self.expressions[id.0 as usize]
+    }
+
+    /// Elaborate one implementation method as an independently checked body.
+    /// Its stable callable identity is owned by the implementation contract,
+    /// while its generic environment combines implementation and method
+    /// binders in the same slot order frozen by signature elaboration.
+    pub(crate) fn elaborate_implementation_method(
+        implementation: &Definition,
+        context: ImplementationMethodContext<'_>,
+        body: &BodySyntax,
+        index: &DefinitionIndex,
+        signatures: &ElaboratedInterface,
+        fixities: &FixityTable,
+    ) -> Self {
+        let mut generic_parameters = std::collections::BTreeMap::new();
+        for (index, name) in context.implementation_header.generics.iter().enumerate() {
+            generic_parameters.insert(name.clone(), index as u32);
+        }
+        let method_base = context.implementation_header.generics.len() as u32;
+        for (offset, name) in context.method.signature.generics.iter().enumerate() {
+            generic_parameters.insert(name.clone(), method_base + offset as u32);
+        }
+        let mut elaborator = Elaborator {
+            body,
+            index,
+            signatures,
+            fixities,
+            module: &implementation.module,
+            inference: InferContext::default(),
+            locals: ScopeMap::default(),
+            expressions: vec![],
+            diagnostics: vec![],
+            recovered: body.recovered,
+            next_callable: 0,
+            function_arguments: std::collections::BTreeMap::new(),
+            generic_parameters,
+            declared_effects: context.signature.effects.clone(),
+            handled_effects: std::collections::BTreeSet::new(),
+        };
+        let mut parameters = vec![];
+        for (parameter, ty) in context
+            .method
+            .signature
+            .parameters
+            .iter()
+            .zip(context.signature.parameters.iter())
+        {
+            elaborator.locals.define(parameter.name.clone(), ty.clone());
+            parameters.push((parameter.name.clone(), ty.clone()));
+        }
+        let root = elaborator.expression(body.root);
+        let actual = elaborator.expressions[root.0 as usize].ty.clone();
+        if elaborator
+            .inference
+            .unify(context.signature.result.clone(), actual)
+            .is_err()
+        {
+            elaborator.error(
+                context.method.span,
+                "G4110",
+                "implementation method body does not match declared result type",
+            );
+            elaborator.recovered = true;
+        }
+        elaborator.seal_types();
+        elaborator
+            .diagnostics
+            .sort_by_key(|diagnostic| diagnostic.span.start);
+        Self {
+            parameters,
+            expressions: elaborator.expressions,
+            root,
+            diagnostics: elaborator.diagnostics,
+            recovered: elaborator.recovered,
+        }
     }
 
     /// Constants are body-local expressions with an interface-declared result

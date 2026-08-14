@@ -8,10 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     BodySyntax, BootstrapManifest, CoherenceSet, CompilationMode, CompilationRequest,
-    CompilerDatabase, DefKey, DefinitionIndex, DiagnosticClass, Digest, ElaboratedInterface,
-    FixityTable, MirFunction, MirLowering, MirProgram, ModuleGraph, PlaceFlow, RevisionError,
-    Severity, SourceSpan, Span, TrustedRuntimeManifest, TypedBody, VerifiedVmProgram,
-    emit_vm_program, verify_vm_program,
+    CompilerDatabase, DefKey, DefinitionIndex, DiagnosticClass, Digest, ElaboratedHeader,
+    ElaboratedInterface, FixityTable, MirFunction, MirLowering, MirProgram, ModuleGraph,
+    ParsedHeader, PlaceFlow, RevisionError, Severity, SourceSpan, Span, TrustedRuntimeManifest,
+    TypedBody, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -294,6 +294,110 @@ impl StageZeroCompiler {
                     && core.diagnostics.is_empty()
                     && body.diagnostics.is_empty();
                 body_products.push((declaration.key, is_constant, valid, core, flow));
+            }
+            for implementation in node
+                .interface
+                .interface
+                .definitions
+                .iter()
+                .filter(|definition| definition.kind == crate::DeclarationKind::Implementation)
+            {
+                let ParsedHeader::Implementation(implementation_header) =
+                    &implementation.syntax.header
+                else {
+                    continue;
+                };
+                let Some(ElaboratedHeader::Implementation(implementation_signature)) =
+                    signatures.definitions.get(&implementation.key)
+                else {
+                    diagnostics.push(CompileDiagnostic::invariant(
+                        "G7012",
+                        "implementation lost its frozen signature before body elaboration",
+                    ));
+                    continue;
+                };
+                for method in &implementation_header.methods {
+                    let Some(body_range) = method.body else {
+                        diagnostics.push(CompileDiagnostic::source(
+                            "G7002",
+                            format!("implementation method `{}` has no body", method.name),
+                            Some(method.span),
+                        ));
+                        continue;
+                    };
+                    let Some(method_signature) = implementation_signature.methods.get(&method.name)
+                    else {
+                        // Header/signature validation has already issued the
+                        // source diagnostic for an unknown method. Do not
+                        // invent a body contract during recovery.
+                        continue;
+                    };
+                    let body = BodySyntax::parse(&lexed, text, body_range);
+                    diagnostics.extend(body.diagnostics.iter().map(|diagnostic| {
+                        CompileDiagnostic::source(
+                            diagnostic.code,
+                            diagnostic.message,
+                            Some(diagnostic.span),
+                        )
+                    }));
+                    if body.recovered {
+                        diagnostics.push(CompileDiagnostic::source(
+                            "G7006",
+                            format!(
+                                "implementation method `{}` has recovered body syntax and cannot enter a release artifact",
+                                method.name
+                            ),
+                            Some(method.span),
+                        ));
+                    }
+                    let core = TypedBody::elaborate_implementation_method(
+                        implementation,
+                        crate::core::ImplementationMethodContext {
+                            implementation_header,
+                            method,
+                            signature: method_signature,
+                        },
+                        &body,
+                        &index,
+                        &signatures,
+                        &fixities,
+                    );
+                    diagnostics.extend(core.diagnostics.iter().map(|diagnostic| {
+                        CompileDiagnostic::source(
+                            diagnostic.code,
+                            diagnostic.message.clone(),
+                            Some(diagnostic.span),
+                        )
+                    }));
+                    if core.recovered {
+                        diagnostics.push(CompileDiagnostic::source(
+                            "G7007",
+                            format!(
+                                "implementation method `{}` has recovered Typed Core and cannot enter a release artifact",
+                                method.name
+                            ),
+                            Some(method.span),
+                        ));
+                    }
+                    let flow = PlaceFlow::analyze(&core);
+                    diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
+                        CompileDiagnostic::source(
+                            diagnostic.code,
+                            diagnostic.message.clone(),
+                            Some(diagnostic.span),
+                        )
+                    }));
+                    let valid = flow.diagnostics.is_empty()
+                        && core.diagnostics.is_empty()
+                        && body.diagnostics.is_empty();
+                    body_products.push((
+                        implementation_method_key(implementation.key, &method.name),
+                        false,
+                        valid,
+                        core,
+                        flow,
+                    ));
+                }
             }
         }
         let typed_bodies = body_products

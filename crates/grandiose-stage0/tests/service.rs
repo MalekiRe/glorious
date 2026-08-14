@@ -201,6 +201,30 @@ fn service_proves_and_enforces_direct_callable_trait_bounds() {
 }
 
 #[test]
+fn service_type_checks_implementation_method_bodies() {
+    let source = "trait Convert { fn convert(value: i64) -> i64; } impl Convert for i64 { fn convert(value: i64) -> i64 { \"not an integer\" } } pub fn main() -> i64 { 42 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("ill-typed implementation method unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4110"),
+        "missing implementation method result diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_type_checks_implementation_method_bodies_with_impl_generics() {
+    let source = "trait Identity<T> { fn identity(value: T) -> T; } struct Box<T> {} impl<T> Identity<T> for Box<T> { fn identity(value: T) -> T { value } } pub fn main() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
     let enum_source = "pub enum Result { Ok(i64), Err(Text) } pub fn main() -> Bool { Result::Ok(42) is Result::Ok(42) }";
     let outcome = StageZeroCompiler::new()
