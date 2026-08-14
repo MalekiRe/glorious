@@ -3079,12 +3079,12 @@ fn substitute_alias_generic_identity_effect_row(
             .collect(),
         tail: value.tail,
     };
-    if let Some(EffectTail::Generic(index)) = row.tail {
-        if let Some(GenericArgument::EffectRow(argument)) = arguments.get(index as usize) {
-            row.effects.extend(argument.effects.clone());
-            row.projections.extend(argument.projections.clone());
-            row.tail = argument.tail;
-        }
+    if let Some(EffectTail::Generic(index)) = row.tail
+        && let Some(GenericArgument::EffectRow(argument)) = arguments.get(index as usize)
+    {
+        row.effects.extend(argument.effects.clone());
+        row.projections.extend(argument.projections.clone());
+        row.tail = argument.tail;
     }
     row.canonicalized()
 }
