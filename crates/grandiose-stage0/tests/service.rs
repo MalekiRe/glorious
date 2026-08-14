@@ -5120,6 +5120,27 @@ fn service_executes_a_generic_effect_handler_through_vm_frames() {
 }
 
 #[test]
+fn service_matches_effect_row_generic_instances_in_vm_handler_frames() {
+    // The row argument is part of the nominal protocol identity.  It must
+    // survive elaboration, handler installation, bytecode encoding, and
+    // runtime dispatch rather than being erased as callable-only metadata.
+    let source = "effect Trace { note() -> i64; } effect Relay<e: EffectRow> { [1,1] relay(value: i64) -> i64; } pub fn main() -> i64 { handle Relay<{Trace}>::relay(41) { Relay<{Trace}>::relay(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            effect_arguments,
+            ..
+        } if matches!(effect_arguments.as_slice(), [VmGenericArgument::EffectRow(row)] if row.effects.len() == 1 && row.projections.is_empty() && row.tail.is_none())
+    )));
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_instantiates_generic_effect_operations_at_the_call_and_handler() {
     let source = "effect Ask { ask<T>(value: T) -> T; } pub fn main() -> i64 { handle Ask::ask<i64>(41) { Ask::ask<i64>(value) => value + 1 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
