@@ -1706,14 +1706,14 @@ impl Lowerer<'_> {
             .iter()
             .filter(|clause| !clause.terminal)
             .collect::<Vec<_>>();
-        let direct_clauses = all_inner_operation_clauses
+        let mut direct_clauses = all_inner_operation_clauses
             .iter()
             .copied()
             .filter(|clause| clause.effect == effect && clause.operation == operation)
             .collect::<Vec<_>>();
-        let [direct_clause] = direct_clauses.as_slice() else {
+        if direct_clauses.is_empty() {
             return None;
-        };
+        }
         let mut sibling_groups = Vec::<Vec<&CoreHandlerClause>>::new();
         for clause in all_inner_operation_clauses
             .into_iter()
@@ -1742,6 +1742,12 @@ impl Lowerer<'_> {
                 group.truncate(fallback + 1);
             }
         }
+        if let Some(fallback) = direct_clauses
+            .iter()
+            .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable))
+        {
+            direct_clauses.truncate(fallback + 1);
+        }
         let exact_one_shot = |clause: &CoreHandlerClause| match &clause.resumption {
             CoreHandlerResumption::Explicit { quantity, .. }
             | CoreHandlerResumption::Tail { quantity } => {
@@ -1754,9 +1760,9 @@ impl Lowerer<'_> {
             || outer_clause.operation != operation
             || outer_clause.patterns.len() != argument_ids.len()
             || !outer_clause.patterns.iter().all(pattern_is_irrefutable)
-            || !exact_one_shot(direct_clause)
-            || direct_clause.patterns.len() != argument_ids.len()
-            || !direct_clause.patterns.iter().all(pattern_is_irrefutable)
+            || direct_clauses.iter().any(|clause| {
+                !exact_one_shot(clause) || clause.patterns.len() != argument_ids.len()
+            })
             || sibling_groups.iter().flatten().any(|clause| {
                 !exact_one_shot(clause) || clause.patterns.len() != clause.payload_types.len()
             })
@@ -1813,11 +1819,44 @@ impl Lowerer<'_> {
                 forward_block: None,
             });
         }
-        let direct_payload_destinations = direct_clause
+        let direct_payload_destinations = direct_clauses[0]
             .payload_types
             .iter()
             .map(|ty| self.alloc(ty.clone(), inner_computation))
             .collect::<Vec<_>>();
+        let direct_clauses = direct_clauses
+            .into_iter()
+            .map(|clause| {
+                let tests = if clause.patterns.iter().all(pattern_is_irrefutable) {
+                    Vec::new()
+                } else {
+                    clause
+                        .patterns
+                        .iter()
+                        .cloned()
+                        .zip(direct_payload_destinations.iter().copied())
+                        .map(|(pattern, subject)| {
+                            Some((
+                                self.alloc(
+                                    Type::Scalar(crate::types::ScalarType::Bool),
+                                    inner_computation,
+                                ),
+                                subject,
+                                lower_pattern(pattern)?,
+                            ))
+                        })
+                        .collect::<Option<Vec<_>>>()?
+                };
+                Some((clause, tests))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut direct_dispatch = SiblingHandlerDispatch {
+            clauses: direct_clauses,
+            payload_destinations: direct_payload_destinations.clone(),
+            test_blocks: Vec::new(),
+            body_blocks: Vec::new(),
+            forward_block: None,
+        };
         let mut next_block = 2u32;
         for dispatch in &mut dispatches {
             dispatch.test_blocks = dispatch
@@ -1849,7 +1888,39 @@ impl Lowerer<'_> {
                 next_block += 1;
             }
         }
-        let direct_target = MirBlockId(next_block);
+        direct_dispatch.test_blocks = direct_dispatch
+            .clauses
+            .iter()
+            .map(|(_, tests)| {
+                (0..tests.len())
+                    .map(|_| {
+                        let block = MirBlockId(next_block);
+                        next_block += 1;
+                        block
+                    })
+                    .collect()
+            })
+            .collect();
+        direct_dispatch.body_blocks = (0..direct_dispatch.clauses.len())
+            .map(|_| {
+                let block = MirBlockId(next_block);
+                next_block += 1;
+                block
+            })
+            .collect();
+        if !direct_dispatch
+            .clauses
+            .last()
+            .is_some_and(|(clause, _)| clause.patterns.iter().all(pattern_is_irrefutable))
+        {
+            direct_dispatch.forward_block = Some(MirBlockId(next_block));
+        }
+        let direct_target = direct_dispatch
+            .test_blocks
+            .first()
+            .and_then(|tests| tests.first())
+            .copied()
+            .unwrap_or(direct_dispatch.body_blocks[0]);
         let result = self.alloc(
             self.body.expression(inner_computation).ty.clone(),
             inner_computation,
@@ -1939,15 +2010,17 @@ impl Lowerer<'_> {
             }
             dispatch_instructions.push(bodies);
         }
-        self.instructions = Vec::new();
-        let direct_named = self.named.clone();
-        self.bind_handler_patterns(&direct_clause.patterns, &direct_payload_destinations)?;
-        let direct_resumed = self.direct_handler_clause_value(direct_clause)?;
-        self.instructions.push(MirInstruction::Resume {
-            value: direct_resumed,
-        });
-        let direct_instructions = std::mem::take(&mut self.instructions);
-        self.named = direct_named;
+        let mut direct_instructions = Vec::with_capacity(direct_dispatch.clauses.len());
+        for (clause, _) in &direct_dispatch.clauses {
+            self.instructions = Vec::new();
+            let named = self.named.clone();
+            self.bind_handler_patterns(&clause.patterns, &direct_payload_destinations)?;
+            let resumed = self.direct_handler_clause_value(clause)?;
+            self.instructions
+                .push(MirInstruction::Resume { value: resumed });
+            direct_instructions.push(std::mem::take(&mut self.instructions));
+            self.named = named;
+        }
 
         let mut blocks = vec![
             MirBlock {
@@ -2016,11 +2089,59 @@ impl Lowerer<'_> {
                 });
             }
         }
-        blocks.push(MirBlock {
-            parameters: vec![],
-            instructions: direct_instructions,
-            terminator: MirTerminator::Unreachable,
-        });
+        for (clause_index, ((_, tests), test_blocks)) in direct_dispatch
+            .clauses
+            .iter()
+            .zip(&direct_dispatch.test_blocks)
+            .enumerate()
+        {
+            if tests.is_empty() {
+                continue;
+            }
+            let failure_target = direct_dispatch
+                .test_blocks
+                .get(clause_index + 1)
+                .and_then(|tests| tests.first())
+                .copied()
+                .or_else(|| direct_dispatch.body_blocks.get(clause_index + 1).copied())
+                .or(direct_dispatch.forward_block)
+                .expect("direct dispatch has a fallback or forward target");
+            for (test_index, (condition, subject, pattern)) in tests.iter().enumerate() {
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: *condition,
+                        subject: *subject,
+                        pattern: pattern.clone(),
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition: *condition,
+                        then_target: if test_index + 1 == tests.len() {
+                            direct_dispatch.body_blocks[clause_index]
+                        } else {
+                            test_blocks[test_index + 1]
+                        },
+                        then_arguments: vec![],
+                        else_target: failure_target,
+                        else_arguments: vec![],
+                    },
+                });
+            }
+        }
+        for instructions in direct_instructions {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions,
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        if direct_dispatch.forward_block.is_some() {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward],
+                terminator: MirTerminator::Unreachable,
+            });
+        }
         Some(MirFunction {
             definition: self.definition,
             captures: 0,
