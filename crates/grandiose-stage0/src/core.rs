@@ -9086,9 +9086,11 @@ fn call_reference_origin(
             unreachable!("reference leaf traversal only yields references");
         };
         if matches!(result_lifetime, Lifetime::Static) {
-            // A mixed static/caller-owned aggregate needs a path-level
-            // external representation that Core does not yet encode.
-            return CallReferenceOrigin::Opaque;
+            // `Paths` records only caller-region leaves.  A result that is
+            // entirely static used `External` above; in a mixed aggregate the
+            // static leaf has no loan to preserve and can be omitted while
+            // its caller-derived siblings retain their exact paths.
+            continue;
         }
         let candidates = argument_leaves
             .iter()
@@ -9156,10 +9158,10 @@ fn callable_reference_origin_from_contract(
                 ..
             }
         ) {
-            // Mixed static/caller-owned results need a path-level external
-            // representation, which the current frozen contract does not
-            // encode. Keep that case fail-closed rather than guessing.
-            return CallReferenceOrigin::Opaque;
+            // Static leaves carry no caller-region provenance.  The whole
+            // result is `External` only when every leaf is static; otherwise
+            // preserve just the caller-derived paths in this mixed result.
+            continue;
         }
         let candidates = argument_leaves
             .iter()

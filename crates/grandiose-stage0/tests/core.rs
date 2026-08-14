@@ -3789,15 +3789,16 @@ fn effect_operation_contract_freezes_the_selected_generic_lifetime_path() {
             _ => None,
         })
         .expect("effect operation did not retain a frozen lifetime contract");
-    assert!(matches!(contract, grandiose_stage0::CallReferenceOrigin::Paths(paths) if paths.len() == 1 && paths[0].argument == 0));
+    assert!(
+        matches!(contract, grandiose_stage0::CallReferenceOrigin::Paths(paths) if paths.len() == 1 && paths[0].argument == 0)
+    );
     assert_eq!(origin, contract);
-    *origin = grandiose_stage0::CallReferenceOrigin::Paths(vec![
-        grandiose_stage0::CallReferencePath {
+    *origin =
+        grandiose_stage0::CallReferenceOrigin::Paths(vec![grandiose_stage0::CallReferencePath {
             result_fields: vec![],
             argument: 1,
             argument_fields: vec![],
-        },
-    ]);
+        }]);
     assert!(
         core.validate()
             .iter()
@@ -3807,7 +3808,9 @@ fn effect_operation_contract_freezes_the_selected_generic_lifetime_path() {
     );
     let flow = PlaceFlow::analyze(&core);
     let lowered = MirLowering::lower(
-        DefKey(Digest::of_bytes(b"forged-effect-operation-lifetime-relation")),
+        DefKey(Digest::of_bytes(
+            b"forged-effect-operation-lifetime-relation",
+        )),
         &core,
         &flow,
     );
@@ -3819,6 +3822,60 @@ fn effect_operation_contract_freezes_the_selected_generic_lifetime_path() {
                 .any(|diagnostic| diagnostic.code == "G6000"),
         "MIR accepted a forged effect operation lifetime relation: {lowered:#?}"
     );
+}
+
+#[test]
+fn mixed_static_and_caller_reference_results_preserve_only_caller_paths() {
+    let call = core_for(
+        "core-mixed-static-call-reference@0.1.0",
+        "pub fn pair<'a>(stable: &'static i64, value: &'a i64) -> (&'static i64, &'a i64) { (stable, value) } pub fn main(stable: &'static i64) -> i64 { let local = 1; let result = pair(stable, &local); 0 }",
+    );
+    assert!(call.diagnostics.is_empty(), "{:#?}", call.diagnostics);
+    let call_paths = call
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Call {
+                reference_contract: grandiose_stage0::CallReferenceOrigin::Paths(contract),
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(origin),
+                ..
+            } => Some((contract, origin)),
+            _ => None,
+        })
+        .expect("mixed call result was treated as opaque");
+    assert_eq!(call_paths.0.len(), 1);
+    assert_eq!(call_paths.0[0].result_fields, [1]);
+    assert_eq!(call_paths.0[0].argument, 1);
+    assert_eq!(call_paths.1, call_paths.0);
+    assert!(
+        !PlaceFlow::analyze(&call)
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "mixed call result lost its caller reference path"
+    );
+
+    let perform = core_for(
+        "core-mixed-static-perform-reference@0.1.0",
+        "effect Pair<'a> { [0, 1] pair(stable: &'static i64, value: &'a i64) -> (&'static i64, &'a i64); } pub fn main<'a>(stable: &'static i64, value: &'a i64) -> i64 / {Pair<'a>} { let result = Pair<'a>::pair(stable, value); 0 }",
+    );
+    assert!(perform.diagnostics.is_empty(), "{:#?}", perform.diagnostics);
+    let paths = perform
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Perform {
+                reference_contract: grandiose_stage0::CallReferenceOrigin::Paths(contract),
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(origin),
+                ..
+            } => Some((contract, origin)),
+            _ => None,
+        })
+        .expect("mixed effect result was treated as opaque");
+    assert_eq!(paths.0.len(), 1);
+    assert_eq!(paths.0[0].result_fields, [1]);
+    assert_eq!(paths.0[0].argument, 1);
+    assert_eq!(paths.1, paths.0);
 }
 
 #[test]
