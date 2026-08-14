@@ -75,6 +75,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_convert_wrapping_to_usize<T>` in
     /// distributed std. Its frozen i64 specialization truncates two's-complement bits.
     IntConvertWrappingToUsize,
+    /// Exact generic declaration `__g1_int_convert_wrapping_to_u8<T>` in
+    /// distributed std. Its frozen i64 specialization truncates two's-complement bits.
+    IntConvertWrappingToU8,
     /// Exact generic declaration `__g1_int_wrapping_sub<T>` in distributed
     /// std. Its i64 specialization has wrapping, not checked, overflow.
     IntWrappingSub,
@@ -157,6 +160,7 @@ impl PrimitiveRole {
             Self::IntConvertWrappingToI64 => "int-convert-wrapping-to-i64",
             Self::IntConvertWrappingToU32 => "int-convert-wrapping-to-u32",
             Self::IntConvertWrappingToUsize => "int-convert-wrapping-to-usize",
+            Self::IntConvertWrappingToU8 => "int-convert-wrapping-to-u8",
             Self::IntWrappingSub => "int-wrapping-sub",
             Self::IntWrappingMul => "int-wrapping-mul",
             Self::IntEqual => "int-equal",
@@ -214,6 +218,7 @@ impl PrimitiveRole {
             "int-convert-wrapping-to-i64" => Self::IntConvertWrappingToI64,
             "int-convert-wrapping-to-u32" => Self::IntConvertWrappingToU32,
             "int-convert-wrapping-to-usize" => Self::IntConvertWrappingToUsize,
+            "int-convert-wrapping-to-u8" => Self::IntConvertWrappingToU8,
             "int-wrapping-sub" => Self::IntWrappingSub,
             "int-wrapping-mul" => Self::IntWrappingMul,
             "int-equal" => Self::IntEqual,
@@ -682,6 +687,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::IntConvertWrappingToU8 => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0)],
+            result: Type::Scalar(crate::ScalarType::U8),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::IntBitNot => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
@@ -777,6 +793,7 @@ fn manifest_digest(
             PrimitiveRole::IntConvertWrappingToI64 => 46,
             PrimitiveRole::IntConvertWrappingToU32 => 48,
             PrimitiveRole::IntConvertWrappingToUsize => 50,
+            PrimitiveRole::IntConvertWrappingToU8 => 52,
             PrimitiveRole::IntWrappingSub => 35,
             PrimitiveRole::IntWrappingMul => 36,
             PrimitiveRole::IntEqual => 34,

@@ -1050,6 +1050,50 @@ fn i64_to_usize_wrapping_round_trips_and_verifier_rejects_input_type_confusion()
 }
 
 #[test]
+fn i64_to_u8_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"i64-to-u8-wrapping-vm")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, VmType::U8],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: -1 },
+            VmInstruction::I64ToU8Wrapping { dst: 1, value: 0 },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"i64-to-u8-wrapping-vm-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    assert_eq!(
+        decode_and_verify_artifact(&encoded)
+            .unwrap()
+            .run_u8()
+            .unwrap(),
+        u8::MAX,
+    );
+
+    let mut forged = candidate;
+    forged.function.registers[0] = VmType::Bool;
+    forged.fingerprint = forged.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(forged),
+        Err(VmArtifactError::TypeMismatch {
+            register: 0,
+            expected: VmType::I64,
+            found: VmType::Bool,
+        })
+    ));
+}
+
+#[test]
 fn i64_greater_to_u32_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
         nominal_copy_descriptors: vec![],
