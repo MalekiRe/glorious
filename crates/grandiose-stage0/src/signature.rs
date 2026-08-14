@@ -193,6 +193,20 @@ fn associated_item_contract_mismatch(
     }
 }
 
+fn generic_binder_kinds(kinds: &[GenericKind]) -> String {
+    let values = kinds
+        .iter()
+        .map(|kind| match kind {
+            GenericKind::Type => "type".to_owned(),
+            GenericKind::EffectRow => "effect row".to_owned(),
+            GenericKind::Lifetime => "lifetime".to_owned(),
+            GenericKind::Const(ConstKind::U32) => "u32 const".to_owned(),
+            GenericKind::Const(ConstKind::Quantity) => "quantity const".to_owned(),
+        })
+        .collect::<Vec<_>>();
+    format!("<{}>", values.join(", "))
+}
+
 impl ElaboratedInterface {
     pub fn elaborate(interface: &PackageInterface) -> Self {
         let index = DefinitionIndex::from_interface(interface);
@@ -320,7 +334,17 @@ impl ElaboratedInterface {
             }
             for (name, method) in &implementation.methods {
                 match trait_header.methods.get(name) {
-                    Some(expected) if expected.generics == method.generics => {
+                    // Binder arity is only half of a universally quantified
+                    // method contract.  In particular, a lifetime binder
+                    // cannot stand in for a type, const, or effect-row
+                    // binder just because both occupy one generic slot.  The
+                    // body signature may not mention a marker binder at all,
+                    // so comparing the elaborated parameter/result types
+                    // alone would otherwise let this mismatch through.
+                    Some(expected)
+                        if expected.generics == method.generics
+                            && expected.generic_kinds == method.generic_kinds =>
+                    {
                         let required = instantiate_trait_method_contract(
                             expected,
                             implementation,
@@ -337,8 +361,9 @@ impl ElaboratedInterface {
                     Some(expected) => diagnostics.push(SignatureDiagnostic {
                         code: "G4119",
                         message: format!(
-                            "implementation method `{name}` has {} generics, but the trait requires {}",
-                            method.generics, expected.generics
+                            "implementation method `{name}` has incompatible generic binders: {} but the trait requires {}",
+                            generic_binder_kinds(&method.generic_kinds),
+                            generic_binder_kinds(&expected.generic_kinds),
                         ),
                     }),
                     None => diagnostics.push(SignatureDiagnostic {

@@ -393,6 +393,34 @@ fn implementation_trait_methods_rebase_lifetime_binders_after_impl_generics() {
 }
 
 #[test]
+fn implementation_methods_cannot_substitute_a_type_binder_for_a_lifetime_binder() {
+    let package = PackageKey("signature-trait-method-lifetime-kind@0.1.0".into());
+    let source = r#"
+        trait Marker {
+            fn mark<'a>() -> i64;
+        }
+        impl Marker for i64 {
+            fn mark<T>() -> i64 { 0 }
+        }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+
+    assert!(
+        signatures.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "G4119"
+                && diagnostic.message.contains("<type>")
+                && diagnostic.message.contains("<lifetime>")
+        }),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn implementation_methods_must_match_the_instantiated_trait_contract() {
     let package = PackageKey("signature-impl-method-contract@0.1.0".into());
     let source = r#"
