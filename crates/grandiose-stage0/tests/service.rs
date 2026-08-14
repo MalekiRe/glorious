@@ -1512,7 +1512,7 @@ fn service_dispatches_record_terminal_handler_patterns_through_verified_cfg() {
 
 #[test]
 fn service_projects_nested_record_binders_in_a_terminal_handler_arm() {
-    let source = "pub struct Ticket { serial: i64 } effect Stop { stop(value: Ticket) -> !; } pub fn choose(value: Ticket) -> i64 { handle Stop::stop(value) { Stop::stop(Ticket { serial: serial }) => serial, Stop::stop(_) => 0 } } pub fn main() -> i64 { choose(Ticket { serial: 42 }) }";
+    let source = "pub struct Ticket { serial: i64 } effect Stop { stop(value: Ticket) -> !; } pub fn choose(value: Ticket) -> i64 { handle Stop::stop(value) { Stop::stop(Ticket { serial: serial }) => serial } } pub fn main() -> i64 { choose(Ticket { serial: 42 }) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -2526,7 +2526,7 @@ fn service_resumption_binds_payloads_before_entering_a_nonempty_continuation() {
 
 #[test]
 fn service_resumption_projects_nested_record_binders_before_entering_continuation() {
-    let source = "pub struct Ticket { serial: i64 } effect Ask { [1,1] ask(ticket: Ticket) -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(Ticket { serial: 41 }); value + 1 } { Ask::ask(Ticket { serial: serial }) with k => k(serial); Ask::ask(_) with k => k(0) } }";
+    let source = "pub struct Ticket { serial: i64 } effect Ask { [1,1] ask(ticket: Ticket) -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(Ticket { serial: 41 }); value + 1 } { Ask::ask(Ticket { serial: serial }) with k => k(serial) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);

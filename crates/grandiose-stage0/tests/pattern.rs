@@ -169,3 +169,37 @@ fn explicit_nominal_pattern_arguments_must_match_the_subject_identity() {
         plan.diagnostics
     );
 }
+
+#[test]
+fn explicit_generic_nominal_pattern_identity_accepts_the_matching_application() {
+    let source = "pub enum Result<T> { Ok(T), Err } pub fn main(value: Result<i64>) -> () { value is Result<i64>::Ok(found) }";
+    let (interface, signatures, body) = parsed(source);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Result"))
+        .unwrap()
+        .key;
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected body block");
+    };
+    let ExprKind::Is { pattern, .. } = body.expression(values[0]).kind else {
+        panic!("expected structural test");
+    };
+    let plan = elaborate_pattern(
+        &body,
+        pattern,
+        Type::Nominal {
+            definition,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+        &interface.module,
+    );
+    assert!(plan.diagnostics.is_empty(), "{:#?}", plan.diagnostics);
+    assert!(matches!(
+        plan.plan.decision,
+        PatternDecision::Enum { variant: 0, .. }
+    ));
+}

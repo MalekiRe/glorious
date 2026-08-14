@@ -5420,6 +5420,18 @@ impl Elaborator<'_> {
         for clause in operation_clauses {
             resolved.push(self.resolve_handler_clause(clause));
         }
+        // Handler operations use the same ordered finite-domain proof as
+        // completion dispatch.  Previously this proof was only consulted for
+        // effect discharge, which meant a duplicate or post-fallback handler
+        // row could reach MIR even though it could never be selected.
+        for index in self.unreachable_handler_operation_rows(&resolved) {
+            self.error(
+                resolved[index].source.span,
+                "G4175",
+                "handler arm is unreachable because earlier arms cover every payload it can match",
+            );
+            self.recovered = true;
+        }
         // An effect leaves the outward row only when every operation has an
         // irrefutable arm.  This deliberately conservative rule preserves the
         // required forwarding behaviour of partial handlers until the shared
@@ -5814,8 +5826,31 @@ impl Elaborator<'_> {
             }
         }
         if covered_by_catch_all {
+            for (index, pattern) in patterns.iter().enumerate() {
+                if patterns[..index]
+                    .iter()
+                    .any(|earlier| core_pattern_subsumes(earlier, pattern))
+                {
+                    analysis.unreachable.push(index);
+                }
+            }
             analysis.exhaustive = true;
+            analysis.unreachable.sort_unstable();
+            analysis.unreachable.dedup();
             return analysis;
+        }
+
+        // This structural subsumption check also handles unbounded literal
+        // domains.  Finite enumeration below proves broader combinations,
+        // while an identical `41` row after an earlier `41` must be rejected
+        // even though `i64` is not enumerable.
+        for (index, pattern) in patterns.iter().enumerate() {
+            if patterns[..index]
+                .iter()
+                .any(|earlier| core_pattern_subsumes(earlier, pattern))
+            {
+                analysis.unreachable.push(index);
+            }
         }
 
         let Some(values) = self.finite_pattern_values(subject, 0) else {
@@ -5837,6 +5872,8 @@ impl Elaborator<'_> {
                 .iter()
                 .any(|pattern| core_pattern_matches_value(pattern, value))
         });
+        analysis.unreachable.sort_unstable();
+        analysis.unreachable.dedup();
         analysis
     }
 
@@ -6286,20 +6323,90 @@ impl Elaborator<'_> {
     /// Unknown, recursive, or over-large domains remain conservatively
     /// outward-facing.
     fn handler_operation_is_exhaustive(&self, rows: &[&ResolvedHandlerClause]) -> bool {
-        if rows
+        self.analyze_handler_operation_patterns(rows).exhaustive
+    }
+
+    /// Return source indices of handler rows which cannot be selected after
+    /// their earlier siblings for the same `(effect instance, operation)`.
+    /// Grouping by the resolved protocol identity is important: syntactically
+    /// identical operation names from distinct instantiated effects are not
+    /// competing dispatch rows.
+    fn unreachable_handler_operation_rows(&self, clauses: &[ResolvedHandlerClause]) -> Vec<usize> {
+        let mut groups = std::collections::BTreeMap::<
+            (EffectInstance, u32),
+            Vec<(usize, &ResolvedHandlerClause)>,
+        >::new();
+        for (index, clause) in clauses
             .iter()
-            .any(|row| row.patterns.iter().all(|pattern| !pattern.plan.refutable))
+            .enumerate()
+            .filter(|(_, clause)| !clause.failed)
         {
-            return true;
+            groups
+                .entry((clause.effect.clone(), clause.operation_index))
+                .or_default()
+                .push((index, clause));
         }
+        let mut unreachable = vec![];
+        for rows in groups.into_values() {
+            let clauses = rows.iter().map(|(_, clause)| *clause).collect::<Vec<_>>();
+            let analysis = self.analyze_handler_operation_patterns(&clauses);
+            unreachable.extend(analysis.unreachable.into_iter().map(|row| rows[row].0));
+        }
+        unreachable.sort_unstable();
+        unreachable
+    }
+
+    /// Bounded matrix analysis for one operation's payload tuple.  This is
+    /// deliberately shared by both reachability diagnostics and outward
+    /// effect coverage: a decision is never considered exhaustive by one
+    /// consumer while another consumer still treats an earlier row as live.
+    fn analyze_handler_operation_patterns(
+        &self,
+        rows: &[&ResolvedHandlerClause],
+    ) -> CorePatternMatrixAnalysis {
+        let mut analysis = CorePatternMatrixAnalysis {
+            exhaustive: false,
+            unreachable: vec![],
+        };
         let Some(first) = rows.first() else {
-            return false;
+            return analysis;
         };
         if rows
             .iter()
             .any(|row| row.patterns.len() != first.patterns.len())
         {
-            return false;
+            return analysis;
+        }
+        let mut covered_by_catch_all = false;
+        for (index, row) in rows.iter().enumerate() {
+            if covered_by_catch_all {
+                analysis.unreachable.push(index);
+            }
+            if row.patterns.iter().all(|pattern| !pattern.plan.refutable) {
+                covered_by_catch_all = true;
+            }
+        }
+        if covered_by_catch_all {
+            for (index, row) in rows.iter().enumerate() {
+                if rows[..index]
+                    .iter()
+                    .any(|earlier| handler_patterns_subsume(&earlier.patterns, &row.patterns))
+                {
+                    analysis.unreachable.push(index);
+                }
+            }
+            analysis.exhaustive = true;
+            analysis.unreachable.sort_unstable();
+            analysis.unreachable.dedup();
+            return analysis;
+        }
+        for (index, row) in rows.iter().enumerate() {
+            if rows[..index]
+                .iter()
+                .any(|earlier| handler_patterns_subsume(&earlier.patterns, &row.patterns))
+            {
+                analysis.unreachable.push(index);
+            }
         }
         let domains = first
             .patterns
@@ -6307,19 +6414,41 @@ impl Elaborator<'_> {
             .map(|pattern| self.finite_pattern_values(&pattern.plan.subject, 0))
             .collect::<Option<Vec<_>>>();
         let Some(domains) = domains else {
-            return false;
+            return analysis;
         };
         let Some(assignments) = finite_pattern_products(domains, 4096) else {
-            return false;
+            return analysis;
         };
-        assignments.iter().all(|assignment| {
+        for (index, row) in rows.iter().enumerate() {
+            let useful = assignments.iter().any(|assignment| {
+                row.patterns.iter().zip(assignment).all(|(pattern, value)| {
+                    pattern_decision_matches_value(&pattern.plan.decision, value)
+                }) && !rows[..index].iter().any(|earlier| {
+                    earlier
+                        .patterns
+                        .iter()
+                        .zip(assignment)
+                        .all(|(pattern, value)| {
+                            pattern_decision_matches_value(&pattern.plan.decision, value)
+                        })
+                })
+            });
+            if !useful {
+                analysis.unreachable.push(index);
+            }
+        }
+        analysis.exhaustive = assignments.iter().all(|assignment| {
             rows.iter().any(|row| {
                 row.patterns.iter().zip(assignment).all(|(pattern, value)| {
                     pattern_decision_matches_value(&pattern.plan.decision, value)
                 })
             })
-        })
+        });
+        analysis.unreachable.sort_unstable();
+        analysis.unreachable.dedup();
+        analysis
     }
+
     fn check_effects(&mut self, effects: &EffectRow, span: Span) {
         let effects = match self
             .inference
@@ -7424,6 +7553,136 @@ fn core_pattern_matches_value(pattern: &CorePattern, value: &FinitePatternValue)
                     values
                         .get(field.index as usize)
                         .is_some_and(|value| core_pattern_matches_value(&field.pattern, value))
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Whether every value matched by `right` is also matched by `left`.  This is
+/// a structural, source-order proof rather than a finite-domain enumeration,
+/// so it can identify duplicate literal and nested nominal rows even when the
+/// surrounding scalar domain is unbounded.
+fn core_pattern_subsumes(left: &CorePattern, right: &CorePattern) -> bool {
+    match (left, right) {
+        (CorePattern::Any | CorePattern::Bind { .. }, _) => true,
+        (CorePattern::Literal(left), CorePattern::Literal(right)) => left == right,
+        (CorePattern::Tuple(left), CorePattern::Tuple(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| core_pattern_subsumes(left, right))
+        }
+        (
+            CorePattern::Record {
+                definition: left_definition,
+                fields: left_fields,
+                ..
+            },
+            CorePattern::Record {
+                definition: right_definition,
+                fields: right_fields,
+                ..
+            },
+        ) => {
+            left_definition == right_definition
+                && left_fields.iter().all(|left| {
+                    right_fields
+                        .iter()
+                        .find(|right| right.index == left.index)
+                        .is_some_and(|right| core_pattern_subsumes(&left.pattern, &right.pattern))
+                })
+        }
+        (
+            CorePattern::Enum {
+                definition: left_definition,
+                variant: left_variant,
+                fields: left_fields,
+                ..
+            },
+            CorePattern::Enum {
+                definition: right_definition,
+                variant: right_variant,
+                fields: right_fields,
+                ..
+            },
+        ) => {
+            left_definition == right_definition
+                && left_variant == right_variant
+                && left_fields.iter().all(|left| {
+                    right_fields
+                        .iter()
+                        .find(|right| right.index == left.index)
+                        .is_some_and(|right| core_pattern_subsumes(&left.pattern, &right.pattern))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn handler_patterns_subsume(
+    left: &[crate::pattern::PatternElaboration],
+    right: &[crate::pattern::PatternElaboration],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            pattern_decision_subsumes(&left.plan.decision, &right.plan.decision)
+        })
+}
+
+fn pattern_decision_subsumes(
+    left: &crate::pattern::PatternDecision,
+    right: &crate::pattern::PatternDecision,
+) -> bool {
+    use crate::pattern::PatternDecision;
+    match (left, right) {
+        (PatternDecision::Any | PatternDecision::Bind(_), _) => true,
+        (PatternDecision::Literal(left), PatternDecision::Literal(right)) => left == right,
+        (PatternDecision::Tuple(left), PatternDecision::Tuple(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| pattern_decision_subsumes(left, right))
+        }
+        (
+            PatternDecision::Record {
+                definition: left_definition,
+                fields: left_fields,
+            },
+            PatternDecision::Record {
+                definition: right_definition,
+                fields: right_fields,
+            },
+        ) => {
+            left_definition == right_definition
+                && left_fields.iter().all(|(index, left)| {
+                    right_fields
+                        .iter()
+                        .find(|(right, _)| right == index)
+                        .is_some_and(|(_, right)| pattern_decision_subsumes(left, right))
+                })
+        }
+        (
+            PatternDecision::Enum {
+                definition: left_definition,
+                variant: left_variant,
+                fields: left_fields,
+            },
+            PatternDecision::Enum {
+                definition: right_definition,
+                variant: right_variant,
+                fields: right_fields,
+            },
+        ) => {
+            left_definition == right_definition
+                && left_variant == right_variant
+                && left_fields.iter().all(|(index, left)| {
+                    right_fields
+                        .iter()
+                        .find(|(right, _)| right == index)
+                        .is_some_and(|(_, right)| pattern_decision_subsumes(left, right))
                 })
         }
         _ => false,

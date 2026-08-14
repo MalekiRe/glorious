@@ -3,7 +3,7 @@ use grandiose_stage0::{
     CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan, DefKey, DefinitionIndex,
     Digest, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind,
     GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction,
-    MirLowering, PackageKey, PlaceFlow, Quantity, ScalarType, Span, Type, TypedBody,
+    MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span, Type, TypedBody,
     implementation_method_key,
 };
 
@@ -984,7 +984,7 @@ fn placeflow_rejects_writes_through_a_moved_parent_projection() {
 
 #[test]
 fn placeflow_joins_partial_moves_from_dynamic_handler_exits() {
-    let source = "effect Tick { tick() -> i64; } pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; handle Tick::tick() { Tick::tick() => move pair.left, Tick::tick() => 0 }; pair.left }";
+    let source = "effect Tick { tick(value: Bool) -> i64; } pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; handle Tick::tick(true) { Tick::tick(true) => move pair.left, Tick::tick(false) => 0 }; pair.left }";
     let flow = flow_for("core-partial-move-handler-join@0.1.0", source);
     assert!(
         flow.diagnostics
@@ -2073,6 +2073,60 @@ fn handler_coverage_tracks_direct_operations_but_calls_require_total_protocol_co
 }
 
 #[test]
+fn handler_pattern_matrix_rejects_unreachable_rows_and_accepts_closed_bool_coverage() {
+    let total = core_for(
+        "core-handler-pattern-matrix-total@0.1.0",
+        "effect Stop { die(value: Bool) -> !; } pub fn main() -> i64 { handle Stop::die(true) { Stop::die(true) => 1, Stop::die(false) => 2 } }",
+    );
+    assert!(total.diagnostics.is_empty(), "{:#?}", total.diagnostics);
+    let flow = PlaceFlow::analyze(&total);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    let mir = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"core-handler-pattern-matrix-total")),
+        &total,
+        &flow,
+    )
+    .function
+    .expect("total terminal handler lowers to MIR");
+    assert!(mir.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| {
+        matches!(instruction, MirInstruction::PatternTest { pattern: MirPattern::Literal(value), .. } if value == "true")
+    }));
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("pattern handler emits VM");
+    let verified =
+        grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
+            .expect("pattern handler VM artifact verifies");
+    assert_eq!(verified.run_i64().expect("VM executes pattern dispatch"), 1);
+
+    let unreachable = core_for(
+        "core-handler-pattern-matrix-unreachable@0.1.0",
+        "effect Stop { die(value: Bool) -> !; } pub fn main() -> i64 { handle Stop::die(true) { Stop::die(true) => 1, Stop::die(true) => 2, Stop::die(false) => 3 } }",
+    );
+    assert!(
+        unreachable
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4175"),
+        "unreachable terminal handler pattern was not diagnosed: {:#?}",
+        unreachable.diagnostics
+    );
+}
+
+#[test]
+fn handler_pattern_matrix_rejects_duplicate_unbounded_literal_rows() {
+    let core = core_for(
+        "core-handler-pattern-unbounded-literal@0.1.0",
+        "effect Stop { die(value: i64) -> !; } pub fn main() -> i64 { handle Stop::die(41) { Stop::die(41) => 1, Stop::die(41) => 2, Stop::die(value) => 3 } }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4175"),
+        "duplicate i64 handler literal was not diagnosed: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn nested_partial_handlers_compose_to_discharge_a_callable_effect_contract() {
     let source = "effect Choice { first() -> i64; second() -> i64; } pub fn worker() -> i64 / Choice { Choice::first() } pub fn main() -> i64 / Choice { handle { handle worker() { Choice::first() => 10 } } { Choice::second() => 20 } }";
     let core = core_for("core-composed-partial-handler-contract@0.1.0", source);
@@ -2529,7 +2583,7 @@ fn effect_operation_generic_kind_mismatches_reach_the_contract_boundary() {
 #[test]
 fn placeflow_joins_handler_arms_conservatively_after_dynamic_selection() {
     let package = PackageKey("core-handler-flow@0.1.0".into());
-    let source = "effect Console { read() -> i64; } pub fn main() -> i64 { let value = 7; handle Console::read() { Console::read() => move value, Console::read() => 0 }; value }";
+    let source = "effect Console { read(value: Bool) -> i64; } pub fn main() -> i64 { let value = 7; handle Console::read(true) { Console::read(true) => move value, Console::read(false) => 0 }; value }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
