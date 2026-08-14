@@ -61,6 +61,9 @@ pub enum PrimitiveRole {
     U32Le,
     U32ToUsize,
     UsizeToU32Checked,
+    /// Exact generic declaration `__g1_int_checked_add<T>` in distributed std.
+    /// Lowering may specialize it only after the frozen type argument is i64.
+    IntCheckedAdd,
 }
 
 impl PrimitiveRole {
@@ -98,6 +101,7 @@ impl PrimitiveRole {
             Self::U32Le => "u32-le",
             Self::U32ToUsize => "u32-to-usize",
             Self::UsizeToU32Checked => "usize-to-u32-checked",
+            Self::IntCheckedAdd => "int-checked-add",
         }
     }
 
@@ -135,6 +139,7 @@ impl PrimitiveRole {
             "u32-le" => Self::U32Le,
             "u32-to-usize" => Self::U32ToUsize,
             "usize-to-u32-checked" => Self::UsizeToU32Checked,
+            "int-checked-add" => Self::IntCheckedAdd,
             _ => return None,
         })
     }
@@ -495,6 +500,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::IntCheckedAdd => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0), Type::Generic(0)],
+            result: Type::Generic(0),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
     }
 }
 fn manifest_digest(
@@ -538,6 +554,7 @@ fn manifest_digest(
             PrimitiveRole::U32Le => 29,
             PrimitiveRole::U32ToUsize => 30,
             PrimitiveRole::UsizeToU32Checked => 31,
+            PrimitiveRole::IntCheckedAdd => 32,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }

@@ -13579,6 +13579,34 @@ impl Lowerer<'_> {
                                     arguments,
                                 });
                             }
+                            Some(PrimitiveRole::IntCheckedAdd) => {
+                                let [left, right] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic int checked-add requires two operands",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[left.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.locals[right.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                {
+                                    self.error("G6005", "generic int checked-add is only VM-specialized for frozen i64");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::AddI64 {
+                                    dst,
+                                    left: *left,
+                                    right: *right,
+                                });
+                            }
                             None => match host_import {
                                 Some(import) => self.instructions.push(MirInstruction::HostCall {
                                     dst,

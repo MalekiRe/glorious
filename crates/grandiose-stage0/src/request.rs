@@ -412,6 +412,7 @@ fn fingerprint_world(request: &CompilationRequest) -> Digest {
                     crate::PrimitiveRole::U32Le => 29,
                     crate::PrimitiveRole::U32ToUsize => 30,
                     crate::PrimitiveRole::UsizeToU32Checked => 31,
+                    crate::PrimitiveRole::IntCheckedAdd => 32,
                 }],
             );
             put(&mut bytes, selector.module_path.as_bytes());
