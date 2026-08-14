@@ -567,7 +567,26 @@ impl Parser<'_> {
             } else if self.at_punctuation('.') {
                 let start = self.expression(value).span;
                 self.position += 1;
-                let name = self.expect_identifier()?;
+                // Tuple and enum payload projections use their canonical
+                // positional spelling (`value.0`).  The scanner correctly
+                // classifies that segment as an integer, while named record
+                // projections remain identifiers; preserve both spellings in
+                // one Field syntax node for Core to resolve by the base type.
+                let name = match self.current() {
+                    Some(index)
+                        if matches!(
+                            self.lexed.tokens[index].kind,
+                            TokenKind::Identifier | TokenKind::Integer
+                        ) =>
+                    {
+                        self.position += 1;
+                        self.text(index).to_owned()
+                    }
+                    _ => {
+                        self.error_current("G4005", "expected field name or positional index");
+                        return None;
+                    }
+                };
                 let span = join(
                     start,
                     self.lexed.tokens[self.tokens[self.position - 1]].span,

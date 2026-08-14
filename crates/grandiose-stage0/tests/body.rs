@@ -148,6 +148,23 @@ fn body_parser_preserves_structural_is_patterns_and_rejects_duplicate_binders() 
 }
 
 #[test]
+fn body_parser_preserves_named_and_positional_field_projections() {
+    let body = parse("{ pair.left; result.0 }");
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected block");
+    };
+    assert!(matches!(
+        body.expression(values[0]).kind,
+        ExprKind::Field { ref name, .. } if name == "left"
+    ));
+    assert!(matches!(
+        body.expression(values[1]).kind,
+        ExprKind::Field { ref name, .. } if name == "0"
+    ));
+}
+
+#[test]
 fn body_parser_retains_explicit_nominal_arguments_on_construction_and_patterns() {
     let body = parse("{ Packet<i64> { value: 1 }; subject is Result<i64>::Ok(value) }");
     assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
