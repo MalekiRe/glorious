@@ -2,10 +2,10 @@ use grandiose_stage0::{
     BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError, BootstrapLimits, BootstrapManifest,
     BootstrapManifestError, BootstrapStage, Budget, CancellationToken, CompilationMode,
     CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus,
-    DiagnosticClass, Digest, InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport,
-    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmContinuationPolicy,
-    VmExecutionLimits, VmGenericArgument, VmInstruction, VmType, decode_and_verify_program,
-    decode_program, encode_program,
+    DiagnosticClass, Digest, FileKey, InstanceLimits, LogicalPath, ModuleKey, PackageKey,
+    RetentionReport, Severity, SourceInput, StageZeroCompiler, VmArtifactError,
+    VmContinuationPolicy, VmExecutionLimits, VmGenericArgument, VmInstruction, VmType,
+    decode_and_verify_program, decode_program, encode_program,
 };
 use std::collections::BTreeMap;
 
@@ -520,6 +520,10 @@ fn service_keeps_public_glob_facades_green_for_private_target_edits() {
     compiler.compile_revision(child).unwrap();
 
     let package = PackageKey("app@0.1.0".into());
+    let api_interface = DependencyNode::Interface(ModuleKey {
+        package: package.clone(),
+        path: "crate::api".into(),
+    });
     for path in ["crate", "crate::api", "crate::facade"] {
         let module = ModuleKey {
             package: package.clone(),
@@ -533,6 +537,19 @@ fn service_keeps_public_glob_facades_green_for_private_target_edits() {
             DependencyStatus::Green { parent: green_parent } if green_parent == parent
         ));
     }
+    let facade = compiler
+        .dependency_trace(
+            child,
+            &DependencyNode::Interface(ModuleKey {
+                package,
+                path: "crate::facade".into(),
+            }),
+        )
+        .unwrap();
+    assert!(
+        facade.dependencies.contains(&api_interface),
+        "the public glob facade records the target interface even when that target stays green"
+    );
 }
 
 #[test]
@@ -584,17 +601,26 @@ fn service_invalidates_explicit_and_module_reexports_with_their_target_contract(
     compiler.compile_revision(child).unwrap();
 
     let package = PackageKey("app@0.1.0".into());
+    let api_interface = DependencyNode::Interface(ModuleKey {
+        package: package.clone(),
+        path: "crate::api".into(),
+    });
+    let api_input = DependencyNode::Input(FileKey::new(&package, "src/api/api.glorious"));
     for path in ["crate", "crate::explicit", "crate::module"] {
         let module = ModuleKey {
             package: package.clone(),
             path: path.into(),
         };
+        let trace = compiler
+            .dependency_trace(child, &DependencyNode::Interface(module))
+            .unwrap();
+        assert!(
+            trace.dependencies.contains(&api_interface),
+            "{path} must retain the public API interface it exposes"
+        );
         assert!(matches!(
-            compiler
-                .dependency_trace(child, &DependencyNode::Interface(module))
-                .unwrap()
-                .status,
-            DependencyStatus::Red { .. }
+            trace.status,
+            DependencyStatus::Red { ref first_changed, .. } if *first_changed == api_input
         ));
     }
 }

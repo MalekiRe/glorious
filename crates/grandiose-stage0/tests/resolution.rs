@@ -509,6 +509,55 @@ fn sealed_public_interfaces_include_transitive_module_alias_and_glob_surfaces() 
 }
 
 #[test]
+fn sealed_public_dependencies_follow_only_resolved_public_surface_contracts() {
+    let package = PackageKey("resolution-sealed-public-dependencies@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect(
+        "crate",
+        "pub mod api; pub mod facade; pub mod private_facade;",
+    );
+    let api = collect("crate::api", "pub fn answer() { () } fn hidden() { () }");
+    let facade = collect("crate::facade", "pub use crate::api as client;");
+    let private_facade = collect(
+        "crate::private_facade",
+        "use crate::api::answer; pub fn local() { () }",
+    );
+    let index = DefinitionIndex::from_interfaces([&root, &api, &facade, &private_facade]);
+
+    let api_module = ModuleKey {
+        package: package.clone(),
+        path: "crate::api".into(),
+    };
+    let facade_module = ModuleKey {
+        package: package.clone(),
+        path: "crate::facade".into(),
+    };
+    let private_facade_module = ModuleKey {
+        package: package.clone(),
+        path: "crate::private_facade".into(),
+    };
+    assert_eq!(
+        index.sealed_public_dependencies(&facade),
+        vec![api_module.clone()]
+    );
+    assert_eq!(
+        index.sealed_public_dependencies(&private_facade),
+        Vec::<ModuleKey>::new(),
+        "a private import is not part of the exported facade contract"
+    );
+    assert_eq!(
+        index.sealed_public_dependencies(&root),
+        vec![api_module, facade_module, private_facade_module],
+        "public module edges are target-interface dependencies"
+    );
+}
+
+#[test]
 fn sealed_public_interfaces_exclude_private_members_behind_public_modules() {
     let package = PackageKey("resolution-sealed-private-surface@0.1.0".into());
     let collect = |module: &str, source: &str| {

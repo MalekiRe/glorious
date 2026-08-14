@@ -300,6 +300,116 @@ impl DefinitionIndex {
         ])
     }
 
+    /// Return the exact module interfaces consulted while sealing this
+    /// module's public surface.  This mirrors `sealed_public_fingerprint`'s
+    /// resolution walk rather than approximating it from source import syntax:
+    /// a private import, an inaccessible re-export, or an unselected glob
+    /// member must not become an interface dependency.  Conversely, a public
+    /// module edge and every resolved public re-export contribute the target
+    /// interface whose contract supplied the exported fact.
+    ///
+    /// The result deliberately excludes `interface.module` itself.  A module
+    /// may re-export a name declared locally (or form a recovered re-export
+    /// cycle); recording a self edge would turn an otherwise ordinary
+    /// revision fact into a ledger cycle.  Its own source remains the direct
+    /// `Input` dependency published by the service.
+    pub fn sealed_public_dependencies(&self, interface: &PackageInterface) -> Vec<ModuleKey> {
+        let requester = ModuleKey {
+            package: interface.module.package.clone(),
+            path: "<dependency>".into(),
+        };
+        let mut active = BTreeSet::new();
+        let mut dependencies = BTreeSet::new();
+        self.collect_public_surface_dependencies(
+            &interface.module,
+            &interface.module,
+            &requester,
+            &mut active,
+            &mut dependencies,
+        );
+        dependencies.into_iter().collect()
+    }
+
+    fn collect_public_surface_dependencies(
+        &self,
+        module: &ModuleKey,
+        origin: &ModuleKey,
+        requester: &ModuleKey,
+        active: &mut BTreeSet<ModuleKey>,
+        dependencies: &mut BTreeSet<ModuleKey>,
+    ) {
+        // This matches the cycle marker in `public_module_surface`: no
+        // additional target contract is observed after a recursive module
+        // edge, so no dependency is added for that unobserved suffix.
+        if !active.insert(module.clone()) {
+            return;
+        }
+        if module != origin {
+            dependencies.insert(module.clone());
+        }
+        for namespace in all_namespaces() {
+            let names = self.module_member_names(module, namespace, &mut BTreeSet::new());
+            for name in names {
+                match self.resolve_member(
+                    namespace,
+                    module,
+                    &name,
+                    requester,
+                    true,
+                    &mut BTreeSet::new(),
+                ) {
+                    ResolutionState::Resolved(key) => {
+                        if namespace == DefinitionNamespace::Module {
+                            if let Some(target) = self.module_targets.get(&key) {
+                                self.collect_public_surface_dependencies(
+                                    target,
+                                    origin,
+                                    requester,
+                                    active,
+                                    dependencies,
+                                );
+                            }
+                        } else {
+                            self.collect_definition_owner_dependency(key, origin, dependencies);
+                        }
+                    }
+                    ResolutionState::Ambiguous(candidates) => {
+                        // Ambiguous non-module exports are still frozen
+                        // surface facts. Retain each observed contract owner
+                        // so a failed/recovered request cannot later be
+                        // explained by a synthetic facade-only change. Module
+                        // candidates do not expose a traversed target surface
+                        // (the fingerprint likewise records only their
+                        // recovered declaration contracts).
+                        for key in candidates {
+                            if namespace == DefinitionNamespace::Module {
+                                continue;
+                            }
+                            self.collect_definition_owner_dependency(key, origin, dependencies);
+                        }
+                    }
+                    ResolutionState::Unresolved
+                    | ResolutionState::Inaccessible(_)
+                    | ResolutionState::Recovered => {}
+                }
+            }
+        }
+        active.remove(module);
+    }
+
+    fn collect_definition_owner_dependency(
+        &self,
+        key: DefKey,
+        origin: &ModuleKey,
+        dependencies: &mut BTreeSet<ModuleKey>,
+    ) {
+        if let Some(owner) = self.owners.get(&key)
+            && owner != origin
+        {
+            dependencies.insert(owner.clone());
+        }
+    }
+
     fn public_module_surface(
         &self,
         module: &ModuleKey,

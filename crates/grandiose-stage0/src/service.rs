@@ -754,10 +754,17 @@ impl StageZeroCompiler {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         };
         for node in graph.modules.values() {
+            let mut interface_dependencies = vec![DependencyNode::Input(node.file)];
+            interface_dependencies.extend(
+                index
+                    .sealed_public_dependencies(&node.interface.interface)
+                    .into_iter()
+                    .map(DependencyNode::Interface),
+            );
             dependencies.record(
                 DependencyNode::Interface(node.key.clone()),
                 node.interface.interface.public_fingerprint,
-                vec![DependencyNode::Input(node.file)],
+                interface_dependencies,
             );
         }
         diagnostics.extend(index.validate_imports().into_iter().map(|diagnostic| {
