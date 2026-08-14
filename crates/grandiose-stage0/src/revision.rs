@@ -25,6 +25,17 @@ pub struct RetentionReport {
     pub retained_pinned: u64,
 }
 
+/// Stable, inspection-safe identity for one database-owned immutable world.
+/// It deliberately contains no pointers or local arena IDs; callers can keep
+/// this after the underlying revision is retired without gaining authority to
+/// reopen or mutate that world.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RevisionMetadata {
+    pub revision: RevisionId,
+    pub parent: Option<RevisionId>,
+    pub input_fingerprint: Digest,
+}
+
 impl From<InputError> for RevisionError {
     fn from(error: InputError) -> Self {
         Self::Input(error)
@@ -122,6 +133,35 @@ impl CompilerDatabase {
         Ok(DatabaseSnapshot {
             record: self.require_active_revision(&state, revision)?,
         })
+    }
+
+    /// Admit one new request against exactly one currently active immutable
+    /// revision. Once constructed, the session keeps that world alive even if
+    /// a host later retires the revision in favour of a newer editor/build
+    /// input world.
+    pub fn open_session(&self, revision: RevisionId) -> Result<RequestSession, RevisionError> {
+        Ok(RequestSession::new(self.open(revision)?))
+    }
+
+    /// Check that a session was admitted by this database and that its pinned
+    /// record remains one of this database's live records. Retired records are
+    /// intentionally accepted here: retirement blocks *new* sessions, never
+    /// invalidates an already admitted request.
+    pub(crate) fn validate_session(&self, session: &RequestSession) -> Result<(), RevisionError> {
+        let snapshot = session.snapshot();
+        if snapshot.id().database != self.id {
+            return Err(RevisionError::StaleRevision(snapshot.id()));
+        }
+        let state = self.state.lock().expect("compiler database mutex poisoned");
+        let record = self.require_revision(&state, snapshot.id())?;
+        if Arc::ptr_eq(&record, &snapshot.record) {
+            Ok(())
+        } else {
+            // Revision ordinals are never reused, so this can only occur if a
+            // future boundary constructs a stale handle incorrectly. Fail
+            // closed rather than accepting a same-shaped foreign record.
+            Err(RevisionError::UnknownRevision(snapshot.id()))
+        }
     }
 
     pub(crate) fn interface_cache(&self) -> &InterfaceCache {
@@ -236,6 +276,14 @@ impl DatabaseSnapshot {
         self.record.parent
     }
 
+    pub fn metadata(&self) -> RevisionMetadata {
+        RevisionMetadata {
+            revision: self.id(),
+            parent: self.parent(),
+            input_fingerprint: self.world().fingerprint,
+        }
+    }
+
     /// Return the immediate immutable parent when it remains retained. A
     /// collected parent is intentionally indistinguishable from a missing
     /// reusable memo entry: a query must fail closed and recompute rather than
@@ -258,11 +306,19 @@ pub struct RequestSession {
 }
 
 impl RequestSession {
-    pub fn new(snapshot: DatabaseSnapshot) -> Self {
+    fn new(snapshot: DatabaseSnapshot) -> Self {
         Self { snapshot }
     }
 
     pub fn snapshot(&self) -> &DatabaseSnapshot {
         &self.snapshot
+    }
+
+    pub fn revision(&self) -> RevisionId {
+        self.snapshot.id()
+    }
+
+    pub fn metadata(&self) -> RevisionMetadata {
+        self.snapshot.metadata()
     }
 }

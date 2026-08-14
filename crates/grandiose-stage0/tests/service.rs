@@ -1,8 +1,8 @@
 use grandiose_stage0::{
     BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError, BootstrapLimits, BootstrapManifest,
     BootstrapManifestError, BootstrapStage, CompilationMode, CompilationRequest, CompileDiagnostic,
-    CompilerBuildIdentity, DiagnosticClass, Digest, LogicalPath, PackageKey, Severity, SourceInput,
-    StageZeroCompiler, VmArtifactError, VmExecutionLimits, VmInstruction,
+    CompilerBuildIdentity, DiagnosticClass, Digest, LogicalPath, PackageKey, RetentionReport,
+    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmExecutionLimits, VmInstruction,
     decode_and_verify_program, decode_program,
 };
 use std::collections::BTreeMap;
@@ -156,6 +156,89 @@ fn service_compiles_explicit_parent_and_child_revisions_without_world_mixing() {
         .unwrap();
     let child_outcome = compiler.compile_revision(child).unwrap();
     assert_eq!(child_outcome.artifact.unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
+fn service_sessions_pin_retired_revisions_without_mixing_live_worlds() {
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(request("pub fn main() -> i64 { 40 + 2 }"), None)
+        .unwrap();
+    let child = compiler
+        .import_revision(request("pub fn main() -> i64 { 40 + 3 }"), Some(parent))
+        .unwrap();
+    let parent_session = compiler.open_session(parent).unwrap();
+    let child_session = compiler.open_session(child).unwrap();
+    assert_eq!(parent_session.metadata().parent, None);
+    assert_eq!(child_session.metadata().parent, Some(parent));
+    assert_ne!(
+        parent_session.metadata().input_fingerprint,
+        child_session.metadata().input_fingerprint
+    );
+
+    compiler.retire_revision(parent).unwrap();
+    assert!(matches!(
+        compiler.open_session(parent),
+        Err(error) if error.diagnostics()[0].code == "G7027"
+    ));
+    assert_eq!(
+        compiler.collect_retired(),
+        RetentionReport {
+            collected: 0,
+            retained_pinned: 1,
+        }
+    );
+
+    // Retirement cannot redirect either already-admitted request to a newer
+    // source world. The pinned parent remains executable while the child
+    // observes its own independent revision.
+    assert_eq!(
+        compiler
+            .compile_session(&parent_session)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+    assert_eq!(
+        compiler
+            .compile_session(&child_session)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        43
+    );
+    assert!(matches!(
+        StageZeroCompiler::new().compile_session(&child_session),
+        Err(error) if error.diagnostics()[0].code == "G7026"
+    ));
+
+    drop(parent_session);
+    assert_eq!(
+        compiler.collect_retired(),
+        RetentionReport {
+            collected: 1,
+            retained_pinned: 0,
+        }
+    );
+    assert!(matches!(
+        compiler.open_session(parent),
+        Err(error) if error.diagnostics()[0].code == "G7025"
+    ));
+    assert_eq!(
+        compiler
+            .compile_session(&child_session)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        43
+    );
 }
 
 #[test]

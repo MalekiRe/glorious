@@ -8,9 +8,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     BodySyntax, BootstrapManifest, CoherenceSet, CompilationMode, CompilationRequest,
-    CompilerDatabase, DefKey, DefinitionIndex, DiagnosticClass, Digest, ElaboratedHeader,
-    ElaboratedInterface, EscapeFlow, FixityTable, InputError, MirFunction, MirLowering, MirProgram,
-    ModuleGraph, ParsedHeader, PlaceFlow, RevisionError, RevisionId, Severity, SourceSpan, Span,
+    CompilerDatabase, DatabaseSnapshot, DefKey, DefinitionIndex, DiagnosticClass, Digest,
+    ElaboratedHeader, ElaboratedInterface, EscapeFlow, FixityTable, InputError, MirFunction,
+    MirLowering, MirProgram, ModuleGraph, ParsedHeader, PlaceFlow, RequestSession,
+    RetentionReport, RevisionError, RevisionId, Severity, SourceSpan, Span,
     TrustedRuntimeManifest, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program,
     implementation_method_key, verify_vm_program,
 };
@@ -399,6 +400,24 @@ impl StageZeroCompiler {
         Ok(self.database.import(request, parent)?)
     }
 
+    /// Admit a request-scoped session pinned to one active revision. The
+    /// session is the only public way to keep a long-lived service request
+    /// alive across subsequent editor/build imports.
+    pub fn open_session(&self, revision: RevisionId) -> Result<RequestSession, ServiceError> {
+        Ok(self.database.open_session(revision)?)
+    }
+
+    /// Retire a world from new request admission. Existing sessions stay
+    /// valid until their owners release them and a safe-point collection run
+    /// observes no remaining pins.
+    pub fn retire_revision(&self, revision: RevisionId) -> Result<(), ServiceError> {
+        Ok(self.database.retire_revision(revision)?)
+    }
+
+    pub fn collect_retired(&self) -> RetentionReport {
+        self.database.collect_retired()
+    }
+
     /// Compile a newly imported child revision. This is the command-style
     /// convenience path; editors and long-lived hosts may import first and
     /// call [`Self::compile_revision`] later against the exact pinned world.
@@ -418,7 +437,26 @@ impl StageZeroCompiler {
         &self,
         revision: RevisionId,
     ) -> Result<CompilationOutcome, ServiceError> {
-        let snapshot = self.database.open(revision)?;
+        let session = self.open_session(revision)?;
+        self.compile_session(&session)
+    }
+
+    /// Compile through a previously admitted request session. This validates
+    /// database ownership but intentionally permits a retired revision: a
+    /// request that already pinned its world must never switch to a newer
+    /// world or fail merely because the host retired it mid-request.
+    pub fn compile_session(
+        &self,
+        session: &RequestSession,
+    ) -> Result<CompilationOutcome, ServiceError> {
+        self.database.validate_session(session)?;
+        self.compile_snapshot(session.snapshot())
+    }
+
+    fn compile_snapshot(
+        &self,
+        snapshot: &DatabaseSnapshot,
+    ) -> Result<CompilationOutcome, ServiceError> {
         let input_fingerprint = snapshot.world().fingerprint;
         let source_lengths = snapshot
             .world()

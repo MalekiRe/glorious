@@ -95,6 +95,7 @@ pub use resolution::{
 };
 pub use revision::{
     CompilerDatabase, DatabaseSnapshot, RequestSession, RetentionReport, RevisionError,
+    RevisionMetadata,
 };
 pub use runtime_manifest::{
     ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput, TrustedRuntimeManifest,
