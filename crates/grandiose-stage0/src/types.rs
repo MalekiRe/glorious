@@ -1193,10 +1193,31 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
     }
 }
 
-fn canonical_generic_arguments(values: &[GenericArgument]) -> Vec<u8> {
+/// Tagged canonical encoding for a type tree.  Internal identity consumers
+/// use this instead of `Debug` rendering so nested nominal arguments retain
+/// their type/lifetime/effect-row/const/quantity kinds.
+pub(crate) fn canonical_type_encoding(value: &Type) -> Vec<u8> {
+    let mut bytes = vec![];
+    encode_type(value, &mut bytes);
+    bytes
+}
+
+/// Tagged canonical encoding for declaration argument sequences.
+pub(crate) fn canonical_generic_arguments_encoding(values: &[GenericArgument]) -> Vec<u8> {
     let mut bytes = vec![];
     encode_generic_arguments(values, &mut bytes);
     bytes
+}
+
+/// Tagged canonical encoding for ordered type sequences.
+pub(crate) fn canonical_type_sequence_encoding(values: &[Type]) -> Vec<u8> {
+    let mut bytes = vec![];
+    encode_types(values, &mut bytes);
+    bytes
+}
+
+fn canonical_generic_arguments(values: &[GenericArgument]) -> Vec<u8> {
+    canonical_generic_arguments_encoding(values)
 }
 
 fn effect_row_projection_key(value: &EffectRowProjection) -> Vec<u8> {

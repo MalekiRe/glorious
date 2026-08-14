@@ -11,6 +11,10 @@ use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedHeader,
     ElaboratedImplementation, ElaboratedInterface, ElaboratedTraitReference, GenericArgument, Type,
     implementation_method_key,
+    types::{
+        canonical_generic_arguments_encoding, canonical_type_encoding,
+        canonical_type_sequence_encoding,
+    },
 };
 
 pub const DEFAULT_MAX_TRAIT_DEPTH: u32 = 128;
@@ -1455,25 +1459,27 @@ fn substitute_callable_signature(
 }
 
 fn goal_key(goal: &TraitGoal) -> Digest {
-    // `Type` and `EffectRow` have deterministic Debug implementations over
-    // ordered members.  This temporary kernel uses that closed rendering only
-    // for per-body memoization; public fingerprints never depend on it.
+    let relation_arguments = canonical_generic_arguments_encoding(&goal.relation.arguments);
+    let subject = canonical_type_encoding(&goal.subject);
     Digest::of_parts([
-        b"grandiose-stage0-trait-goal-v1".as_slice(),
+        b"grandiose-stage0-trait-goal-v2".as_slice(),
         goal.relation.definition.0.as_bytes().as_slice(),
-        format!("{:?}", goal.relation.arguments).as_bytes(),
-        format!("{:?}", goal.subject).as_bytes(),
+        relation_arguments.as_slice(),
+        subject.as_slice(),
     ])
 }
 
 fn associated_projection_key(goal: &TraitGoal, name: &str, arguments: &[Type]) -> Digest {
+    let relation_arguments = canonical_generic_arguments_encoding(&goal.relation.arguments);
+    let subject = canonical_type_encoding(&goal.subject);
+    let arguments = canonical_type_sequence_encoding(arguments);
     Digest::of_parts([
-        b"grandiose-stage0-associated-projection-v1".as_slice(),
+        b"grandiose-stage0-associated-projection-v2".as_slice(),
         goal.relation.definition.0.as_bytes().as_slice(),
-        format!("{:?}", goal.relation.arguments).as_bytes(),
-        format!("{:?}", goal.subject).as_bytes(),
+        relation_arguments.as_slice(),
+        subject.as_slice(),
         name.as_bytes(),
-        format!("{:?}", arguments).as_bytes(),
+        arguments.as_slice(),
     ])
 }
 
@@ -1482,13 +1488,16 @@ fn associated_effect_row_projection_key(
     name: &str,
     arguments: &[Type],
 ) -> Digest {
+    let relation_arguments = canonical_generic_arguments_encoding(&goal.relation.arguments);
+    let subject = canonical_type_encoding(&goal.subject);
+    let arguments = canonical_type_sequence_encoding(arguments);
     Digest::of_parts([
-        b"grandiose-stage0-associated-effect-row-projection-v1".as_slice(),
+        b"grandiose-stage0-associated-effect-row-projection-v2".as_slice(),
         goal.relation.definition.0.as_bytes().as_slice(),
-        format!("{:?}", goal.relation.arguments).as_bytes(),
-        format!("{:?}", goal.subject).as_bytes(),
+        relation_arguments.as_slice(),
+        subject.as_slice(),
         name.as_bytes(),
-        format!("{:?}", arguments).as_bytes(),
+        arguments.as_slice(),
     ])
 }
 

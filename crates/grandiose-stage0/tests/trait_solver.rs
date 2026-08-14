@@ -1,7 +1,9 @@
+use std::collections::BTreeSet;
+
 use grandiose_stage0::{
-    DeclarationScan, DefKey, ElaboratedInterface, ElaboratedTraitReference, FileKey,
-    GenericArgument, InterfaceSet, LexedFile, Lifetime, Mutability, PackageKey, ScalarType,
-    TraitAnswer, TraitCandidateExplanation, TraitCandidateRejection,
+    DeclarationScan, DefKey, EffectRow, EffectTail, ElaboratedInterface, ElaboratedTraitReference,
+    FileKey, GenericArgument, InterfaceSet, LexedFile, Lifetime, Mutability, PackageKey, Quantity,
+    ScalarType, TraitAnswer, TraitCandidateExplanation, TraitCandidateRejection,
     TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer, TraitProjectionAnswer,
     TraitSolver, TraitSolverLimits, Type, implementation_method_key,
 };
@@ -458,6 +460,74 @@ fn selection_explanations_retain_recursive_overflow_where_bound_outcomes() {
             ..
         }]
     ));
+}
+
+#[test]
+fn trait_goal_queries_distinguish_nested_mixed_kind_nominal_arguments() {
+    let (interface, signatures) = signatures("trait Ready {} struct Box<T> {}");
+    let ready = key(&interface, "Ready");
+    let boxed = key(&interface, "Box");
+    let solver = TraitSolver::new(&signatures);
+    let nested_goal = |argument: GenericArgument| TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![argument.clone()],
+        },
+        subject: Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::Type(Type::Nominal {
+                definition: boxed,
+                arguments: vec![argument],
+            })],
+        },
+    };
+    let arguments = vec![
+        GenericArgument::Type(Type::Scalar(ScalarType::I64)),
+        GenericArgument::Lifetime(Lifetime::Static),
+        GenericArgument::Lifetime(Lifetime::Generic(7)),
+        GenericArgument::EffectRow(EffectRow::empty()),
+        GenericArgument::EffectRow(EffectRow {
+            effects: BTreeSet::new(),
+            projections: vec![],
+            tail: Some(EffectTail::Generic(3)),
+        }),
+        GenericArgument::ConstU32(7),
+        GenericArgument::ConstQuantity(Quantity::new(2, Some(5)).unwrap()),
+    ];
+    let fingerprints = arguments
+        .into_iter()
+        .map(|argument| solver.query(&nested_goal(argument)).fingerprint)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(fingerprints.len(), 7, "mixed-kind goals must never alias");
+}
+
+#[test]
+fn trait_solver_tables_do_not_alias_nested_nominal_argument_kinds() {
+    let (interface, signatures) =
+        signatures("trait Ready {} struct Box<T> {} impl Ready for Box<i64> {}");
+    let ready = key(&interface, "Ready");
+    let boxed = key(&interface, "Box");
+    let relation = ElaboratedTraitReference {
+        definition: ready,
+        arguments: vec![],
+    };
+    let matching = TraitGoal {
+        relation: relation.clone(),
+        subject: Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+    };
+    let adversarial = TraitGoal {
+        relation,
+        subject: Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::ConstQuantity(Quantity::ONCE)],
+        },
+    };
+    let mut solver = TraitSolver::new(&signatures);
+    assert!(matches!(solver.solve(matching), TraitAnswer::Proven { .. }));
+    assert_eq!(solver.solve(adversarial), TraitAnswer::NoSolution);
 }
 
 #[test]
