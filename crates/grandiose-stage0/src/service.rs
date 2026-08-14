@@ -1175,6 +1175,7 @@ impl StageZeroCompiler {
                         crate::PrimitiveRole::IntBitXor,
                         crate::PrimitiveRole::IntBitNot,
                         crate::PrimitiveRole::IntConvertWrappingToU32,
+                        crate::PrimitiveRole::IntConvertWrappingToUsize,
                         crate::PrimitiveRole::IntShr,
                         crate::PrimitiveRole::IntShl,
                     ]

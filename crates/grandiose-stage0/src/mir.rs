@@ -278,6 +278,12 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    /// Exact manifest-bound i64-to-usize conversion, retaining the low
+    /// two's-complement bits rather than checking the range.
+    I64ToUsizeWrapping {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     MakeTuple {
         dst: MirLocal,
         fields: Vec<MirLocal>,
@@ -1429,6 +1435,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::I64ToU32Checked { dst, .. }
         | MirInstruction::I64ToU32Wrapping { dst, .. }
         | MirInstruction::I64ToUsizeChecked { dst, .. }
+        | MirInstruction::I64ToUsizeWrapping { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -3338,7 +3345,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::UsizeToU32Checked { .. }
         | MirInstruction::I64ToU32Checked { .. }
         | MirInstruction::I64ToU32Wrapping { .. }
-        | MirInstruction::I64ToUsizeChecked { .. } => Ok(()),
+        | MirInstruction::I64ToUsizeChecked { .. }
+        | MirInstruction::I64ToUsizeWrapping { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -4070,7 +4078,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::UsizeToU32Checked { dst, value }
         | MirInstruction::I64ToU32Checked { dst, value }
         | MirInstruction::I64ToU32Wrapping { dst, value }
-        | MirInstruction::I64ToUsizeChecked { dst, value } => vec![*dst, *value],
+        | MirInstruction::I64ToUsizeChecked { dst, value }
+        | MirInstruction::I64ToUsizeWrapping { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -13755,6 +13764,34 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::I64ToU32Wrapping { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::IntConvertWrappingToUsize) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic wrapping i64-to-usize conversion requires one operand",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Usize)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "generic wrapping i64-to-usize conversion is only VM-specialized for frozen i64",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::I64ToUsizeWrapping {
+                                    dst,
+                                    value: *value,
+                                });
                             }
                             Some(PrimitiveRole::IntBitNot) => {
                                 let [value] = arguments.as_slice() else {
