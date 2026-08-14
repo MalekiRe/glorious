@@ -108,6 +108,7 @@ fn program_host_capability_declarations_are_canonical_exact_and_fingerprinted() 
         host_capabilities: vec!["clock".into()],
         entry,
         functions: BTreeMap::from([(entry, function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"stale-host-capability-fingerprint"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -201,6 +202,7 @@ fn program_host_capabilities_exclude_unreachable_emitted_helpers() {
         host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(entry, entry_function), (unused, unused_host_function)]),
+        callable_environments: BTreeMap::new(),
         fingerprint: Digest::of_bytes(b"unreachable-host-capability-stale"),
     };
     program.fingerprint = program.computed_fingerprint();
@@ -3059,6 +3061,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
     let mut valid = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: Some(Digest::of_bytes(b"trusted-runtime-manifest")),
+        host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(callable, closure), (entry, entry_function)]),
         callable_environments: BTreeMap::from([(callable, environment.clone())]),
