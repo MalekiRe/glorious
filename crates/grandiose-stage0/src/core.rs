@@ -2134,7 +2134,7 @@ impl TypedBody {
             active_resumptions: vec![],
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
-            resumption_use_tracker: None,
+            resumption_use_trackers: vec![],
         };
         let expected_result = signatures
             .definitions
@@ -2318,7 +2318,7 @@ impl TypedBody {
             active_resumptions: vec![],
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
-            resumption_use_tracker: None,
+            resumption_use_trackers: vec![],
         };
         let mut parameters = vec![];
         for (parameter, ty) in context
@@ -2401,7 +2401,7 @@ impl TypedBody {
             active_resumptions: vec![],
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
-            resumption_use_tracker: None,
+            resumption_use_trackers: vec![],
         };
         let expected = match signatures.definitions.get(&definition.key) {
             Some(ElaboratedHeader::Constant(Some(ty))) => Some(ty.clone()),
@@ -2558,10 +2558,11 @@ struct Elaborator<'a> {
     /// entries cannot make a shadowing local resumptive.
     resumption_bindings: std::collections::BTreeMap<(String, u64), ActiveResumption>,
     active_labels: Vec<ActiveLabel>,
-    /// Installed only while one explicit handler arm is elaborated. Nested
-    /// handler arms replace and restore it, preserving lexical continuation
-    /// identity rather than counting an accidentally shadowed spelling.
-    resumption_use_tracker: Option<ResumptionUseTracker>,
+    /// One tracker for each lexically active explicit handler arm. Nested
+    /// arms keep enclosing trackers live: an outer continuation may be
+    /// resumed from a nested handler body, while an identically spelled inner
+    /// continuation remains a distinct branded value.
+    resumption_use_trackers: Vec<ResumptionUseTracker>,
 }
 impl Elaborator<'_> {
     fn pattern_generic_scope(&self) -> PatternGenericScope {
@@ -5462,10 +5463,10 @@ impl Elaborator<'_> {
         let Some(identity) = self.resumption_identity(id) else {
             return;
         };
-        if let Some(tracker) = &mut self.resumption_use_tracker
-            && tracker.identity.id == identity.id
-        {
-            tracker.direct_uses = tracker.direct_uses.saturating_add(1);
+        for tracker in &mut self.resumption_use_trackers {
+            if tracker.identity.id == identity.id {
+                tracker.direct_uses = tracker.direct_uses.saturating_add(1);
+            }
         }
     }
     fn assignment_place(&mut self, id: ExprId, span: Span) -> CorePlace {
@@ -6735,24 +6736,21 @@ impl Elaborator<'_> {
                     }
                 }
             }
-            let previous_tracker = active_identity.as_ref().map(|identity| {
-                self.resumption_use_tracker.replace(ResumptionUseTracker {
+            if let Some(identity) = active_identity.as_ref() {
+                self.resumption_use_trackers.push(ResumptionUseTracker {
                     identity: identity.clone(),
                     direct_uses: 0,
-                })
-            });
+                });
+            }
             let body = self.expression(clause.source.body);
             let direct_uses = if active_identity.is_some() {
-                self.resumption_use_tracker
-                    .take()
-                    .map(|tracker| tracker.direct_uses)
-                    .unwrap_or(0)
+                self.resumption_use_trackers
+                    .pop()
+                    .expect("active handler resumption must retain its use tracker")
+                    .direct_uses
             } else {
                 0
             };
-            if let Some(previous) = previous_tracker {
-                self.resumption_use_tracker = previous;
-            }
             if active_identity.is_some() {
                 self.active_resumptions
                     .pop()

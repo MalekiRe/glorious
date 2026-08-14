@@ -10800,6 +10800,14 @@ impl Lowerer<'_> {
         computation: CoreId,
         clauses: Vec<CoreHandlerClause>,
     ) -> Option<()> {
+        // This generic probe runs after the specialised resumptive handler
+        // lowerings.  A non-bottom computation is not a failed terminal
+        // program: leave it for those runtime-frame lowerings instead of
+        // emitting a misleading terminal diagnostic that prevents them from
+        // claiming the shape.
+        if !matches!(self.body.expression(computation).ty, Type::Never) {
+            return None;
+        }
         let (effect, operation, arguments) = self.terminal_operation(computation)?;
         let Some(clause) = clauses.iter().find(|clause| {
             clause.terminal && clause.effect == effect && clause.operation == operation

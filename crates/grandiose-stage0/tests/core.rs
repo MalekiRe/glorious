@@ -3293,6 +3293,41 @@ fn normalized_quantity_bounds_drive_finite_resumption_core_and_mir_contracts() {
 }
 
 #[test]
+fn nested_handler_arms_preserve_outer_resumption_use_tracking() {
+    let core = core_for(
+        "core-nested-resumption-use-tracking@0.1.0",
+        "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping() { Ping::ping() with inner => { let value = inner(41); outer(value) } } } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let mut uses = core
+        .expressions
+        .iter()
+        .filter_map(|expression| match &expression.kind {
+            CoreKind::Handle { clauses, .. } => clauses.first()?.continuation.as_ref(),
+            _ => None,
+        })
+        .map(|continuation| continuation.direct_uses)
+        .collect::<Vec<_>>();
+    uses.sort_unstable();
+    assert_eq!(uses, vec![1, 1]);
+}
+
+#[test]
+fn nested_handler_arms_reject_excess_outer_resumption_uses() {
+    let core = core_for(
+        "core-nested-resumption-use-rejection@0.1.0",
+        "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping() { Ping::ping() with inner => { let value = inner(41); outer(value) + outer(value) } } } }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6005"),
+        "the outer [1, 1] continuation must observe both nested calls: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn normalized_quantity_bounds_reject_implicit_one_shot_resumption() {
     let core = core_for(
         "core-handler-quantity-arithmetic-rejection@0.1.0",
