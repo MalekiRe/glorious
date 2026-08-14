@@ -949,6 +949,76 @@ fn placeflow_rejects_read_while_a_unique_borrow_is_live() {
 }
 
 #[test]
+fn forged_callable_lifetime_relation_cannot_retarget_a_second_argument() {
+    let mut core = core_for(
+        "core-forged-call-reference-relation@0.1.0",
+        "pub fn first<'a, 'b>(left: &'a i64, right: &'b i64) -> &'a i64 { left } pub fn main() -> i64 { let left = 1; let right = 2; let forwarded = first(&left, &right); *forwarded }",
+    );
+    let paths = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Call {
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(paths),
+                ..
+            } => Some(paths),
+            _ => None,
+        })
+        .expect("generic call did not retain its frozen relation");
+    paths[0].argument = 1;
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4187"),
+        "forged call retargeted a distinct generic lifetime: {:#?}",
+        core.validate()
+    );
+    let flow = PlaceFlow::analyze(&core);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-call-lifetime-relation")),
+        &core,
+        &flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR accepted a forged callable lifetime relation: {lowered:#?}"
+    );
+}
+
+#[test]
+fn higher_ranked_callable_relation_survives_local_region_opening() {
+    let core = core_for(
+        "core-hrtb-distinct-reference-relation@0.1.0",
+        "pub fn main(callback: for<'a> for<'b> (&'a i64, &'b i64) -> &'a i64) -> i64 { let left = 1; let right = 2; let forwarded = callback(&left, &right); left = 3; *forwarded }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let paths = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Call {
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(paths),
+                ..
+            } => Some(paths),
+            _ => None,
+        })
+        .expect("higher-ranked call did not retain its frozen relation");
+    assert_eq!(paths[0].argument, 0);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        !flow
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "higher-ranked relation became opaque after opening: {flow:#?}"
+    );
+}
+
+#[test]
 fn placeflow_tracks_a_live_field_borrow_back_to_its_root_local() {
     let package = PackageKey("core-projection-borrow@0.1.0".into());
     let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; move pair; loan; 0 }";
@@ -3412,6 +3482,29 @@ fn call_reference_provenance_tracks_tuple_and_nominal_result_paths() {
 }
 
 #[test]
+fn generic_lifetime_relation_selects_the_precise_call_reference_argument() {
+    let core = core_for(
+        "core-call-reference-distinct-generic-lifetimes@0.1.0",
+        "pub fn first<'a, 'b>(left: &'a i64, right: &'b i64) -> &'a i64 { left } pub fn main() -> i64 { let left = 1; let right = 2; let forwarded = first(&left, &right); left = 3; *forwarded }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        !flow
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "distinct generic lifetime relationship became opaque: {flow:#?}"
+    );
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5007"),
+        "call result did not retain the left argument's loan: {flow:#?}"
+    );
+}
+
+#[test]
 fn forged_call_reference_paths_fail_closed_before_ownership() {
     let mut core = core_for(
         "core-forged-call-reference-path@0.1.0",
@@ -3856,6 +3949,41 @@ fn selected_trait_methods_share_the_call_lifetime_constraint_boundary() {
             .any(|diagnostic| diagnostic.code == "G5017"),
         "{:#?}",
         rejected.diagnostics
+    );
+}
+
+#[test]
+fn trait_method_generic_lifetime_relation_freezes_the_selected_payload_path() {
+    let core = core_for(
+        "core-trait-method-distinct-lifetime-relation@0.1.0",
+        "trait First { fn first<'a, 'b>(receiver: i64, left: &'a i64, right: &'b i64) -> &'a i64; } impl First for i64 { fn first<'a, 'b>(receiver: i64, left: &'a i64, right: &'b i64) -> &'a i64 { left } } pub fn main() -> i64 { let left = 1; let right = 2; let forwarded = First::first(0, &left, &right); left = 3; *forwarded }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let paths = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Call {
+                reference_origin: grandiose_stage0::CallReferenceOrigin::Paths(paths),
+                ..
+            } => Some(paths),
+            _ => None,
+        })
+        .expect("trait method call did not retain its frozen relation");
+    assert_eq!(paths[0].argument, 1);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        !flow
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "trait method generic relation became opaque: {flow:#?}"
+    );
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5007"),
+        "trait method result did not preserve the selected caller loan: {flow:#?}"
     );
 }
 

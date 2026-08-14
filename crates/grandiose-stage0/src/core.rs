@@ -1175,19 +1175,35 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
 }
 
 fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type) -> Option<String> {
-    let (arguments, reference_origin, boundary) = match kind {
+    let (arguments, reference_origin, boundary, callable_contract) = match kind {
         CoreKind::Call {
+            callee,
             arguments,
             reference_origin,
             ..
-        } => (arguments, reference_origin, "call"),
+        } => (
+            arguments,
+            reference_origin,
+            "call",
+            body.expressions
+                .get(callee.0 as usize)
+                .and_then(|callee| callable_reference_origin_from_type(&callee.ty)),
+        ),
         CoreKind::Perform {
             arguments,
             reference_origin,
             ..
-        } => (arguments, reference_origin, "effect operation"),
+        } => (arguments, reference_origin, "effect operation", None),
         _ => return None,
     };
+    if let Some(contract) = callable_contract
+        && !matches!(contract, CallReferenceOrigin::Opaque)
+        && reference_origin != &contract
+    {
+        return Some(format!(
+            "reference-valued {boundary} does not match its frozen callable lifetime contract"
+        ));
+    }
     let is_reference = known_reference_bearing_type(result);
     match reference_origin {
         CallReferenceOrigin::None if is_reference => Some(format!(
@@ -4782,8 +4798,18 @@ impl Elaborator<'_> {
                 reference_origin,
                 ..
             } => {
-                *reference_origin =
-                    call_reference_origin(self.signatures, &self.expressions, arguments, result);
+                // Generic/HRTB callable signatures preserve a more precise
+                // relationship than the caller's erased local regions.  Once
+                // that contract names a unique source argument, keep it
+                // frozen instead of recomputing an ambiguous `Elided` match.
+                if matches!(reference_origin, CallReferenceOrigin::Opaque) {
+                    *reference_origin = call_reference_origin(
+                        self.signatures,
+                        &self.expressions,
+                        arguments,
+                        result,
+                    );
+                }
             }
             CoreKind::PatternTest {
                 pattern,
@@ -5944,6 +5970,12 @@ impl Elaborator<'_> {
                 "call argument count does not match callable signature",
             );
         }
+        // Preserve the declaration-owned lifetime relation before opening the
+        // callable into caller-local (usually elided) regions.  Two distinct
+        // generic or higher-ranked regions can legitimately both become
+        // `Elided` at this boundary; deriving provenance afterwards would
+        // make a precise result look ambiguous or, worse, pick a wrong loan.
+        let reference_origin = callable_reference_origin_from_contract(&parameters, &result);
         let Ok((parameters, result, effects)) =
             self.instantiate_call_lifetimes(parameters, *result, effects, &arguments, span)
         else {
@@ -5972,7 +6004,7 @@ impl Elaborator<'_> {
             CoreKind::Call {
                 callee,
                 arguments,
-                reference_origin: CallReferenceOrigin::Opaque,
+                reference_origin,
             },
             result,
             span,
@@ -9033,6 +9065,120 @@ fn call_reference_origin(
         });
     }
     CallReferenceOrigin::Paths(paths)
+}
+
+/// Recover the reference-result relation directly from a callable contract,
+/// before call instantiation turns distinct declaration/HRTB lifetimes into
+/// caller-local `Elided` regions.  This intentionally covers only structural
+/// shapes whose paths are self-describing in Core; richer nominal layouts use
+/// the interface-aware fallback after sealing.
+fn callable_reference_origin_from_type(ty: &Type) -> Option<CallReferenceOrigin> {
+    let Type::Callable {
+        parameters, result, ..
+    } = ty
+    else {
+        return None;
+    };
+    Some(callable_reference_origin_from_contract(parameters, result))
+}
+
+fn callable_reference_origin_from_contract(
+    parameters: &[Type],
+    result: &Type,
+) -> CallReferenceOrigin {
+    let mut result_leaves = vec![];
+    if contract_reference_leaf_paths(result, &mut vec![], &mut result_leaves).is_err() {
+        return CallReferenceOrigin::Opaque;
+    }
+    if result_leaves.is_empty() {
+        return CallReferenceOrigin::None;
+    }
+    if result_leaves.iter().all(|(_, ty)| {
+        matches!(
+            ty,
+            Type::Reference {
+                lifetime: Lifetime::Static,
+                ..
+            }
+        )
+    }) {
+        return CallReferenceOrigin::External;
+    }
+    let mut argument_leaves = vec![];
+    for (argument, parameter) in parameters.iter().enumerate() {
+        let mut leaves = vec![];
+        if contract_reference_leaf_paths(parameter, &mut vec![], &mut leaves).is_err() {
+            return CallReferenceOrigin::Opaque;
+        }
+        argument_leaves.extend(
+            leaves
+                .into_iter()
+                .map(|(fields, ty)| (argument as u32, fields, ty)),
+        );
+    }
+    let mut paths = vec![];
+    for (result_fields, result_ty) in result_leaves {
+        if matches!(
+            result_ty,
+            Type::Reference {
+                lifetime: Lifetime::Static,
+                ..
+            }
+        ) {
+            // Mixed static/caller-owned results need a path-level external
+            // representation, which the current frozen contract does not
+            // encode. Keep that case fail-closed rather than guessing.
+            return CallReferenceOrigin::Opaque;
+        }
+        let candidates = argument_leaves
+            .iter()
+            .filter(|(_, _, candidate)| candidate == &result_ty)
+            .collect::<Vec<_>>();
+        let [(argument, argument_fields, _)] = candidates.as_slice() else {
+            return CallReferenceOrigin::Opaque;
+        };
+        paths.push(CallReferencePath {
+            result_fields,
+            argument: *argument,
+            argument_fields: argument_fields.clone(),
+        });
+    }
+    CallReferenceOrigin::Paths(paths)
+}
+
+fn contract_reference_leaf_paths(
+    ty: &Type,
+    path: &mut Vec<u32>,
+    leaves: &mut Vec<(Vec<u32>, Type)>,
+) -> Result<(), ()> {
+    match ty {
+        Type::Reference { .. } => leaves.push((path.clone(), ty.clone())),
+        Type::Tuple(fields) => {
+            for (index, field) in fields.iter().enumerate() {
+                path.push(index as u32);
+                contract_reference_leaf_paths(field, path, leaves)?;
+                path.pop();
+            }
+        }
+        Type::Array(_)
+        | Type::Nominal { .. }
+        | Type::Projection { .. }
+        | Type::Generic(_)
+        | Type::Infer(_) => {
+            // Layout or a possible reference leaf is declaration-owned and
+            // cannot be reconstructed from an isolated callable value.
+            return Err(());
+        }
+        Type::Callable { .. }
+        | Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Error => {}
+    }
+    Ok(())
 }
 
 /// Discover direct reference leaves through the sealed structural shapes that
