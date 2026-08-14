@@ -360,6 +360,10 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    I64ToI128Wrapping {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     MakeTuple {
         dst: MirLocal,
         fields: Vec<MirLocal>,
@@ -1529,6 +1533,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::I64ToU128Checked { dst, .. }
         | MirInstruction::I64ToU128Wrapping { dst, .. }
         | MirInstruction::I64ToI128Checked { dst, .. }
+        | MirInstruction::I64ToI128Wrapping { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -3456,7 +3461,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::I64ToIsizeWrapping { .. }
         | MirInstruction::I64ToU128Checked { .. }
         | MirInstruction::I64ToU128Wrapping { .. }
-        | MirInstruction::I64ToI128Checked { .. } => Ok(()),
+        | MirInstruction::I64ToI128Checked { .. }
+        | MirInstruction::I64ToI128Wrapping { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -4206,7 +4212,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::I64ToIsizeWrapping { dst, value }
         | MirInstruction::I64ToU128Checked { dst, value }
         | MirInstruction::I64ToU128Wrapping { dst, value }
-        | MirInstruction::I64ToI128Checked { dst, value } => vec![*dst, *value],
+        | MirInstruction::I64ToI128Checked { dst, value }
+        | MirInstruction::I64ToI128Wrapping { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -14080,6 +14087,29 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::I64ToU128Wrapping { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::IntConvertWrappingToI128) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic wrapping i128 conversion requires one operand",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::I128)
+                                {
+                                    self.error("G6005", "generic wrapping i128 conversion is only VM-specialized for frozen i64");
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::I64ToI128Wrapping { dst, value: *value });
                             }
                             Some(PrimitiveRole::IntConvertWrappingToIsize) => {
                                 let [value] = arguments.as_slice() else {
