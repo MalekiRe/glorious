@@ -3054,3 +3054,49 @@ fn handler_clause_label_transfer_preserves_brand_cleanup_and_vm_frame_exit() {
         42
     );
 }
+
+#[test]
+fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
+    let core = core_for(
+        "core-completion-label-transfer@0.1.0",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { label done { handle Ask::ask() { value => transfer done value, Ask::ask() => 42 } } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("outer label owner");
+    let lowered = MirLowering::lower(owner, &core, &flow);
+    let mir = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "completion transfer lowers through Leave: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    assert!(
+        mir.blocks[0]
+            .instructions
+            .iter()
+            .any(|instruction| matches!(
+                instruction,
+                grandiose_stage0::MirInstruction::UninstallHandler
+            ))
+    );
+    assert!(matches!(
+        mir.blocks[1].terminator,
+        grandiose_stage0::MirTerminator::Leave { .. }
+    ));
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("emit completion leave");
+    assert_eq!(
+        grandiose_stage0::verify_vm(artifact)
+            .expect("verify completion leave")
+            .run_i64()
+            .expect("run completion leave"),
+        42
+    );
+}

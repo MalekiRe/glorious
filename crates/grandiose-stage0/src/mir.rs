@@ -1043,6 +1043,24 @@ impl MirLowering {
                 local
             })
             .collect::<Vec<_>>();
+        // A direct normal-completion clause may leave after the protected
+        // frame has been uninstalled.
+        if let Some(function) =
+            lowerer.lower_root_label_completion_leave(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         // A direct handler clause may itself take the lexically branded leave.
         // Claim that full frame-aware edge before generic label or handler
         // probes inspect the body as an ordinary value expression.
@@ -2221,6 +2239,179 @@ struct SiblingHandlerDispatch<'a> {
 }
 
 impl Lowerer<'_> {
+    /// Lower one direct normal-completion arm that leaves an enclosing label.
+    /// The operation frame is resumed on its own block; the restored protected
+    /// path executes `UninstallHandler` before entering the completion block,
+    /// so the completion `Leave` carries only the lexical cleanup proof and
+    /// cannot retain a stale continuation capability.
+    fn lower_root_label_completion_leave(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (label, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => (root, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Label { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let completion = match self.body.expression(body).kind.clone() {
+            CoreKind::Completion { .. } => body,
+            CoreKind::Block(values) => *values.last()?,
+            _ => return None,
+        };
+        let CoreKind::Completion {
+            computation,
+            clauses: completion_clauses,
+        } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+        let [completion_clause] = completion_clauses.as_slice() else {
+            return None;
+        };
+        if !pattern_is_irrefutable(&completion_clause.pattern)
+            || !self.contains_label_transfer(completion_clause.body, brand)
+        {
+            return None;
+        }
+        let CoreKind::Handle {
+            computation: protected,
+            clauses: operation_clauses,
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+        } = self.body.expression(protected).kind.clone()
+        else {
+            return None;
+        };
+        let matching = operation_clauses
+            .iter()
+            .filter(|clause| clause.effect == effect && clause.operation == operation)
+            .collect::<Vec<_>>();
+        let [operation_clause] = matching.as_slice() else {
+            return None;
+        };
+        let quantity = match operation_clause.resumption {
+            CoreHandlerResumption::Tail { quantity }
+            | CoreHandlerResumption::Explicit { quantity, .. } => quantity,
+            CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => return None,
+        };
+        if quantity != crate::quantity::Quantity::ONCE
+            || operation_clause.terminal
+            || operation_clause.patterns.len() != argument_ids.len()
+            || !operation_clause.patterns.iter().all(pattern_is_irrefutable)
+        {
+            return None;
+        }
+        for value in root_prefix {
+            self.statement(value)?;
+        }
+        let payloads = operation_clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), protected))
+            .collect::<Vec<_>>();
+        let performed = self.alloc(self.body.expression(protected).ty.clone(), protected);
+        let arguments = argument_ids
+            .iter()
+            .map(|id| self.value(*id))
+            .collect::<Option<Vec<_>>>()?;
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payloads.clone(),
+            resume_type: self.body.expression(protected).ty.clone(),
+            target: MirBlockId(2),
+        });
+        entry.push(MirInstruction::Perform {
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+
+        let completion_subject =
+            self.alloc(self.body.expression(protected).ty.clone(), CoreId(u32::MAX));
+        let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(
+            std::slice::from_ref(&completion_clause.pattern),
+            &[completion_subject],
+        )?;
+        let completed = self.lower_label_transfer_path(completion_clause.body, brand)?;
+        let completion_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.bind_handler_patterns(&operation_clause.patterns, &payloads)?;
+        let resumed = self.direct_handler_clause_value(operation_clause)?;
+        self.instructions
+            .push(MirInstruction::Resume { value: resumed });
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(1),
+                        arguments: vec![performed],
+                    },
+                },
+                MirBlock {
+                    parameters: vec![completion_subject],
+                    instructions: completion_instructions,
+                    terminator: MirTerminator::Leave {
+                        brand,
+                        target: MirBlockId(3),
+                        arguments: vec![completed],
+                        cleanup: MirCleanupPlan {
+                            moved_places: self.leave_cleanup.moved_places.clone(),
+                            active_loans: self.leave_cleanup.active_loans.clone(),
+                        },
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+            ],
+        })
+    }
     /// Lower the first frame-aware label boundary: one directly selected,
     /// irrefutable operation clause may leave an enclosing lexical label.
     /// The protected computation retains its ordinary uninstall path, while
