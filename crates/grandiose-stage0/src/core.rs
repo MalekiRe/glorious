@@ -5801,7 +5801,18 @@ impl Elaborator<'_> {
         let mut substitution = CallLifetimeSubstitution::default();
         let mut aligned_parameters = Vec::with_capacity(parameters.len());
         for (parameter, argument) in parameters.iter().zip(arguments) {
-            let actual = self.expressions[argument.0 as usize].ty.clone();
+            let raw_actual = self.expressions[argument.0 as usize].ty.clone();
+            // A local can retain a solved inference variable in an otherwise
+            // structural nominal application until Typed Core is sealed. The
+            // lifetime relation must inspect that solved shape before it
+            // opens a callee's region binders; otherwise `Box<&'a T>` looks
+            // opaque and leaves `'a` uninstantiated in the result. Keep the
+            // raw value when unrelated inference remains open so ordinary
+            // call unification still owns that diagnostic.
+            let actual = self
+                .inference
+                .zonk(raw_actual.clone())
+                .unwrap_or(raw_actual);
             let aligned = match align_lifetime_types(
                 parameter,
                 &actual,

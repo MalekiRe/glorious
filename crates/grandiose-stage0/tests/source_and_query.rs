@@ -439,6 +439,27 @@ fn label_sigil_is_a_lossless_operator_before_its_identifier() {
 }
 
 #[test]
+fn generic_type_delimiters_split_before_reference_and_bottom_starters_only() {
+    let snapshot = snapshot();
+    let file = snapshot.world().sources[0].key;
+    let source = "Option<&'a T> Result<!, E> value<=other";
+    let lexed = grandiose_stage0::LexedFile::lex(file, source);
+    let significant = lexed
+        .tokens
+        .iter()
+        .filter(|token| !matches!(token.kind, TokenKind::Whitespace | TokenKind::End))
+        .map(|token| lexed.text(source, token))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        significant,
+        [
+            "Option", "<", "&", "'a", "T", ">", "Result", "<", "!", ",", "E", ">", "value", "<=",
+            "other"
+        ]
+    );
+}
+
+#[test]
 fn memo_publication_is_revision_qualified_and_records_dependencies() {
     let snapshot = snapshot();
     let memo = MemoTable::<String, u32>::new();

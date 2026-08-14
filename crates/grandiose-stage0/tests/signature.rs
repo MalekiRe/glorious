@@ -1525,6 +1525,28 @@ fn nominal_and_alias_applications_require_their_declared_generic_arity() {
 }
 
 #[test]
+fn polymorphic_enum_constructor_value_aliases_do_not_require_spurious_type_arguments() {
+    let package = PackageKey("signature-polymorphic-constructor-alias@0.1.0".into());
+    let source = "pub enum Result<T, E> { Ok(T), Err(E) } type Option<T> = Result<T, ()>; let Option::Some = Result::Ok; let None = Result::Err(()); pub fn references<'a, T, E>(value: Option<&'a T>) -> Result<!, E> { () }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/lib.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        !signatures
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3305"),
+        "polymorphic constructor aliases were treated as missing nominal applications: {:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn nominal_layout_field_types_are_elaborated_and_alias_normalized() {
     let package = PackageKey("signature-nominal-layout@0.1.0".into());
     let source = "type Count = i64; pub struct Pair<T> { left: T, count: Count }";
