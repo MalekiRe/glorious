@@ -3500,6 +3500,47 @@ fn result_carried_bool_literals_and_patterns_remain_source_level_control() {
 }
 
 #[test]
+fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handlers() {
+    let comparison = core_for(
+        "core-nominal-bool-integer-comparison@0.1.0",
+        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; infixl 20 <=; pub fn main(value: u32) -> Bool { handle value <= 1114111 { true => true, false => false } }",
+    );
+    assert!(
+        comparison.diagnostics.is_empty(),
+        "{:#?}",
+        comparison.diagnostics
+    );
+    assert!(comparison.expressions.iter().any(|expression| {
+        matches!(
+            expression.kind,
+            CoreKind::Binary { ref operator, right, .. }
+                if operator == "<="
+                    && comparison.expression(right).ty == Type::Scalar(ScalarType::U32)
+        )
+    }));
+
+    let terminal_handler = core_for(
+        "core-nominal-bool-terminal-handler@0.1.0",
+        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; effect Branch { select(value: u32) -> ! } pub fn main(value: u32) -> Bool { handle Branch::select(value) { Branch::select(0) => false, Branch::select(_) => true } }",
+    );
+    assert!(
+        terminal_handler.diagnostics.is_empty(),
+        "{:#?}",
+        terminal_handler.diagnostics
+    );
+    assert_eq!(
+        terminal_handler.expression(terminal_handler.root).ty,
+        terminal_handler
+            .expressions
+            .iter()
+            .find_map(|expression| {
+                matches!(expression.kind, CoreKind::Enum { .. }).then(|| expression.ty.clone())
+            })
+            .expect("terminal handler Bool literals lower to the nominal carrier")
+    );
+}
+
+#[test]
 fn handler_pattern_matrix_rejects_duplicate_unbounded_literal_rows() {
     let core = core_for(
         "core-handler-pattern-unbounded-literal@0.1.0",

@@ -7965,7 +7965,13 @@ impl Elaborator<'_> {
         active_operations.extend(covered_operations);
         let previous_operations =
             std::mem::replace(&mut self.handled_operations, active_operations);
-        let result = self.inference.fresh();
+        // A handler is an expression boundary just like a block or a direct
+        // call.  Its declared result must therefore constrain operation-arm
+        // bodies before they are elaborated.  This matters for the canonical
+        // `Bool` carrier (`Result<(), ()>`): a terminal arm written as
+        // `true`/`false` otherwise falls back to the legacy scalar literal
+        // and only fails at the outer function boundary.
+        let result = expected.clone().unwrap_or_else(|| self.inference.fresh());
         let computation = self.expression(computation);
         let computation_ty = self.expressions[computation.0 as usize].ty.clone();
         if !matches!(computation_ty, Type::Never)
@@ -8116,7 +8122,13 @@ impl Elaborator<'_> {
             let clause_effects = std::mem::replace(&mut self.handled_effects, previous.clone());
             let clause_operations =
                 std::mem::replace(&mut self.handled_operations, previous_operations.clone());
-            let body = self.expression(clause.source.body);
+            let body_expected = match &resumption {
+                CoreHandlerResumption::Tail { .. } => Some(clause.operation.result.clone()),
+                CoreHandlerResumption::Explicit { .. }
+                | CoreHandlerResumption::Discard { .. }
+                | CoreHandlerResumption::Terminal => Some(result.clone()),
+            };
+            let body = self.expression_expected(clause.source.body, body_expected);
             self.handled_effects = clause_effects;
             self.handled_operations = clause_operations;
             let direct_uses = if active_identity.is_some() {
@@ -9819,10 +9831,26 @@ impl Elaborator<'_> {
         let Some(operator) = operators.pop() else {
             return false;
         };
-        let (Some(right), Some(left)) = (values.pop(), values.pop()) else {
+        let (Some(mut right), Some(left)) = (values.pop(), values.pop()) else {
             return false;
         };
         let left_ty = self.expressions[left.0 as usize].ty.clone();
+        // Operators are elaborated from their receiver outward.  A numeric
+        // source literal on the right has no inherent width, so preserve the
+        // receiver's concrete scalar width before testing the primitive or
+        // trait route.  Without this, `u32 <= 1114111` becomes a `u32`/`i64`
+        // trait call and the canonical character/float helpers fail before
+        // their nominal Bool result can reach source control flow.
+        let numeric_literal = match &self.expressions[right.0 as usize].kind {
+            CoreKind::Literal(text) if literal_is_numeric(text) => Some(text.clone()),
+            _ => None,
+        };
+        if let (Some(text), Type::Scalar(scalar)) = (numeric_literal, left_ty.clone())
+            && scalar_is_numeric(scalar)
+        {
+            let literal_span = self.expressions[right.0 as usize].span;
+            right = self.literal_expected(text, Some(Type::Scalar(scalar)), literal_span);
+        }
         let right_ty = self.expressions[right.0 as usize].ty.clone();
         // Built-in arithmetic is homogeneous, but a trait operator is not:
         // `Index::[]`, comparisons against a wrapper, and application-style
@@ -9837,7 +9865,15 @@ impl Elaborator<'_> {
                 return true;
             }
         };
-        let numeric = matches!(operand_ty, Type::Scalar(ScalarType::I64 | ScalarType::F64));
+        // Scalar comparisons are compiler primitives across every concrete
+        // integer width, not only the legacy default `i64`.  Their result is
+        // the scalar predicate consumed by `handle`/`is`; source-level Bool
+        // carriers are constructed at the surrounding contextual boundary.
+        // Routing `u32 <= value` through traits is wrong: `<=` and `!=` are
+        // primitive spellings rather than trait-method names in the canonical
+        // surface, and it leaves otherwise valid standard-library control
+        // flow without an implementation candidate.
+        let numeric = matches!(operand_ty, Type::Scalar(scalar) if scalar_is_numeric(scalar));
         let text = matches!(operand_ty, Type::Scalar(ScalarType::Text));
         let ordered = numeric || matches!(operand_ty, Type::Scalar(ScalarType::Char));
         let equality = ordered
