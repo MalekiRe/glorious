@@ -296,6 +296,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
                             PrimitiveRole::IntConvertWrappingToU64,
                             PrimitiveRole::IntConvertCheckedToIsize,
                             PrimitiveRole::IntConvertWrappingToIsize,
+                            PrimitiveRole::IntConvertCheckedToU128,
                             PrimitiveRole::IntShr,
                         ]
                         .map(PrimitiveRole::selector_name)

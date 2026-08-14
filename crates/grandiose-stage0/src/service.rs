@@ -1176,6 +1176,7 @@ impl StageZeroCompiler {
                         crate::PrimitiveRole::IntConvertWrappingToU64,
                         crate::PrimitiveRole::IntConvertCheckedToIsize,
                         crate::PrimitiveRole::IntConvertWrappingToIsize,
+                        crate::PrimitiveRole::IntConvertCheckedToU128,
                         crate::PrimitiveRole::IntWrappingSub,
                         crate::PrimitiveRole::IntWrappingMul,
                         crate::PrimitiveRole::IntEqual,
