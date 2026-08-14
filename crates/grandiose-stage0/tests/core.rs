@@ -300,6 +300,41 @@ fn placeflow_tracks_a_field_borrow_back_to_its_root_local() {
 }
 
 #[test]
+fn placeflow_conservatively_consumes_a_root_after_a_projection_move() {
+    let package = PackageKey("core-projection-move@0.1.0".into());
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair.right }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.unwrap());
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5001"),
+        "a projection move must consume its root until partial moves are tracked: {:#?}",
+        flow.diagnostics
+    );
+}
+
+#[test]
 fn typed_core_and_placeflow_lower_to_validated_mir() {
     let package = PackageKey("core@0.1.0".into());
     let source = "pub fn main() -> i64 { let value = 1; value + 2 }";

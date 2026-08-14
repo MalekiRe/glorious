@@ -97,8 +97,13 @@ impl Analyzer<'_> {
             }
             CoreKind::Move(v) => {
                 self.visit(v);
-                if let CoreKind::Local(n) = &self.body.expression(v).kind {
-                    self.move_(n, e.span)
+                // A field is a place projection into its root local.  The
+                // current flow domain does not retain per-field move paths,
+                // so consuming a projection must conservatively consume the
+                // owner too.  That preserves the essential ownership
+                // invariant until partial-move states are represented.
+                if let Some(name) = self.root_local(v).map(str::to_owned) {
+                    self.move_(&name, e.span)
                 }
             }
             CoreKind::Unary { value, .. } => self.visit(value),
