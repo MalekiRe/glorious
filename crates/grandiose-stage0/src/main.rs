@@ -3,9 +3,10 @@
 use std::{collections::BTreeMap, env, fs, process::ExitCode};
 
 use grandiose_stage0::{
-    BootstrapLimits, BootstrapStage, CompilationMode, CompilationRequest, CompileDiagnostic,
-    CompilerBuildIdentity, Digest, LogicalPath, PackageKey, PrimitiveRole, PrimitiveSelector,
-    RuntimeManifestInput, SourceInput, StageZeroCompiler, decode_and_verify_program,
+    BootstrapLimits, BootstrapManifest, BootstrapStage, CompilationMode, CompilationRequest,
+    CompileDiagnostic, CompilerBuildIdentity, Digest, LogicalPath, PackageKey, PrimitiveRole,
+    PrimitiveSelector, RuntimeManifestInput, SourceInput, StageZeroCompiler,
+    decode_and_verify_program,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -58,6 +59,42 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
         return verify_program(&path);
+    }
+    if command == "verify-bootstrap" {
+        let Some(earlier_program) = arguments.next() else {
+            eprintln!(
+                "grc-stage0: verify-bootstrap requires EARLIER_PROGRAM EARLIER_MANIFEST LATER_PROGRAM LATER_MANIFEST"
+            );
+            return ExitCode::from(2);
+        };
+        let Some(earlier_manifest) = arguments.next() else {
+            eprintln!(
+                "grc-stage0: verify-bootstrap requires EARLIER_PROGRAM EARLIER_MANIFEST LATER_PROGRAM LATER_MANIFEST"
+            );
+            return ExitCode::from(2);
+        };
+        let Some(later_program) = arguments.next() else {
+            eprintln!(
+                "grc-stage0: verify-bootstrap requires EARLIER_PROGRAM EARLIER_MANIFEST LATER_PROGRAM LATER_MANIFEST"
+            );
+            return ExitCode::from(2);
+        };
+        let Some(later_manifest) = arguments.next() else {
+            eprintln!(
+                "grc-stage0: verify-bootstrap requires EARLIER_PROGRAM EARLIER_MANIFEST LATER_PROGRAM LATER_MANIFEST"
+            );
+            return ExitCode::from(2);
+        };
+        if arguments.next().is_some() {
+            usage();
+            return ExitCode::from(2);
+        }
+        return verify_bootstrap(
+            &earlier_program,
+            &earlier_manifest,
+            &later_program,
+            &later_manifest,
+        );
     }
     let Some(path) = arguments.next() else {
         eprintln!("grc-stage0: {command} requires a source FILE");
@@ -340,6 +377,66 @@ fn verify_program(path: &str) -> ExitCode {
     }
 }
 
+fn verify_bootstrap(
+    earlier_program_path: &str,
+    earlier_manifest_path: &str,
+    later_program_path: &str,
+    later_manifest_path: &str,
+) -> ExitCode {
+    let load_program = |path: &str| match fs::read(path) {
+        Ok(bytes) => decode_and_verify_program(&bytes)
+            .map_err(|error| format!("program verification failed: {error:?}")),
+        Err(error) => Err(format!("cannot read {path}: {error}")),
+    };
+    let load_manifest = |path: &str| match fs::read(path) {
+        Ok(bytes) => BootstrapManifest::decode(&bytes)
+            .map_err(|error| format!("bootstrap manifest is invalid: {error:?}")),
+        Err(error) => Err(format!("cannot read {path}: {error}")),
+    };
+    let earlier_program = match load_program(earlier_program_path) {
+        Ok(program) => program,
+        Err(error) => {
+            eprintln!("grc-stage0: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let earlier_manifest = match load_manifest(earlier_manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("grc-stage0: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let later_program = match load_program(later_program_path) {
+        Ok(program) => program,
+        Err(error) => {
+            eprintln!("grc-stage0: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let later_manifest = match load_manifest(later_manifest_path) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            eprintln!("grc-stage0: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(error) = earlier_manifest.validate_verified_artifact(&earlier_program) {
+        eprintln!("grc-stage0: earlier bootstrap manifest does not match its program: {error:?}");
+        return ExitCode::from(1);
+    }
+    if let Err(error) = later_manifest.validate_verified_artifact(&later_program) {
+        eprintln!("grc-stage0: later bootstrap manifest does not match its program: {error:?}");
+        return ExitCode::from(1);
+    }
+    if let Err(error) = earlier_manifest.compare_convergence(&later_manifest) {
+        eprintln!("grc-stage0: bootstrap convergence failed: {error:?}");
+        return ExitCode::from(1);
+    }
+    println!("{}", later_program.fingerprint());
+    ExitCode::SUCCESS
+}
+
 fn usage() {
     eprintln!("usage: grc-stage0 [--diagnostics text|json] [RUNTIME] <check|run> FILE");
     eprintln!("       grc-stage0 [--diagnostics text|json] [RUNTIME] emit-vm SOURCE OUTPUT");
@@ -347,6 +444,9 @@ fn usage() {
         "       grc-stage0 [--diagnostics text|json] [RUNTIME] emit-bootstrap-vm SOURCE OUTPUT MANIFEST"
     );
     eprintln!("       grc-stage0 [--diagnostics text|json] verify-vm PROGRAM");
+    eprintln!(
+        "       grc-stage0 [--diagnostics text|json] verify-bootstrap EARLIER_PROGRAM EARLIER_MANIFEST LATER_PROGRAM LATER_MANIFEST"
+    );
     eprintln!("RUNTIME: --runtime-standard-library PACKAGE");
     eprintln!("         --runtime-leaf ROLE MODULE NAME  (repeatable)");
     eprintln!("SOURCES: --root-package PACKAGE");
