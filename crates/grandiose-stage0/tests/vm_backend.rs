@@ -682,6 +682,49 @@ fn checked_i64_to_u16_rejects_negative_out_of_range_and_type_confusion() {
 }
 
 #[test]
+fn checked_i64_to_i16_rejects_out_of_range_and_type_confusion() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"i64-i16-checked")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, VmType::I16],
+        instructions: vec![
+            VmInstruction::ConstI64 {
+                dst: 0,
+                value: 32_768,
+            },
+            VmInstruction::I64ToI16Checked { dst: 1, value: 0 },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        decode_and_verify_artifact(&encode_artifact(&candidate))
+            .unwrap()
+            .run_i16(),
+        Err(VmArtifactError::ArithmeticOverflow)
+    ));
+    let mut forged = candidate;
+    forged.function.registers[0] = VmType::Bool;
+    forged.fingerprint = forged.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(forged),
+        Err(VmArtifactError::TypeMismatch {
+            register: 0,
+            expected: VmType::I64,
+            found: VmType::Bool
+        })
+    ));
+}
+
+#[test]
 fn checked_i64_to_u32_rejects_negative_out_of_range_and_type_confusion() {
     let function = VmFunction {
         nominal_copy_descriptors: vec![],
