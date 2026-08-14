@@ -1278,6 +1278,32 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        if let Some(function) =
+            lowerer.lower_root_interprocedural_ordered_handler_matrix(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer
             .lower_root_interprocedural_ordered_one_shot_handler(body.root, parameters.clone())
         {
@@ -7919,6 +7945,340 @@ impl Lowerer<'_> {
                     },
                 },
             ],
+        })
+    }
+
+    /// Lower several independent ordered pattern matrices around one normal
+    /// callee call. Each dynamic operation owns one frame and one source-order
+    /// matrix; a failed row never falls into a sibling operation's clauses.
+    /// Instead, an incomplete matrix `Forward`s its still-suspended operation
+    /// to the enclosing dynamic frame, preserving nested handler restoration.
+    fn lower_root_interprocedural_ordered_handler_matrix(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Call { callee, arguments } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.effects.is_empty() || effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let matching = clauses
+            .iter()
+            .filter(|clause| !clause.terminal && effects.effects.contains(&clause.effect))
+            .collect::<Vec<_>>();
+        // Every source operation arm must participate. An unrelated or
+        // terminal arm needs a broader matrix proof than this runtime slice.
+        if matching.is_empty() || matching.len() != clauses.len() {
+            return None;
+        }
+        let mut grouped = BTreeMap::new();
+        for clause in matching {
+            grouped
+                .entry((clause.effect.clone(), clause.operation))
+                .or_insert_with(Vec::new)
+                .push(clause);
+        }
+        if grouped.len() < 2 {
+            return None;
+        }
+        let groups = grouped.into_values().collect::<Vec<_>>();
+        if groups.iter().any(|group| {
+            let fallback = group
+                .iter()
+                .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable));
+            fallback.is_some_and(|index| index + 1 != group.len())
+                || group.iter().any(|clause| {
+                    clause.patterns.len() != clause.payload_types.len()
+                        || !matches!(
+                            clause.resumption,
+                            CoreHandlerResumption::Tail {
+                                quantity: crate::quantity::Quantity::ONCE
+                            } | CoreHandlerResumption::Explicit {
+                                quantity: crate::quantity::Quantity::ONCE,
+                                ..
+                            }
+                        )
+                        || clause.continuation.is_none()
+                        || self.handler_body_uses_snapshot_alias(clause.body)
+                })
+                || group.windows(2).any(|pair| {
+                    pair[0]
+                        .continuation
+                        .as_ref()
+                        .zip(pair[1].continuation.as_ref())
+                        .is_none_or(|(left, right)| left.parameter != right.parameter)
+                })
+        }) {
+            return None;
+        }
+
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let payloads = groups
+            .iter()
+            .map(|group| {
+                group[0]
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), computation))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        // Reserve every target before emitting the entry. The resulting CFG
+        // has stable source-order rows within each operation and stable
+        // canonical ordering between independently dispatched operations.
+        let mut next = 1_u32;
+        let body_blocks = groups
+            .iter()
+            .map(|group| {
+                (0..group.len())
+                    .map(|_| {
+                        let id = MirBlockId(next);
+                        next += 1;
+                        id
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let test_blocks = groups
+            .iter()
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|clause| {
+                        (0..if clause.patterns.iter().all(pattern_is_irrefutable) {
+                            0
+                        } else {
+                            clause.patterns.len()
+                        })
+                            .map(|_| {
+                                let id = MirBlockId(next);
+                                next += 1;
+                                id
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let forward_blocks = groups
+            .iter()
+            .map(|group| {
+                (!group
+                    .iter()
+                    .any(|clause| clause.patterns.iter().all(pattern_is_irrefutable)))
+                .then_some(MirBlockId(u32::MAX))
+            })
+            .collect::<Vec<_>>();
+        let mut forward_blocks = forward_blocks;
+        for block in forward_blocks.iter_mut().flatten() {
+            *block = MirBlockId(next);
+            next += 1;
+        }
+
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (index, group) in groups.iter().enumerate() {
+            let target = test_blocks[index][0]
+                .first()
+                .copied()
+                .unwrap_or(body_blocks[index][0]);
+            entry.push(MirInstruction::InstallHandler {
+                effect: group[0].effect.definition,
+                effect_arguments: group[0].effect.arguments.clone(),
+                operation: group[0].operation,
+                payload_destinations: payloads[index].clone(),
+                resume_type: group[0]
+                    .continuation
+                    .as_ref()
+                    .expect("ordered arm has frozen continuation contract")
+                    .parameter
+                    .clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target,
+            });
+        }
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: result,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        for _ in &groups {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let mut bodies = Vec::new();
+        for (group, payloads) in groups.iter().zip(&payloads) {
+            for clause in group {
+                self.instructions = Vec::new();
+                self.named = boundary_named.clone();
+                self.values = boundary_values.clone();
+                self.bind_handler_patterns(&clause.patterns, payloads)?;
+                let value = self.direct_handler_clause_value(clause)?;
+                self.instructions.push(MirInstruction::Resume { value });
+                bodies.push(std::mem::take(&mut self.instructions));
+            }
+        }
+        self.named = boundary_named;
+        self.values = boundary_values;
+
+        let mut tests = Vec::new();
+        for ((group, ids), payloads) in groups.iter().zip(&test_blocks).zip(&payloads) {
+            for (clause, clause_ids) in group.iter().zip(ids) {
+                tests.push(
+                    clause
+                        .patterns
+                        .iter()
+                        .cloned()
+                        .zip(payloads.iter().copied())
+                        .zip(clause_ids.iter().copied())
+                        .map(|((pattern, subject), id)| {
+                            Some((
+                                id,
+                                self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root),
+                                subject,
+                                lower_pattern(pattern)?,
+                            ))
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                );
+            }
+        }
+
+        let mut blocks = vec![MirBlock {
+            parameters: vec![],
+            instructions: entry,
+            terminator: MirTerminator::Return { value: result },
+        }];
+        blocks.extend(bodies.into_iter().map(|instructions| MirBlock {
+            parameters: vec![],
+            instructions,
+            terminator: MirTerminator::Unreachable,
+        }));
+        let mut flat = 0;
+        for (group_index, group) in groups.iter().enumerate() {
+            for clause_index in 0..group.len() {
+                let values = &tests[flat];
+                flat += 1;
+                for (test_index, (id, condition, subject, pattern)) in
+                    values.iter().cloned().enumerate()
+                {
+                    let failure = test_blocks[group_index][clause_index]
+                        .get(test_index + 1)
+                        .copied()
+                        .or_else(|| {
+                            test_blocks[group_index]
+                                .get(clause_index + 1)
+                                .and_then(|ids| ids.first())
+                                .copied()
+                        })
+                        .or_else(|| body_blocks[group_index].get(clause_index + 1).copied())
+                        .or(forward_blocks[group_index])
+                        .expect("partial operation matrix has a forwarding edge");
+                    blocks.push(MirBlock {
+                        parameters: vec![],
+                        instructions: vec![MirInstruction::PatternTest {
+                            dst: condition,
+                            subject,
+                            pattern,
+                        }],
+                        terminator: MirTerminator::SwitchBool {
+                            condition,
+                            then_target: test_blocks[group_index][clause_index]
+                                .get(test_index + 1)
+                                .copied()
+                                .unwrap_or(body_blocks[group_index][clause_index]),
+                            then_arguments: vec![],
+                            else_target: failure,
+                            else_arguments: vec![],
+                        },
+                    });
+                    debug_assert_eq!(id.0, blocks.len() as u32 - 1);
+                }
+            }
+        }
+        for forward in forward_blocks.into_iter().flatten() {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward],
+                terminator: MirTerminator::Unreachable,
+            });
+            debug_assert_eq!(forward.0, blocks.len() as u32 - 1);
+        }
+        debug_assert_eq!(next as usize, blocks.len());
+        Some(MirFunction {
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
         })
     }
 

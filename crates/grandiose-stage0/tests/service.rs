@@ -3341,6 +3341,100 @@ fn service_orders_refutable_handler_clauses_around_an_interprocedural_call() {
 }
 
 #[test]
+fn service_orders_generic_multi_operation_matrices_around_an_interprocedural_call() {
+    let source = "effect Console<T> { [1, 1] read(value: T) -> Text; [1, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let read = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { handle helper(40) { Console<i64>::read(0) with k => k(\"zero\"); Console<i64>::read(_) with k => k(\"value\"); Console<i64>::write(0) with k => k(0); Console<i64>::write(_) with k => k(42) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. }))
+            .count(),
+        2,
+        "one dynamic frame is required for each independently ordered operation matrix"
+    );
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            operation: 0,
+            effect_arguments,
+            resume_type: VmType::Text,
+            ..
+        } if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
+    )));
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            operation: 1,
+            effect_arguments,
+            resume_type: VmType::I64,
+            ..
+        } if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
+    )));
+    assert!(
+        program.functions.values().any(|function| function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::PatternTest { .. }))),
+        "refutable source rows must remain VM pattern tests"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_orders_generic_multi_operation_matrices_through_a_function_value() {
+    let source = "effect Console<T> { [1, 1] read(value: T) -> Text; [1, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let read = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Console<i64>::read(0) with k => k(\"zero\"); Console<i64>::read(_) with k => k(\"value\"); Console<i64>::write(0) with k => k(0); Console<i64>::write(_) with k => k(42) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        "the matrix must keep the function-value call boundary"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_a_forged_ordered_matrix_handler_target() {
+    let source = "effect Console<T> { [1, 1] read(value: T) -> Text; [1, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let read = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { handle helper(40) { Console<i64>::read(0) with k => k(\"zero\"); Console<i64>::read(_) with k => k(\"value\"); Console<i64>::write(0) with k => k(0); Console<i64>::write(_) with k => k(42) } }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap()
+        .artifact
+        .unwrap();
+    let mut forged = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = forged.functions.get_mut(&forged.entry).unwrap();
+    let VmInstruction::InstallHandler { target, .. } = entry
+        .instructions
+        .iter_mut()
+        .find(|instruction| {
+            matches!(
+                instruction,
+                VmInstruction::InstallHandler { operation: 0, .. }
+            )
+        })
+        .expect("generated ordered matrix installs its read frame")
+    else {
+        unreachable!("the selected instruction is an InstallHandler")
+    };
+    *target = 0;
+    forged.fingerprint = forged.computed_fingerprint();
+    assert!(
+        decode_and_verify_program(&encode_program(&forged)).is_err(),
+        "a forged caller cannot make normal entry flow reach a handler clause"
+    );
+}
+
+#[test]
 fn service_forwards_a_partial_refutable_interprocedural_handler_to_an_outer_frame() {
     let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn leaf(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn partial(value: i64) -> i64 / Ask { handle leaf(value) { Ask::ask(0) with k => k(1) } } pub fn main() -> i64 { handle partial(40) { Ask::ask(value) with k => k(value + 2) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -3367,6 +3461,29 @@ fn service_forwards_a_partial_refutable_interprocedural_handler_to_an_outer_fram
                     .any(|instruction| matches!(instruction, VmInstruction::Forward))
         }),
         "the partial callee matrix must preserve its call, frame, test, and forwarding edge together"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_forwards_a_partial_multi_operation_matrix_to_an_outer_handler() {
+    let source = "effect Console<T> { [1, 1] read(value: T) -> T; [1, 1] write(value: T) -> T; } pub fn helper<T>(value: T) -> T / Console<T> { Console<T>::read(value) } pub fn partial(value: i64) -> i64 / Console<i64> { handle helper(value) { Console<i64>::read(0) with k => k(1); Console<i64>::write(_) with k => k(0) } } pub fn main() -> i64 { handle partial(40) { Console<i64>::read(value) with k => k(value + 2); Console<i64>::write(value) with k => k(value) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(
+        program.functions.values().any(|function| {
+            function
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::PatternTest { .. }))
+                && function
+                    .instructions
+                    .iter()
+                    .any(|instruction| matches!(instruction, VmInstruction::Forward))
+        }),
+        "a failed partial row must forward its original suspended operation"
     );
     assert_eq!(artifact.run_i64().unwrap(), 42);
 }
