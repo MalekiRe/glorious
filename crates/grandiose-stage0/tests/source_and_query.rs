@@ -4,13 +4,13 @@ use grandiose_stage0::{
     CompilationMode, CompilationRequest, CompilerBuildIdentity, CompilerDatabase, Digest,
     LogicalPath, PackageKey, SourceInput, TokenKind,
     query::{
-        MemoTable, Query, QueryCompleteness, QueryContext, QueryEngine, QueryFailure, QueryFrame,
-        QueryValue,
+        MemoTable, Query, QueryCompleteness, QueryContext, QueryEngine, QueryExecutionKind,
+        QueryFailure, QueryFrame, QueryRecomputeReason, QueryValue,
     },
 };
 
-fn snapshot() -> grandiose_stage0::DatabaseSnapshot {
-    let request = CompilationRequest {
+fn request(source: &[u8]) -> CompilationRequest {
+    CompilationRequest {
         build: CompilerBuildIdentity {
             compiler: Digest::of_bytes(b"stage0-test"),
             language_generation: 1,
@@ -25,16 +25,24 @@ fn snapshot() -> grandiose_stage0::DatabaseSnapshot {
         sources: vec![SourceInput::new(
             PackageKey("app@0.1.0".into()),
             LogicalPath::parse("src/main.glorious").unwrap(),
-            b"main() { /* nested /* note */ comment */ 12 + 3 }".as_slice(),
+            source,
         )],
         target: "g1-vm".into(),
         semantic_options: BTreeMap::new(),
         codegen_options: BTreeMap::new(),
         capability_manifest: vec![],
         runtime_manifest: None,
-    };
+    }
+}
+
+fn snapshot() -> grandiose_stage0::DatabaseSnapshot {
     let database = CompilerDatabase::new();
-    let id = database.import(request, None).unwrap();
+    let id = database
+        .import(
+            request(b"main() { /* nested /* note */ comment */ 12 + 3 }"),
+            None,
+        )
+        .unwrap();
     database.open(id).unwrap()
 }
 
@@ -63,6 +71,41 @@ impl Query for WordCount {
 #[derive(Debug)]
 struct NestedWordCount {
     words: QueryEngine<WordCount>,
+}
+
+/// This query's value depends solely on its typed key. It explicitly grants
+/// reuse across source revisions, exercising red/green validation without
+/// smuggling a source dependency through ambient state.
+#[derive(Debug)]
+struct KeyOnly;
+impl Query for KeyOnly {
+    type Key = String;
+    type Value = usize;
+    type Error = ();
+    const NAME: &'static str = "key_only";
+
+    fn can_reuse(
+        &self,
+        _key: &Self::Key,
+        _parent: &grandiose_stage0::query::MemoEntry<Self::Value>,
+        _from: &grandiose_stage0::DatabaseSnapshot,
+        _to: &grandiose_stage0::DatabaseSnapshot,
+    ) -> bool {
+        true
+    }
+
+    fn execute(
+        &self,
+        context: &mut QueryContext<'_>,
+        key: Self::Key,
+    ) -> Result<QueryValue<Self::Value>, QueryFailure<Self::Error>> {
+        context.check()?;
+        Ok(QueryValue {
+            value: key.len(),
+            fingerprint: Digest::of_bytes(key.as_bytes()),
+            completeness: QueryCompleteness::Complete,
+        })
+    }
 }
 impl Query for NestedWordCount {
     type Key = String;
@@ -291,5 +334,58 @@ fn cancelled_query_execution_never_publishes_a_memo_entry() {
             .unwrap()
             .value,
         1
+    );
+}
+
+#[test]
+fn query_engine_reuses_only_query_validated_parent_entries() {
+    let database = CompilerDatabase::new();
+    let parent_id = database.import(request(b"main() { 1 }"), None).unwrap();
+    let parent = database.open(parent_id).unwrap();
+    let child_id = database
+        .import(request(b"main() { 2 }"), Some(parent_id))
+        .unwrap();
+    let child = database.open(child_id).unwrap();
+    let cancellation = grandiose_stage0::CancellationToken::new();
+
+    let reusable = QueryEngine::new(KeyOnly);
+    let reusable_budget = grandiose_stage0::Budget::root("reusable", 4);
+    assert_eq!(
+        reusable
+            .execute(
+                &parent,
+                "stable key".into(),
+                &cancellation,
+                &reusable_budget
+            )
+            .unwrap()
+            .value,
+        10
+    );
+    assert_eq!(
+        reusable
+            .execute(&child, "stable key".into(), &cancellation, &reusable_budget)
+            .unwrap()
+            .value,
+        10
+    );
+    assert_eq!(reusable_budget.spent(), 1);
+    assert_eq!(
+        reusable.execution_kind(&child, &"stable key".into()),
+        Some(QueryExecutionKind::ReusedFromParent { parent: parent_id })
+    );
+
+    let source_sensitive = QueryEngine::new(WordCount);
+    let source_budget = grandiose_stage0::Budget::root("source-sensitive", 4);
+    source_sensitive
+        .execute(&parent, "one two".into(), &cancellation, &source_budget)
+        .unwrap();
+    source_sensitive
+        .execute(&child, "one two".into(), &cancellation, &source_budget)
+        .unwrap();
+    assert_eq!(source_budget.spent(), 2);
+    assert_eq!(
+        source_sensitive.why_recomputed(&child, &"one two".into()),
+        Some(QueryRecomputeReason::ParentReuseRejected { parent: parent_id })
     );
 }

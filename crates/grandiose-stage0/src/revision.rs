@@ -35,6 +35,10 @@ struct RevisionRecord {
     id: RevisionId,
     world: Arc<NormalizedInputWorld>,
     parent: Option<RevisionId>,
+    /// A child may inspect its immediate parent while validating a red/green
+    /// query result. This is weak so revision ancestry never prevents the
+    /// normal safe-point collector from reclaiming retired worlds.
+    parent_record: Option<Weak<RevisionRecord>>,
 }
 
 #[derive(Debug)]
@@ -80,9 +84,9 @@ impl CompilerDatabase {
     ) -> Result<RevisionId, RevisionError> {
         let world = Arc::new(request.normalize()?);
         let mut state = self.state.lock().expect("compiler database mutex poisoned");
-        if let Some(parent) = parent {
-            self.require_active_revision(&state, parent)?;
-        }
+        let parent_record = parent
+            .map(|parent| self.require_active_revision(&state, parent))
+            .transpose()?;
         if let Some(existing) = state
             .equivalent_worlds
             .get(&world.fingerprint)
@@ -99,6 +103,7 @@ impl CompilerDatabase {
             id,
             world: world.clone(),
             parent,
+            parent_record: parent_record.as_ref().map(Arc::downgrade),
         });
         state
             .equivalent_worlds
@@ -213,6 +218,18 @@ impl DatabaseSnapshot {
 
     pub fn parent(&self) -> Option<RevisionId> {
         self.record.parent
+    }
+
+    /// Return the immediate immutable parent when it remains retained. A
+    /// collected parent is intentionally indistinguishable from a missing
+    /// reusable memo entry: a query must fail closed and recompute rather than
+    /// make retention an implicit correctness requirement.
+    pub fn parent_snapshot(&self) -> Option<Self> {
+        self.record
+            .parent_record
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .map(|record| Self { record })
     }
 }
 

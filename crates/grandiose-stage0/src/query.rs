@@ -83,6 +83,24 @@ pub struct MemoEntry<V> {
     pub dependencies: Vec<Dependency>,
 }
 
+/// A deterministic explanation for work performed after a revision change.
+/// Query-family owners decide whether a parent memo entry remains valid; the
+/// engine records that decision instead of making cache warmth invisible to
+/// inspection clients.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QueryRecomputeReason {
+    Cold,
+    ParentMemoMissing { parent: RevisionId },
+    ParentReuseRejected { parent: RevisionId },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum QueryExecutionKind {
+    Memoized { revision: RevisionId },
+    ReusedFromParent { parent: RevisionId },
+    Recomputed { reason: QueryRecomputeReason },
+}
+
 /// Typed, revision-qualified in-memory memoization. Query-family owners keep
 /// one of these tables; no stringly typed global cache can mix values from two
 /// families or two snapshots.
@@ -113,10 +131,14 @@ where
     }
 
     pub fn get(&self, snapshot: &DatabaseSnapshot, key: &K) -> Option<MemoEntry<V>> {
+        self.get_at(snapshot.id(), key)
+    }
+
+    fn get_at(&self, revision: RevisionId, key: &K) -> Option<MemoEntry<V>> {
         self.entries
             .lock()
             .expect("query memo mutex poisoned")
-            .get(&(snapshot.id(), key.clone()))
+            .get(&(revision, key.clone()))
             .cloned()
     }
 
@@ -143,6 +165,32 @@ where
                 MemoEntry {
                     result,
                     dependencies: frame.finish(),
+                },
+            );
+    }
+
+    /// Re-publish a query-family-validated parent result under a child
+    /// revision. Dependencies retain their exact producer/fingerprint but are
+    /// rewritten to the child revision because validation has established that
+    /// these are the child world's observed facts too.
+    fn publish_reused(&self, snapshot: &DatabaseSnapshot, key: K, parent: MemoEntry<V>) {
+        let dependencies = parent
+            .dependencies
+            .into_iter()
+            .map(|dependency| Dependency {
+                revision: snapshot.id(),
+                query: dependency.query,
+                fingerprint: dependency.fingerprint,
+            })
+            .collect();
+        self.entries
+            .lock()
+            .expect("query memo mutex poisoned")
+            .insert(
+                (snapshot.id(), key),
+                MemoEntry {
+                    result: parent.result,
+                    dependencies,
                 },
             );
     }
@@ -230,6 +278,19 @@ pub trait Query {
 
     const NAME: &'static str;
 
+    /// Validate a cached parent result for one child revision. The default is
+    /// fail-closed: only a query family that understands all of its inputs may
+    /// carry a result across revisions.
+    fn can_reuse(
+        &self,
+        _key: &Self::Key,
+        _parent: &MemoEntry<Self::Value>,
+        _from: &DatabaseSnapshot,
+        _to: &DatabaseSnapshot,
+    ) -> bool {
+        false
+    }
+
     fn execute(
         &self,
         context: &mut QueryContext<'_>,
@@ -245,6 +306,7 @@ pub struct QueryEngine<Q: Query> {
     query: Q,
     memo: MemoTable<Q::Key, Q::Value>,
     running: Mutex<HashSet<(RevisionId, Q::Key)>>,
+    execution: Mutex<HashMap<(RevisionId, Q::Key), QueryExecutionKind>>,
 }
 
 impl<Q: Query> QueryEngine<Q> {
@@ -253,6 +315,7 @@ impl<Q: Query> QueryEngine<Q> {
             query,
             memo: MemoTable::new(),
             running: Mutex::new(HashSet::new()),
+            execution: Mutex::new(HashMap::new()),
         }
     }
     pub fn execute(
@@ -263,9 +326,41 @@ impl<Q: Query> QueryEngine<Q> {
         budget: &Arc<Budget>,
     ) -> Result<QueryValue<Q::Value>, QueryFailure<Q::Error>> {
         if let Some(entry) = self.memo.get(snapshot, &key) {
+            self.record_execution(
+                snapshot,
+                &key,
+                QueryExecutionKind::Memoized {
+                    revision: snapshot.id(),
+                },
+            );
             return Ok(entry.result);
         }
         cancellation.check().map_err(|_| QueryFailure::Cancelled)?;
+        let recompute_reason = if let Some(parent_snapshot) = snapshot.parent_snapshot() {
+            let parent = parent_snapshot.id();
+            match self.memo.get_at(parent, &key) {
+                Some(entry)
+                    if self
+                        .query
+                        .can_reuse(&key, &entry, &parent_snapshot, snapshot) =>
+                {
+                    self.memo
+                        .publish_reused(snapshot, key.clone(), entry.clone());
+                    self.record_execution(
+                        snapshot,
+                        &key,
+                        QueryExecutionKind::ReusedFromParent { parent },
+                    );
+                    return Ok(entry.result);
+                }
+                Some(_) => QueryRecomputeReason::ParentReuseRejected { parent },
+                None => QueryRecomputeReason::ParentMemoMissing { parent },
+            }
+        } else if let Some(parent) = snapshot.parent() {
+            QueryRecomputeReason::ParentMemoMissing { parent }
+        } else {
+            QueryRecomputeReason::Cold
+        };
         {
             let mut running = self.running.lock().expect("query running mutex poisoned");
             if !running.insert((snapshot.id(), key.clone())) {
@@ -283,10 +378,55 @@ impl<Q: Query> QueryEngine<Q> {
         let result = result?;
         cancellation.check().map_err(|_| QueryFailure::Cancelled)?;
         self.memo
-            .publish(snapshot, key, result.clone(), context.finish());
+            .publish(snapshot, key.clone(), result.clone(), context.finish());
+        self.record_execution(
+            snapshot,
+            &key,
+            QueryExecutionKind::Recomputed {
+                reason: recompute_reason,
+            },
+        );
         Ok(result)
     }
     pub fn memo(&self) -> &MemoTable<Q::Key, Q::Value> {
         &self.memo
+    }
+    /// Explain whether this revision/key was memoized, validated from its
+    /// parent, or recomputed. Missing data means no successful publication has
+    /// occurred for the requested key, never an implicit cache hit.
+    pub fn execution_kind(
+        &self,
+        snapshot: &DatabaseSnapshot,
+        key: &Q::Key,
+    ) -> Option<QueryExecutionKind> {
+        self.execution
+            .lock()
+            .expect("query execution mutex poisoned")
+            .get(&(snapshot.id(), key.clone()))
+            .cloned()
+    }
+    pub fn why_recomputed(
+        &self,
+        snapshot: &DatabaseSnapshot,
+        key: &Q::Key,
+    ) -> Option<QueryRecomputeReason> {
+        match self.execution_kind(snapshot, key) {
+            Some(QueryExecutionKind::Recomputed { reason }) => Some(reason),
+            Some(
+                QueryExecutionKind::Memoized { .. } | QueryExecutionKind::ReusedFromParent { .. },
+            )
+            | None => None,
+        }
+    }
+    fn record_execution(
+        &self,
+        snapshot: &DatabaseSnapshot,
+        key: &Q::Key,
+        kind: QueryExecutionKind,
+    ) {
+        self.execution
+            .lock()
+            .expect("query execution mutex poisoned")
+            .insert((snapshot.id(), key.clone()), kind);
     }
 }
