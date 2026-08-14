@@ -7158,16 +7158,43 @@ impl Lowerer<'_> {
             return None;
         }
 
-        // Keep this rewrite exact: no side effects or bindings may be moved
-        // across the inner resumption boundary. Core's identity-bearing
+        // Split the inner arm at its inner resumption.  The prefix remains in
+        // the suspended inner clause; the suffix is the resumed computation
+        // and is emitted after `UninstallHandler`.  This is the same CPS
+        // boundary as the original two-statement form, but it must not make
+        // source programs spell a synthetic `let value = inner(..); outer`
+        // shape.  In particular, ordinary pure setup and a pure transform of
+        // the resumed value are semantically part of their respective sides
+        // of that boundary.
+        //
+        // Keep the proof deliberately strict about effects.  A second
+        // suspension in either side needs a general handler-clause CFG with
+        // another return edge; lowering it as straight-line instructions
+        // would lose a frame transition.  Core's identity-bearing
         // `Resumption` nodes prevent a same-spelled local from qualifying.
         let CoreKind::Block(inner_body) = self.body.expression(inner_clause.body).kind.clone()
         else {
             return None;
         };
-        let [binding, outer_call] = inner_body.as_slice() else {
+        let (outer_call, before_outer) = inner_body.split_last()?;
+        let binding_index = before_outer
+            .iter()
+            .position(|candidate| self.is_named_resumption_binding(*candidate, inner_name))?;
+        if before_outer[binding_index + 1..]
+            .iter()
+            .any(|candidate| self.is_named_resumption_binding(*candidate, inner_name))
+        {
             return None;
-        };
+        }
+        let (inner_prefix, from_binding) = before_outer.split_at(binding_index);
+        let (binding, inner_residual) = from_binding.split_first()?;
+        if !inner_prefix
+            .iter()
+            .chain(inner_residual.iter())
+            .all(|expression| self.core_is_effect_free(*expression))
+        {
+            return None;
+        }
         let CoreKind::Let {
             name: binding_name,
             value: inner_call,
@@ -7214,20 +7241,15 @@ impl Lowerer<'_> {
         if resolved_inner_name != *inner_name || resolved_outer_name != *outer_name {
             return None;
         }
-        let CoreKind::Local(name) = self.body.expression(*outer_resume_argument).kind.clone()
-        else {
-            return None;
-        };
-        if name != binding_name
-            || self.body.expression(inner_call).ty != self.body.expression(inner_computation).ty
+        if self.body.expression(inner_call).ty != self.body.expression(inner_computation).ty
             || self.body.expression(*outer_call).ty != self.body.expression(root).ty
         {
             return None;
         }
         let outer_continuation = outer_clause.continuation.as_ref()?;
         let inner_continuation = inner_clause.continuation.as_ref()?;
-        if outer_continuation.parameter != self.body.expression(inner_computation).ty
-            || inner_continuation.parameter != self.body.expression(*inner_resume_argument).ty
+        if inner_continuation.parameter != self.body.expression(*inner_resume_argument).ty
+            || outer_continuation.parameter != self.body.expression(*outer_resume_argument).ty
             || outer_continuation.result != self.body.expression(root).ty
         {
             return None;
@@ -7354,13 +7376,45 @@ impl Lowerer<'_> {
             _ => return None,
         }
         outer_arm.push(MirInstruction::UninstallHandler);
+        // The inner continuation has returned to this point with the result
+        // in `inner_result`.  Its saved register snapshot deliberately does
+        // not retain handler payload registers: those are valid only while
+        // the selected clause is active.  Consequently this specialised path
+        // supports ordinary residual work over the resumed result and the
+        // enclosing arm environment, but leaves payload-capturing residuals
+        // to the general clause-CFG lowering rather than fabricating a live
+        // payload after the frame has been uninstalled.
+        self.instructions = Vec::new();
+        let outer_residual_named = self.named.clone();
+        self.named.insert(binding_name, inner_result);
+        for expression in inner_residual {
+            if self.statement(*expression).is_none() {
+                self.error(
+                    "G6005",
+                    "nested handler residual requires a value that is not retained across the inner resumption",
+                );
+                return Some(self.invalid_function(parameters));
+            }
+        }
+        let Some(outer_resume_value) = self.value(*outer_resume_argument) else {
+            self.error(
+                "G6005",
+                "nested handler residual requires a value that is not retained across the inner resumption",
+            );
+            return Some(self.invalid_function(parameters));
+        };
+        outer_arm.extend(std::mem::take(&mut self.instructions));
+        self.named = outer_residual_named;
         outer_arm.push(MirInstruction::Resume {
-            value: inner_result,
+            value: outer_resume_value,
         });
 
         self.instructions = Vec::new();
         let inner_named = self.named.clone();
         self.bind_handler_patterns(&inner_clause.patterns, &inner_payload_destinations)?;
+        for expression in inner_prefix {
+            self.statement(*expression)?;
+        }
         let inner_resume_value = self.value(*inner_resume_argument)?;
         self.instructions.push(MirInstruction::Resume {
             value: inner_resume_value,
@@ -11312,6 +11366,24 @@ impl Lowerer<'_> {
                 None
             }
         }
+    }
+    /// Whether `id` is a direct invocation of the lexical resumption whose
+    /// Core identity carries `name`.  A local with the same spelling is never
+    /// accepted here: Core resolves resumptions before MIR lowering.
+    fn is_named_resumption_call(&self, id: CoreId, name: &str) -> bool {
+        let CoreKind::Call { callee, .. } = self.body.expression(id).kind else {
+            return false;
+        };
+        matches!(
+            self.body.expression(callee).kind,
+            CoreKind::Resumption { name: ref resolved, .. } if resolved == name
+        )
+    }
+    fn is_named_resumption_binding(&self, id: CoreId, name: &str) -> bool {
+        let CoreKind::Let { value, .. } = self.body.expression(id).kind else {
+            return false;
+        };
+        self.is_named_resumption_call(value, name)
     }
     /// Expand the narrow interprocedural case that is structurally identical
     /// to a direct performance: a named callee with one `Perform` root and

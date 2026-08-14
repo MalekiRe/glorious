@@ -2777,6 +2777,46 @@ fn service_resumes_an_outer_handler_from_a_nested_handler_arm() {
 }
 
 #[test]
+fn service_preserves_inner_clause_setup_and_residual_before_outer_resumption() {
+    // The inner arm has ordinary work on both sides of its one-shot
+    // resumption.  `offset` belongs to the suspended clause, while
+    // `adjusted` belongs to the resumed residual that must run after the
+    // inner frame is uninstalled and before the outer frame is resumed.
+    let source = "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping(seed: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping(40) { Ping::ping(_) with inner => { let offset = 1; let value = inner(40 + offset); let adjusted = value + 1; outer(adjusted) } } } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_nested_arm_residual_that_captures_inner_payload() {
+    // Inner payload registers belong to the selected handler clause, not the
+    // restored continuation after `inner(...)`.  This must fail before VM
+    // emission rather than becoming a verifier ReadBeforeWrite.
+    let source = "effect Ask { [1,1] ask() -> i64; } effect Ping { [1,1] ping(seed: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with outer => handle Ping::ping(40) { Ping::ping(seed) with inner => { let value = inner(1); outer(value + seed) } } } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("inner payload escaped into nested resumption residual")
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "G6005"
+                && diagnostic
+                    .message
+                    .contains("not retained across the inner resumption")
+        }),
+        "missing nested residual retention diagnostic: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G7005"),
+        "residual must not reach VM verification: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_preserves_generic_effect_identity_across_nested_arm_resumption() {
     let source = "effect Ask<T> { [1,1] ask(value: T) -> T; } effect Ping<T> { [1,1] ping(value: T) -> T; } pub fn main() -> i64 { handle Ask<i64>::ask(0) { Ask<i64>::ask(_) with outer => handle Ping<i64>::ping(41) { Ping<i64>::ping(_) with inner => { let value = inner(41); outer(value) } } } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
