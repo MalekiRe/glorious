@@ -5343,12 +5343,11 @@ impl Lowerer<'_> {
             blocks,
         })
     }
-    /// Lower two lexically nested exact-one-shot handlers around one direct
-    /// operation.  Even when the inner frame does not name the operation, it
-    /// must remain on the continuation snapshot while the outer frame runs:
-    /// resuming the outer clause restores the inner frame before normal scope
-    /// exit uninstalls it.  This is the smallest source form that exercises
-    /// partial-handler forwarding through the real VM stack.
+    /// Lower two lexically nested handlers around one direct operation. The
+    /// outer arm may be an explicit finite replay while the inner frame is
+    /// one-shot. Even when that inner frame does not name the operation, it
+    /// must remain on each outer continuation snapshot: every replay restores
+    /// it before ordinary scope exit uninstalls it.
     fn lower_root_runtime_nested_one_shot_handler(
         &mut self,
         root: CoreId,
@@ -5421,19 +5420,35 @@ impl Lowerer<'_> {
         let [inner_clause] = inner_operation_clauses.as_slice() else {
             return None;
         };
-        for clause in [*outer_clause, *inner_clause] {
-            let quantity = match &clause.resumption {
-                CoreHandlerResumption::Explicit { quantity, .. }
-                | CoreHandlerResumption::Tail { quantity } => *quantity,
-                CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => {
-                    return None;
-                }
-            };
-            if quantity != crate::quantity::Quantity::ONCE
-                || clause.patterns.len() != argument_ids.len()
+        let outer_policy = match &outer_clause.resumption {
+            CoreHandlerResumption::Explicit { quantity, .. }
+            | CoreHandlerResumption::Tail { quantity }
+                if *quantity == crate::quantity::Quantity::ONCE =>
             {
-                return None;
+                MirContinuationPolicy::Consume
             }
+            CoreHandlerResumption::Explicit { quantity, .. }
+                if !quantity.contains(crate::quantity::Quantity::ONCE)
+                    && quantity.upper.is_some_and(|upper| upper >= 2) =>
+            {
+                MirContinuationPolicy::Replay
+            }
+            _ => return None,
+        };
+        let inner_is_one_shot = matches!(
+            inner_clause.resumption,
+            CoreHandlerResumption::Explicit {
+                quantity: crate::quantity::Quantity::ONCE,
+                ..
+            } | CoreHandlerResumption::Tail {
+                quantity: crate::quantity::Quantity::ONCE
+            }
+        );
+        if !inner_is_one_shot
+            || outer_clause.patterns.len() != argument_ids.len()
+            || inner_clause.patterns.len() != argument_ids.len()
+        {
+            return None;
         }
         if !outer_clause.patterns.iter().all(pattern_is_irrefutable) {
             return None;
@@ -5492,7 +5507,7 @@ impl Lowerer<'_> {
             operation: outer_clause.operation,
             payload_destinations: outer_payload_destinations.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
-            continuation: MirContinuationPolicy::Consume,
+            continuation: outer_policy,
             target: MirBlockId(1),
         });
         entry.push(MirInstruction::InstallHandler {
@@ -5522,9 +5537,13 @@ impl Lowerer<'_> {
         let outer_named = self.named.clone();
         self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
         let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
-        self.instructions.push(MirInstruction::Resume {
-            value: outer_resumed,
-        });
+        if outer_policy == MirContinuationPolicy::Consume {
+            self.instructions.push(MirInstruction::Resume {
+                value: outer_resumed,
+            });
+        } else {
+            self.instructions.push(MirInstruction::Cancel);
+        }
         let outer_instructions = std::mem::take(&mut self.instructions);
         self.named = outer_named;
 
@@ -5562,7 +5581,13 @@ impl Lowerer<'_> {
             MirBlock {
                 parameters: vec![],
                 instructions: outer_instructions,
-                terminator: MirTerminator::Unreachable,
+                terminator: if outer_policy == MirContinuationPolicy::Replay {
+                    MirTerminator::Return {
+                        value: outer_resumed,
+                    }
+                } else {
+                    MirTerminator::Unreachable
+                },
             },
         ];
         for (index, (condition, subject, pattern)) in inner_tests.into_iter().enumerate() {

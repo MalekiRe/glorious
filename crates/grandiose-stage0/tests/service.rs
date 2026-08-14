@@ -2315,6 +2315,30 @@ fn service_reenters_a_dynamic_replayable_handler_clause_per_resume() {
 }
 
 #[test]
+fn service_reinstates_an_outer_finite_handler_across_a_nested_dynamic_suspension() {
+    let source = "effect Ops { [2,2] outer() -> i64; [1,1] inner() -> i64; } pub fn main() -> i64 { handle { handle Ops::outer() { Ops::inner(k) => k(40) } } { Ops::outer(k) => k(20) + k(22) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_an_underused_outer_finite_resumption_through_nested_suspension() {
+    let source = "effect Ops { [2,2] outer() -> i64; [1,1] inner() -> i64; } pub fn main() -> i64 { handle { handle Ops::outer() { Ops::inner(k) => k(40) } } { Ops::outer(k) => k(20) } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("underused nested finite resumption was accepted")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5012"),
+        "missing quantitative nested-resumption diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_generated_resumption_shadows_a_same_named_parameter() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn identity(value: i64) -> i64 { value } pub fn choose(k: (i64) -> i64) -> i64 { handle Ask::ask() { Ask::ask(k) => k(42) } } pub fn main() -> i64 { choose(identity) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
