@@ -1533,8 +1533,27 @@ fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
             referent,
         } => Type::Reference {
             mutability: *mutability,
-            lifetime: *lifetime,
+            lifetime: specialize_lifetime(*lifetime, arguments),
             referent: Box::new(specialize_type(referent, arguments)),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } => Type::Projection {
+            subject: Box::new(specialize_type(subject, arguments)),
+            trait_definition: *trait_definition,
+            trait_arguments: trait_arguments
+                .iter()
+                .map(|argument| specialize_type(argument, arguments))
+                .collect(),
+            name: name.clone(),
+            item_arguments: item_arguments
+                .iter()
+                .map(|argument| specialize_type(argument, arguments))
+                .collect(),
         },
         Type::Nominal {
             definition,
@@ -1546,8 +1565,112 @@ fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
                 .map(|field| specialize_generic_argument(field, arguments))
                 .collect(),
         },
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            lifetime_binders: *lifetime_binders,
+            parameters: parameters
+                .iter()
+                .map(|parameter| specialize_type(parameter, arguments))
+                .collect(),
+            result: Box::new(specialize_type(result, arguments)),
+            effects: specialize_effect_row(effects, arguments),
+            invocation: *invocation,
+        },
+        Type::ConstGeneric { index, kind } => arguments
+            .get(*index as usize)
+            .and_then(|argument| match (argument, kind) {
+                (GenericArgument::ConstU32(value), crate::ConstKind::U32) => {
+                    Some(Type::ConstU32(*value))
+                }
+                (GenericArgument::ConstQuantity(value), crate::ConstKind::Quantity) => {
+                    Some(Type::ConstQuantity(*value))
+                }
+                (GenericArgument::ConstGeneric { kind: found, .. }, expected)
+                    if found == expected =>
+                {
+                    Some(match argument {
+                        GenericArgument::ConstGeneric { index, kind } => Type::ConstGeneric {
+                            index: *index,
+                            kind: *kind,
+                        },
+                        _ => unreachable!("const generic arm only admits const generic arguments"),
+                    })
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| value.clone()),
         value => value.clone(),
     }
+}
+
+fn specialize_lifetime(
+    lifetime: crate::Lifetime,
+    arguments: &[GenericArgument],
+) -> crate::Lifetime {
+    match lifetime {
+        crate::Lifetime::Generic(index) => arguments
+            .get(index as usize)
+            .and_then(|argument| match argument {
+                GenericArgument::Lifetime(value) => Some(*value),
+                _ => None,
+            })
+            .unwrap_or(lifetime),
+        lifetime => lifetime,
+    }
+}
+
+fn specialize_effect_row(
+    value: &crate::EffectRow,
+    arguments: &[GenericArgument],
+) -> crate::EffectRow {
+    let mut row = crate::EffectRow {
+        effects: value
+            .effects
+            .iter()
+            .map(|effect| crate::EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .iter()
+                    .map(|argument| specialize_generic_argument(argument, arguments))
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .iter()
+            .map(|projection| crate::EffectRowProjection {
+                subject: Box::new(specialize_type(&projection.subject, arguments)),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .iter()
+                    .map(|argument| specialize_type(argument, arguments))
+                    .collect(),
+                name: projection.name.clone(),
+                item_arguments: projection
+                    .item_arguments
+                    .iter()
+                    .map(|argument| specialize_type(argument, arguments))
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    };
+    if let Some(crate::EffectTail::Generic(index)) = row.tail
+        && let Some(GenericArgument::EffectRow(argument)) = arguments.get(index as usize)
+    {
+        let argument = specialize_effect_row(argument, arguments);
+        row.effects.extend(argument.effects);
+        row.projections.extend(argument.projections);
+        row.tail = argument.tail;
+    }
+    row.canonicalized()
 }
 
 fn specialize_generic_argument(
@@ -1556,32 +1679,12 @@ fn specialize_generic_argument(
 ) -> GenericArgument {
     match value {
         GenericArgument::Type(value) => GenericArgument::Type(specialize_type(value, arguments)),
-        GenericArgument::EffectRow(value) => GenericArgument::EffectRow(
-            crate::EffectRow {
-                effects: value
-                    .effects
-                    .iter()
-                    .map(|effect| crate::EffectInstance {
-                        definition: effect.definition,
-                        arguments: effect
-                            .arguments
-                            .iter()
-                            .map(|argument| specialize_generic_argument(argument, arguments))
-                            .collect(),
-                    })
-                    .collect(),
-                projections: value.projections.clone(),
-                tail: value.tail,
-            }
-            .canonicalized(),
-        ),
-        GenericArgument::Lifetime(crate::Lifetime::Generic(index)) => arguments
-            .get(*index as usize)
-            .and_then(|argument| match argument {
-                GenericArgument::Lifetime(value) => Some(GenericArgument::Lifetime(*value)),
-                _ => None,
-            })
-            .unwrap_or_else(|| value.clone()),
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(specialize_effect_row(value, arguments))
+        }
+        GenericArgument::Lifetime(value) => {
+            GenericArgument::Lifetime(specialize_lifetime(*value, arguments))
+        }
         GenericArgument::ConstGeneric { index, kind } => arguments
             .get(*index as usize)
             .filter(|argument| match (argument, kind) {
@@ -1748,4 +1851,125 @@ fn constant_cycle(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::specialize_type;
+    use crate::{
+        DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, EffectTail,
+        GenericArgument, Lifetime, Mutability, Quantity, ScalarType, Type,
+    };
+
+    fn key(name: &str) -> DefKey {
+        DefKey(Digest::of_bytes(name.as_bytes()))
+    }
+
+    #[test]
+    fn instance_specialization_rewrites_nested_generic_identity() {
+        let outer_effect = key("outer-effect");
+        let supplied_effect = key("supplied-effect");
+        let trait_key = key("trait");
+        let generic_effect = EffectInstance {
+            definition: outer_effect,
+            arguments: vec![
+                GenericArgument::Type(Type::Generic(0)),
+                GenericArgument::Lifetime(Lifetime::Generic(1)),
+                GenericArgument::ConstGeneric {
+                    index: 2,
+                    kind: crate::ConstKind::U32,
+                },
+            ],
+        };
+        let supplied_row = EffectRow {
+            effects: BTreeSet::from([EffectInstance {
+                definition: supplied_effect,
+                arguments: vec![GenericArgument::Type(Type::Generic(0))],
+            }]),
+            projections: vec![],
+            tail: None,
+        };
+        let original = Type::Callable {
+            lifetime_binders: 0,
+            parameters: vec![Type::Reference {
+                mutability: Mutability::Shared,
+                lifetime: Lifetime::Generic(1),
+                referent: Box::new(Type::Generic(0)),
+            }],
+            result: Box::new(Type::ConstGeneric {
+                index: 2,
+                kind: crate::ConstKind::U32,
+            }),
+            effects: EffectRow {
+                effects: BTreeSet::from([generic_effect]),
+                projections: vec![EffectRowProjection {
+                    subject: Box::new(Type::Generic(0)),
+                    trait_definition: trait_key,
+                    trait_arguments: vec![Type::Generic(0)],
+                    name: "Effects".into(),
+                    item_arguments: vec![Type::ConstGeneric {
+                        index: 2,
+                        kind: crate::ConstKind::U32,
+                    }],
+                }],
+                tail: Some(EffectTail::Generic(3)),
+            },
+            invocation: Quantity::ONCE,
+        };
+
+        let specialized = specialize_type(
+            &original,
+            &[
+                GenericArgument::Type(Type::Scalar(ScalarType::Text)),
+                GenericArgument::Lifetime(Lifetime::Static),
+                GenericArgument::ConstU32(17),
+                GenericArgument::EffectRow(supplied_row),
+            ],
+        );
+
+        let Type::Callable {
+            parameters,
+            result,
+            effects,
+            ..
+        } = specialized
+        else {
+            panic!("expected specialized callable");
+        };
+        assert!(matches!(
+            parameters.as_slice(),
+            [Type::Reference {
+                lifetime: Lifetime::Static,
+                referent,
+                ..
+            }] if **referent == Type::Scalar(ScalarType::Text)
+        ));
+        assert_eq!(*result, Type::ConstU32(17));
+        assert_eq!(effects.tail, None);
+        assert!(effects.effects.contains(&EffectInstance {
+            definition: outer_effect,
+            arguments: vec![
+                GenericArgument::Type(Type::Scalar(ScalarType::Text)),
+                GenericArgument::Lifetime(Lifetime::Static),
+                GenericArgument::ConstU32(17),
+            ],
+        }));
+        assert!(effects.effects.contains(&EffectInstance {
+            definition: supplied_effect,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::Text))],
+        }));
+        assert!(matches!(
+            effects.projections.as_slice(),
+            [EffectRowProjection {
+                subject,
+                trait_arguments,
+                item_arguments,
+                ..
+            }] if **subject == Type::Scalar(ScalarType::Text)
+                && trait_arguments == &vec![Type::Scalar(ScalarType::Text)]
+                && item_arguments == &vec![Type::ConstU32(17)]
+        ));
+    }
 }
