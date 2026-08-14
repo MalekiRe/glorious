@@ -2050,25 +2050,10 @@ impl Lowerer<'_> {
         let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
             return None;
         };
-        let CoreKind::Block(values) = self.body.expression(body).kind.clone() else {
-            // A non-block label is still a valid static label and is handled
-            // by ordinary value lowering/erasure below.
+        if !self.contains_label_transfer(body, brand) {
             return None;
-        };
-        let transfer = values.iter().position(|value| {
-            matches!(
-                self.body.expression(*value).kind,
-                CoreKind::Transfer { brand: target, .. } if target == brand
-            )
-        })?;
-        for value in values.iter().take(transfer) {
-            self.statement(*value)?;
         }
-        let CoreKind::Transfer { value, .. } = self.body.expression(values[transfer]).kind.clone()
-        else {
-            unreachable!("located transfer must retain its Core form")
-        };
-        let value = self.value(value)?;
+        let value = self.lower_label_transfer_path(body, brand)?;
         let result = self.body.expression(root).ty.clone();
         let join = self.alloc(result.clone(), CoreId(u32::MAX));
         Some(MirFunction {
@@ -2094,6 +2079,63 @@ impl Lowerer<'_> {
                 },
             ],
         })
+    }
+
+    /// Find and lower a transfer to `target` through arbitrarily nested
+    /// static label scopes.  Labels do not have a runtime object; entering a
+    /// nested label only changes which brand a transfer may name.  We inspect
+    /// the path first so ordinary nested labels remain on the normal value
+    /// path and are not executed twice.
+    fn lower_label_transfer_path(
+        &mut self,
+        id: CoreId,
+        target: crate::LabelBrand,
+    ) -> Option<MirLocal> {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Block(values) => {
+                for value in values {
+                    if self.contains_label_transfer(value, target) {
+                        return self.lower_label_transfer_path(value, target);
+                    }
+                    self.statement(value)?;
+                }
+                self.error("G6012", "label scope has no transfer to its target brand");
+                None
+            }
+            CoreKind::Label { body, .. } => self.lower_label_transfer_path(body, target),
+            CoreKind::Transfer { brand, value } if brand == target => self.value(value),
+            CoreKind::Transfer { .. } => {
+                self.error(
+                    "G6012",
+                    "nested label transfer requires its own cleanup-carrying target edge",
+                );
+                None
+            }
+            _ => {
+                self.error(
+                    "G6012",
+                    "label transfer path is not a structured lexical exit",
+                );
+                None
+            }
+        }
+    }
+
+    fn contains_label_transfer(&self, id: CoreId, target: crate::LabelBrand) -> bool {
+        match &self.body.expression(id).kind {
+            CoreKind::Transfer { brand, .. } => *brand == target,
+            // A closure forms a separate execution environment. Its outer
+            // label transfers are rejected by Core; transfers to labels it
+            // declares itself cannot become an edge in this body.
+            CoreKind::Closure { .. } => false,
+            CoreKind::Block(values) => values
+                .iter()
+                .any(|child| self.contains_label_transfer(*child, target)),
+            CoreKind::Label { body, .. } | CoreKind::Let { value: body, .. } => {
+                self.contains_label_transfer(*body, target)
+            }
+            _ => false,
+        }
     }
     /// Generalize nested setup frames from a single ordered sibling operation
     /// to several independent operation-key dispatch matrices. Each matrix

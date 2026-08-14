@@ -2730,3 +2730,28 @@ fn closures_cannot_capture_an_enclosing_label_transfer_target() {
         core.diagnostics
     );
 }
+
+#[test]
+fn nested_labels_can_transfer_to_an_enclosing_brand_through_the_vm_edge() {
+    let core = core_for(
+        "core-nested-label-transfer@0.1.0",
+        "pub fn main() -> i64 { label outer { label inner { transfer outer 42; 0 }; 1 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("outer label");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("nested transfer lowers");
+    let verified =
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).expect("emit nested transfer"))
+            .expect("verify nested transfer");
+    assert_eq!(verified.run_i64().expect("run nested transfer"), 42);
+}
