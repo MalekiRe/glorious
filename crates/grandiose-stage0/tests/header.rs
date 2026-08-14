@@ -434,7 +434,8 @@ fn trait_impl_and_effect_headers_preserve_their_semantic_contracts() {
 #[test]
 fn trait_headers_preserve_value_and_effect_row_associated_defaults() {
     let package = PackageKey("header-associated-defaults@0.1.0".into());
-    let source = "trait Capability<T> { type Output<U> = (T, U); type Effects: EffectRow = { Trace }; }";
+    let source =
+        "trait Capability<T> { type Output<U> = (T, U); type Effects: EffectRow = { Trace }; }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -444,9 +445,17 @@ fn trait_headers_preserve_value_and_effect_row_associated_defaults() {
         panic!("expected trait header");
     };
     assert!(trait_header.associated_types[0].default.is_some());
-    assert!(trait_header.associated_types[0].effect_row_default.is_none());
+    assert!(
+        trait_header.associated_types[0]
+            .effect_row_default
+            .is_none()
+    );
     assert!(trait_header.associated_types[1].default.is_none());
-    assert!(trait_header.associated_types[1].effect_row_default.is_some());
+    assert!(
+        trait_header.associated_types[1]
+            .effect_row_default
+            .is_some()
+    );
 }
 
 #[test]

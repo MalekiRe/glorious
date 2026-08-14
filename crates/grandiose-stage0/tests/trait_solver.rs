@@ -561,10 +561,13 @@ fn associated_type_normalization_uses_the_selected_impl_substitution() {
 
 #[test]
 fn associated_type_defaults_normalize_when_a_positive_impl_omits_the_item() {
-    let (interface, signatures) = signatures(
-        "trait Source { type Item = Text; } struct Value {} impl Source for Value {}",
+    let (interface, signatures) =
+        signatures("trait Source { type Item = Text; } struct Value {} impl Source for Value {}");
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
     );
-    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
     let answer = TraitSolver::new(&signatures).normalize_associated_type(
         TraitGoal {
             relation: ElaboratedTraitReference {
@@ -592,7 +595,11 @@ fn generic_associated_type_defaults_substitute_trait_and_item_binders() {
     let (interface, signatures) = signatures(
         "trait Convert<T> { type Output<U> = (T, U); } struct Value {} impl Convert<i64> for Value {}",
     );
-    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
     let answer = TraitSolver::new(&signatures).normalize_associated_type_application(
         TraitGoal {
             relation: ElaboratedTraitReference {
@@ -621,7 +628,11 @@ fn explicit_associated_type_definitions_override_trait_defaults() {
     let (interface, signatures) = signatures(
         "trait Source { type Item = Text; } struct Value {} impl Source for Value { type Item = i64; }",
     );
-    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
     let answer = TraitSolver::new(&signatures).normalize_associated_type(
         TraitGoal {
             relation: ElaboratedTraitReference {
@@ -649,7 +660,11 @@ fn associated_effect_row_defaults_normalize_when_a_positive_impl_omits_the_item(
     let (interface, signatures) = signatures(
         "effect Trace { note(); } trait Capability { type Effects: EffectRow = { Trace }; } struct Value {} impl Capability for Value {}",
     );
-    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
     let answer = TraitSolver::new(&signatures).normalize_associated_effect_row_application(
         TraitGoal {
             relation: ElaboratedTraitReference {

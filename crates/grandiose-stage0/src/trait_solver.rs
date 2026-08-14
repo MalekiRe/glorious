@@ -10,8 +10,7 @@ use std::collections::BTreeMap;
 use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedHeader,
     ElaboratedImplementation, ElaboratedInterface, ElaboratedTrait, ElaboratedTraitReference,
-    GenericArgument, Type,
-    implementation_method_key,
+    GenericArgument, Type, implementation_method_key,
     signature::TRAIT_SELF_GENERIC,
     types::{canonical_generic_arguments_encoding, canonical_type_encoding},
 };
@@ -1612,12 +1611,12 @@ fn substitute_effect_row(
     // generic tail.  Replacing that exact shape preserves all effects and
     // projections supplied by the selected trait argument rather than merely
     // replacing its tail.
-    if value.effects.is_empty() && value.projections.is_empty() {
-        if let Some(crate::EffectTail::Generic(index)) = value.tail {
-            if let Some(row) = substitution.effect_rows.get(&index) {
-                return row.clone();
-            }
-        }
+    if value.effects.is_empty()
+        && value.projections.is_empty()
+        && let Some(crate::EffectTail::Generic(index)) = value.tail
+        && let Some(row) = substitution.effect_rows.get(&index)
+    {
+        return row.clone();
     }
     EffectRow {
         effects: value
