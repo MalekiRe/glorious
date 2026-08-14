@@ -331,6 +331,11 @@ pub enum VmInstruction {
         src: u32,
         fields: Vec<u32>,
         unique: bool,
+        /// Distinguishes a loan to a reference carrier (`&reference`) from a
+        /// loan derived through that reference (`&*reference`). This bit is
+        /// part of the decoded artifact contract; inferring it from the
+        /// runtime value would silently erase one reference layer.
+        reborrow: bool,
     },
     DerefCopy {
         dst: u32,
@@ -761,10 +766,11 @@ impl CandidateVmArtifact {
 pub const STAGE0_ARTIFACT_MAGIC: [u8; 8] = *b"G0VM\r\n\x1a\n";
 pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Schema 32 adds sealed callable-environment brands, modes, and capture
-/// types to `MakeCallable` and the target-side program registry. Schema 31
-/// already carries host capabilities and complete nominal-pattern layouts;
-/// older payloads cannot be decoded safely with this new callable proof.
-pub const STAGE0_VM_SCHEMA: u32 = 32;
+/// types to `MakeCallable` and the target-side program registry. Schema 33
+/// adds explicit Borrow carrier-versus-reborrow intent. Schema 31 already
+/// carries host capabilities and complete nominal-pattern layouts; older
+/// payloads cannot be decoded safely with these independent boundary proofs.
+pub const STAGE0_VM_SCHEMA: u32 = 33;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2289,6 +2295,15 @@ impl<'a> Decoder<'a> {
                         });
                     }
                 };
+                let reborrow = match self.byte()? {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(VmArtifactError::MalformedEncoding {
+                            message: "invalid borrow reborrow mode",
+                        });
+                    }
+                };
                 let count = self.count("borrow field projections", MAX_DECODE_REGISTERS)?;
                 let mut fields = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -2299,6 +2314,7 @@ impl<'a> Decoder<'a> {
                     src,
                     fields,
                     unique,
+                    reborrow,
                 })
             }
             53 => Ok(VmInstruction::DerefCopy {
@@ -3312,11 +3328,13 @@ fn lower_instruction(
             src,
             fields,
             unique,
+            reborrow,
         } => VmInstruction::Borrow {
             dst: dst.0,
             src: src.0,
             fields: fields.clone(),
             unique: *unique,
+            reborrow: *reborrow,
         },
         MirInstruction::DerefCopy { dst, reference } => VmInstruction::DerefCopy {
             dst: dst.0,
@@ -4571,11 +4589,19 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 write(&mut states, *dst)?
             }
             VmInstruction::Borrow {
-                dst, src, unique, ..
+                dst,
+                src,
+                fields,
+                unique,
+                reborrow,
             } => {
                 read(&states, *src)?;
                 let found = register_type(function, *dst)?;
-                if !matches!(found, VmType::Reference { unique: actual, .. } if actual == *unique) {
+                let VmType::Reference {
+                    unique: actual_unique,
+                    referent: destination_referent,
+                } = found.clone()
+                else {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
                         expected: VmType::Reference {
@@ -4583,6 +4609,67 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             referent: Box::new(VmType::Unit),
                         },
                         found,
+                    });
+                };
+                if actual_unique != *unique {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *dst,
+                        expected: VmType::Reference {
+                            unique: *unique,
+                            referent: destination_referent,
+                        },
+                        found,
+                    });
+                }
+
+                let source_type = register_type(function, *src)?;
+                let source_referent = match (&source_type, *reborrow) {
+                    (
+                        VmType::Reference {
+                            unique: parent_unique,
+                            referent,
+                        },
+                        true,
+                    ) => {
+                        // A bytecode artifact must not manufacture an
+                        // exclusive child from a shared parent. The explicit
+                        // mode matters: a unique *carrier* loan to `&T` is
+                        // valid, whereas a unique reborrow of that `&T` is
+                        // not.
+                        if *unique && !*parent_unique {
+                            return Err(VmArtifactError::TypeMismatch {
+                                register: *src,
+                                expected: VmType::Reference {
+                                    unique: true,
+                                    referent: referent.clone(),
+                                },
+                                found: source_type,
+                            });
+                        }
+                        referent.as_ref()
+                    }
+                    (_, true) => {
+                        return Err(VmArtifactError::TypeMismatch {
+                            register: *src,
+                            expected: VmType::Reference {
+                                unique: false,
+                                referent: Box::new(VmType::Unit),
+                            },
+                            found: source_type,
+                        });
+                    }
+                    (source, false) => source,
+                };
+                // A whole-place carrier loan and a whole-reference reborrow
+                // have a fully knowable referent at this boundary. Reject a
+                // forged destination type rather than allowing a later
+                // DerefCopy to observe a value that disagrees with its
+                // register contract.
+                if fields.is_empty() && destination_referent.as_ref() != source_referent {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *dst,
+                        expected: source_referent.clone(),
+                        found: *destination_referent,
                     });
                 }
                 write(&mut states, *dst)?
@@ -5375,14 +5462,18 @@ fn borrow_value(
     value: &VmValue,
     fields: &[u32],
     unique: bool,
+    reborrow: bool,
 ) -> Result<VmValue, VmArtifactError> {
-    if let VmValue::Reference {
-        target,
-        fields: parent_fields,
-        unique: parent_unique,
-        referent: parent_referent,
-    } = value
-    {
+    if reborrow {
+        let VmValue::Reference {
+            target,
+            fields: parent_fields,
+            unique: parent_unique,
+            referent: parent_referent,
+        } = value
+        else {
+            return Err(VmArtifactError::InvalidRegister { register: source });
+        };
         if unique && !parent_unique {
             return Err(VmArtifactError::InvalidRegister { register: source });
         }
@@ -6439,12 +6530,14 @@ fn execute(
                 src,
                 fields,
                 unique,
+                reborrow,
             } => {
                 registers[dst as usize] = Some(borrow_value(
                     src,
                     registers[src as usize].as_ref().expect("verified register"),
                     &fields,
                     unique,
+                    reborrow,
                 )?);
             }
             VmInstruction::DerefCopy { dst, reference } => {
@@ -7153,11 +7246,13 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             src,
             fields,
             unique,
+            reborrow,
         } => {
             output.push(52);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&src.to_le_bytes());
             output.push(*unique as u8);
+            output.push(*reborrow as u8);
             output.extend_from_slice(&(fields.len() as u64).to_le_bytes());
             for field in fields {
                 output.extend_from_slice(&field.to_le_bytes());
@@ -8110,6 +8205,7 @@ fn execute_with_arguments(
                 src,
                 fields,
                 unique,
+                reborrow,
             } => {
                 registers[*dst as usize] = Some(borrow_value(
                     *src,
@@ -8118,6 +8214,7 @@ fn execute_with_arguments(
                         .expect("verified register"),
                     fields,
                     *unique,
+                    *reborrow,
                 )?);
             }
             VmInstruction::DerefCopy { dst, reference } => {

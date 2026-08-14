@@ -884,6 +884,11 @@ fn body_local_reference_cannot_be_stored_through_a_caller_owned_reference() {
         "{:#?}",
         local_slot.diagnostics
     );
+    assert_eq!(
+        local_slot.artifact.unwrap().run_i64().unwrap(),
+        42,
+        "borrowing `reference` must preserve the carrier slot as `&mut &i64`, not reborrow its i64 referent"
+    );
 
     let external_value = StageZeroCompiler::new()
         .compile(request(
@@ -996,6 +1001,50 @@ fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
     let outcome = StageZeroCompiler::new()
         .compile(request(replacement))
         .expect("reassigned aggregate reference must replace its origin");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 2);
+}
+
+#[test]
+fn reborrow_suspends_its_aggregate_reference_carrier_until_nll_release() {
+    let replacement_while_live = r#"
+        pub struct Holder { loan: &mut i64, tag: i64 }
+        pub fn main() -> i64 {
+            let first = 1;
+            let second = 2;
+            let holder = Holder { loan: &mut first, tag: 0 };
+            let child = &mut *holder.loan;
+            holder.loan = &mut second;
+            *child
+        }
+    "#;
+    let diagnostics = match StageZeroCompiler::new().compile(request(replacement_while_live)) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!(
+            "replacement of a suspended aggregate reference carrier unexpectedly compiled: {outcome:#?}"
+        ),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5004"),
+        "missing aggregate-carrier reborrow conflict: {diagnostics:#?}"
+    );
+
+    let replacement_after_last_use = r#"
+        pub struct Holder { loan: &mut i64, tag: i64 }
+        pub fn main() -> i64 {
+            let first = 1;
+            let second = 2;
+            let holder = Holder { loan: &mut first, tag: 0 };
+            let child = &mut *holder.loan;
+            *child = 3;
+            holder.loan = &mut second;
+            *holder.loan
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(replacement_after_last_use))
+        .expect("NLL must release a consumed child reborrow before carrier replacement");
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 2);
 }
 

@@ -10,8 +10,8 @@ use crate::{
     instance::InstanceKey,
     placeflow::PlaceFlow,
     types::{
-        GenericArgument, Type, is_canonical_generic_argument_identity, is_canonical_type_identity,
-        projection_item_arguments_match_kinds,
+        GenericArgument, Mutability, Type, is_canonical_generic_argument_identity,
+        is_canonical_type_identity, projection_item_arguments_match_kinds,
     },
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -235,6 +235,10 @@ pub enum MirInstruction {
         src: MirLocal,
         fields: Vec<u32>,
         unique: bool,
+        /// `true` only for `&*parent` (and its unique form). Borrowing a
+        /// local which merely *contains* a reference instead creates a loan
+        /// to that carrier slot, preserving the extra reference layer.
+        reborrow: bool,
     },
     /// Copy through a live loan without consuming it.
     DerefCopy {
@@ -2055,6 +2059,62 @@ impl MirFunction {
                     return Err("MIR callable has captures but no sealed environment".into());
                 }
                 None => {}
+            }
+            return Ok(());
+        }
+        if let MirInstruction::Borrow {
+            dst,
+            src,
+            fields,
+            unique,
+            reborrow,
+        } = instruction
+        {
+            let Type::Reference {
+                mutability,
+                referent: destination_referent,
+                ..
+            } = self.local_type(*dst)?
+            else {
+                return Err("MIR borrow destination is not a reference".into());
+            };
+            let expected_mutability = if *unique {
+                Mutability::Unique
+            } else {
+                Mutability::Shared
+            };
+            if *mutability != expected_mutability {
+                return Err(
+                    "MIR borrow destination mutability disagrees with its loan mode".into(),
+                );
+            }
+            match (self.local_type(*src)?, *reborrow) {
+                (
+                    Type::Reference {
+                        mutability: parent_mutability,
+                        referent: source_referent,
+                        ..
+                    },
+                    true,
+                ) => {
+                    if *unique && *parent_mutability != Mutability::Unique {
+                        return Err("MIR unique reborrow has a shared parent reference".into());
+                    }
+                    if fields.is_empty() && destination_referent != source_referent {
+                        return Err("MIR whole-reference reborrow changes its referent type".into());
+                    }
+                }
+                (source_type, false)
+                    if fields.is_empty() && destination_referent.as_ref() != source_type =>
+                {
+                    return Err(
+                        "MIR whole-place borrow referent does not match its source type".into(),
+                    );
+                }
+                (_, true) => {
+                    return Err("MIR reborrow source is not a reference".into());
+                }
+                _ => {}
             }
             return Ok(());
         }
@@ -11115,6 +11175,7 @@ impl Lowerer<'_> {
                         src,
                         fields: vec![],
                         unique,
+                        reborrow: true,
                     });
                     self.values.insert(id, dst);
                     return Some(dst);
@@ -11128,6 +11189,7 @@ impl Lowerer<'_> {
                     src,
                     fields,
                     unique,
+                    reborrow: false,
                 });
             }
             CoreKind::Deref(value) => {

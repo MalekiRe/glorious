@@ -3700,6 +3700,7 @@ fn unique_reference_mutates_its_live_register_and_round_trips() {
                     src: 0,
                     fields: vec![],
                     unique: true,
+                    reborrow: false,
                 },
                 VmInstruction::ConstI64 { dst: 2, value: 42 },
                 VmInstruction::DerefStore {
@@ -3725,6 +3726,88 @@ fn unique_reference_mutates_its_live_register_and_round_trips() {
             .unwrap(),
         42
     );
+}
+
+#[test]
+fn verifier_rejects_forged_reborrow_capability_and_whole_place_referent() {
+    let mut shared_to_unique = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"forged-shared-to-unique-reborrow")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Reference {
+                    unique: false,
+                    referent: Box::new(VmType::I64),
+                },
+                VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::I64),
+                },
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::Borrow {
+                    dst: 1,
+                    src: 0,
+                    fields: vec![],
+                    unique: false,
+                    reborrow: false,
+                },
+                VmInstruction::Borrow {
+                    dst: 2,
+                    src: 1,
+                    fields: vec![],
+                    unique: true,
+                    reborrow: true,
+                },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"forged-shared-to-unique-reborrow"),
+    };
+    shared_to_unique.fingerprint = shared_to_unique.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(shared_to_unique),
+        Err(VmArtifactError::TypeMismatch { register: 1, .. })
+    ));
+
+    let mut wrong_referent = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"forged-whole-borrow-referent")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Reference {
+                    unique: false,
+                    referent: Box::new(VmType::Text),
+                },
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 1 },
+                VmInstruction::Borrow {
+                    dst: 1,
+                    src: 0,
+                    fields: vec![],
+                    unique: false,
+                    reborrow: false,
+                },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"forged-whole-borrow-referent"),
+    };
+    wrong_referent.fingerprint = wrong_referent.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(wrong_referent),
+        Err(VmArtifactError::TypeMismatch { register: 1, .. })
+    ));
 }
 
 #[test]
