@@ -1,9 +1,19 @@
 use std::collections::BTreeSet;
 
 use grandiose_stage0::{
-    DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, InferContext, Quantity,
-    ScalarType, Type, TypeError,
+    DefKey, Digest, EffectInstance, EffectRow, EffectRowProjection, GenericArgument, InferContext,
+    Lifetime, Quantity, ScalarType, Type, TypeError,
 };
+
+#[test]
+fn canonical_generic_arguments_keep_lifetimes_and_effect_rows_out_of_type_slots() {
+    let lifetime = GenericArgument::Lifetime(Lifetime::Static);
+    let row = GenericArgument::EffectRow(EffectRow::empty());
+    let ty = GenericArgument::Type(Type::Unit);
+    assert_ne!(lifetime, ty);
+    assert_ne!(row, ty);
+    assert_ne!(lifetime, row);
+}
 
 #[test]
 fn unification_is_occurs_checked_and_zonks_body_local_uncertainty() {

@@ -75,6 +75,21 @@ pub enum GenericKind {
     Const(ConstKind),
 }
 
+/// A canonical argument supplied to a declaration-level generic slot.
+///
+/// This is intentionally not `Type`: effect rows and lifetimes participate in
+/// nominal/trait identity but may never be smuggled through the type namespace.
+/// The existing `Type::Nominal` migration consumes this boundary incrementally.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum GenericArgument {
+    Type(Type),
+    EffectRow(EffectRow),
+    Lifetime(Lifetime),
+    ConstU32(u32),
+    ConstQuantity(Quantity),
+    ConstGeneric { index: u32, kind: ConstKind },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mutability {
     Shared,

@@ -125,8 +125,9 @@ pub use trait_solver::{
     TraitGoal, TraitMethodAnswer, TraitProjectionAnswer, TraitSolver, TraitSolverLimits,
 };
 pub use types::{
-    ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail, EffectVar, GenericKind,
-    InferContext, InferVar, Lifetime, Mutability, ScalarType, Type, TypeError,
+    ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail, EffectVar,
+    GenericArgument, GenericKind, InferContext, InferVar, Lifetime, Mutability, ScalarType, Type,
+    TypeError,
 };
 pub use useflow::{
     CallableEscapeBoundary, CallableEscapeFact, CallableUseFact, UseDiagnostic, UseFlow,
