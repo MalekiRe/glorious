@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedHeader,
-    ElaboratedImplementation, ElaboratedInterface, ElaboratedTraitReference, Type,
+    ElaboratedImplementation, ElaboratedInterface, ElaboratedTraitReference, GenericArgument, Type,
     implementation_method_key,
 };
 
@@ -256,7 +256,7 @@ impl TraitSolver {
             .relation
             .arguments
             .into_iter()
-            .map(|argument| self.normalize_type_projections(argument, &mut active))
+            .map(|argument| self.normalize_trait_argument(argument, &mut active))
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(arguments) => arguments,
@@ -400,7 +400,10 @@ impl TraitSolver {
                 let goal = TraitGoal {
                     relation: ElaboratedTraitReference {
                         definition: trait_definition,
-                        arguments: trait_arguments,
+                        arguments: trait_arguments
+                            .into_iter()
+                            .map(GenericArgument::Type)
+                            .collect(),
                     },
                     subject: *subject,
                 };
@@ -477,7 +480,7 @@ impl TraitSolver {
             .relation
             .arguments
             .into_iter()
-            .map(|argument| self.normalize_type_projections(argument, &mut type_active))
+            .map(|argument| self.normalize_trait_argument(argument, &mut type_active))
             .collect::<Result<Vec<_>, _>>()
         {
             Ok(arguments) => arguments,
@@ -637,7 +640,11 @@ impl TraitSolver {
             let goal = TraitGoal {
                 relation: ElaboratedTraitReference {
                     definition: projection.trait_definition,
-                    arguments: projection.trait_arguments,
+                    arguments: projection
+                        .trait_arguments
+                        .into_iter()
+                        .map(GenericArgument::Type)
+                        .collect(),
                 },
                 subject: *projection.subject,
             };
@@ -824,7 +831,7 @@ impl TraitSolver {
             .relation
             .arguments
             .into_iter()
-            .map(|argument| self.normalize_type_projections(argument, &mut active))
+            .map(|argument| self.normalize_trait_argument(argument, &mut active))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|answer| projection_failure_answer(*answer))?;
         Ok(TraitGoal {
@@ -834,6 +841,22 @@ impl TraitSolver {
             },
             subject,
         })
+    }
+
+    fn normalize_trait_argument(
+        &mut self,
+        argument: GenericArgument,
+        active: &mut Vec<Digest>,
+    ) -> Result<GenericArgument, Box<TraitProjectionAnswer>> {
+        match argument {
+            GenericArgument::Type(value) => self
+                .normalize_type_projections(value, active)
+                .map(GenericArgument::Type),
+            // The runtime projection carriers are still type-only. Trait
+            // selection nevertheless preserves every other kind exactly;
+            // there is no type normalizer allowed to reinterpret it here.
+            argument => Ok(argument),
+        }
     }
 }
 
@@ -865,6 +888,7 @@ fn projection_failure_answer(answer: TraitProjectionAnswer) -> TraitAnswerIndex 
 struct ImplementationSubstitution {
     types: BTreeMap<u32, Type>,
     lifetimes: BTreeMap<u32, crate::Lifetime>,
+    generic_arguments: BTreeMap<u32, GenericArgument>,
 }
 
 fn match_rule(
@@ -882,9 +906,61 @@ fn match_rule(
         .iter()
         .zip(&goal.relation.arguments)
     {
-        match_type(template, actual, &mut substitution)?;
+        match_generic_argument(template, actual, &mut substitution)?;
     }
     Some(substitution)
+}
+
+fn match_generic_argument(
+    template: &GenericArgument,
+    actual: &GenericArgument,
+    substitution: &mut ImplementationSubstitution,
+) -> Option<()> {
+    match (template, actual) {
+        (GenericArgument::Type(template), GenericArgument::Type(actual)) => {
+            match_type(template, actual, substitution)
+        }
+        (GenericArgument::ConstGeneric { index, kind }, actual)
+            if generic_argument_is_const_kind(actual, *kind) =>
+        {
+            match substitution.generic_arguments.get(index) {
+                Some(previous) if previous != actual => None,
+                Some(_) => Some(()),
+                None => {
+                    substitution
+                        .generic_arguments
+                        .insert(*index, actual.clone());
+                    Some(())
+                }
+            }
+        }
+        _ => (template == actual).then_some(()),
+    }
+}
+
+fn generic_argument_is_const_kind(argument: &GenericArgument, expected: crate::ConstKind) -> bool {
+    matches!(
+        (argument, expected),
+        (GenericArgument::ConstU32(_), crate::ConstKind::U32)
+            | (
+                GenericArgument::ConstQuantity(_),
+                crate::ConstKind::Quantity
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: crate::ConstKind::U32,
+                    ..
+                },
+                crate::ConstKind::U32
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: crate::ConstKind::Quantity,
+                    ..
+                },
+                crate::ConstKind::Quantity
+            )
+    )
 }
 
 fn match_type(
@@ -1083,8 +1159,31 @@ fn substitute_relation(
         arguments: relation
             .arguments
             .iter()
-            .map(|argument| substitute_type(argument, substitution))
+            .map(|argument| substitute_generic_argument(argument, substitution))
             .collect(),
+    }
+}
+
+fn substitute_generic_argument(
+    argument: &GenericArgument,
+    substitution: &ImplementationSubstitution,
+) -> GenericArgument {
+    match argument {
+        GenericArgument::Type(value) => GenericArgument::Type(substitute_type(value, substitution)),
+        GenericArgument::ConstGeneric { index, kind } => substitution
+            .generic_arguments
+            .get(index)
+            .filter(|argument| generic_argument_is_const_kind(argument, *kind))
+            .cloned()
+            .unwrap_or_else(|| argument.clone()),
+        GenericArgument::Lifetime(crate::Lifetime::Generic(index)) => GenericArgument::Lifetime(
+            substitution
+                .lifetimes
+                .get(index)
+                .copied()
+                .unwrap_or(crate::Lifetime::Generic(*index)),
+        ),
+        argument => argument.clone(),
     }
 }
 

@@ -2509,7 +2509,11 @@ impl Elaborator<'_> {
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
-                    arguments: trait_arguments.clone(),
+                    arguments: trait_arguments
+                        .clone()
+                        .into_iter()
+                        .map(crate::GenericArgument::Type)
+                        .collect(),
                 },
                 subject: *subject.clone(),
             },
@@ -2853,7 +2857,10 @@ impl Elaborator<'_> {
                             TraitGoal {
                                 relation: crate::ElaboratedTraitReference {
                                     definition: trait_definition,
-                                    arguments: trait_arguments,
+                                    arguments: trait_arguments
+                                        .into_iter()
+                                        .map(crate::GenericArgument::Type)
+                                        .collect(),
                                 },
                                 subject,
                             },
@@ -4219,7 +4226,10 @@ impl Elaborator<'_> {
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
-                    arguments: trait_arguments,
+                    arguments: trait_arguments
+                        .into_iter()
+                        .map(crate::GenericArgument::Type)
+                        .collect(),
                 },
                 subject,
             },
@@ -5386,7 +5396,11 @@ impl Elaborator<'_> {
                 TraitGoal {
                     relation: crate::ElaboratedTraitReference {
                         definition: projection.trait_definition,
-                        arguments: projection.trait_arguments,
+                        arguments: projection
+                            .trait_arguments
+                            .into_iter()
+                            .map(crate::GenericArgument::Type)
+                            .collect(),
                     },
                     subject: *projection.subject,
                 },
@@ -5488,7 +5502,13 @@ impl Elaborator<'_> {
             let arguments = relation
                 .arguments
                 .into_iter()
-                .map(|argument| self.inference.zonk(argument))
+                .map(|argument| match argument {
+                    crate::GenericArgument::Type(argument) => self
+                        .inference
+                        .zonk(argument)
+                        .map(crate::GenericArgument::Type),
+                    argument => Ok(argument),
+                })
                 .collect::<Result<Vec<_>, _>>();
             let Ok(arguments) = arguments else {
                 self.error(

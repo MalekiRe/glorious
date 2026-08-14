@@ -1,8 +1,8 @@
 use grandiose_stage0::{
-    DeclarationScan, DefKey, ElaboratedInterface, ElaboratedTraitReference, FileKey, InterfaceSet,
-    LexedFile, Lifetime, Mutability, PackageKey, ScalarType, TraitAnswer,
-    TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer, TraitProjectionAnswer,
-    TraitSolver, Type, implementation_method_key,
+    DeclarationScan, DefKey, ElaboratedInterface, ElaboratedTraitReference, FileKey,
+    GenericArgument, InterfaceSet, LexedFile, Lifetime, Mutability, PackageKey, ScalarType,
+    TraitAnswer, TraitEffectRowProjectionAnswer, TraitGoal, TraitMethodAnswer,
+    TraitProjectionAnswer, TraitSolver, Type, implementation_method_key,
 };
 
 fn signatures(source: &str) -> (grandiose_stage0::PackageInterface, ElaboratedInterface) {
@@ -136,7 +136,7 @@ fn failed_projection_does_not_refute_the_outer_trait_goal() {
     let answer = TraitSolver::new(&signatures).solve(TraitGoal {
         relation: ElaboratedTraitReference {
             definition: consume,
-            arguments: vec![Type::Projection {
+            arguments: vec![GenericArgument::Type(Type::Projection {
                 subject: Box::new(Type::Nominal {
                     definition: value,
                     arguments: vec![],
@@ -145,7 +145,7 @@ fn failed_projection_does_not_refute_the_outer_trait_goal() {
                 trait_arguments: vec![],
                 name: "Item".into(),
                 item_arguments: vec![],
-            }],
+            })],
         },
         subject: Type::Nominal {
             definition: value,
@@ -203,7 +203,7 @@ fn tabled_solver_matches_structural_const_trait_arguments() {
     let answer = TraitSolver::new(&signatures).solve(TraitGoal {
         relation: ElaboratedTraitReference {
             definition: capacity,
-            arguments: vec![Type::ConstU32(7)],
+            arguments: vec![GenericArgument::ConstU32(7)],
         },
         subject: Type::Nominal {
             definition: tag,
@@ -211,6 +211,31 @@ fn tabled_solver_matches_structural_const_trait_arguments() {
         },
     });
     assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
+}
+
+#[test]
+fn trait_solver_rejects_cross_kind_const_substitution() {
+    let (interface, signatures) = signatures(
+        "trait Capacity<n: u32> {} struct Tag<n: u32> {} impl<n: u32> Capacity<n> for Tag<n> {}",
+    );
+    let capacity = key(&interface, "Capacity");
+    let tag = key(&interface, "Tag");
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: capacity,
+            // The spelling shares a numeric-looking value with the subject's
+            // `u32` argument, but the argument kind is Quantity and may not
+            // bind the implementation's `u32` trait slot.
+            arguments: vec![GenericArgument::ConstQuantity(
+                grandiose_stage0::Quantity::ONCE,
+            )],
+        },
+        subject: Type::Nominal {
+            definition: tag,
+            arguments: vec![Type::ConstU32(1)],
+        },
+    });
+    assert!(matches!(answer, TraitAnswer::NoSolution), "{answer:#?}");
 }
 
 #[test]
@@ -417,7 +442,7 @@ fn associated_type_normalization_reduces_projections_in_the_trait_head() {
         TraitGoal {
             relation: ElaboratedTraitReference {
                 definition: consume,
-                arguments: vec![Type::Projection {
+                arguments: vec![GenericArgument::Type(Type::Projection {
                     subject: Box::new(Type::Nominal {
                         definition: value,
                         arguments: vec![],
@@ -426,7 +451,7 @@ fn associated_type_normalization_reduces_projections_in_the_trait_head() {
                     trait_arguments: vec![],
                     name: "Item".into(),
                     item_arguments: vec![],
-                }],
+                })],
             },
             subject: Type::Nominal {
                 definition: value,
@@ -529,7 +554,7 @@ fn method_selection_substitutes_impl_and_method_generic_arguments() {
         TraitGoal {
             relation: ElaboratedTraitReference {
                 definition: convert,
-                arguments: vec![Type::Scalar(ScalarType::I64)],
+                arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
             },
             subject: Type::Nominal {
                 definition: boxed,

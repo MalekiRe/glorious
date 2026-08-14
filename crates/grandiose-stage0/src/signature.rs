@@ -13,8 +13,8 @@ use crate::{
     quantity::Quantity,
     resolution::{DefinitionIndex, ResolutionState},
     types::{
-        ConstKind, EffectInstance, EffectRow, EffectRowProjection, GenericKind, Lifetime,
-        Mutability, Type,
+        ConstKind, EffectInstance, EffectRow, EffectRowProjection, GenericArgument, GenericKind,
+        Lifetime, Mutability, Type,
     },
 };
 
@@ -40,7 +40,9 @@ pub struct CallableSignature {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedTraitReference {
     pub definition: DefKey,
-    pub arguments: Vec<Type>,
+    /// One canonical argument per declared trait slot. Trait identity keeps
+    /// consts, rows, and regions out of the value-type namespace.
+    pub arguments: Vec<GenericArgument>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -558,7 +560,7 @@ impl ElaboratedInterface {
                 .map(|(subject, relation)| {
                     (
                         substitute_alias_generics(subject.clone(), arguments),
-                        substitute_trait_reference(relation, arguments),
+                        substitute_trait_reference_with_types(relation, arguments),
                     )
                 })
                 .collect(),
@@ -863,8 +865,10 @@ fn instantiate_trait_method_contract(
     let trait_generic_count = implementation.relation.arguments.len() as u32;
     let implementation_generic_count = implementation.generics;
     let mut arguments = implementation.relation.arguments.clone();
-    arguments
-        .extend((0..method.generics).map(|offset| Type::Generic(implementation.generics + offset)));
+    arguments.extend(
+        (0..method.generics)
+            .map(|offset| GenericArgument::Type(Type::Generic(implementation.generics + offset))),
+    );
     CallableSignature {
         generics: method.generics,
         generic_kinds: method.generic_kinds.clone(),
@@ -875,7 +879,7 @@ fn instantiate_trait_method_contract(
             .map(|parameter| {
                 rebase_method_lifetimes(
                     replace_trait_self_type(
-                        substitute_alias_generics(parameter, &arguments),
+                        substitute_trait_type_generics(parameter, &arguments),
                         &implementation.self_ty,
                     ),
                     trait_generic_count,
@@ -885,7 +889,7 @@ fn instantiate_trait_method_contract(
             .collect(),
         result: rebase_method_lifetimes(
             replace_trait_self_type(
-                substitute_alias_generics(method.result.clone(), &arguments),
+                substitute_trait_type_generics(method.result.clone(), &arguments),
                 &implementation.self_ty,
             ),
             trait_generic_count,
@@ -893,7 +897,7 @@ fn instantiate_trait_method_contract(
         ),
         effects: rebase_method_lifetime_effect_row(
             replace_trait_self_effect_row(
-                substitute_effect_row(method.effects.clone(), &arguments),
+                substitute_trait_effect_row(method.effects.clone(), &arguments),
                 &implementation.self_ty,
             ),
             trait_generic_count,
@@ -907,7 +911,7 @@ fn instantiate_trait_method_contract(
                 (
                     rebase_method_lifetimes(
                         replace_trait_self_type(
-                            substitute_alias_generics(subject.clone(), &arguments),
+                            substitute_trait_type_generics(subject.clone(), &arguments),
                             &implementation.self_ty,
                         ),
                         trait_generic_count,
@@ -1008,8 +1012,20 @@ fn replace_trait_self_trait_reference(
         arguments: relation
             .arguments
             .into_iter()
-            .map(|value| replace_trait_self_type(value, self_ty))
+            .map(|value| replace_trait_self_generic_argument(value, self_ty))
             .collect(),
+    }
+}
+
+fn replace_trait_self_generic_argument(value: GenericArgument, self_ty: &Type) -> GenericArgument {
+    match value {
+        GenericArgument::Type(value) => {
+            GenericArgument::Type(replace_trait_self_type(value, self_ty))
+        }
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(replace_trait_self_effect_row(value, self_ty))
+        }
+        value => value,
     }
 }
 
@@ -1192,9 +1208,40 @@ fn rebase_method_lifetime_trait_reference(
             .arguments
             .into_iter()
             .map(|argument| {
-                rebase_method_lifetimes(argument, trait_generic_count, implementation_generic_count)
+                rebase_method_lifetime_generic_argument(
+                    argument,
+                    trait_generic_count,
+                    implementation_generic_count,
+                )
             })
             .collect(),
+    }
+}
+
+fn rebase_method_lifetime_generic_argument(
+    argument: GenericArgument,
+    trait_generic_count: u32,
+    implementation_generic_count: u32,
+) -> GenericArgument {
+    match argument {
+        GenericArgument::Type(value) => GenericArgument::Type(rebase_method_lifetimes(
+            value,
+            trait_generic_count,
+            implementation_generic_count,
+        )),
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(rebase_method_lifetime_effect_row(
+                value,
+                trait_generic_count,
+                implementation_generic_count,
+            ))
+        }
+        GenericArgument::Lifetime(Lifetime::Generic(index)) if index >= trait_generic_count => {
+            GenericArgument::Lifetime(Lifetime::Generic(
+                implementation_generic_count + (index - trait_generic_count),
+            ))
+        }
+        value => value,
     }
 }
 
@@ -1271,13 +1318,32 @@ fn normalize_trait_reference(
         .arguments
         .clone()
         .into_iter()
-        .map(|ty| normalize_alias_type(ty, definitions, &mut vec![], diagnostics))
+        .map(|argument| normalize_trait_generic_argument(argument, definitions, diagnostics))
         .collect();
+}
+
+fn normalize_trait_generic_argument(
+    argument: GenericArgument,
+    definitions: &BTreeMap<DefKey, ElaboratedHeader>,
+    diagnostics: &mut Vec<SignatureDiagnostic>,
+) -> GenericArgument {
+    match argument {
+        GenericArgument::Type(value) => GenericArgument::Type(normalize_alias_type(
+            value,
+            definitions,
+            &mut vec![],
+            diagnostics,
+        )),
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(normalize_effect_row(value, definitions, diagnostics))
+        }
+        value => value,
+    }
 }
 
 fn substitute_trait_reference(
     relation: &ElaboratedTraitReference,
-    arguments: &[Type],
+    arguments: &[GenericArgument],
 ) -> ElaboratedTraitReference {
     ElaboratedTraitReference {
         definition: relation.definition,
@@ -1285,9 +1351,66 @@ fn substitute_trait_reference(
             .arguments
             .iter()
             .cloned()
-            .map(|argument| substitute_alias_generics(argument, arguments))
+            .map(|argument| substitute_trait_generic_argument(argument, arguments))
             .collect(),
     }
+}
+
+fn substitute_trait_reference_with_types(
+    relation: &ElaboratedTraitReference,
+    arguments: &[Type],
+) -> ElaboratedTraitReference {
+    let arguments = arguments
+        .iter()
+        .cloned()
+        .map(GenericArgument::Type)
+        .collect::<Vec<_>>();
+    substitute_trait_reference(relation, &arguments)
+}
+
+fn substitute_trait_generic_argument(
+    argument: GenericArgument,
+    arguments: &[GenericArgument],
+) -> GenericArgument {
+    match argument {
+        GenericArgument::Type(value) => {
+            GenericArgument::Type(substitute_trait_type_generics(value, arguments))
+        }
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(substitute_trait_effect_row(value, arguments))
+        }
+        GenericArgument::ConstGeneric { index, kind } => arguments
+            .get(index as usize)
+            .filter(|argument| generic_argument_matches_const_kind(argument, kind))
+            .cloned()
+            .unwrap_or(GenericArgument::ConstGeneric {
+                index: u32::MAX,
+                kind,
+            }),
+        value => value,
+    }
+}
+
+fn generic_argument_matches_const_kind(argument: &GenericArgument, kind: ConstKind) -> bool {
+    matches!(
+        (argument, kind),
+        (GenericArgument::ConstU32(_), ConstKind::U32)
+            | (GenericArgument::ConstQuantity(_), ConstKind::Quantity)
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: ConstKind::U32,
+                    ..
+                },
+                ConstKind::U32
+            )
+            | (
+                GenericArgument::ConstGeneric {
+                    kind: ConstKind::Quantity,
+                    ..
+                },
+                ConstKind::Quantity
+            )
+    )
 }
 
 fn normalize_effect_row(
@@ -1704,7 +1827,8 @@ impl Elaborator<'_> {
                 let expected = self.index.trait_generic_arity(definition).unwrap_or(0) as usize;
                 let kinds = self.index.trait_generic_kinds(definition).unwrap_or(&[]);
                 let name = path.last().map(String::as_str).unwrap_or("<trait>");
-                let arguments = self.elaborate_generic_arguments(name, source_arguments, kinds);
+                let arguments =
+                    self.elaborate_trait_generic_arguments(name, source_arguments, kinds);
                 if expected != arguments.len() {
                     self.error(
                         "G3308",
@@ -1753,18 +1877,13 @@ impl Elaborator<'_> {
     fn elaborate_unresolved_generic_arguments(
         &mut self,
         arguments: &[HeaderGenericArgument],
-    ) -> Vec<Type> {
+    ) -> Vec<GenericArgument> {
         arguments
             .iter()
             .map(|argument| match argument {
-                HeaderGenericArgument::Type(value) => self.ty(value),
-                HeaderGenericArgument::U32(_) | HeaderGenericArgument::Quantity(_) => {
-                    self.error(
-                        "G3318",
-                        "structural generic argument requires a resolved declaration".into(),
-                    );
-                    Type::Error
-                }
+                HeaderGenericArgument::Type(value) => GenericArgument::Type(self.ty(value)),
+                HeaderGenericArgument::U32(value) => GenericArgument::ConstU32(*value),
+                HeaderGenericArgument::Quantity(value) => GenericArgument::ConstQuantity(*value),
             })
             .collect()
     }
@@ -1834,9 +1953,9 @@ impl Elaborator<'_> {
                     projections.push(EffectRowProjection {
                         subject: Box::new(subject),
                         trait_definition: relation.definition,
-                        trait_arguments: relation.arguments,
+                        trait_arguments: self.type_only_trait_arguments(name, relation.arguments),
                         name: name.clone(),
-                        item_arguments: self.elaborate_generic_arguments(
+                        item_arguments: self.elaborate_type_generic_arguments(
                             name,
                             item_arguments,
                             item_kinds,
@@ -2081,9 +2200,9 @@ impl Elaborator<'_> {
                 Type::Projection {
                     subject: Box::new(subject),
                     trait_definition: relation.definition,
-                    trait_arguments: relation.arguments,
+                    trait_arguments: self.type_only_trait_arguments(name, relation.arguments),
                     name: name.clone(),
-                    item_arguments: self.elaborate_generic_arguments(
+                    item_arguments: self.elaborate_type_generic_arguments(
                         name,
                         item_arguments,
                         item_kinds,
@@ -2190,7 +2309,7 @@ impl Elaborator<'_> {
                     let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
                     Type::Nominal {
                         definition,
-                        arguments: self.elaborate_generic_arguments(name, &arguments, kinds),
+                        arguments: self.elaborate_type_generic_arguments(name, &arguments, kinds),
                     }
                 }
             }
@@ -2208,7 +2327,7 @@ impl Elaborator<'_> {
             }
         }
     }
-    fn elaborate_generic_arguments(
+    fn elaborate_type_generic_arguments(
         &mut self,
         name: &str,
         arguments: &[HeaderGenericArgument],
@@ -2286,6 +2405,113 @@ impl Elaborator<'_> {
                     self.error(
                         "G3318",
                         format!("generic argument for `{name}` has an unsupported non-type kind"),
+                    );
+                    Type::Error
+                }
+            })
+            .collect()
+    }
+
+    /// Trait references are identity-bearing rather than immediately runtime
+    /// callable applications, so retain the kind of each supplied slot.
+    fn elaborate_trait_generic_arguments(
+        &mut self,
+        name: &str,
+        arguments: &[HeaderGenericArgument],
+        kinds: &[GenericKind],
+    ) -> Vec<GenericArgument> {
+        arguments
+            .iter()
+            .zip(kinds)
+            .map(|(argument, kind)| match (argument, kind) {
+                (HeaderGenericArgument::Type(value), GenericKind::Type) => {
+                    GenericArgument::Type(self.ty(value))
+                }
+                (HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
+                    GenericArgument::ConstU32(*value)
+                }
+                (
+                    HeaderGenericArgument::Quantity(value),
+                    GenericKind::Const(ConstKind::Quantity),
+                ) => GenericArgument::ConstQuantity(*value),
+                (HeaderGenericArgument::Type(HeaderType::Path(path)), GenericKind::Const(kind))
+                    if path.len() == 1 => match self.const_generics.get(&path[0]) {
+                        Some((index, found)) if found == kind => GenericArgument::ConstGeneric {
+                            index: *index,
+                            kind: *kind,
+                        },
+                        _ => {
+                            self.error(
+                                "G3318",
+                                format!(
+                                    "generic argument for `{name}` must be a structural `{}` constant",
+                                    const_kind_name(*kind),
+                                ),
+                            );
+                            GenericArgument::ConstGeneric {
+                                index: u32::MAX,
+                                kind: *kind,
+                            }
+                        }
+                    },
+                (HeaderGenericArgument::U32(_), GenericKind::Type)
+                | (HeaderGenericArgument::Quantity(_), GenericKind::Type) => {
+                    self.error(
+                        "G3318",
+                        format!("type slot of `{name}` cannot receive a structural constant"),
+                    );
+                    GenericArgument::Type(Type::Error)
+                }
+                (_, GenericKind::Const(kind)) => {
+                    self.error(
+                        "G3318",
+                        format!(
+                            "generic argument for `{name}` must be a structural `{}` constant",
+                            const_kind_name(*kind),
+                        ),
+                    );
+                    GenericArgument::ConstGeneric {
+                        index: u32::MAX,
+                        kind: *kind,
+                    }
+                }
+                (_, GenericKind::EffectRow) => {
+                    self.error(
+                        "G3318",
+                        format!("generic argument for `{name}` must be an effect-row generic"),
+                    );
+                    GenericArgument::EffectRow(EffectRow::empty())
+                }
+                (_, GenericKind::Lifetime) => {
+                    self.error(
+                        "G3318",
+                        format!("generic argument for `{name}` must be a lifetime generic"),
+                    );
+                    GenericArgument::Lifetime(Lifetime::Elided)
+                }
+            })
+            .collect()
+    }
+
+    /// Projections are still a type-only runtime representation. Rejecting a
+    /// non-type trait argument here is intentional: trait identity retains it
+    /// in `ElaboratedTraitReference`, while the older projection carrier must
+    /// not silently reinterpret it as a value type.
+    fn type_only_trait_arguments(
+        &mut self,
+        name: &str,
+        arguments: Vec<GenericArgument>,
+    ) -> Vec<Type> {
+        arguments
+            .into_iter()
+            .map(|argument| match argument {
+                GenericArgument::Type(value) => value,
+                _ => {
+                    self.error(
+                        "G3318",
+                        format!(
+                            "type projection through `{name}` requires type-kind trait arguments"
+                        ),
                     );
                     Type::Error
                 }
@@ -2499,17 +2725,12 @@ fn normalize_nominal_fields(
     }
 }
 
+/// The legacy nominal/callable instantiation boundary is explicitly
+/// type-only. Trait references use `substitute_trait_type_generics` instead.
 fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
     match value {
-        // Trait `Self` is not a source generic slot.  It must survive alias
-        // normalization until trait-method instantiation supplies the selected
-        // implementation head.
         Type::Generic(TRAIT_SELF_GENERIC) => Type::Generic(TRAIT_SELF_GENERIC),
-        Type::Generic(index) => arguments
-            .get(index as usize)
-            .cloned()
-            .unwrap_or(Type::Error),
-        Type::ConstGeneric { index, .. } => arguments
+        Type::Generic(index) | Type::ConstGeneric { index, .. } => arguments
             .get(index as usize)
             .cloned()
             .unwrap_or(Type::Error),
@@ -2578,10 +2799,6 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
     }
 }
 
-/// Instantiate every type nested in an effect row. Effect arguments are part
-/// of a callable's observable protocol, so leaving declaration-owned generic
-/// slots here would make `f<T> / State<T>` appear to perform `State<Generic(0)>`
-/// at every call site.
 fn substitute_effect_row(value: EffectRow, arguments: &[Type]) -> EffectRow {
     EffectRow {
         effects: value
@@ -2612,6 +2829,158 @@ fn substitute_effect_row(value: EffectRow, arguments: &[Type]) -> EffectRow {
                     .item_arguments
                     .into_iter()
                     .map(|value| substitute_alias_generics(value, arguments))
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    }
+    .canonicalized()
+}
+
+/// Substitute declaration generic slots into a type consumer.  This boundary
+/// is deliberately type-valued: a row or lifetime argument cannot enter a
+/// value type, and a mismatched kind recovers as `Type::Error` instead.
+fn substitute_trait_type_generics(value: Type, arguments: &[GenericArgument]) -> Type {
+    match value {
+        // Trait `Self` is not a source generic slot.  It must survive alias
+        // normalization until trait-method instantiation supplies the selected
+        // implementation head.
+        Type::Generic(TRAIT_SELF_GENERIC) => Type::Generic(TRAIT_SELF_GENERIC),
+        Type::Generic(index) => arguments
+            .get(index as usize)
+            .and_then(generic_argument_as_type)
+            .unwrap_or(Type::Error),
+        Type::ConstGeneric { index, kind } => arguments
+            .get(index as usize)
+            .and_then(|argument| generic_argument_as_const_type(argument, kind))
+            .unwrap_or(Type::Error),
+        Type::Nominal {
+            definition,
+            arguments: values,
+        } => Type::Nominal {
+            definition,
+            arguments: values
+                .into_iter()
+                .map(|value| substitute_trait_type_generics(value, arguments))
+                .collect(),
+        },
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        } => Type::Projection {
+            subject: Box::new(substitute_trait_type_generics(*subject, arguments)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|value| substitute_trait_type_generics(value, arguments))
+                .collect(),
+            name,
+            item_arguments: item_arguments
+                .into_iter()
+                .map(|value| substitute_trait_type_generics(value, arguments))
+                .collect(),
+        },
+        Type::Tuple(values) => Type::Tuple(
+            values
+                .into_iter()
+                .map(|value| substitute_trait_type_generics(value, arguments))
+                .collect(),
+        ),
+        Type::Array(value) => {
+            Type::Array(Box::new(substitute_trait_type_generics(*value, arguments)))
+        }
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability,
+            lifetime,
+            referent: Box::new(substitute_trait_type_generics(*referent, arguments)),
+        },
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            lifetime_binders,
+            parameters: parameters
+                .into_iter()
+                .map(|value| substitute_trait_type_generics(value, arguments))
+                .collect(),
+            result: Box::new(substitute_trait_type_generics(*result, arguments)),
+            effects: substitute_trait_effect_row(effects, arguments),
+            invocation,
+        },
+        value => value,
+    }
+}
+
+/// Instantiate every type nested in an effect row. Effect arguments are part
+/// of a callable's observable protocol, so leaving declaration-owned generic
+/// slots here would make `f<T> / State<T>` appear to perform `State<Generic(0)>`
+/// at every call site.
+fn generic_argument_as_type(argument: &GenericArgument) -> Option<Type> {
+    match argument {
+        GenericArgument::Type(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn generic_argument_as_const_type(argument: &GenericArgument, kind: ConstKind) -> Option<Type> {
+    match (argument, kind) {
+        (GenericArgument::ConstU32(value), ConstKind::U32) => Some(Type::ConstU32(*value)),
+        (GenericArgument::ConstQuantity(value), ConstKind::Quantity) => {
+            Some(Type::ConstQuantity(*value))
+        }
+        (GenericArgument::ConstGeneric { index, kind: found }, kind) if *found == kind => {
+            Some(Type::ConstGeneric {
+                index: *index,
+                kind,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn substitute_trait_effect_row(value: EffectRow, arguments: &[GenericArgument]) -> EffectRow {
+    EffectRow {
+        effects: value
+            .effects
+            .into_iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(|argument| substitute_trait_type_generics(argument, arguments))
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| EffectRowProjection {
+                subject: Box::new(substitute_trait_type_generics(
+                    *projection.subject,
+                    arguments,
+                )),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(|value| substitute_trait_type_generics(value, arguments))
+                    .collect(),
+                name: projection.name,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(|value| substitute_trait_type_generics(value, arguments))
                     .collect(),
             })
             .collect(),

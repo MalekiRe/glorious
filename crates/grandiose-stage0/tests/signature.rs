@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     ConstKind, DeclarationScan, DefinitionIndex, EffectTail, ElaboratedHeader, ElaboratedInterface,
-    ElaboratedNominalLayout, FileKey, GenericKind, InterfaceSet, LexedFile, Lifetime, LogicalPath,
-    PackageKey, Quantity, ScalarType, Type,
+    ElaboratedNominalLayout, FileKey, GenericArgument, GenericKind, InterfaceSet, LexedFile,
+    Lifetime, LogicalPath, PackageKey, Quantity, ScalarType, Type,
 };
 
 #[test]
@@ -351,7 +351,7 @@ fn trait_references_elaborate_structural_const_arguments_by_declared_kind() {
     };
     assert!(matches!(
         signature.where_bounds[0].1.arguments.as_slice(),
-        [Type::ConstGeneric {
+        [GenericArgument::ConstGeneric {
             index: 0,
             kind: ConstKind::U32
         }]
@@ -370,7 +370,7 @@ fn trait_references_elaborate_structural_const_arguments_by_declared_kind() {
     };
     assert_eq!(
         signature.where_bounds[0].1.arguments,
-        vec![Type::ConstU32(7)]
+        vec![GenericArgument::ConstU32(7)]
     );
     assert_eq!(
         signatures
