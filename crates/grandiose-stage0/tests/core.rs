@@ -3942,6 +3942,47 @@ fn mixed_static_and_caller_reference_results_preserve_only_caller_paths() {
     assert_eq!(paths.0[0].result_fields, [1]);
     assert_eq!(paths.0[0].argument, 1);
     assert_eq!(paths.1, paths.0);
+    assert!(
+        !PlaceFlow::analyze(&perform)
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "mixed effect result lost its caller reference path"
+    );
+}
+
+#[test]
+fn placeflow_seeds_caller_reference_parameter_provenance() {
+    let core = core_for(
+        "core-caller-parameter-reborrow@0.1.0",
+        "pub fn main(slot: &mut i64) -> i64 { let child = &mut *slot; *child }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(
+        !flow
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5006"),
+        "caller-owned reference parameter did not seed a reborrow parent: {flow:#?}"
+    );
+
+    let conflicting = core_for(
+        "core-caller-parameter-reborrow-conflict@0.1.0",
+        "pub fn main(slot: &mut i64) -> i64 { let child = &mut *slot; *slot = 2; *child }",
+    );
+    assert!(
+        conflicting.diagnostics.is_empty(),
+        "{:#?}",
+        conflicting.diagnostics
+    );
+    assert!(
+        PlaceFlow::analyze(&conflicting)
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5004"),
+        "live child reborrow did not suspend the caller-owned parent"
+    );
 }
 
 #[test]

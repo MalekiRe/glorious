@@ -6,6 +6,7 @@ use crate::{
         RefinementBrand, TypedBody,
     },
     source::Span,
+    types::Type,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -172,6 +173,12 @@ impl PlaceFlow {
             a.states.insert(name.clone(), LocalState::Initialized);
             a.scopes[0].insert(name.clone(), name.clone());
         }
+        // Parameters are caller-owned values, but reference-typed parameter
+        // projections still name a stable external loan.  Seed those frozen
+        // identities before visiting the body so a call or operation may
+        // forward one into its result, and a child reborrow can suspend it,
+        // without inventing a body-local backing place.
+        a.record_parameter_reference_origins();
         a.visit_with_live_after(body.root, &BTreeSet::new());
         a.diagnostics.sort_by_key(|d| d.span.start);
         let active_loans = a
@@ -244,6 +251,35 @@ type HandlerExit = (
 );
 
 impl Analyzer<'_> {
+    fn record_parameter_reference_origins(&mut self) {
+        let parameters = self
+            .body
+            .parameters
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<BTreeSet<_>>();
+        for index in 0..self.body.expressions.len() {
+            let id = CoreId(index as u32);
+            let Some(place) = self.projection(id) else {
+                continue;
+            };
+            if !parameters.contains(place.root.as_str()) {
+                continue;
+            }
+            let Type::Reference { mutability, .. } = &self.body.expression(id).ty else {
+                continue;
+            };
+            let key = projection_key(&place.root, &place.fields);
+            self.reference_origins
+                .entry(key)
+                .or_insert_with(|| ProjectionLoan {
+                    place,
+                    unique: matches!(mutability, crate::types::Mutability::Unique),
+                    owner: None,
+                });
+        }
+    }
+
     fn resolve_name(&self, name: &str) -> String {
         self.scopes
             .iter()
