@@ -1129,6 +1129,54 @@ fn service_proves_bool_normal_completion_coverage_without_a_wildcard() {
 }
 
 #[test]
+fn service_proves_nested_enum_payload_coverage_without_a_wildcard() {
+    let source = "pub enum Bit { Zero, One } pub enum Packet { Data(Bit), End } pub fn main() -> i64 { handle Packet::Data(Bit::One) { Packet::Data(Bit::Zero) => 40, Packet::Data(Bit::One) => 41, Packet::End => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_proves_nested_tuple_bool_coverage_without_a_wildcard() {
+    let source = "pub fn main() -> i64 { handle (true, false) { (true, true) => 40, (true, false) => 41, (false, true) => 42, (false, false) => 43 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_proves_record_field_coverage_without_a_wildcard() {
+    let source = "pub struct Flagged { value: Bool } pub fn main() -> i64 { handle Flagged { value: false } { Flagged { value: true } => 40, Flagged { value: false } => 41 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_rejects_an_unreachable_nested_completion_arm() {
+    let source = "pub enum Bit { Zero, One } pub enum Packet { Data(Bit), End } pub fn main() -> i64 { handle Packet::Data(Bit::One) { Packet::Data(Bit::Zero) => 40, Packet::Data(Bit::One) => 41, Packet::Data(Bit::One) => 42, Packet::End => 43 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("unreachable completion arm unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4168"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_discharges_an_effect_through_nested_payload_coverage() {
+    let source = "pub enum Bit { Zero, One } pub enum Packet { Data(Bit), End } effect Inspect { [1,1] inspect(value: Packet) -> i64; } pub fn worker(value: Packet) -> i64 / Inspect { Inspect::inspect(value) } pub fn main() -> i64 { handle worker(Packet::Data(Bit::One)) { Inspect::inspect(Packet::Data(Bit::Zero)) => 40, Inspect::inspect(Packet::Data(Bit::One)) => 41, Inspect::inspect(Packet::End) => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
 fn service_rejects_partial_normal_completion_coverage_without_a_fallback() {
     let source = "pub fn main() -> i64 { handle false { true => 41 } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

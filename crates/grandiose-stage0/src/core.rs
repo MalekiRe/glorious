@@ -3369,7 +3369,6 @@ impl Elaborator<'_> {
         let subject_ty = self.expressions[subject.0 as usize].ty.clone();
         let result = self.inference.fresh();
         let mut core_clauses = Vec::with_capacity(clauses.len());
-        let mut has_fallback = false;
         for clause in clauses {
             let Some(pattern) = clause.completion else {
                 return self.fail(
@@ -3392,7 +3391,6 @@ impl Elaborator<'_> {
             if elaboration.recovered {
                 self.recovered = true;
             }
-            has_fallback |= !elaboration.plan.refutable;
             let names = elaboration
                 .plan
                 .bindings
@@ -3432,19 +3430,24 @@ impl Elaborator<'_> {
                 span: clause.span,
             });
         }
-        if !has_fallback
-            && !self.core_patterns_exhaustive(
-                &core_clauses
-                    .iter()
-                    .map(|clause| clause.pattern.clone())
-                    .collect::<Vec<_>>(),
-                &subject_ty,
-            )
-        {
+        let patterns = core_clauses
+            .iter()
+            .map(|clause| clause.pattern.clone())
+            .collect::<Vec<_>>();
+        let coverage = self.analyze_core_pattern_matrix(&patterns, &subject_ty);
+        for index in coverage.unreachable {
+            self.error(
+                core_clauses[index].span,
+                "G4168",
+                "completion arm is unreachable because earlier arms cover every value it can match",
+            );
+            self.recovered = true;
+        }
+        if !coverage.exhaustive {
             return self.fail(
                 span,
                 "G4166",
-                "completion arms need an irrefutable fallback",
+                "completion arms do not cover every value; add a fallback or cover every finite constructor",
             );
         }
         self.alloc(
@@ -3456,59 +3459,141 @@ impl Elaborator<'_> {
             span,
         )
     }
-    /// Finite normal-completion coverage mirrors the operation-row proof:
-    /// it permits a closed enum or Bool matrix, while leaving all infinite or
-    /// partially refined subjects subject to the ordinary fallback rule.
-    fn core_patterns_exhaustive(&self, patterns: &[CorePattern], subject: &Type) -> bool {
-        if patterns.iter().any(core_pattern_irrefutable) {
-            return true;
+    /// Check an ordered pattern matrix against the finite structural domains
+    /// available to Stage 0.  Unlike the former constructor-only check, this
+    /// follows nested tuple, record, and enum payload decisions.  It is a
+    /// proof procedure, not a heuristic: unknown/infinite/recursive domains
+    /// are left open and still require an irrefutable arm.
+    fn analyze_core_pattern_matrix(
+        &self,
+        patterns: &[CorePattern],
+        subject: &Type,
+    ) -> CorePatternMatrixAnalysis {
+        let mut analysis = CorePatternMatrixAnalysis {
+            exhaustive: false,
+            unreachable: vec![],
+        };
+        let mut covered_by_catch_all = false;
+        for (index, pattern) in patterns.iter().enumerate() {
+            if covered_by_catch_all {
+                analysis.unreachable.push(index);
+            }
+            if core_pattern_irrefutable(pattern) {
+                covered_by_catch_all = true;
+            }
+        }
+        if covered_by_catch_all {
+            analysis.exhaustive = true;
+            return analysis;
+        }
+
+        let Some(values) = self.finite_pattern_values(subject, 0) else {
+            return analysis;
+        };
+        for (index, pattern) in patterns.iter().enumerate() {
+            let useful = values.iter().any(|value| {
+                core_pattern_matches_value(pattern, value)
+                    && !patterns[..index]
+                        .iter()
+                        .any(|earlier| core_pattern_matches_value(earlier, value))
+            });
+            if !useful {
+                analysis.unreachable.push(index);
+            }
+        }
+        analysis.exhaustive = values.iter().all(|value| {
+            patterns
+                .iter()
+                .any(|pattern| core_pattern_matches_value(pattern, value))
+        });
+        analysis
+    }
+
+    /// Enumerate a closed structural domain with a deliberately modest cap.
+    /// The cap preserves predictable compilation while keeping the proof
+    /// complete for all domains it accepts; exceeding it means "unknown",
+    /// never a false claim of coverage.
+    fn finite_pattern_values(&self, subject: &Type, depth: u8) -> Option<Vec<FinitePatternValue>> {
+        const MAX_VALUES: usize = 4096;
+        const MAX_DEPTH: u8 = 16;
+        if depth >= MAX_DEPTH {
+            return None;
         }
         match subject {
-            Type::Nominal { definition, .. } => {
-                let Some(ElaboratedHeader::Nominal {
+            Type::Unit => Some(vec![FinitePatternValue::Unit]),
+            Type::Scalar(ScalarType::Bool) => Some(vec![
+                FinitePatternValue::Bool(false),
+                FinitePatternValue::Bool(true),
+            ]),
+            Type::Tuple(fields) => {
+                let fields = fields
+                    .iter()
+                    .map(|field| self.finite_pattern_values(field, depth + 1))
+                    .collect::<Option<Vec<_>>>()?;
+                finite_pattern_products(fields, MAX_VALUES)
+                    .map(|values| values.into_iter().map(FinitePatternValue::Tuple).collect())
+            }
+            Type::Nominal {
+                definition,
+                arguments,
+            } => match self.signatures.definitions.get(definition)? {
+                ElaboratedHeader::Nominal {
+                    layout: crate::signature::ElaboratedNominalLayout::Struct(_),
+                    ..
+                } => {
+                    let fields = self
+                        .signatures
+                        .instantiate_struct_fields(*definition, arguments)?;
+                    let values = fields
+                        .iter()
+                        .map(|field| self.finite_pattern_values(&field.ty, depth + 1))
+                        .collect::<Option<Vec<_>>>()?;
+                    finite_pattern_products(values, MAX_VALUES).map(|values| {
+                        values
+                            .into_iter()
+                            .map(|fields| FinitePatternValue::Record {
+                                definition: *definition,
+                                fields,
+                            })
+                            .collect()
+                    })
+                }
+                ElaboratedHeader::Nominal {
                     layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
                     ..
-                }) = self.signatures.definitions.get(definition)
-                else {
-                    return false;
-                };
-                let covered = patterns
-                    .iter()
-                    .filter_map(|pattern| match pattern {
-                        CorePattern::Enum {
-                            definition: actual,
-                            variant,
-                            fields,
-                            ..
-                        } if actual == definition
-                            && fields
-                                .iter()
-                                .all(|field| core_pattern_irrefutable(&field.pattern)) =>
-                        {
-                            Some(*variant)
+                } => {
+                    let mut values = vec![];
+                    for (variant, _) in variants.iter().enumerate() {
+                        let fields = self.signatures.instantiate_enum_fields(
+                            *definition,
+                            arguments,
+                            variant as u32,
+                        )?;
+                        let fields = fields
+                            .iter()
+                            .map(|field| self.finite_pattern_values(&field.ty, depth + 1))
+                            .collect::<Option<Vec<_>>>()?;
+                        let products = finite_pattern_products(fields, MAX_VALUES)?;
+                        if values.len().checked_add(products.len())? > MAX_VALUES {
+                            return None;
                         }
-                        _ => None,
-                    })
-                    .collect::<std::collections::BTreeSet<_>>();
-                covered.len() == variants.len()
-                    && covered
-                        .iter()
-                        .all(|variant| (*variant as usize) < variants.len())
-            }
-            Type::Scalar(ScalarType::Bool) => {
-                patterns
-                    .iter()
-                    .filter_map(|pattern| match pattern {
-                        CorePattern::Literal(value) if value == "true" || value == "false" => {
-                            Some(value.as_str())
-                        }
-                        _ => None,
-                    })
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len()
-                    == 2
-            }
-            _ => false,
+                        values.extend(products.into_iter().map(|fields| {
+                            FinitePatternValue::Enum {
+                                definition: *definition,
+                                variant: variant as u32,
+                                fields,
+                            }
+                        }));
+                    }
+                    Some(values)
+                }
+                ElaboratedHeader::Nominal {
+                    layout: crate::signature::ElaboratedNominalLayout::Opaque,
+                    ..
+                } => None,
+                _ => None,
+            },
+            _ => None,
         }
     }
     fn residual_effects(&self) -> EffectRow {
@@ -3866,12 +3951,12 @@ impl Elaborator<'_> {
             })
             .collect()
     }
-    /// A compact, source-order matrix proof for the finite cases available in
-    /// stage0.  The shared pattern DAG remains responsible for dispatch; this
-    /// proof only decides whether an operation may leave the outward effect
-    /// row.  It deliberately accepts a row only when every constructor arm
-    /// covers its payload irrefutably, so it never mistakes a partial nested
-    /// pattern for total coverage.
+    /// A bounded structural matrix proof for operation payloads.  This uses
+    /// the same finite inhabitant domain as normal-completion coverage, so a
+    /// handler can discharge an operation through nested enum/record/tuple
+    /// patterns without falsely treating a partially refined payload as total.
+    /// Unknown, recursive, or over-large domains remain conservatively
+    /// outward-facing.
     fn handler_operation_is_exhaustive(&self, rows: &[&ResolvedHandlerClause]) -> bool {
         if rows
             .iter()
@@ -3888,56 +3973,22 @@ impl Elaborator<'_> {
         {
             return false;
         }
-        let mut domains = Vec::with_capacity(first.patterns.len());
-        let mut combinations = 1usize;
-        for pattern in &first.patterns {
-            let domain = match &pattern.plan.subject {
-                Type::Scalar(ScalarType::Bool) => {
-                    vec![
-                        FiniteConstructor::Bool(false),
-                        FiniteConstructor::Bool(true),
-                    ]
-                }
-                Type::Nominal { definition, .. } => {
-                    let Some(ElaboratedHeader::Nominal {
-                        layout: crate::signature::ElaboratedNominalLayout::Enum(variants),
-                        ..
-                    }) = self.signatures.definitions.get(definition)
-                    else {
-                        return false;
-                    };
-                    (0..variants.len() as u32)
-                        .map(|variant| FiniteConstructor::Enum {
-                            definition: *definition,
-                            variant,
-                        })
-                        .collect()
-                }
-                _ => return false,
-            };
-            combinations = match combinations.checked_mul(domain.len()) {
-                Some(count) if count <= 4096 => count,
-                _ => return false,
-            };
-            domains.push(domain);
-        }
-        (0..combinations).all(|ordinal| {
-            let mut cursor = ordinal;
-            let assignment = domains
-                .iter()
-                .map(|domain| {
-                    let constructor = domain[cursor % domain.len()];
-                    cursor /= domain.len();
-                    constructor
-                })
-                .collect::<Vec<_>>();
+        let domains = first
+            .patterns
+            .iter()
+            .map(|pattern| self.finite_pattern_values(&pattern.plan.subject, 0))
+            .collect::<Option<Vec<_>>>();
+        let Some(domains) = domains else {
+            return false;
+        };
+        let Some(assignments) = finite_pattern_products(domains, 4096) else {
+            return false;
+        };
+        assignments.iter().all(|assignment| {
             rows.iter().any(|row| {
-                row.patterns
-                    .iter()
-                    .zip(&assignment)
-                    .all(|(pattern, constructor)| {
-                        pattern_decision_matches_constructor(&pattern.plan.decision, *constructor)
-                    })
+                row.patterns.iter().zip(assignment).all(|(pattern, value)| {
+                    pattern_decision_matches_value(&pattern.plan.decision, value)
+                })
             })
         })
     }
@@ -4347,63 +4398,6 @@ fn literal_type(text: &str) -> Type {
     }
 }
 
-/// Whether a decision is total once an enclosing finite constructor has
-/// already selected its variant. This is intentionally narrower than general
-/// matrix exhaustiveness: it is the local payload proof used by the handler
-/// coverage check above.
-fn pattern_decision_irrefutable(decision: &crate::pattern::PatternDecision) -> bool {
-    match decision {
-        crate::pattern::PatternDecision::Any | crate::pattern::PatternDecision::Bind(_) => true,
-        crate::pattern::PatternDecision::Tuple(values) => {
-            values.iter().all(pattern_decision_irrefutable)
-        }
-        crate::pattern::PatternDecision::Record { fields, .. } => fields
-            .iter()
-            .all(|(_, field)| pattern_decision_irrefutable(field)),
-        crate::pattern::PatternDecision::Literal(_)
-        | crate::pattern::PatternDecision::Enum { .. }
-        | crate::pattern::PatternDecision::Error => false,
-    }
-}
-
-#[derive(Clone, Copy)]
-enum FiniteConstructor {
-    Bool(bool),
-    Enum { definition: DefKey, variant: u32 },
-}
-
-fn pattern_decision_matches_constructor(
-    decision: &crate::pattern::PatternDecision,
-    constructor: FiniteConstructor,
-) -> bool {
-    match (decision, constructor) {
-        (crate::pattern::PatternDecision::Any | crate::pattern::PatternDecision::Bind(_), _) => {
-            true
-        }
-        (crate::pattern::PatternDecision::Literal(value), FiniteConstructor::Bool(actual)) => {
-            matches!((value.as_str(), actual), ("true", true) | ("false", false))
-        }
-        (
-            crate::pattern::PatternDecision::Enum {
-                definition,
-                variant,
-                fields,
-            },
-            FiniteConstructor::Enum {
-                definition: actual_definition,
-                variant: actual_variant,
-            },
-        ) => {
-            definition == &actual_definition
-                && *variant == actual_variant
-                && fields
-                    .iter()
-                    .all(|(_, field)| pattern_decision_irrefutable(field))
-        }
-        _ => false,
-    }
-}
-
 fn core_pattern_irrefutable(pattern: &CorePattern) -> bool {
     match pattern {
         CorePattern::Any | CorePattern::Bind { .. } => true,
@@ -4412,6 +4406,164 @@ fn core_pattern_irrefutable(pattern: &CorePattern) -> bool {
             .iter()
             .all(|field| core_pattern_irrefutable(&field.pattern)),
         CorePattern::Literal(_) | CorePattern::Enum { .. } | CorePattern::Error => false,
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CorePatternMatrixAnalysis {
+    exhaustive: bool,
+    unreachable: Vec<usize>,
+}
+
+/// A concrete inhabitant of a small, closed structural type.  This exists
+/// only during Core validation: neither MIR nor the VM receives an invented
+/// value, only the already typed pattern decision that this proof validates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FinitePatternValue {
+    Unit,
+    Bool(bool),
+    Tuple(Vec<FinitePatternValue>),
+    Record {
+        definition: DefKey,
+        fields: Vec<FinitePatternValue>,
+    },
+    Enum {
+        definition: DefKey,
+        variant: u32,
+        fields: Vec<FinitePatternValue>,
+    },
+}
+
+fn finite_pattern_products(
+    columns: Vec<Vec<FinitePatternValue>>,
+    limit: usize,
+) -> Option<Vec<Vec<FinitePatternValue>>> {
+    let mut products = vec![vec![]];
+    for column in columns {
+        let count = products.len().checked_mul(column.len())?;
+        if count > limit {
+            return None;
+        }
+        let mut next = Vec::with_capacity(count);
+        for prefix in products {
+            for value in &column {
+                let mut product = prefix.clone();
+                product.push(value.clone());
+                next.push(product);
+            }
+        }
+        products = next;
+    }
+    Some(products)
+}
+
+fn core_pattern_matches_value(pattern: &CorePattern, value: &FinitePatternValue) -> bool {
+    match (pattern, value) {
+        (CorePattern::Any | CorePattern::Bind { .. }, _) => true,
+        (CorePattern::Literal(literal), FinitePatternValue::Bool(value)) => {
+            matches!((literal.as_str(), value), ("true", true) | ("false", false))
+        }
+        (CorePattern::Tuple(patterns), FinitePatternValue::Tuple(values)) => {
+            patterns.len() == values.len()
+                && patterns
+                    .iter()
+                    .zip(values)
+                    .all(|(pattern, value)| core_pattern_matches_value(pattern, value))
+        }
+        (
+            CorePattern::Record {
+                definition, fields, ..
+            },
+            FinitePatternValue::Record {
+                definition: actual,
+                fields: values,
+            },
+        ) => {
+            definition == actual
+                && fields.iter().all(|field| {
+                    values
+                        .get(field.index as usize)
+                        .is_some_and(|value| core_pattern_matches_value(&field.pattern, value))
+                })
+        }
+        (
+            CorePattern::Enum {
+                definition,
+                variant,
+                fields,
+                ..
+            },
+            FinitePatternValue::Enum {
+                definition: actual_definition,
+                variant: actual_variant,
+                fields: values,
+            },
+        ) => {
+            definition == actual_definition
+                && variant == actual_variant
+                && fields.iter().all(|field| {
+                    values
+                        .get(field.index as usize)
+                        .is_some_and(|value| core_pattern_matches_value(&field.pattern, value))
+                })
+        }
+        _ => false,
+    }
+}
+
+fn pattern_decision_matches_value(
+    decision: &crate::pattern::PatternDecision,
+    value: &FinitePatternValue,
+) -> bool {
+    match (decision, value) {
+        (crate::pattern::PatternDecision::Any | crate::pattern::PatternDecision::Bind(_), _) => {
+            true
+        }
+        (crate::pattern::PatternDecision::Literal(literal), FinitePatternValue::Bool(value)) => {
+            matches!((literal.as_str(), value), ("true", true) | ("false", false))
+        }
+        (crate::pattern::PatternDecision::Tuple(patterns), FinitePatternValue::Tuple(values)) => {
+            patterns.len() == values.len()
+                && patterns
+                    .iter()
+                    .zip(values)
+                    .all(|(pattern, value)| pattern_decision_matches_value(pattern, value))
+        }
+        (
+            crate::pattern::PatternDecision::Record { definition, fields },
+            FinitePatternValue::Record {
+                definition: actual,
+                fields: values,
+            },
+        ) => {
+            definition == actual
+                && fields.iter().all(|(index, pattern)| {
+                    values
+                        .get(*index as usize)
+                        .is_some_and(|value| pattern_decision_matches_value(pattern, value))
+                })
+        }
+        (
+            crate::pattern::PatternDecision::Enum {
+                definition,
+                variant,
+                fields,
+            },
+            FinitePatternValue::Enum {
+                definition: actual_definition,
+                variant: actual_variant,
+                fields: values,
+            },
+        ) => {
+            definition == actual_definition
+                && variant == actual_variant
+                && fields.iter().all(|(index, pattern)| {
+                    values
+                        .get(*index as usize)
+                        .is_some_and(|value| pattern_decision_matches_value(pattern, value))
+                })
+        }
+        _ => false,
     }
 }
 
