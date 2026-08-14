@@ -3359,28 +3359,33 @@ impl Lowerer<'_> {
         {
             return None;
         }
-        let matching = clauses
+        let mut matching = clauses
             .iter()
             .filter(|clause| {
                 !clause.terminal && clause.effect == effect && clause.operation == operation
             })
             .collect::<Vec<_>>();
-        let [clause] = matching.as_slice() else {
+        if matching.is_empty() {
             return None;
-        };
-        let CoreHandlerResumption::Explicit {
-            name: continuation,
-            quantity,
-        } = &clause.resumption
-        else {
-            return None;
-        };
-        let upper = quantity.upper?;
-        if quantity.lower != upper
-            || upper < 2
-            || clause.patterns.len() != argument_ids.len()
-            || !clause.patterns.iter().all(pattern_is_irrefutable)
+        }
+        let has_fallback = if let Some(index) = matching
+            .iter()
+            .position(|clause| clause.patterns.iter().all(pattern_is_irrefutable))
         {
+            matching.truncate(index + 1);
+            true
+        } else {
+            false
+        };
+        if matching.iter().any(|clause| {
+            let CoreHandlerResumption::Explicit { quantity, .. } = &clause.resumption else {
+                return true;
+            };
+            quantity
+                .upper
+                .is_none_or(|upper| quantity.lower != upper || upper < 2)
+                || clause.patterns.len() != argument_ids.len()
+        }) {
             return None;
         }
         for expression in root_prefix.iter().chain(computation_prefix.iter()) {
@@ -3390,41 +3395,127 @@ impl Lowerer<'_> {
             .iter()
             .map(|argument| self.value(*argument))
             .collect::<Option<Vec<_>>>()?;
-        let before_clause = self.named.clone();
-        self.bind_handler_patterns(&clause.patterns, &arguments)?;
-        // A generated continuation shadows an outer local with the same
-        // spelling. Remove the binding during clause lowering so the call
-        // recognition in `value` cannot accidentally select the outer local.
-        let shadowed = self.named.remove(continuation);
-        let previous = self.direct_resumption.replace(DirectResumptionState {
-            name: continuation.clone(),
-            quantity: *quantity,
-            calls: 0,
-            plan: DirectResumptionPlan::PureResidual {
-                binding: name,
-                prefix: residual_prefix.to_vec(),
-                result: *residual_result,
-            },
-        });
-        let result = self.value(clause.body);
-        let state = self
-            .direct_resumption
-            .take()
-            .expect("finite resumption state must outlive its clause body");
-        self.direct_resumption = previous;
-        self.named = before_clause;
-        if let Some(local) = shadowed {
-            self.named.insert(continuation.clone(), local);
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let entry_values = self.values.clone();
+        let entry_named = self.named.clone();
+        let mut bodies = Vec::with_capacity(matching.len());
+        for clause in &matching {
+            let CoreHandlerResumption::Explicit {
+                name: continuation,
+                quantity,
+            } = &clause.resumption
+            else {
+                return None;
+            };
+            self.instructions = Vec::new();
+            self.values = entry_values.clone();
+            self.named = entry_named.clone();
+            self.bind_handler_patterns(&clause.patterns, &arguments)?;
+            // A generated continuation shadows an outer local with the same
+            // spelling. Remove the binding during clause lowering so the call
+            // recognition in `value` cannot accidentally select the outer
+            // local or a payload binder.
+            self.named.remove(continuation);
+            let previous = self.direct_resumption.replace(DirectResumptionState {
+                name: continuation.clone(),
+                quantity: *quantity,
+                calls: 0,
+                plan: DirectResumptionPlan::PureResidual {
+                    binding: name.clone(),
+                    prefix: residual_prefix.to_vec(),
+                    result: *residual_result,
+                },
+            });
+            let result = self.value(clause.body);
+            let state = self
+                .direct_resumption
+                .take()
+                .expect("finite resumption state must outlive its clause body");
+            self.direct_resumption = previous;
+            let result = result?;
+            let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls)).ok()?;
+            if !state.quantity.contains(actual) {
+                self.error(
+                    "G6005",
+                    "finite resumption calls do not satisfy its declared quantity",
+                );
+                return Some(self.invalid_function(parameters));
+            }
+            bodies.push((std::mem::take(&mut self.instructions), result));
         }
-        let result = result?;
-        let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls)).ok()?;
-        if !state.quantity.contains(actual) {
-            self.error(
-                "G6005",
-                "finite resumption calls do not satisfy its declared quantity",
-            );
-            return Some(self.invalid_function(parameters));
+        self.values = entry_values;
+        self.named = entry_named;
+
+        let mut blocks = vec![MirBlock {
+            parameters: vec![],
+            instructions: entry_instructions,
+            terminator: MirTerminator::Unreachable,
+        }];
+        let body_ids = bodies
+            .into_iter()
+            .map(|(instructions, result)| {
+                let id = MirBlockId(blocks.len() as u32);
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions,
+                    terminator: MirTerminator::Return { value: result },
+                });
+                id
+            })
+            .collect::<Vec<_>>();
+        let mut next = if has_fallback {
+            *body_ids
+                .last()
+                .expect("finite handler fallback body exists")
+        } else {
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            });
+            id
+        };
+        let tested = if has_fallback {
+            matching.len().saturating_sub(1)
+        } else {
+            matching.len()
+        };
+        for index in (0..tested).rev() {
+            let mut selected = body_ids[index];
+            for (pattern, argument) in matching[index]
+                .patterns
+                .iter()
+                .cloned()
+                .zip(arguments.iter().copied())
+                .rev()
+            {
+                let pattern = lower_pattern(pattern)?;
+                let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+                let id = MirBlockId(blocks.len() as u32);
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: condition,
+                        subject: argument,
+                        pattern,
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: selected,
+                        then_arguments: vec![],
+                        else_target: next,
+                        else_arguments: vec![],
+                    },
+                });
+                selected = id;
+            }
+            next = selected;
         }
+        blocks[0].terminator = MirTerminator::Goto {
+            target: next,
+            arguments: vec![],
+        };
         Some(MirFunction {
             definition: self.definition,
             captures: 0,
@@ -3432,11 +3523,7 @@ impl Lowerer<'_> {
             locals: self.locals.clone(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
-            blocks: vec![MirBlock {
-                parameters: vec![],
-                instructions: std::mem::take(&mut self.instructions),
-                terminator: MirTerminator::Return { value: result },
-            }],
+            blocks,
         })
     }
     /// Lower one nonempty, exact-one-shot continuation through the VM handler
