@@ -512,8 +512,9 @@ fn conditional_surface_syntax_desugars_to_contextual_library_calls() {
     else {
         panic!("positive conditional arm was not a call")
     };
+    assert_eq!(positive.len(), 2);
     assert!(matches!(
-        &body.expression(positive[0]).kind,
+        &body.expression(positive[1]).kind,
         ExprKind::ContextualBlock(_)
     ));
 }
