@@ -483,7 +483,13 @@ pub enum CoreKind {
         trait_arguments: Vec<GenericArgument>,
         method_arguments: Vec<GenericArgument>,
     },
-    Constant(DefKey),
+    /// An evaluated top-level value is lowered as a zero-argument function.
+    /// Its outward type may be generalized, so retain the use-site
+    /// substitution exactly as we do for ordinary callable references.
+    Constant {
+        definition: DefKey,
+        arguments: Vec<GenericArgument>,
+    },
     Tuple(Vec<CoreId>),
     Array(Vec<CoreId>),
     Record {
@@ -845,7 +851,9 @@ fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProje
                 .extend(environment.captures.iter().map(|capture| &capture.ty));
         }
         CoreKind::Assign { place, .. } => collect_place_projection_terms(place, terms),
-        CoreKind::Function { arguments, .. } => terms.arguments.extend(arguments),
+        CoreKind::Function { arguments, .. } | CoreKind::Constant { arguments, .. } => {
+            terms.arguments.extend(arguments)
+        }
         CoreKind::TraitMethod {
             trait_arguments,
             method_arguments,
@@ -905,7 +913,6 @@ fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProje
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
-        | CoreKind::Constant(_)
         | CoreKind::Tuple(_)
         | CoreKind::Array(_)
         | CoreKind::Record { .. }
@@ -1223,9 +1230,13 @@ impl CoreFingerprintEncoder<'_> {
                 self.generic_arguments(trait_arguments);
                 self.generic_arguments(method_arguments);
             }
-            CoreKind::Constant(definition) => {
+            CoreKind::Constant {
+                definition,
+                arguments,
+            } => {
                 self.bytes(b"constant");
                 self.debug(definition);
+                self.generic_arguments(arguments);
             }
             CoreKind::Tuple(values) => {
                 self.bytes(b"tuple");
@@ -1481,7 +1492,7 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
         | CoreKind::Resumption { .. }
         | CoreKind::Function { .. }
         | CoreKind::TraitMethod { .. }
-        | CoreKind::Constant(_)
+        | CoreKind::Constant { .. }
         | CoreKind::Error => vec![],
     }
 }
@@ -2254,7 +2265,7 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
                 || effect_row_contains_inference(&environment.runs_in.effects)
         }
         CoreKind::Assign { place, .. } => place_contains_inference(place),
-        CoreKind::Function { arguments, .. } => {
+        CoreKind::Function { arguments, .. } | CoreKind::Constant { arguments, .. } => {
             arguments.iter().any(generic_argument_contains_inference)
         }
         CoreKind::TraitMethod {
@@ -2313,7 +2324,6 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
-        | CoreKind::Constant(_)
         | CoreKind::Tuple(_)
         | CoreKind::Array(_)
         | CoreKind::Record { .. }
@@ -2355,7 +2365,7 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
                 || !is_canonical_effect_row_identity(&environment.runs_in.effects)
         }
         CoreKind::Assign { place, .. } => place_contains_noncanonical_type_identity(place),
-        CoreKind::Function { arguments, .. } => arguments
+        CoreKind::Function { arguments, .. } | CoreKind::Constant { arguments, .. } => arguments
             .iter()
             .any(|argument| !is_canonical_generic_argument_identity(argument)),
         CoreKind::TraitMethod {
@@ -2432,7 +2442,6 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
-        | CoreKind::Constant(_)
         | CoreKind::Tuple(_)
         | CoreKind::Array(_)
         | CoreKind::Record { .. }
@@ -2518,7 +2527,7 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
                 )
         }
         CoreKind::Assign { place, .. } => place_contains_out_of_scope_bound_lifetime(place),
-        CoreKind::Function { arguments, .. } => arguments
+        CoreKind::Function { arguments, .. } | CoreKind::Constant { arguments, .. } => arguments
             .iter()
             .any(|argument| generic_argument_contains_out_of_scope_bound_lifetime(argument, &[])),
         CoreKind::TraitMethod {
@@ -2585,7 +2594,6 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
-        | CoreKind::Constant(_)
         | CoreKind::Tuple(_)
         | CoreKind::Array(_)
         | CoreKind::Record { .. }
@@ -5739,7 +5747,7 @@ impl Elaborator<'_> {
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
-            | CoreKind::Constant(_)
+            | CoreKind::Constant { .. }
             | CoreKind::Error => {}
             CoreKind::Local(_) => {}
         }
@@ -5788,7 +5796,7 @@ impl Elaborator<'_> {
             }
             CoreKind::Assign { place, .. } => self.zonk_place(place, span),
             CoreKind::Label { .. } | CoreKind::Transfer { .. } => {}
-            CoreKind::Function { arguments, .. } => {
+            CoreKind::Function { arguments, .. } | CoreKind::Constant { arguments, .. } => {
                 *arguments = arguments
                     .iter()
                     .cloned()
@@ -5923,7 +5931,6 @@ impl Elaborator<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Constant(_)
             | CoreKind::Tuple(_)
             | CoreKind::Array(_)
             | CoreKind::Record { .. }
@@ -6430,9 +6437,14 @@ impl Elaborator<'_> {
                         )
                     }
                     None => match self.signatures.definitions.get(&definition) {
-                        Some(ElaboratedHeader::Constant(Some(ty))) => {
-                            self.alloc(CoreKind::Constant(definition), ty.clone(), span)
-                        }
+                        Some(ElaboratedHeader::Constant(Some(ty))) => self.alloc(
+                            CoreKind::Constant {
+                                definition,
+                                arguments: vec![],
+                            },
+                            ty.clone(),
+                            span,
+                        ),
                         Some(ElaboratedHeader::Constant(None)) => {
                             self.fail(span, "G4102", "constant value has no frozen type")
                         }
@@ -6462,7 +6474,14 @@ impl Elaborator<'_> {
                                 .signatures
                                 .instantiate_value_initializer_generic(definition, &arguments)
                                 .expect("fresh arguments match the frozen initializer contract");
-                            self.alloc(CoreKind::Constant(definition), ty, span)
+                            self.alloc(
+                                CoreKind::Constant {
+                                    definition,
+                                    arguments,
+                                },
+                                ty,
+                                span,
+                            )
                         }
                         Some(ElaboratedHeader::ValueInitializer { ty: None, .. }) => self.fail(
                             span,

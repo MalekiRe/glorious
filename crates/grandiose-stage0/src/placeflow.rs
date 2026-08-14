@@ -410,7 +410,7 @@ impl Analyzer<'_> {
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
-            | CoreKind::Constant(_)
+            | CoreKind::Constant { .. }
             | CoreKind::Error => {}
             CoreKind::Closure { environment, .. } => {
                 self.visit_closure_environment(&environment, e.span, None);
@@ -790,7 +790,7 @@ impl Analyzer<'_> {
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
-            | CoreKind::Constant(_)
+            | CoreKind::Constant { .. }
             | CoreKind::Error => None,
         };
         // Inspect structural children before trusting the frozen bottom type.
@@ -887,7 +887,7 @@ impl Analyzer<'_> {
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
-            | CoreKind::Constant(_)
+            | CoreKind::Constant { .. }
             | CoreKind::Error => {}
         }
     }

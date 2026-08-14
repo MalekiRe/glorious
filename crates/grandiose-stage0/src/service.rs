@@ -1613,6 +1613,7 @@ impl StageZeroCompiler {
                 let function = match &expression.kind {
                     crate::core::CoreKind::Function { .. }
                     | crate::core::CoreKind::TraitMethod { .. }
+                    | crate::core::CoreKind::Constant { .. }
                         if !direct_callees.contains(&crate::CoreId(index as u32)) =>
                     {
                         Some(&expression.kind)
@@ -1636,6 +1637,26 @@ impl StageZeroCompiler {
                         InstanceKey::new(
                             *callee,
                             &signature.generic_kinds,
+                            arguments
+                                .iter()
+                                .map(|argument| {
+                                    specialize_generic_argument(argument, caller.arguments())
+                                })
+                                .collect(),
+                        )
+                    }
+                    Some(crate::core::CoreKind::Constant {
+                        definition: callee,
+                        arguments,
+                    }) => {
+                        let Some(ElaboratedHeader::ValueInitializer { generic_kinds, .. }) =
+                            signatures.definitions.get(callee)
+                        else {
+                            continue;
+                        };
+                        InstanceKey::new(
+                            *callee,
+                            generic_kinds,
                             arguments
                                 .iter()
                                 .map(|argument| {
@@ -2043,18 +2064,17 @@ fn materialize_concrete_instances(
                 if generic_arguments.is_empty() {
                     continue;
                 }
-                let Some(ElaboratedHeader::Callable(signature)) =
-                    signatures.definitions.get(callee)
-                else {
-                    return Err(format!(
-                        "generic direct call has no callable signature for {callee:?}"
-                    ));
+                let generic_kinds = match signatures.definitions.get(callee) {
+                    Some(ElaboratedHeader::Callable(signature)) => &signature.generic_kinds,
+                    Some(ElaboratedHeader::ValueInitializer { generic_kinds, .. }) => generic_kinds,
+                    _ => {
+                        return Err(format!(
+                            "generic direct call has no callable signature for {callee:?}"
+                        ));
+                    }
                 };
-                let key = match InstanceKey::new(
-                    *callee,
-                    &signature.generic_kinds,
-                    generic_arguments.clone(),
-                ) {
+                let key = match InstanceKey::new(*callee, generic_kinds, generic_arguments.clone())
+                {
                     Ok(key) => key,
                     Err(
                         crate::InstanceKeyError::NonConcreteType { .. }
@@ -2074,9 +2094,17 @@ fn materialize_concrete_instances(
                         return Err(format!("direct-call instance is not executable: {error:?}"));
                     }
                 };
-                *callee = *targets.get(&key).ok_or_else(|| {
-                    format!("discovered direct-call instance was not materialized: {key:?}")
-                })?;
+                let Some(target) = targets.get(&key) else {
+                    // This instruction belongs to an otherwise unreachable
+                    // source body. Instance discovery deliberately starts at
+                    // the executable entry, so no specialized target exists
+                    // (and none may enter the linked program). Erase the
+                    // template substitution; if the body becomes reachable,
+                    // discovery will materialize the same key first.
+                    generic_arguments.clear();
+                    continue;
+                };
+                *callee = *target;
                 generic_arguments.clear();
             }
         }

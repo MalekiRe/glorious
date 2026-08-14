@@ -547,7 +547,7 @@ impl Analyzer<'_> {
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
-            | CoreKind::Constant(_)
+            | CoreKind::Constant { .. }
             | CoreKind::Error => Summary::default(),
             CoreKind::Closure {
                 callable,

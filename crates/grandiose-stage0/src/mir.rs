@@ -5478,7 +5478,7 @@ impl Lowerer<'_> {
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
-            | CoreKind::Constant(_)
+            | CoreKind::Constant { .. }
             | CoreKind::Error => None,
         }
     }
@@ -5585,7 +5585,7 @@ impl Lowerer<'_> {
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
-            | CoreKind::Constant(_)
+            | CoreKind::Constant { .. }
             | CoreKind::Error => false,
         }
     }
@@ -13064,14 +13064,23 @@ impl Lowerer<'_> {
                 }),
                 environment: None,
             }),
-            CoreKind::Constant(callee) => {
+            CoreKind::Constant {
+                definition: callee,
+                arguments: generic_arguments,
+            } => {
                 self.instructions.push(MirInstruction::Call {
                     dst,
                     callee,
-                    generic_arguments: vec![],
+                    generic_arguments,
                     trait_instance: None,
                     arguments: vec![],
                 });
+            }
+            CoreKind::Tuple(fields) if fields.is_empty() => {
+                // Header elaboration canonicalizes `()` to `Type::Unit`.
+                // Preserve that identity in MIR rather than manufacturing an
+                // empty runtime tuple, whose verifier type is distinct.
+                self.instructions.push(MirInstruction::ConstUnit { dst });
             }
             CoreKind::Tuple(fields) => {
                 let fields = fields
@@ -15445,7 +15454,7 @@ impl Lowerer<'_> {
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. } => true,
-            CoreKind::Constant(_)
+            CoreKind::Constant { .. }
             | CoreKind::Error
             | CoreKind::Perform { .. }
             | CoreKind::Handle { .. }
@@ -15494,7 +15503,7 @@ impl Lowerer<'_> {
             | CoreKind::Resumption { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. } => true,
-            CoreKind::Constant(_)
+            CoreKind::Constant { .. }
             | CoreKind::Error
             | CoreKind::Perform { .. }
             | CoreKind::Handle { .. }
