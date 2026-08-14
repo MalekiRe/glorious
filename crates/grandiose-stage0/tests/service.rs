@@ -3202,6 +3202,100 @@ fn service_propagates_a_closed_multi_operation_effect_summary_through_a_callee()
 }
 
 #[test]
+fn service_materializes_generic_multi_operation_effect_frames_across_a_callee() {
+    let source = "effect State<T> { [1,1] read(value: T) -> T; [1,1] write(value: T) -> T; } pub fn helper<T>(value: T) -> T / State<T> { let read = State<T>::read(value); State<T>::write(read) } pub fn main() -> i64 { handle helper(40) { State<i64>::read(value) with k => k(value + 1), State<i64>::write(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(
+                instruction,
+                VmInstruction::InstallHandler { effect_arguments, .. }
+                    if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
+            ))
+            .count(),
+        2,
+        "one concrete State<i64> frame is required per summarized operation"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+        "generic multi-operation helper must remain a normal VM call"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_uses_each_operation_continuation_type_across_a_multi_operation_call() {
+    let source = "effect State { [1,1] read() -> Text; [1,1] write(value: i64) -> i64; } pub fn helper() -> i64 / State { let value = State::read(); let written = State::write(40); written + 2 } pub fn main() -> i64 { handle helper() { State::read() with k => k(\"ignored\"), State::write(value) with k => k(value) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry.instructions.iter().any(|instruction| matches!(
+            instruction,
+            VmInstruction::InstallHandler {
+                operation: 0,
+                resume_type: VmType::Text,
+                ..
+            }
+        )),
+        "read frame must inject the Text operation result, not helper's i64 result"
+    );
+    assert!(
+        entry.instructions.iter().any(|instruction| matches!(
+            instruction,
+            VmInstruction::InstallHandler {
+                operation: 1,
+                resume_type: VmType::I64,
+                ..
+            }
+        )),
+        "write frame must retain its independent i64 operation result"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_dispatches_generic_multi_operation_effects_through_a_function_value() {
+    let source = "effect State<T> { [1,1] read(value: T) -> T; [1,1] write(value: T) -> T; } pub fn helper<T>(value: T) -> T / State<T> { let read = State<T>::read(value); State<T>::write(read) } pub fn main() -> i64 { let operation = helper; handle operation(40) { State<i64>::read(value) with k => k(value + 1), State<i64>::write(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        "generic multi-operation function values must keep their dynamic call boundary"
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(
+                instruction,
+                VmInstruction::InstallHandler { effect_arguments, .. }
+                    if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
+            ))
+            .count(),
+        2
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_orders_refutable_handler_clauses_around_an_interprocedural_call() {
     let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn leaf(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn helper(value: i64) -> i64 / Ask { leaf(value) } pub fn main() -> i64 { handle helper(40) { Ask::ask(0) with k => k(1), Ask::ask(value) with k => k(value + 2) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

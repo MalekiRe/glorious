@@ -7969,6 +7969,7 @@ impl Lowerer<'_> {
                             ..
                         }
                     )
+                    || clause.continuation.is_none()
                     || self.handler_body_uses_snapshot_alias(clause.body)
             })
         {
@@ -8014,7 +8015,12 @@ impl Lowerer<'_> {
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
                 payload_destinations: payloads[index].clone(),
-                resume_type: self.body.expression(computation).ty.clone(),
+                resume_type: clause
+                    .continuation
+                    .as_ref()
+                    .expect("resumptive interprocedural arm has a frozen contract")
+                    .parameter
+                    .clone(),
                 continuation: MirContinuationPolicy::Consume,
                 target: MirBlockId((index + 1) as u32),
             });
