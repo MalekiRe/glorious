@@ -971,6 +971,33 @@ fn failed_and_resource_limited_sessions_do_not_publish_staged_interfaces() {
 }
 
 #[test]
+fn request_work_budget_bounds_declaration_heavy_compilation_before_publication() {
+    let compiler = StageZeroCompiler::new();
+    let mut source = String::new();
+    for index in 0..32 {
+        source.push_str(&format!("pub fn helper_{index}() -> i64 {{ {index} }} "));
+    }
+    source.push_str("pub fn main() -> i64 { helper_31() }");
+    let revision = compiler.import_revision(request(&source), None).unwrap();
+    // Admission, source/module traversal, and a few declarations fit; the
+    // remaining hostile declaration stream must consume the same request
+    // budget rather than slipping through zero-cost checkpoints.
+    let budget = Budget::root("request-work", 12);
+    let session = compiler
+        .open_session_with_controls(revision, CancellationToken::new(), budget.clone())
+        .unwrap();
+    let error = compiler.compile_session(&session).unwrap_err();
+    assert_eq!(error.diagnostics()[0].code, "G7030");
+    assert_eq!(budget.spent(), 12, "resource work must be cumulative");
+    assert_eq!(compiler.interface_cache_stats().hits, 0);
+    assert_eq!(compiler.interface_cache_stats().misses, 0);
+    assert!(
+        compiler.dependency_traces(revision).is_empty(),
+        "an exhausted request must discard staged dependency facts"
+    );
+}
+
+#[test]
 fn service_reuses_only_unchanged_frozen_module_interfaces_across_revisions() {
     let compiler = StageZeroCompiler::new();
     let parent = compiler

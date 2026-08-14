@@ -681,9 +681,10 @@ impl StageZeroCompiler {
         if !session.claim_execution() {
             return Err(ServiceError::SessionConsumed(session.revision()));
         }
-        // This lease is held through the final publication boundary and its
-        // Drop settles request accounting on every error/cancellation path.
-        let _request_lease = session.checkpoint(1)?;
+        // Every structural checkpoint consumes work from this request. A
+        // failed or cancelled transaction still keeps its spent-work record,
+        // so callers cannot turn one budget into an unbounded retry loop.
+        session.checkpoint(1)?;
         let mut interfaces = self.database.interface_cache().transaction();
         let mut dependencies = self
             .database
@@ -713,7 +714,7 @@ impl StageZeroCompiler {
         interfaces: &mut crate::interface::InterfaceCacheTransaction<'_>,
         dependencies: &mut crate::dependency::DependencyTransaction<'_>,
     ) -> Result<CompilationOutcome, ServiceError> {
-        session.checkpoint(0)?;
+        session.checkpoint(1)?;
         let input_fingerprint = snapshot.world().fingerprint;
         let source_lengths = snapshot
             .world()
@@ -728,6 +729,7 @@ impl StageZeroCompiler {
             })
             .collect::<BTreeMap<_, _>>();
         for source in snapshot.world().sources.iter() {
+            session.checkpoint(1)?;
             dependencies.record(DependencyNode::Input(source.key), source.digest, vec![]);
         }
         let mut graph = ModuleGraph::build_with_interface_transaction(
@@ -735,7 +737,7 @@ impl StageZeroCompiler {
             &snapshot.world().root_package,
             interfaces,
         );
-        session.checkpoint(0)?;
+        session.checkpoint(1)?;
         let mut diagnostics = graph
             .diagnostics
             .into_iter()
@@ -744,7 +746,7 @@ impl StageZeroCompiler {
             })
             .collect::<Vec<_>>();
         for node in graph.modules.values() {
-            session.checkpoint(0)?;
+            session.checkpoint(1)?;
             diagnostics.extend(node.interface.diagnostics.iter().map(|diagnostic| {
                 CompileDiagnostic::source(
                     diagnostic.code,
@@ -982,7 +984,7 @@ impl StageZeroCompiler {
         // Core products without reopening source or consulting host state.
         let mut body_products = Vec::<(DefKey, bool, bool, TypedBody, PlaceFlow)>::new();
         for node in graph.modules.values() {
-            session.checkpoint(0)?;
+            session.checkpoint(1)?;
             let Some(source) = snapshot
                 .world()
                 .sources
@@ -1018,6 +1020,7 @@ impl StageZeroCompiler {
                         || definition.kind == crate::DeclarationKind::Constant
                 })
             {
+                session.checkpoint(1)?;
                 let Some(body_range) = declaration.body else {
                     diagnostics.push(CompileDiagnostic::source(
                         "G7002",
@@ -1444,6 +1447,7 @@ impl StageZeroCompiler {
             }
         }
         for instance in instance_graph.ordered() {
+            session.checkpoint(1)?;
             let mut instance_dependencies = vec![
                 DependencyNode::Core(instance.callable),
                 DependencyNode::Body(instance.callable),
@@ -1458,7 +1462,7 @@ impl StageZeroCompiler {
             );
         }
         for (definition, is_constant, valid, core, flow) in body_products {
-            session.checkpoint(0)?;
+            session.checkpoint(1)?;
             if !valid {
                 continue;
             }
@@ -1546,7 +1550,7 @@ impl StageZeroCompiler {
             CompilationMode::Build | CompilationMode::Test | CompilationMode::Bootstrap(_)
         );
         if !demands_artifact {
-            session.checkpoint(0)?;
+            session.checkpoint(1)?;
             return Ok(CompilationOutcome {
                 diagnostics,
                 artifact: None,
@@ -1565,7 +1569,11 @@ impl StageZeroCompiler {
             functions: linked_functions,
             instances: linked_instances,
         };
-        session.checkpoint(0)?;
+        session.checkpoint(
+            u64::try_from(program.functions.len())
+                .expect("reachable function count fits in request work budget")
+                .saturating_add(1),
+        )?;
         let mut candidate = emit_vm_program(&program).map_err(|error| {
             failed(
                 input_fingerprint,
@@ -1622,7 +1630,7 @@ impl StageZeroCompiler {
                 .map(DependencyNode::Mir)
                 .collect(),
         );
-        session.checkpoint(0)?;
+        session.checkpoint(1)?;
         let bootstrap_manifest = match &snapshot.world().mode {
             CompilationMode::Bootstrap(stage) => {
                 if let Some(expected) = stage.expected_artifact

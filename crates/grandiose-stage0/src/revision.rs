@@ -10,7 +10,7 @@ use crate::{
     dependency::DependencyLedger,
     identity::{Digest, RevisionId, fresh_database_id},
     interface::{InterfaceCache, InterfaceCacheStats},
-    operation::{Budget, BudgetError, BudgetLease, CancellationToken},
+    operation::{Budget, BudgetError, CancellationToken},
     request::{CompilationRequest, InputError, NormalizedInputWorld},
 };
 
@@ -486,12 +486,16 @@ impl RequestSession {
         !self.execution_claimed.swap(true, Ordering::AcqRel)
     }
 
-    pub(crate) fn checkpoint(&self, cost: u64) -> Result<BudgetLease, RequestControlError> {
+    /// Poll cancellation and consume deterministic request work. Unlike a
+    /// temporary allocation reservation, compiler work is not released when a
+    /// phase returns: otherwise a long request could repeatedly pass a
+    /// zero-cost checkpoint while exceeding its advertised resource ceiling.
+    pub(crate) fn checkpoint(&self, cost: u64) -> Result<(), RequestControlError> {
         self.cancellation
             .check()
             .map_err(|_| RequestControlError::Cancelled)?;
         self.budget
-            .lease(cost)
+            .charge(cost)
             .map_err(RequestControlError::Resource)
     }
 }
