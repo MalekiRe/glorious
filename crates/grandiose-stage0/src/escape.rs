@@ -14,7 +14,7 @@ use crate::{
     },
     placeflow::PlaceFlow,
     source::Span,
-    types::Type,
+    types::{EffectRow, GenericArgument, Type},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -711,20 +711,34 @@ fn contains_open_type_parameter(value: &Type) -> bool {
     match value {
         Type::Generic(_) => true,
         Type::Tuple(values) => values.iter().any(contains_open_type_parameter),
-        Type::Array(value) | Type::Reference { referent: value, .. } => {
-            contains_open_type_parameter(value)
-        }
-        Type::Nominal { arguments, .. } => arguments.iter().any(|argument| {
-            matches!(argument, crate::types::GenericArgument::Type(value) if contains_open_type_parameter(value))
-        }),
+        Type::Array(value)
+        | Type::Reference {
+            referent: value, ..
+        } => contains_open_type_parameter(value),
+        Type::Nominal { arguments, .. } => arguments
+            .iter()
+            .any(generic_argument_contains_open_type_parameter),
         Type::Callable {
             parameters, result, ..
         } => {
             parameters.iter().any(contains_open_type_parameter)
                 || contains_open_type_parameter(result)
         }
-        Type::Projection { .. }
-        | Type::Infer(_)
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            contains_open_type_parameter(subject)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_contains_open_type_parameter)
+                || item_arguments
+                    .iter()
+                    .any(generic_argument_contains_open_type_parameter)
+        }
+        Type::Infer(_)
         | Type::Unit
         | Type::Never
         | Type::Scalar(_)
@@ -733,6 +747,37 @@ fn contains_open_type_parameter(value: &Type) -> bool {
         | Type::ConstGeneric { .. }
         | Type::Error => false,
     }
+}
+
+fn generic_argument_contains_open_type_parameter(value: &GenericArgument) -> bool {
+    match value {
+        GenericArgument::Type(value) => contains_open_type_parameter(value),
+        GenericArgument::EffectRow(row) => effect_row_contains_open_type_parameter(row),
+        GenericArgument::Lifetime(_)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstU32Expr(_) => false,
+    }
+}
+
+fn effect_row_contains_open_type_parameter(row: &EffectRow) -> bool {
+    row.effects.iter().any(|effect| {
+        effect
+            .arguments
+            .iter()
+            .any(generic_argument_contains_open_type_parameter)
+    }) || row.projections.iter().any(|projection| {
+        contains_open_type_parameter(&projection.subject)
+            || projection
+                .trait_arguments
+                .iter()
+                .any(generic_argument_contains_open_type_parameter)
+            || projection
+                .item_arguments
+                .iter()
+                .any(generic_argument_contains_open_type_parameter)
+    })
 }
 
 /// A reference coming from a parameter may name caller-owned storage. Joins

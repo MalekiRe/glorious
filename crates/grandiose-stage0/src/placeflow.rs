@@ -1913,20 +1913,33 @@ fn contains_open_type_parameter(value: &crate::types::Type) -> bool {
         crate::types::Type::Generic(_) => true,
         crate::types::Type::Tuple(values) => values.iter().any(contains_open_type_parameter),
         crate::types::Type::Array(value)
-        | crate::types::Type::Reference { referent: value, .. } => {
-            contains_open_type_parameter(value)
-        }
-        crate::types::Type::Nominal { arguments, .. } => arguments.iter().any(|argument| {
-            matches!(argument, crate::types::GenericArgument::Type(value) if contains_open_type_parameter(value))
-        }),
+        | crate::types::Type::Reference {
+            referent: value, ..
+        } => contains_open_type_parameter(value),
+        crate::types::Type::Nominal { arguments, .. } => arguments
+            .iter()
+            .any(generic_argument_contains_open_type_parameter),
         crate::types::Type::Callable {
             parameters, result, ..
         } => {
             parameters.iter().any(contains_open_type_parameter)
                 || contains_open_type_parameter(result)
         }
-        crate::types::Type::Projection { .. }
-        | crate::types::Type::Infer(_)
+        crate::types::Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            contains_open_type_parameter(subject)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_contains_open_type_parameter)
+                || item_arguments
+                    .iter()
+                    .any(generic_argument_contains_open_type_parameter)
+        }
+        crate::types::Type::Infer(_)
         | crate::types::Type::Unit
         | crate::types::Type::Never
         | crate::types::Type::Scalar(_)
@@ -1935,6 +1948,39 @@ fn contains_open_type_parameter(value: &crate::types::Type) -> bool {
         | crate::types::Type::ConstGeneric { .. }
         | crate::types::Type::Error => false,
     }
+}
+
+fn generic_argument_contains_open_type_parameter(value: &crate::types::GenericArgument) -> bool {
+    match value {
+        crate::types::GenericArgument::Type(value) => contains_open_type_parameter(value),
+        crate::types::GenericArgument::EffectRow(row) => {
+            effect_row_contains_open_type_parameter(row)
+        }
+        crate::types::GenericArgument::Lifetime(_)
+        | crate::types::GenericArgument::ConstU32(_)
+        | crate::types::GenericArgument::ConstQuantity(_)
+        | crate::types::GenericArgument::ConstGeneric { .. }
+        | crate::types::GenericArgument::ConstU32Expr(_) => false,
+    }
+}
+
+fn effect_row_contains_open_type_parameter(row: &crate::types::EffectRow) -> bool {
+    row.effects.iter().any(|effect| {
+        effect
+            .arguments
+            .iter()
+            .any(generic_argument_contains_open_type_parameter)
+    }) || row.projections.iter().any(|projection| {
+        contains_open_type_parameter(&projection.subject)
+            || projection
+                .trait_arguments
+                .iter()
+                .any(generic_argument_contains_open_type_parameter)
+            || projection
+                .item_arguments
+                .iter()
+                .any(generic_argument_contains_open_type_parameter)
+    })
 }
 
 /// Flatten a frozen pattern to the structural paths owned by each binder.

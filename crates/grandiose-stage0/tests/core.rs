@@ -3856,6 +3856,59 @@ fn opaque_generic_result_shapes_distinguish_concrete_scalars_from_enum_reference
 }
 
 #[test]
+fn opaque_projection_results_defer_until_their_generic_head_is_instantiated() {
+    let mut core = core_for(
+        "core-opaque-reference-open-projection@0.1.0",
+        "pub fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { identity(41) }",
+    );
+    let expression = core
+        .expressions
+        .iter_mut()
+        .find(|expression| matches!(expression.kind, CoreKind::Call { .. }))
+        .expect("generic call did not reach frozen Core");
+    let CoreKind::Call {
+        reference_origin,
+        reference_shape,
+        ..
+    } = &mut expression.kind
+    else {
+        unreachable!("selected call expression")
+    };
+    *reference_origin = grandiose_stage0::CallReferenceOrigin::Opaque;
+    *reference_shape = grandiose_stage0::CallReferenceShape::OpaquePotentiallyReference;
+    expression.ty = Type::Projection {
+        subject: Box::new(Type::Generic(0)),
+        trait_definition: DefKey(Digest::of_bytes(b"opaque-open-projection-trait")),
+        trait_arguments: vec![
+            GenericArgument::Type(Type::Generic(1)),
+            GenericArgument::EffectRow(EffectRow {
+                effects: BTreeSet::new(),
+                projections: vec![],
+                tail: Some(EffectTail::Generic(2)),
+            }),
+        ],
+        name: "Output".into(),
+        item_generic_kinds: vec![],
+        item_arguments: vec![],
+    };
+
+    assert!(
+        !PlaceFlow::analyze(&core)
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "an open projection head was rejected before a concrete instance exists"
+    );
+    assert!(
+        !EscapeFlow::analyze(&core, &PlaceFlow::analyze(&core))
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5023"),
+        "escape checking did not defer an open projection head"
+    );
+}
+
+#[test]
 fn forged_opaque_result_shape_cannot_bypass_core_or_mir_validation() {
     let mut core = core_for(
         "core-forged-opaque-reference-shape@0.1.0",
