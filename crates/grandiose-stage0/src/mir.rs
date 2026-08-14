@@ -13130,10 +13130,7 @@ impl Lowerer<'_> {
                         // the frozen i64 literal ABI.  Materialize the contextual
                         // u32 value through the checked VM conversion so an
                         // out-of-range literal cannot silently wrap.
-                        let source = self.alloc(
-                            Type::Scalar(crate::types::ScalarType::I64),
-                            id,
-                        );
+                        let source = self.alloc(Type::Scalar(crate::types::ScalarType::I64), id);
                         self.instructions
                             .push(MirInstruction::ConstI64 { dst: source, value });
                         self.instructions
@@ -13520,10 +13517,7 @@ impl Lowerer<'_> {
                         MirInstruction::U32Eq { dst, left, right }
                     }
                     (Type::Scalar(crate::types::ScalarType::U32), "!=") => {
-                        let equal = self.alloc(
-                            Type::Scalar(crate::types::ScalarType::Bool),
-                            id,
-                        );
+                        let equal = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
                         self.instructions.push(MirInstruction::U32Eq {
                             dst: equal,
                             left,
@@ -13538,10 +13532,8 @@ impl Lowerer<'_> {
                         MirInstruction::U32Le { dst, left, right }
                     }
                     (Type::Scalar(crate::types::ScalarType::U32), ">") => {
-                        let less_equal = self.alloc(
-                            Type::Scalar(crate::types::ScalarType::Bool),
-                            id,
-                        );
+                        let less_equal =
+                            self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
                         self.instructions.push(MirInstruction::U32Le {
                             dst: less_equal,
                             left,
@@ -13553,10 +13545,7 @@ impl Lowerer<'_> {
                         }
                     }
                     (Type::Scalar(crate::types::ScalarType::U32), ">=") => {
-                        let less = self.alloc(
-                            Type::Scalar(crate::types::ScalarType::Bool),
-                            id,
-                        );
+                        let less = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
                         self.instructions.push(MirInstruction::U32Lt {
                             dst: less,
                             left,

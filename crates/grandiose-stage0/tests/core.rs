@@ -2365,8 +2365,7 @@ fn typed_core_and_placeflow_lower_to_validated_mir() {
 #[test]
 fn contextual_u32_comparisons_lower_to_typed_vm_primitives() {
     let package = PackageKey("core-u32-comparison-mir@0.1.0".into());
-    let source =
-        "infixl 20 <=; pub fn main(value: u32) -> bool { value <= 1114111 }";
+    let source = "infixl 20 <=; pub fn main(value: u32) -> bool { value <= 1114111 }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -2391,15 +2390,21 @@ fn contextual_u32_comparisons_lower_to_typed_vm_primitives() {
     let flow = PlaceFlow::analyze(&core);
     let lowered = MirLowering::lower(definition.key, &core, &flow);
     assert!(lowered.diagnostics.is_empty(), "{:#?}", lowered.diagnostics);
-    let mir = lowered.function.expect("u32 comparison should lower to MIR");
-    assert!(mir.entry_block().instructions.iter().any(
-        |instruction| matches!(instruction, MirInstruction::I64ToU32Checked { .. })
-    ));
-    assert!(mir
-        .entry_block()
-        .instructions
-        .iter()
-        .any(|instruction| matches!(instruction, MirInstruction::U32Le { .. })));
+    let mir = lowered
+        .function
+        .expect("u32 comparison should lower to MIR");
+    assert!(
+        mir.entry_block()
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MirInstruction::I64ToU32Checked { .. }))
+    );
+    assert!(
+        mir.entry_block()
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MirInstruction::U32Le { .. }))
+    );
     assert!(mir.validate().is_ok());
 }
 

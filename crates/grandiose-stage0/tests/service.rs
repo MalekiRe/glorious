@@ -5700,7 +5700,9 @@ fn service_refuses_an_ambiguous_multi_variant_negative_payload_projection() {
         }
         pub fn main() -> i64 { 0 }
     "#;
-    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    let error = StageZeroCompiler::new()
+        .compile(request(source))
+        .unwrap_err();
     assert!(
         error
             .diagnostics()
