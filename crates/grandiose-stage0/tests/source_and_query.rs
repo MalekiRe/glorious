@@ -1,11 +1,17 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use grandiose_stage0::{
     CompilationMode, CompilationRequest, CompilerBuildIdentity, CompilerDatabase, Digest,
     LogicalPath, PackageKey, SourceInput, TokenKind,
     query::{
         MemoTable, Query, QueryCompleteness, QueryContext, QueryEngine, QueryExecutionKind,
-        QueryFailure, QueryFrame, QueryRecomputeReason, QueryValue,
+        QueryFailure, QueryFrame, QueryRecomputeReason, QueryRecoveryPolicy, QueryValue,
     },
 };
 
@@ -122,6 +128,129 @@ impl Query for NestedWordCount {
             value: child.value,
             fingerprint: Digest::of_parts([b"nested".as_slice(), &child.fingerprint.as_bytes()]),
             completeness: child.completeness,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct RecoveredLeaf;
+impl Query for RecoveredLeaf {
+    type Key = String;
+    type Value = usize;
+    type Error = ();
+    const NAME: &'static str = "recovered_leaf";
+    const RECOVERY_POLICY: QueryRecoveryPolicy = QueryRecoveryPolicy::Allow;
+
+    fn execute(
+        &self,
+        _context: &mut QueryContext<'_>,
+        key: Self::Key,
+    ) -> Result<QueryValue<Self::Value>, QueryFailure<Self::Error>> {
+        Ok(QueryValue {
+            value: key.len(),
+            fingerprint: Digest::of_parts([b"recovered-leaf".as_slice(), key.as_bytes()]),
+            completeness: QueryCompleteness::Recovered,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct CompleteOnlyRecoveryParent {
+    child: QueryEngine<RecoveredLeaf>,
+}
+impl Query for CompleteOnlyRecoveryParent {
+    type Key = String;
+    type Value = usize;
+    type Error = ();
+    const NAME: &'static str = "complete_only_recovery_parent";
+
+    fn execute(
+        &self,
+        context: &mut QueryContext<'_>,
+        key: Self::Key,
+    ) -> Result<QueryValue<Self::Value>, QueryFailure<Self::Error>> {
+        let child = context.query(&self.child, key)?;
+        Ok(QueryValue {
+            value: child.value,
+            fingerprint: child.fingerprint,
+            completeness: QueryCompleteness::Complete,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct RecoveryForwarder {
+    child: QueryEngine<RecoveredLeaf>,
+}
+impl Query for RecoveryForwarder {
+    type Key = String;
+    type Value = usize;
+    type Error = ();
+    const NAME: &'static str = "recovery_forwarder";
+    const RECOVERY_POLICY: QueryRecoveryPolicy = QueryRecoveryPolicy::Allow;
+
+    fn execute(
+        &self,
+        context: &mut QueryContext<'_>,
+        key: Self::Key,
+    ) -> Result<QueryValue<Self::Value>, QueryFailure<Self::Error>> {
+        let child = context.query(&self.child, key)?;
+        // A faulty query author may claim completeness here. The engine must
+        // retain the child's provisional status when it publishes this frame.
+        Ok(QueryValue {
+            value: child.value,
+            fingerprint: Digest::of_parts([
+                b"recovery-forwarder".as_slice(),
+                child.fingerprint.as_bytes().as_slice(),
+            ]),
+            completeness: QueryCompleteness::Complete,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct UndeclaredRecovered;
+impl Query for UndeclaredRecovered {
+    type Key = String;
+    type Value = usize;
+    type Error = ();
+    const NAME: &'static str = "undeclared_recovered";
+
+    fn execute(
+        &self,
+        _context: &mut QueryContext<'_>,
+        _key: Self::Key,
+    ) -> Result<QueryValue<Self::Value>, QueryFailure<Self::Error>> {
+        Ok(QueryValue {
+            value: 0,
+            fingerprint: Digest::of_bytes(b"undeclared-recovered"),
+            completeness: QueryCompleteness::Recovered,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct PanicOnce {
+    panicked: AtomicBool,
+}
+impl Query for PanicOnce {
+    type Key = String;
+    type Value = usize;
+    type Error = ();
+    const NAME: &'static str = "panic_once";
+
+    fn execute(
+        &self,
+        _context: &mut QueryContext<'_>,
+        key: Self::Key,
+    ) -> Result<QueryValue<Self::Value>, QueryFailure<Self::Error>> {
+        if !self.panicked.swap(true, Ordering::SeqCst) {
+            panic!("hostile query panic before publication");
+        }
+        Ok(QueryValue {
+            value: key.len(),
+            fingerprint: Digest::of_parts([b"panic-once".as_slice(), key.as_bytes()]),
+            completeness: QueryCompleteness::Complete,
         })
     }
 }
@@ -382,6 +511,93 @@ fn cancelled_query_execution_never_publishes_a_memo_entry() {
         engine.execute(&snapshot, "one".into(), &cancelled, &budget),
         Err(QueryFailure::Cancelled)
     ));
+}
+
+#[test]
+fn recovered_query_products_require_explicit_policy_and_propagate_through_parents() {
+    let snapshot = snapshot();
+    let cancellation = grandiose_stage0::CancellationToken::new();
+    let budget = grandiose_stage0::Budget::root("recovery-policy", 16);
+
+    let complete_only = QueryEngine::new(CompleteOnlyRecoveryParent {
+        child: QueryEngine::new(RecoveredLeaf),
+    });
+    assert!(matches!(
+        complete_only.execute(&snapshot, "editor input".into(), &cancellation, &budget),
+        Err(QueryFailure::RecoveredProduct {
+            query: RecoveredLeaf::NAME
+        })
+    ));
+    assert!(
+        complete_only
+            .memo()
+            .get(&snapshot, &"editor input".to_owned())
+            .is_none(),
+        "a complete-only parent must not publish after observing recovered input"
+    );
+
+    let forwarder = QueryEngine::new(RecoveryForwarder {
+        child: QueryEngine::new(RecoveredLeaf),
+    });
+    let result = forwarder
+        .execute(&snapshot, "editor input".into(), &cancellation, &budget)
+        .unwrap();
+    assert_eq!(result.completeness, QueryCompleteness::Recovered);
+    assert_eq!(
+        forwarder
+            .memo()
+            .get(&snapshot, &"editor input".to_owned())
+            .unwrap()
+            .result
+            .completeness,
+        QueryCompleteness::Recovered,
+        "a recovery-capable parent may consume recovery but cannot erase it"
+    );
+
+    let undeclared = QueryEngine::new(UndeclaredRecovered);
+    assert!(matches!(
+        undeclared.execute(&snapshot, "forbidden".into(), &cancellation, &budget),
+        Err(QueryFailure::RecoveredProduct {
+            query: UndeclaredRecovered::NAME
+        })
+    ));
+    assert!(
+        undeclared
+            .memo()
+            .get(&snapshot, &"forbidden".to_owned())
+            .is_none(),
+        "recovery without a query-family policy must not poison the memo"
+    );
+}
+
+#[test]
+fn panic_before_publication_clears_running_marker_for_later_recovery() {
+    let snapshot = snapshot();
+    let engine = QueryEngine::new(PanicOnce {
+        panicked: AtomicBool::new(false),
+    });
+    let cancellation = grandiose_stage0::CancellationToken::new();
+    let budget = grandiose_stage0::Budget::root("panic-recovery", 8);
+    let first = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.execute(&snapshot, "retry".into(), &cancellation, &budget)
+    }));
+    assert!(
+        first.is_err(),
+        "hostile query must reach the panic boundary"
+    );
+    assert!(
+        engine.memo().get(&snapshot, &"retry".to_owned()).is_none(),
+        "a panicked query must not publish a partial value"
+    );
+    let retry = engine
+        .execute(&snapshot, "retry".into(), &cancellation, &budget)
+        .expect("the stale running marker must not turn retry into a cycle");
+    assert_eq!(retry.value, 5);
+    assert_eq!(
+        budget.spent(),
+        2,
+        "each attempted execution is charged once"
+    );
 }
 
 #[test]

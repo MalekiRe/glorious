@@ -24,6 +24,21 @@ pub enum QueryCompleteness {
     Recovered,
 }
 
+/// Whether a query family may intentionally produce or consume a recovered
+/// semantic product. Recovery is an explicit typed policy rather than a
+/// property a parent may erase while constructing its own result.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryRecoveryPolicy {
+    Reject,
+    Allow,
+}
+
+impl QueryRecoveryPolicy {
+    fn allows_recovery(self) -> bool {
+        matches!(self, Self::Allow)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct QueryValue<T> {
     pub value: T,
@@ -46,6 +61,7 @@ pub struct Dependency {
 pub struct QueryFrame {
     revision: RevisionId,
     dependencies: Vec<Dependency>,
+    recovered_dependency: bool,
 }
 
 impl QueryFrame {
@@ -53,6 +69,7 @@ impl QueryFrame {
         Self {
             revision: snapshot.id(),
             dependencies: vec![],
+            recovered_dependency: false,
         }
     }
 
@@ -62,6 +79,14 @@ impl QueryFrame {
             query,
             fingerprint,
         });
+    }
+
+    fn depend_on_recovered_product(&mut self) {
+        self.recovered_dependency = true;
+    }
+
+    fn contains_recovered_dependency(&self) -> bool {
+        self.recovered_dependency
     }
 
     pub fn finish(mut self) -> Vec<Dependency> {
@@ -222,9 +247,19 @@ where
 pub enum QueryFailure<E> {
     Rejected(E),
     Cancelled,
-    ResourceLimit { name: &'static str, limit: u64 },
+    ResourceLimit {
+        name: &'static str,
+        limit: u64,
+    },
     Invariant(&'static str),
-    Cycle { query: &'static str },
+    Cycle {
+        query: &'static str,
+    },
+    /// A complete-only query attempted to observe a provisional result, or a
+    /// query attempted to publish recovery without declaring that policy.
+    RecoveredProduct {
+        query: &'static str,
+    },
 }
 
 /// The only authority granted to a running query. Nested queries record their
@@ -234,6 +269,7 @@ pub struct QueryContext<'a> {
     snapshot: &'a DatabaseSnapshot,
     cancellation: &'a CancellationToken,
     budget: &'a Arc<Budget>,
+    recovery_policy: QueryRecoveryPolicy,
     frame: QueryFrame,
 }
 
@@ -242,11 +278,13 @@ impl<'a> QueryContext<'a> {
         snapshot: &'a DatabaseSnapshot,
         cancellation: &'a CancellationToken,
         budget: &'a Arc<Budget>,
+        recovery_policy: QueryRecoveryPolicy,
     ) -> Self {
         Self {
             snapshot,
             cancellation,
             budget,
+            recovery_policy,
             frame: QueryFrame::new(snapshot),
         }
     }
@@ -281,6 +319,12 @@ impl<'a> QueryContext<'a> {
         key: Q::Key,
     ) -> Result<QueryValue<Q::Value>, QueryFailure<Q::Error>> {
         let result = engine.execute(self.snapshot, key, self.cancellation, self.budget)?;
+        if result.completeness == QueryCompleteness::Recovered {
+            if !self.recovery_policy.allows_recovery() {
+                return Err(QueryFailure::RecoveredProduct { query: Q::NAME });
+            }
+            self.frame.depend_on_recovered_product();
+        }
         self.frame.depend(Q::NAME, result.fingerprint);
         Ok(result)
     }
@@ -299,6 +343,11 @@ pub trait Query {
     type Error: Clone + Debug + Send + Sync + 'static;
 
     const NAME: &'static str;
+
+    /// Recovery-capable queries are tooling-facing by default. A release or
+    /// complete-only query must opt in before it can consume a recovered child
+    /// or publish a recovered result of its own.
+    const RECOVERY_POLICY: QueryRecoveryPolicy = QueryRecoveryPolicy::Reject;
 
     /// Validate a cached parent result for one child revision. The default is
     /// fail-closed: only a query family that understands all of its inputs may
@@ -331,6 +380,28 @@ pub struct QueryEngine<Q: Query> {
     execution: Mutex<HashMap<(RevisionId, Q::Key), QueryExecutionKind>>,
 }
 
+/// Removes the execution marker even when a query panics. Panics remain
+/// invariant failures for the caller, but they must not poison this key into a
+/// permanent synthetic cycle for every later request.
+struct RunningQueryGuard<'a, K: Eq + Hash> {
+    running: &'a Mutex<HashSet<(RevisionId, K)>>,
+    entry: Option<(RevisionId, K)>,
+}
+
+impl<K> Drop for RunningQueryGuard<'_, K>
+where
+    K: Eq + Hash,
+{
+    fn drop(&mut self) {
+        if let Some(entry) = self.entry.take() {
+            self.running
+                .lock()
+                .expect("query running mutex poisoned")
+                .remove(&entry);
+        }
+    }
+}
+
 impl<Q: Query> QueryEngine<Q> {
     pub fn new(query: Q) -> Self {
         Self {
@@ -352,6 +423,11 @@ impl<Q: Query> QueryEngine<Q> {
         // memo first.
         cancellation.check().map_err(|_| QueryFailure::Cancelled)?;
         if let Some(entry) = self.memo.get(snapshot, &key) {
+            if entry.result.completeness == QueryCompleteness::Recovered
+                && !Q::RECOVERY_POLICY.allows_recovery()
+            {
+                return Err(QueryFailure::RecoveredProduct { query: Q::NAME });
+            }
             self.record_execution(
                 snapshot,
                 &key,
@@ -371,6 +447,11 @@ impl<Q: Query> QueryEngine<Q> {
                         .can_reuse(&key, &entry, &parent_snapshot, snapshot) =>
                 {
                     cancellation.check().map_err(|_| QueryFailure::Cancelled)?;
+                    if entry.result.completeness == QueryCompleteness::Recovered
+                        && !Q::RECOVERY_POLICY.allows_recovery()
+                    {
+                        return Err(QueryFailure::RecoveredProduct { query: Q::NAME });
+                    }
                     self.memo
                         .publish_reused(snapshot, key.clone(), entry.clone());
                     self.record_execution(
@@ -388,24 +469,34 @@ impl<Q: Query> QueryEngine<Q> {
         } else {
             QueryRecomputeReason::Cold
         };
-        {
+        let running = {
             let mut running = self.running.lock().expect("query running mutex poisoned");
             if !running.insert((snapshot.id(), key.clone())) {
                 return Err(QueryFailure::Cycle { query: Q::NAME });
             }
-        }
-        let mut context = QueryContext::new(snapshot, cancellation, budget);
+            RunningQueryGuard {
+                running: &self.running,
+                entry: Some((snapshot.id(), key.clone())),
+            }
+        };
+        let mut context = QueryContext::new(snapshot, cancellation, budget, Q::RECOVERY_POLICY);
         let result = context
             .charge(1)
             .and_then(|_| self.query.execute(&mut context, key.clone()));
-        self.running
-            .lock()
-            .expect("query running mutex poisoned")
-            .remove(&(snapshot.id(), key.clone()));
-        let result = result?;
+        drop(running);
+        let mut result = result?;
+        let frame = context.finish();
+        if frame.contains_recovered_dependency() {
+            result.completeness = QueryCompleteness::Recovered;
+        }
+        if result.completeness == QueryCompleteness::Recovered
+            && !Q::RECOVERY_POLICY.allows_recovery()
+        {
+            return Err(QueryFailure::RecoveredProduct { query: Q::NAME });
+        }
         cancellation.check().map_err(|_| QueryFailure::Cancelled)?;
         self.memo
-            .publish(snapshot, key.clone(), result.clone(), context.finish());
+            .publish(snapshot, key.clone(), result.clone(), frame);
         self.record_execution(
             snapshot,
             &key,
