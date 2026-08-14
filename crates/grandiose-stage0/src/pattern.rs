@@ -211,7 +211,18 @@ impl Elaborator<'_> {
                     };
                 }
                 let literal_ty = literal_type(&literal);
-                if literal_ty != subject {
+                // Pattern literals are contextual just like expression
+                // literals.  A handler payload such as `Branch::select(0)`
+                // receives its concrete width from the operation contract;
+                // treating `0` as the legacy `i64` default rejects an exact
+                // `u32` arm before the handler matrix can reason about it.
+                // The decision retains the source spelling and is lowered
+                // against `subject`, so no implicit runtime conversion is
+                // introduced here.
+                let matches_subject = literal_ty == subject
+                    || (literal_is_numeric(&literal)
+                        && matches!(&subject, Type::Scalar(scalar) if scalar_is_numeric(*scalar)));
+                if !matches_subject {
                     self.error(
                         pattern.span,
                         "G4201",
@@ -922,6 +933,30 @@ fn literal_type(value: &str) -> Type {
     } else {
         Type::Scalar(ScalarType::I64)
     }
+}
+
+fn literal_is_numeric(value: &str) -> bool {
+    !matches!(value, "true" | "false") && !value.starts_with('"') && !value.starts_with('\'')
+}
+
+fn scalar_is_numeric(scalar: ScalarType) -> bool {
+    matches!(
+        scalar,
+        ScalarType::U8
+            | ScalarType::U16
+            | ScalarType::U32
+            | ScalarType::U64
+            | ScalarType::U128
+            | ScalarType::Usize
+            | ScalarType::I8
+            | ScalarType::I16
+            | ScalarType::I32
+            | ScalarType::I64
+            | ScalarType::I128
+            | ScalarType::Isize
+            | ScalarType::F32
+            | ScalarType::F64
+    )
 }
 
 fn scalar(name: &str) -> Option<ScalarType> {
