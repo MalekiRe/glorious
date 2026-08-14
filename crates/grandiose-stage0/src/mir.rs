@@ -12105,6 +12105,18 @@ impl Lowerer<'_> {
                 self.named = previous_named;
                 return Some(self.invalid_function(parameters));
             }
+            if let Some((prefix, completion)) = self.tail_completion(clause.body) {
+                for statement in prefix {
+                    self.statement(statement)?;
+                }
+                let Some(id) = self.lower_completion_return(completion, root, &mut blocks) else {
+                    self.named = previous_named;
+                    return Some(self.invalid_function(parameters));
+                };
+                self.named = previous_named;
+                bodies.push(id);
+                continue;
+            }
             let Some(body) = self.value(clause.body) else {
                 self.named = previous_named;
                 return Some(self.invalid_function(parameters));
@@ -12179,6 +12191,137 @@ impl Lowerer<'_> {
             entry: MirBlockId(0),
             blocks,
         })
+    }
+
+    /// Lower a completion expression that occurs in an already selected
+    /// completion arm.  Root completion lowering already has a decision CFG,
+    /// but a nested `handle value is Pattern { ... }` is itself a value and
+    /// must not fall through to the generic expression lowering (where it
+    /// would be confused with a resumptive effect handler).  This recursively
+    /// emits the same ordered matrix and makes every nested arm return to the
+    /// enclosing function's result boundary.
+    fn lower_completion_return(
+        &mut self,
+        completion: CoreId,
+        root: CoreId,
+        blocks: &mut Vec<MirBlock>,
+    ) -> Option<MirBlockId> {
+        let CoreKind::Completion {
+            computation,
+            clauses,
+        } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+        let subject = self.value(computation)?;
+        let fallback_index = clauses
+            .iter()
+            .position(|clause| pattern_is_irrefutable(&clause.pattern));
+        let selected = fallback_index
+            .map(|index| clauses[..=index].to_vec())
+            .unwrap_or(clauses);
+        let has_fallback = fallback_index.is_some();
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let entry_values = self.values.clone();
+        let entry_named = self.named.clone();
+        let entry = MirBlockId(blocks.len() as u32);
+        blocks.push(MirBlock {
+            parameters: vec![],
+            instructions: entry_instructions,
+            terminator: MirTerminator::Unreachable,
+        });
+        let mut bodies = Vec::with_capacity(selected.len());
+        for clause in &selected {
+            self.instructions = vec![];
+            self.values = entry_values.clone();
+            self.named = entry_named.clone();
+            self.bind_completion_clause(clause, subject)?;
+            let body = if let Some((prefix, completion)) = self.tail_completion(clause.body) {
+                for statement in prefix {
+                    self.statement(statement)?;
+                }
+                self.lower_completion_return(completion, root, blocks)?
+            } else {
+                let body = self.value(clause.body)?;
+                let id = MirBlockId(blocks.len() as u32);
+                blocks.push(MirBlock {
+                    parameters: vec![],
+                    instructions: std::mem::take(&mut self.instructions),
+                    terminator: MirTerminator::Return { value: body },
+                });
+                id
+            };
+            bodies.push(body);
+        }
+        self.values = entry_values;
+        self.named = entry_named;
+        let mut next = if has_fallback {
+            *bodies.last().expect("completion fallback body exists")
+        } else {
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            });
+            id
+        };
+        let tested = if has_fallback {
+            selected.len().saturating_sub(1)
+        } else {
+            selected.len()
+        };
+        for index in (0..tested).rev() {
+            let Some(pattern) = lower_pattern(selected[index].pattern.clone()) else {
+                self.error(
+                    "G6005",
+                    "completion handler contains an invalid structural pattern",
+                );
+                return None;
+            };
+            let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+            blocks[entry.0 as usize]
+                .instructions
+                .push(MirInstruction::PatternTest {
+                    dst: condition,
+                    subject,
+                    pattern,
+                });
+            let selected_arm = bodies[index];
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target: selected_arm,
+                    then_arguments: vec![],
+                    else_target: next,
+                    else_arguments: vec![],
+                },
+            });
+            next = id;
+        }
+        blocks[entry.0 as usize].terminator = MirTerminator::Goto {
+            target: next,
+            arguments: vec![],
+        };
+        Some(entry)
+    }
+
+    /// A block preserves its tail value, so a completion in that position has
+    /// the same branch-to-return shape as a bare completion while retaining
+    /// all prefix side effects in the selected arm's entry block.
+    fn tail_completion(&self, id: CoreId) -> Option<(Vec<CoreId>, CoreId)> {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Completion { .. } => Some((vec![], id)),
+            CoreKind::Block(values) => {
+                let (completion, prefix) = values.split_last()?;
+                matches!(self.body.expression(*completion).kind, CoreKind::Completion { .. })
+                    .then(|| (prefix.to_vec(), *completion))
+            }
+            _ => None,
+        }
     }
     /// Direct mixed handlers use two ordered dispatch phases. A selected
     /// resumptive operation arm supplies the normal result of its resumed
