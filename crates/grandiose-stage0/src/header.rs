@@ -1281,7 +1281,15 @@ impl Parser<'_> {
             // 0 nominal layout records field identity and type only, so retain
             // the modifier's syntax boundary while visibility policy stays in
             // interface collection.
-            if matches!(self.word(), Some("private" | "public")) {
+            // `public` and `private` remain legal field names. They are a
+            // visibility modifier only when another field identifier follows;
+            // `public: Bool` is a field named `public`, not a modifier plus a
+            // malformed `Bool` field.
+            if matches!(self.word(), Some("private" | "public"))
+                && !self.tokens.get(self.position + 1).is_some_and(|next| {
+                    self.lexed.tokens[*next].kind == TokenKind::Punctuation(':')
+                })
+            {
                 self.position += 1;
             }
             let name = self.identifier().unwrap_or_else(|| {

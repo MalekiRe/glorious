@@ -621,6 +621,31 @@ fn canonical_unit_arrow_before_a_callable_body_does_not_parse_a_brace_as_a_type(
 }
 
 #[test]
+fn nominal_fields_keep_public_and_private_as_ordinary_names_before_a_colon() {
+    let package = PackageKey("header-visibility-names@0.1.0".into());
+    let source = "pub struct Flags { public: Bool, private: Bool, public named: i64 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Nominal {
+        layout: grandiose_stage0::NominalLayoutHeader::Struct(fields),
+        ..
+    } = parsed.header
+    else {
+        panic!("expected struct layout");
+    };
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["public", "private", "named"]
+    );
+}
+
+#[test]
 fn malformed_named_associated_binding_reports_the_type_frontier() {
     let package = PackageKey("header-malformed-associated-binding@0.1.0".into());
     let source = "pub fn apply<F>() where F: Fn<(), Output = > { 0 }";
