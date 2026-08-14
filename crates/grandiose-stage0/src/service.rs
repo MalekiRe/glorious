@@ -15,10 +15,11 @@ use crate::{
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
     DefinitionIndex, DependencyNode, DependencyTrace, DiagnosticClass, Digest, ElaboratedHeader,
     ElaboratedInterface, EscapeFlow, FixityTable, GenericArgument, InputError, InstanceGraph,
-    InstanceKey, InstanceLimits, InstanceRoot, MirFunction, MirInstance, MirLowering, MirProgram,
-    ModuleGraph, ParsedHeader, PlaceFlow, PublicationGuard, RequestSession, RetentionReport,
-    RevisionError, RevisionId, Severity, SourceSpan, Span, TrustedRuntimeManifest, Type, TypedBody,
-    UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
+    InstanceKey, InstanceLimits, InstanceRoot, MirFunction, MirInstance, MirInstruction,
+    MirLowering, MirProgram, ModuleGraph, ParsedHeader, PlaceFlow, PublicationGuard,
+    RequestSession, RetentionReport, RevisionError, RevisionId, Severity, SourceSpan, Span,
+    TrustedRuntimeManifest, Type, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program,
+    implementation_method_key, verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1995,6 +1996,7 @@ fn materialize_concrete_instances(
         let mut specialized = base;
         specialized.definition = executable;
         specialize_mir_local_types(&mut specialized, key.arguments());
+        materialize_deferred_scalar_operations(&mut specialized)?;
         register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
         targets.insert(key.clone(), executable);
         instances.insert(executable, MirInstance { key, executable });
@@ -2110,6 +2112,49 @@ fn materialize_concrete_instances(
         }
     }
     Ok(instances)
+}
+
+/// Rewrite scalar operations whose source templates deliberately retain a
+/// generic type parameter until instance materialization.  Runtime primitive
+/// declarations are sealed and cannot themselves be materialized; ordinary
+/// source wrappers therefore carry this deferred operation through Typed Core
+/// and MIR until their enclosing instance fixes the local register types.
+fn materialize_deferred_scalar_operations(function: &mut MirFunction) -> Result<(), String> {
+    for block in &mut function.blocks {
+        for instruction in &mut block.instructions {
+            let MirInstruction::BitAndGeneric { dst, left, right } = instruction else {
+                continue;
+            };
+            let scalar = function
+                .locals
+                .get(dst.0 as usize)
+                .map(|local| local.ty.clone())
+                .ok_or_else(|| "deferred bitwise-and destination is not a MIR local".to_owned())?;
+            *instruction = match scalar {
+                Type::Scalar(crate::ScalarType::I64) => MirInstruction::BitAndI64 {
+                    dst: *dst,
+                    left: *left,
+                    right: *right,
+                },
+                Type::Scalar(crate::ScalarType::U32) => MirInstruction::BitAndU32 {
+                    dst: *dst,
+                    left: *left,
+                    right: *right,
+                },
+                Type::Scalar(crate::ScalarType::U64) => MirInstruction::BitAndU64 {
+                    dst: *dst,
+                    left: *left,
+                    right: *right,
+                },
+                other => {
+                    return Err(format!(
+                        "generic int bitwise-and instance has unsupported scalar result {other:?}"
+                    ));
+                }
+            };
+        }
+    }
+    Ok(())
 }
 
 /// Canonicalize a solver-selected trait method into the shared instance-key

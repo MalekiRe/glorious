@@ -5466,6 +5466,11 @@ fn lower_instruction(
             left: left.0,
             right: right.0,
         },
+        MirInstruction::BitAndGeneric { .. } => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "unmaterialized generic bitwise-and reached VM lowering",
+            });
+        }
         MirInstruction::BitXorI64 { dst, left, right } => VmInstruction::BitXorI64 {
             dst: dst.0,
             left: left.0,

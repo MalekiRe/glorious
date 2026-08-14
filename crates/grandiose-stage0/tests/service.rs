@@ -237,8 +237,11 @@ fn manifest_bound_float_finiteness_predicates_execute_through_unsigned_vm_paths(
             "fn {to_bits}(value: {float}) -> {integer} {{ () }}\
              fn {from_bits}(value: {integer}) -> {float} {{ () }}\
              fn __g1_int_bit_and<T>(left: T, right: T) -> T {{ () }}\
+             fn bit_and<T>(left: T, right: T) -> T {{\
+                 __g1_int_bit_and(move left, move right)\
+             }}\
              finite(value: {float}) -> Bool {{\
-                 __g1_int_bit_and<{integer}>({to_bits}(move value), {infinity_bits}) != {infinity_bits}\
+                 bit_and({to_bits}(move value), {infinity_bits}) != {infinity_bits}\
              }}\
              pub fn main() -> Bool {{ finite({from_bits}({infinity_bits})) }}",
         );

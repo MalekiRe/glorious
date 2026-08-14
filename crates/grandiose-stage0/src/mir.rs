@@ -677,6 +677,13 @@ pub enum MirInstruction {
         left: MirLocal,
         right: MirLocal,
     },
+    /// A generic runtime wrapper body has been type-checked but cannot select
+    /// a machine width until its concrete instance is materialized.
+    BitAndGeneric {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
     /// Exact manifest-bound i64 bitwise-xor. This is never ordinary source
     /// arithmetic and remains distinct in the frozen MIR contract.
     BitXorI64 {
@@ -1310,6 +1317,7 @@ fn fold_block(
             | MirInstruction::BitAndI64 { .. }
             | MirInstruction::BitAndU32 { .. }
             | MirInstruction::BitAndU64 { .. }
+            | MirInstruction::BitAndGeneric { .. }
             | MirInstruction::BitOrI64 { .. }
             | MirInstruction::BitXorI64 { .. }
             | MirInstruction::IntShrI64 { .. }
@@ -1560,6 +1568,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::BitAndI64 { dst, .. }
         | MirInstruction::BitAndU32 { dst, .. }
         | MirInstruction::BitAndU64 { dst, .. }
+        | MirInstruction::BitAndGeneric { dst, .. }
         | MirInstruction::BitXorI64 { dst, .. }
         | MirInstruction::IntShrI64 { dst, .. }
         | MirInstruction::BitOrI64 { dst, .. }
@@ -3644,6 +3653,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::BitAndI64 { .. }
         | MirInstruction::BitAndU32 { .. }
         | MirInstruction::BitAndU64 { .. }
+        | MirInstruction::BitAndGeneric { .. }
         | MirInstruction::BitXorI64 { .. }
         | MirInstruction::IntShrI64 { .. }
         | MirInstruction::BitOrI64 { .. }
@@ -4448,6 +4458,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::BitAndI64 { dst, left, right }
         | MirInstruction::BitAndU32 { dst, left, right }
         | MirInstruction::BitAndU64 { dst, left, right }
+        | MirInstruction::BitAndGeneric { dst, left, right }
         | MirInstruction::BitXorI64 { dst, left, right }
         | MirInstruction::IntShrI64 { dst, left, right }
         | MirInstruction::BitOrI64 { dst, left, right }
@@ -14679,6 +14690,22 @@ impl Lowerer<'_> {
                                     );
                                     return None;
                                 };
+                                if matches!(
+                                    generic_arguments.as_slice(),
+                                    [GenericArgument::Type(Type::Generic(_))]
+                                ) {
+                                    self.instructions.push(MirInstruction::BitAndGeneric {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    });
+                                    // The generic source template is retained only so a
+                                    // concrete caller can materialize it later.  Preserve
+                                    // normal expression memoization before leaving this
+                                    // direct-lowering fast path.
+                                    self.values.insert(id, dst);
+                                    return Some(dst);
+                                }
                                 let scalar = match generic_arguments.as_slice() {
                                     [GenericArgument::Type(Type::Scalar(scalar))] => *scalar,
                                     _ => {
