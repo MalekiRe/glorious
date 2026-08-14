@@ -2784,3 +2784,18 @@ fn leave_edges_carry_canonical_placeflow_cleanup_evidence() {
     grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).expect("emit leave"))
         .expect("verify proof-erased cleanup leave");
 }
+
+#[test]
+fn handler_clauses_cannot_erase_an_enclosing_label_transfer_brand() {
+    let core = core_for(
+        "core-handler-label-transfer@0.1.0",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { label done { handle Ask::ask() { Ask::ask() => transfer done 42 } } }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4184"),
+        "{:#?}",
+        core.diagnostics
+    );
+}

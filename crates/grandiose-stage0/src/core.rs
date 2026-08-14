@@ -2972,6 +2972,30 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
     }
+    /// Handler clauses may suspend and resume after the protected label scope
+    /// has changed. Until a `Leave` edge is represented inside every handler
+    /// continuation path, reject an outward transfer here rather than letting
+    /// handler specialization erase the target brand.
+    fn check_handler_label_transfer_escape(&mut self, body: CoreId, span: Span) {
+        let active = self
+            .active_labels
+            .iter()
+            .map(|label| label.brand)
+            .collect::<std::collections::BTreeSet<_>>();
+        if active.is_empty() {
+            return;
+        }
+        let mut transfers = Vec::new();
+        collect_transfer_brands(&self.expressions, body, &mut transfers);
+        if transfers.into_iter().any(|brand| active.contains(&brand)) {
+            self.error(
+                span,
+                "G4184",
+                "handler clause cannot transfer to an enclosing label before handler leave edges are represented",
+            );
+            self.recovered = true;
+        }
+    }
     fn collect_captures(
         &self,
         id: CoreId,
@@ -4649,6 +4673,7 @@ impl Elaborator<'_> {
             result,
             span,
         );
+        self.check_handler_label_transfer_escape(handler, span);
         if completion_clauses.is_empty() {
             handler
         } else {
