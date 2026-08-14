@@ -81,7 +81,7 @@ pub use mir::{
     MirBlock, MirBlockId, MirCleanupPlan, MirContinuationPolicy, MirDiagnostic, MirEditor,
     MirFunction, MirInstance, MirInstruction, MirLocal, MirLocalDecl, MirLowering,
     MirOptimizationReport, MirPattern, MirPatternField, MirProgram, MirTerminator,
-    optimize as optimize_mir,
+    MirTraitMethodInstance, optimize as optimize_mir,
 };
 pub use module_graph::{ModuleDiagnostic, ModuleGraph, ModuleNode};
 pub use operation::{Budget, BudgetError, CancellationToken, PublicationGuard};

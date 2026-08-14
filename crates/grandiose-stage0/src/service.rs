@@ -1102,16 +1102,25 @@ impl StageZeroCompiler {
                     ),
                     _ => continue,
                 };
-                let key = key.map_err(|error| {
-                    failed(
-                        input_fingerprint,
-                        vec![CompileDiagnostic::invariant(
-                            "G7030",
-                            format!("callable instance is not concrete: {error:?}"),
-                        )],
-                        &source_lengths,
-                    )
-                })?;
+                let key = match key {
+                    Ok(key) => key,
+                    Err(
+                        crate::InstanceKeyError::NonConcreteType { .. }
+                        | crate::InstanceKeyError::UnresolvedType { .. }
+                        | crate::InstanceKeyError::OpenEffectRow { .. }
+                        | crate::InstanceKeyError::NonConcreteLifetime { .. },
+                    ) => continue,
+                    Err(error) => {
+                        return Err(failed(
+                            input_fingerprint,
+                            vec![CompileDiagnostic::invariant(
+                                "G7030",
+                                format!("callable instance is not concrete: {error:?}"),
+                            )],
+                            &source_lengths,
+                        ));
+                    }
+                };
                 instance_graph
                     .discover_callee(&caller, key, limits)
                     .map_err(|error| {
@@ -1382,9 +1391,29 @@ fn materialize_concrete_instances(
                             &trait_instance.trait_arguments,
                             &trait_instance.method_arguments,
                         )
-                        .map_err(|error| {
-                            format!("trait method instance is not executable: {error:?}")
-                        })?
+                    };
+                    let key = match key {
+                        Ok(key) => key,
+                        Err(
+                            crate::InstanceKeyError::NonConcreteType { .. }
+                            | crate::InstanceKeyError::UnresolvedType { .. }
+                            | crate::InstanceKeyError::OpenEffectRow { .. }
+                            | crate::InstanceKeyError::NonConcreteLifetime { .. },
+                        ) => {
+                            // Source generic templates are retained for
+                            // diagnostics and only their concrete clones are
+                            // executable. Their solver-selected callee is
+                            // still valid, but no executable instance exists
+                            // until an outer materialization closes the
+                            // binders.
+                            *trait_instance = None;
+                            continue;
+                        }
+                        Err(error) => {
+                            return Err(format!(
+                                "trait method instance is not executable: {error:?}"
+                            ));
+                        }
                     };
                     *callee = *targets.get(&key).ok_or_else(|| {
                         format!("selected trait-method instance was not materialized: {key:?}")
