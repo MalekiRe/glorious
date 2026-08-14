@@ -1148,13 +1148,9 @@ fn validated_type_arguments(
             let valid = match (kind, argument) {
                 (GenericKind::Type, GenericArgument::Type(_))
                 | (GenericKind::EffectRow, GenericArgument::EffectRow(_))
-                | (GenericKind::Lifetime, GenericArgument::Lifetime(_))
-                | (GenericKind::Const(ConstKind::U32), GenericArgument::ConstU32(_))
-                | (GenericKind::Const(ConstKind::Quantity), GenericArgument::ConstQuantity(_)) => {
-                    true
-                }
-                (GenericKind::Const(kind), GenericArgument::ConstGeneric { kind: found, .. }) => {
-                    kind == found
+                | (GenericKind::Lifetime, GenericArgument::Lifetime(_)) => true,
+                (GenericKind::Const(kind), argument) => {
+                    generic_argument_matches_const_kind(argument, *kind)
                 }
                 _ => false,
             };
@@ -1193,11 +1189,9 @@ fn validate_generic_arguments(
         let valid = match (kind, argument) {
             (GenericKind::Type, GenericArgument::Type(_))
             | (GenericKind::EffectRow, GenericArgument::EffectRow(_))
-            | (GenericKind::Lifetime, GenericArgument::Lifetime(_))
-            | (GenericKind::Const(ConstKind::U32), GenericArgument::ConstU32(_))
-            | (GenericKind::Const(ConstKind::Quantity), GenericArgument::ConstQuantity(_)) => true,
-            (GenericKind::Const(expected), GenericArgument::ConstGeneric { kind: found, .. }) => {
-                expected == found
+            | (GenericKind::Lifetime, GenericArgument::Lifetime(_)) => true,
+            (GenericKind::Const(kind), argument) => {
+                generic_argument_matches_const_kind(argument, *kind)
             }
             _ => false,
         };
