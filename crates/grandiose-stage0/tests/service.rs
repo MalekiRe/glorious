@@ -3572,6 +3572,92 @@ fn service_intercepts_an_indirect_terminal_callee_through_a_vm_frame() {
 }
 
 #[test]
+fn service_cancels_an_outward_effect_call_through_a_vm_frame() {
+    let source = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn leaf(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn helper(value: i64) -> i64 / Ask { let copied = value + 0; leaf(copied) } pub fn main() -> i64 { handle helper(40) { Ask::ask(_) with _ => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+        "the cancelled helper must remain an ordinary VM call"
+    );
+    assert!(
+        entry.instructions.iter().any(|instruction| matches!(
+            instruction,
+            VmInstruction::InstallHandler {
+                continuation: VmContinuationPolicy::Consume,
+                ..
+            }
+        )),
+        "the caller must install a consuming cancellation frame"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Cancel)),
+        "the cancellation arm must consume the cross-call suspended frame"
+    );
+    assert!(
+        program.functions.values().any(|function| function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Perform { .. }))),
+        "the leaf's outward effect must remain a real VM Perform"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_cancels_an_indirect_outward_effect_call_through_a_vm_frame() {
+    let source = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn helper(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Ask::ask(_) with _ => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+        "the cancelled function value must retain its indirect VM call"
+    );
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            continuation: VmContinuationPolicy::Consume,
+            ..
+        }
+    )));
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_cancellation_frame_keeps_the_operation_result_type_across_a_call() {
+    let source = "effect Read { [0, 1] read() -> Text; } pub fn helper() -> i64 / Read { let ignored = Read::read(); 0 } pub fn main() -> i64 { handle helper() { Read::read() with _ => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            resume_type: VmType::Text,
+            continuation: VmContinuationPolicy::Consume,
+            ..
+        }
+    )));
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_resumption_binds_payloads_before_entering_a_nonempty_continuation() {
     let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(41); value + 1 } { Ask::ask(seed) with k => k(seed) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
