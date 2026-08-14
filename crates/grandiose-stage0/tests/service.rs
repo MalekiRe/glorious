@@ -7053,7 +7053,7 @@ fn service_resolves_language_prelude_ownership_traits_by_fixed_identity() {
     let source = r#"
         struct Ticket {}
         impl Use<[0, 1]> for Ticket {}
-        impl Drop for Ticket {}
+        impl Drop for Ticket { drop(&mut self) {} }
         pub fn main() -> i64 { 42 }
     "#;
     let outcome = StageZeroCompiler::new()
@@ -7073,5 +7073,21 @@ fn source_trait_named_use_overrides_the_language_prelude_only_when_declared() {
     let outcome = StageZeroCompiler::new()
         .compile(request(source))
         .expect("a declared local trait must resolve before the language prelude");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_parses_bare_operator_trait_and_implementation_methods() {
+    let source = r#"
+        struct Number { value: i64 }
+        trait Add { +(self: Self, other: Self) -> Self; }
+        impl Add for Number {
+            +(self: Number, other: Number) -> Number { self }
+        }
+        pub fn main() -> i64 { 42 }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).expect(
+        "operator-named trait and implementation methods must enter one interface contract",
+    );
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }

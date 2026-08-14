@@ -725,7 +725,7 @@ impl Parser<'_> {
                 self.position += 1;
             }
             let method_start = self.current().unwrap_or(start);
-            let name = self.identifier().unwrap_or_else(|| {
+            let name = self.callable_member_name().unwrap_or_else(|| {
                 self.error("G3233", "expected trait method name");
                 "<error>".into()
             });
@@ -800,6 +800,7 @@ impl Parser<'_> {
                 if body_parser.word() != Some("type")
                     && body_parser.word() != Some("const")
                     && body_parser.word() != Some("fn")
+                    && !body_parser.callable_member_ahead()
                 {
                     body_parser.skip_item_body();
                     continue;
@@ -868,10 +869,12 @@ impl Parser<'_> {
                     });
                     continue;
                 }
-                if body_parser.word() == Some("fn") {
+                if body_parser.word() == Some("fn") || body_parser.callable_member_ahead() {
                     let start = body_parser.current().unwrap();
-                    body_parser.position += 1;
-                    let name = body_parser.identifier().unwrap_or_else(|| {
+                    if body_parser.word() == Some("fn") {
+                        body_parser.position += 1;
+                    }
+                    let name = body_parser.callable_member_name().unwrap_or_else(|| {
                         body_parser.error("G3242", "expected implementation method name");
                         "<error>".into()
                     });
@@ -1023,11 +1026,39 @@ impl Parser<'_> {
         let mut parameters = vec![];
         while self.current().is_some() && !self.at_punctuation(')') {
             let start = self.current().unwrap();
-            let name = self.identifier().unwrap_or_else(|| "<error>".into());
-            if !self.punctuation(':') {
-                self.error("G3203", "expected `:` after parameter name");
-            }
-            let ty = self.ty();
+            // Canonical trait and implementation members permit the concise
+            // borrowed receiver spelling `&self` / `&mut self`. It is still
+            // frozen as an explicit `Self` reference in the interface, so
+            // later trait instantiation never has to recover a receiver from
+            // a parameter name.
+            let (name, ty) = if self.operator("&") {
+                let unique = self.word() == Some("mut");
+                if unique {
+                    self.position += 1;
+                }
+                let name = self.identifier().unwrap_or_else(|| {
+                    self.error("G3203", "expected `self` after borrowed receiver");
+                    "<error>".into()
+                });
+                if name != "self" {
+                    self.error("G3203", "borrowed receiver must name `self`");
+                }
+                (
+                    name,
+                    HeaderType::Reference {
+                        unique,
+                        lifetime: None,
+                        referent: Box::new(HeaderType::Path(vec!["Self".into()])),
+                    },
+                )
+            } else {
+                let name = self.identifier().unwrap_or_else(|| "<error>".into());
+                if !self.punctuation(':') {
+                    self.error("G3203", "expected `:` after parameter name");
+                }
+                let ty = self.ty();
+                (name, ty)
+            };
             let end = self.previous().unwrap_or(start);
             parameters.push(HeaderParameter {
                 name,
@@ -2137,6 +2168,43 @@ impl Parser<'_> {
         let value = self.word()?.to_owned();
         self.position += 1;
         Some(value)
+    }
+    /// Trait and implementation members may be ordinary identifiers or
+    /// declared operators.  Retaining the exact operator spelling here makes
+    /// the method table, coherence checking, and operator-call lowering share
+    /// one stable name instead of inventing a parser-only surrogate.
+    fn callable_member_name(&mut self) -> Option<String> {
+        if let Some(name) = self.identifier() {
+            return Some(name);
+        }
+        let current = self.current()?;
+        (self.lexed.tokens[current].kind == TokenKind::Operator).then(|| {
+            self.position += 1;
+            self.text(current).to_owned()
+        })
+    }
+    /// An implementation body has no item keyword in canonical source. Only
+    /// accept a bare member when its name is immediately followed by a
+    /// callable introducer, keeping malformed arbitrary body expressions out
+    /// of the interface namespace.
+    fn callable_member_ahead(&self) -> bool {
+        let Some(current) = self.current() else {
+            return false;
+        };
+        if self.word() == Some("fn") {
+            return true;
+        }
+        if !matches!(
+            self.lexed.tokens[current].kind,
+            TokenKind::Identifier | TokenKind::Operator
+        ) {
+            return false;
+        }
+        let Some(next) = self.tokens.get(self.position + 1).copied() else {
+            return false;
+        };
+        self.lexed.tokens[next].kind == TokenKind::Punctuation('(')
+            || (self.lexed.tokens[next].kind == TokenKind::Operator && self.text(next) == "<")
     }
     fn at_punctuation(&self, value: char) -> bool {
         self.current()
