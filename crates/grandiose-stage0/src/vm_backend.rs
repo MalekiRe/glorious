@@ -354,6 +354,61 @@ pub enum VmInstruction {
     /// operands and cannot fall through into an unrelated instruction.
     Trap,
 }
+/// Canonical, artifact-safe ownership evidence attached to a nonlocal leave.
+/// It deliberately contains only structural place text and indices—not MIR
+/// locals, Core arena IDs, or host pointers—so a decoded artifact can verify
+/// the same proof without compiler-session state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VmCleanupProof {
+    pub moved_places: Vec<VmCleanupPlace>,
+    pub active_loans: Vec<VmCleanupLoan>,
+}
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct VmCleanupPlace {
+    pub root: String,
+    pub fields: Vec<u32>,
+}
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct VmCleanupLoan {
+    pub owner: Option<String>,
+    pub root: String,
+    pub fields: Vec<u32>,
+    pub unique: bool,
+}
+impl VmCleanupProof {
+    pub fn from_mir(plan: &crate::MirCleanupPlan) -> Self {
+        let mut moved_places = plan
+            .moved_places
+            .iter()
+            .map(|place| VmCleanupPlace {
+                root: place.root.clone(),
+                fields: place.fields.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut active_loans = plan
+            .active_loans
+            .iter()
+            .map(|loan| VmCleanupLoan {
+                owner: loan.owner.clone(),
+                root: loan.root.clone(),
+                fields: loan.fields.clone(),
+                unique: loan.unique,
+            })
+            .collect::<Vec<_>>();
+        moved_places.sort();
+        moved_places.dedup();
+        active_loans.sort();
+        active_loans.dedup();
+        Self {
+            moved_places,
+            active_loans,
+        }
+    }
+    pub fn validate(&self) -> bool {
+        self.moved_places.windows(2).all(|pair| pair[0] < pair[1])
+            && self.active_loans.windows(2).all(|pair| pair[0] < pair[1])
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmFunction {
     pub definition: DefKey,

@@ -128,8 +128,9 @@ pub use useflow::{
 };
 pub use vm_backend::{
     CandidateVmArtifact, CandidateVmProgram, STAGE0_VM_SCHEMA, VerifiedVmArtifact,
-    VerifiedVmProgram, VmArtifactError, VmCompare, VmExecutionLimits, VmFunction, VmInstruction,
-    VmPattern, VmPatternField, VmType, decode_and_verify_artifact, decode_and_verify_program,
-    decode_artifact, decode_program, emit as emit_vm, emit_program as emit_vm_program,
-    encode_artifact, encode_program, verify as verify_vm, verify_program as verify_vm_program,
+    VerifiedVmProgram, VmArtifactError, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmCompare,
+    VmExecutionLimits, VmFunction, VmInstruction, VmPattern, VmPatternField, VmType,
+    decode_and_verify_artifact, decode_and_verify_program, decode_artifact, decode_program,
+    emit as emit_vm, emit_program as emit_vm_program, encode_artifact, encode_program,
+    verify as verify_vm, verify_program as verify_vm_program,
 };
