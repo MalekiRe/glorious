@@ -155,6 +155,32 @@ fn callable_fingerprints_include_associated_effect_row_projections() {
 }
 
 #[test]
+fn matching_associated_effect_row_projections_unify_without_erasure() {
+    let capability = DefKey(Digest::of_bytes(b"Capability"));
+    let row = EffectRow {
+        effects: BTreeSet::new(),
+        projections: vec![EffectRowProjection {
+            subject: Box::new(Type::Scalar(ScalarType::I64)),
+            trait_definition: capability,
+            trait_arguments: vec![],
+            name: "Effects".into(),
+            item_arguments: vec![],
+        }],
+        tail: None,
+    };
+    let callable = |effects| Type::Callable {
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects,
+        invocation: Quantity::ONCE,
+    };
+    let unified = InferContext::default()
+        .unify(callable(row.clone()), callable(row.clone()))
+        .unwrap();
+    assert_eq!(unified, callable(row));
+}
+
+#[test]
 fn effect_row_unification_solves_protocol_argument_inference() {
     let state = DefKey(Digest::of_bytes(b"State"));
     let mut inference = InferContext::default();
