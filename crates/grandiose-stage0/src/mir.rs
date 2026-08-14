@@ -13814,6 +13814,29 @@ impl Lowerer<'_> {
                                     _ => unreachable!("int primitive role was narrowed above"),
                                 });
                             }
+                            Some(PrimitiveRole::IntConvertCheckedToI64) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic checked i64 conversion requires one operand",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                {
+                                    self.error("G6005", "generic checked i64 conversion is only authorized for frozen i64");
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::Copy { dst, src: *value });
+                            }
                             None => match host_import {
                                 Some(import) => self.instructions.push(MirInstruction::HostCall {
                                     dst,

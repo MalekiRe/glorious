@@ -414,6 +414,7 @@ fn fingerprint_world(request: &CompilationRequest) -> Digest {
                     crate::PrimitiveRole::UsizeToU32Checked => 31,
                     crate::PrimitiveRole::IntCheckedAdd => 32,
                     crate::PrimitiveRole::IntWrappingAdd => 33,
+                    crate::PrimitiveRole::IntConvertCheckedToI64 => 45,
                     crate::PrimitiveRole::IntWrappingSub => 35,
                     crate::PrimitiveRole::IntWrappingMul => 36,
                     crate::PrimitiveRole::IntEqual => 34,
