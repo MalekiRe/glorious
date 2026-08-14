@@ -123,6 +123,10 @@ pub enum HeaderType {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeaderGenericArgument {
     Type(HeaderType),
+    /// A source lifetime supplied to a region generic slot. It stays distinct
+    /// from a path-shaped type until the referenced declaration establishes
+    /// the slot kind.
+    Lifetime(String),
     U32(u32),
     /// A structural quantity interval supplied to a `Quantity` const slot.
     /// Keeping this distinct from `HeaderType` makes the source kind boundary
@@ -1476,7 +1480,11 @@ impl Parser<'_> {
         self.position += 1;
         let mut arguments = vec![];
         while self.current().is_some() && !self.at_operator(">") {
-            if self.at_punctuation('[') {
+            if self.word().is_some_and(|name| name.starts_with('\'')) {
+                arguments.push(HeaderGenericArgument::Lifetime(
+                    self.identifier().expect("checked lifetime token"),
+                ));
+            } else if self.at_punctuation('[') {
                 arguments.push(HeaderGenericArgument::Quantity(
                     self.structural_quantity_argument(),
                 ));

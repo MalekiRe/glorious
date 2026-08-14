@@ -72,6 +72,24 @@ fn nominal_headers_retain_structural_u32_arguments() {
 }
 
 #[test]
+fn trait_references_retain_explicit_lifetime_arguments() {
+    let package = PackageKey("header-lifetime-generic-argument@0.1.0".into());
+    let source = "pub trait Marker<'a> {} pub fn require<'a, T>() where T: Marker<'a> { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[1]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header")
+    };
+    assert!(matches!(
+        header.where_bounds.as_slice(),
+        [bound] if bound.relation.arguments == vec![HeaderGenericArgument::Lifetime("'a".into())]
+    ));
+}
+
+#[test]
 fn nominal_headers_retain_structural_quantity_arguments() {
     let package = PackageKey("header-structural-quantity-argument@0.1.0".into());
     let source =

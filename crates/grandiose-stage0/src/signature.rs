@@ -1882,6 +1882,9 @@ impl Elaborator<'_> {
             .iter()
             .map(|argument| match argument {
                 HeaderGenericArgument::Type(value) => GenericArgument::Type(self.ty(value)),
+                HeaderGenericArgument::Lifetime(value) => {
+                    GenericArgument::Lifetime(self.lifetime(Some(value)))
+                }
                 HeaderGenericArgument::U32(value) => GenericArgument::ConstU32(*value),
                 HeaderGenericArgument::Quantity(value) => GenericArgument::ConstQuantity(*value),
             })
@@ -1907,31 +1910,7 @@ impl Elaborator<'_> {
             let (path, arguments) = match effect {
                 HeaderType::Path(path) => (path, vec![]),
                 HeaderType::Application(base, arguments) => match base.as_ref() {
-                    HeaderType::Path(path) => (
-                        path,
-                        arguments
-                            .iter()
-                            .map(|value| match value {
-                                HeaderGenericArgument::Type(value) => self.ty(value),
-                                HeaderGenericArgument::U32(_) => {
-                                    self.error(
-                                        "G3318",
-                                        "effect arguments must be types, not structural constants"
-                                            .into(),
-                                    );
-                                    Type::Error
-                                }
-                                HeaderGenericArgument::Quantity(_) => {
-                                    self.error(
-                                        "G3318",
-                                        "effect arguments must be types, not structural constants"
-                                            .into(),
-                                    );
-                                    Type::Error
-                                }
-                            })
-                            .collect(),
-                    ),
+                    HeaderType::Path(path) => (path, arguments.clone()),
                     _ => {
                         self.error("G3312", "effect row member is not a nominal path".into());
                         continue;
@@ -1975,6 +1954,7 @@ impl Elaborator<'_> {
                 ResolutionState::Resolved(definition) => {
                     let expected =
                         self.index.effect_generic_arity(definition).unwrap_or(0) as usize;
+                    let kinds = self.index.effect_generic_kinds(definition).unwrap_or(&[]);
                     if expected != arguments.len() {
                         self.error(
                             "G3313",
@@ -1987,7 +1967,11 @@ impl Elaborator<'_> {
                     } else {
                         effects.push(EffectInstance {
                             definition,
-                            arguments: arguments.into_iter().map(GenericArgument::Type).collect(),
+                            arguments: self.elaborate_trait_generic_arguments(
+                                path.last().map(String::as_str).unwrap_or("<effect>"),
+                                &arguments,
+                                kinds,
+                            ),
                         });
                     }
                 }
@@ -2391,6 +2375,13 @@ impl Elaborator<'_> {
                     );
                     Type::Error
                 }
+                (HeaderGenericArgument::Lifetime(_), GenericKind::Type) => {
+                    self.error(
+                        "G3318",
+                        format!("type slot of `{name}` cannot receive a lifetime"),
+                    );
+                    Type::Error
+                }
                 (_, GenericKind::Const(kind)) => {
                     self.error(
                         "G3318",
@@ -2427,6 +2418,9 @@ impl Elaborator<'_> {
                 (HeaderGenericArgument::Type(value), GenericKind::Type) => {
                     GenericArgument::Type(self.ty(value))
                 }
+                (HeaderGenericArgument::Lifetime(value), GenericKind::Lifetime) => {
+                    GenericArgument::Lifetime(self.lifetime(Some(value)))
+                }
                 (HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
                     GenericArgument::ConstU32(*value)
                 }
@@ -2455,7 +2449,8 @@ impl Elaborator<'_> {
                         }
                     },
                 (HeaderGenericArgument::U32(_), GenericKind::Type)
-                | (HeaderGenericArgument::Quantity(_), GenericKind::Type) => {
+                | (HeaderGenericArgument::Quantity(_), GenericKind::Type)
+                | (HeaderGenericArgument::Lifetime(_), GenericKind::Type) => {
                     self.error(
                         "G3318",
                         format!("type slot of `{name}` cannot receive a structural constant"),

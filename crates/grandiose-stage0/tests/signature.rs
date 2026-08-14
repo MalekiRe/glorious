@@ -529,6 +529,49 @@ fn trait_and_implementation_lifetime_binders_are_frozen_with_their_kinds() {
 }
 
 #[test]
+fn trait_and_effect_references_elaborate_explicit_lifetime_arguments() {
+    let package = PackageKey("signature-lifetime-generic-arguments@0.1.0".into());
+    let source = r#"
+        trait Marker<'a> {}
+        effect Trace<'a> { emit() -> i64 }
+        pub fn relay<'a, T>() -> i64 / Trace<'a> where T: Marker<'a> { 0 }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let relay = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("relay"))
+        .expect("relay definition");
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&relay.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert_eq!(
+        signature.where_bounds[0].1.arguments,
+        vec![GenericArgument::Lifetime(Lifetime::Generic(0))]
+    );
+    let effect = signature
+        .effects
+        .effects
+        .iter()
+        .next()
+        .expect("Trace effect");
+    assert_eq!(
+        effect.arguments,
+        vec![GenericArgument::Lifetime(Lifetime::Generic(0))]
+    );
+}
+
+#[test]
 fn interfaces_reject_unbound_or_type_position_lifetimes() {
     let package = PackageKey("signature-invalid-lifetimes@0.1.0".into());
     let source =
