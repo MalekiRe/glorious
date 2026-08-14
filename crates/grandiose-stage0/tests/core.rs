@@ -144,6 +144,68 @@ fn typed_core_validation_rejects_impossible_structural_projection() {
 }
 
 #[test]
+fn typed_core_semantic_fingerprint_ignores_arena_allocation_order_and_spans() {
+    let package = PackageKey("core-fingerprint@0.1.0".into());
+    let span = |start| Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start,
+        end: start + 1,
+    };
+    let first = TypedBody {
+        parameters: vec![],
+        expressions: vec![
+            CoreExpr {
+                kind: CoreKind::Block(vec![CoreId(1), CoreId(2)]),
+                ty: Type::Scalar(grandiose_stage0::ScalarType::I64),
+                span: span(20),
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("40".into()),
+                ty: Type::Scalar(grandiose_stage0::ScalarType::I64),
+                span: span(21),
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("42".into()),
+                ty: Type::Scalar(grandiose_stage0::ScalarType::I64),
+                span: span(22),
+            },
+        ],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    let second = TypedBody {
+        parameters: vec![],
+        expressions: vec![
+            CoreExpr {
+                kind: CoreKind::Literal("40".into()),
+                ty: Type::Scalar(grandiose_stage0::ScalarType::I64),
+                span: span(200),
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("42".into()),
+                ty: Type::Scalar(grandiose_stage0::ScalarType::I64),
+                span: span(201),
+            },
+            CoreExpr {
+                kind: CoreKind::Block(vec![CoreId(0), CoreId(1)]),
+                ty: Type::Scalar(grandiose_stage0::ScalarType::I64),
+                span: span(202),
+            },
+        ],
+        root: CoreId(2),
+        diagnostics: vec![],
+        recovered: false,
+    };
+
+    assert_eq!(
+        first.semantic_fingerprint(),
+        second.semantic_fingerprint(),
+        "equivalent Core must not inherit transient arena IDs or spans"
+    );
+}
+
+#[test]
 fn typed_core_checks_a_function_body_against_its_declared_result() {
     let package = PackageKey("core@0.1.0".into());
     let source = "pub fn main() -> Text { 1 }";

@@ -292,6 +292,22 @@ pub struct TypedBody {
 }
 
 impl TypedBody {
+    /// A deterministic body-semantic identity for cache and differential
+    /// comparison consumers. Source spans and body-arena allocation order do
+    /// not participate; reachable nodes receive IDs in structural traversal
+    /// order from the root instead. This is deliberately a fingerprint of
+    /// frozen Core, not of recovery diagnostics or presentation metadata.
+    pub fn semantic_fingerprint(&self) -> Digest {
+        let mut encoder = CoreFingerprintEncoder {
+            body: self,
+            numbers: std::collections::BTreeMap::new(),
+            bytes: Vec::new(),
+        };
+        encoder.bytes(b"grandiose-stage0-typed-core-v1");
+        encoder.id(self.root);
+        Digest::of_bytes(&encoder.bytes)
+    }
+
     /// Independently validate the frozen Core graph before any ownership or
     /// lowering pass consumes it.  Elaboration normally constructs these
     /// facts directly, but this boundary is also where a future persisted or
@@ -355,6 +371,216 @@ impl TypedBody {
 
     fn contains(&self, id: CoreId) -> bool {
         (id.0 as usize) < self.expressions.len()
+    }
+}
+
+struct CoreFingerprintEncoder<'a> {
+    body: &'a TypedBody,
+    numbers: std::collections::BTreeMap<CoreId, u32>,
+    bytes: Vec<u8>,
+}
+
+impl CoreFingerprintEncoder<'_> {
+    fn bytes(&mut self, value: &[u8]) {
+        self.bytes
+            .extend_from_slice(&(value.len() as u64).to_le_bytes());
+        self.bytes.extend_from_slice(value);
+    }
+
+    fn debug(&mut self, value: impl std::fmt::Debug) {
+        self.bytes(format!("{value:?}").as_bytes());
+    }
+
+    fn id(&mut self, id: CoreId) {
+        if let Some(number) = self.numbers.get(&id).copied() {
+            self.bytes(b"ref");
+            self.bytes(&number.to_le_bytes());
+            return;
+        }
+        let number = self.numbers.len() as u32;
+        self.numbers.insert(id, number);
+        self.bytes(b"node");
+        self.bytes(&number.to_le_bytes());
+        let Some(expression) = self.body.expressions.get(id.0 as usize) else {
+            // Invalid Core never becomes a release product, but representing
+            // this state deterministically keeps inspection tools total.
+            self.bytes(b"missing");
+            self.bytes(&id.0.to_le_bytes());
+            return;
+        };
+        self.debug(&expression.ty);
+        self.kind(&expression.kind);
+    }
+
+    fn ids(&mut self, values: &[CoreId]) {
+        self.bytes(&(values.len() as u64).to_le_bytes());
+        for value in values {
+            self.id(*value);
+        }
+    }
+
+    fn kind(&mut self, kind: &CoreKind) {
+        match kind {
+            CoreKind::Literal(value) => {
+                self.bytes(b"literal");
+                self.bytes(value.as_bytes());
+            }
+            CoreKind::Local(name) => {
+                self.bytes(b"local");
+                self.bytes(name.as_bytes());
+            }
+            CoreKind::Function(definition) => {
+                self.bytes(b"function");
+                self.debug(definition);
+            }
+            CoreKind::TraitMethod { evidence, method } => {
+                self.bytes(b"trait-method");
+                self.debug(evidence);
+                self.debug(method);
+            }
+            CoreKind::Constant(definition) => {
+                self.bytes(b"constant");
+                self.debug(definition);
+            }
+            CoreKind::Tuple(values) => {
+                self.bytes(b"tuple");
+                self.ids(values);
+            }
+            CoreKind::Array(values) => {
+                self.bytes(b"array");
+                self.ids(values);
+            }
+            CoreKind::Record { definition, fields } => {
+                self.bytes(b"record");
+                self.debug(definition);
+                self.ids(fields);
+            }
+            CoreKind::Field {
+                base,
+                index,
+                field_count,
+            } => {
+                self.bytes(b"field");
+                self.bytes(&index.to_le_bytes());
+                self.bytes(&field_count.to_le_bytes());
+                self.id(*base);
+            }
+            CoreKind::Enum {
+                definition,
+                variant,
+                fields,
+            } => {
+                self.bytes(b"enum");
+                self.debug(definition);
+                self.bytes(&variant.to_le_bytes());
+                self.ids(fields);
+            }
+            CoreKind::PatternTest { subject, pattern } => {
+                self.bytes(b"pattern-test");
+                self.debug(pattern);
+                self.id(*subject);
+            }
+            CoreKind::Closure {
+                callable,
+                parameters,
+                captures,
+                body,
+            } => {
+                self.bytes(b"closure");
+                self.debug(callable);
+                self.debug(parameters);
+                self.debug(captures);
+                self.id(*body);
+            }
+            CoreKind::Let { name, value } => {
+                self.bytes(b"let");
+                self.bytes(name.as_bytes());
+                self.id(*value);
+            }
+            CoreKind::Assign { place, value } => {
+                self.bytes(b"assign");
+                self.debug(place);
+                self.id(*value);
+            }
+            CoreKind::Call { callee, arguments } => {
+                self.bytes(b"call");
+                self.id(*callee);
+                self.ids(arguments);
+            }
+            CoreKind::Perform {
+                effect,
+                operation,
+                arguments,
+                terminal,
+            } => {
+                self.bytes(b"perform");
+                self.debug(effect);
+                self.bytes(&operation.to_le_bytes());
+                self.bytes(&[*terminal as u8]);
+                self.ids(arguments);
+            }
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => {
+                self.bytes(b"handle");
+                self.id(*computation);
+                self.bytes(&(clauses.len() as u64).to_le_bytes());
+                for clause in clauses {
+                    self.debug(&clause.effect);
+                    self.bytes(&clause.operation.to_le_bytes());
+                    self.debug(&clause.payload_types);
+                    self.debug(&clause.patterns);
+                    self.debug(&clause.bindings);
+                    self.debug(&clause.resumption);
+                    self.debug(&clause.continuation);
+                    self.bytes(&[clause.terminal as u8]);
+                    self.id(clause.body);
+                }
+            }
+            CoreKind::Completion {
+                computation,
+                clauses,
+            } => {
+                self.bytes(b"completion");
+                self.id(*computation);
+                self.bytes(&(clauses.len() as u64).to_le_bytes());
+                for clause in clauses {
+                    self.debug(&clause.pattern);
+                    self.debug(&clause.bindings);
+                    self.id(clause.body);
+                }
+            }
+            CoreKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                self.bytes(b"binary");
+                self.bytes(operator.as_bytes());
+                self.id(*left);
+                self.id(*right);
+            }
+            CoreKind::Block(values) => {
+                self.bytes(b"block");
+                self.ids(values);
+            }
+            CoreKind::Borrow { unique, value } => {
+                self.bytes(b"borrow");
+                self.bytes(&[*unique as u8]);
+                self.id(*value);
+            }
+            CoreKind::Move(value) => {
+                self.bytes(b"move");
+                self.id(*value);
+            }
+            CoreKind::Unary { operator, value } => {
+                self.bytes(b"unary");
+                self.bytes(operator.as_bytes());
+                self.id(*value);
+            }
+            CoreKind::Error => self.bytes(b"error"),
+        }
     }
 }
 
