@@ -360,6 +360,27 @@ fn manifest_bound_checked_i64_to_u8_converts() {
 }
 
 #[test]
+fn manifest_bound_checked_i64_to_u16_converts() {
+    let mut input = request(
+        "fn __g1_int_convert_checked_to_u16<T>(value: T) -> u16 { () } pub fn main() -> u16 { __g1_int_convert_checked_to_u16<i64>(65535) }",
+    );
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::IntConvertCheckedToU16,
+        "__g1_int_convert_checked_to_u16",
+    ));
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(input)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_u16()
+            .unwrap(),
+        65_535
+    );
+}
+
+#[test]
 fn manifest_bound_checked_i64_to_u32_converts_and_rejects_out_of_range_values() {
     let source = "fn __g1_int_convert_checked_to_u32<T>(value: T) -> u32 { () } pub fn main() -> u32 { __g1_int_convert_checked_to_u32<i64>(42) }";
     let mut input = request(source);
