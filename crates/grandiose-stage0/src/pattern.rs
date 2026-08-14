@@ -201,6 +201,15 @@ impl Elaborator<'_> {
                 PatternDecision::Bind(key)
             }
             PatternKind::Literal(literal) => {
+                if let Some((definition, variant)) =
+                    canonical_bool_literal_pattern(&subject, self.signatures, &literal)
+                {
+                    return PatternDecision::Enum {
+                        definition,
+                        variant,
+                        fields: vec![(0, PatternDecision::Any)],
+                    };
+                }
                 let literal_ty = literal_type(&literal);
                 if literal_ty != subject {
                     self.error(
@@ -854,6 +863,32 @@ impl Elaborator<'_> {
         });
         self.recovered = true;
     }
+}
+
+/// The canonical standard library represents `Bool` as `Result<(), ()>`.
+/// Accept its ordinary `true` and `false` source patterns by recognizing only
+/// the exact one-unit `Ok` and `Err` constructors of the normalized subject.
+fn canonical_bool_literal_pattern(
+    subject: &Type,
+    signatures: &ElaboratedInterface,
+    literal: &str,
+) -> Option<(DefKey, u32)> {
+    let Type::Nominal {
+        definition,
+        arguments,
+    } = subject
+    else {
+        return None;
+    };
+    let name = match literal {
+        "true" => "Ok",
+        "false" => "Err",
+        _ => return None,
+    };
+    let (variant, fields) = signatures
+        .instantiate_enum_variant_generic(*definition, arguments, name)
+        .ok()?;
+    (fields == vec![Type::Unit]).then_some((*definition, variant))
 }
 
 fn nominal_subject(subject: &Type) -> Option<(DefKey, Vec<crate::GenericArgument>)> {

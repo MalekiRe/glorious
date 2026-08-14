@@ -3630,7 +3630,7 @@ impl Elaborator<'_> {
             ExprKind::Handle {
                 computation,
                 clauses,
-            } => self.handle(computation, clauses, expression.span),
+            } => self.handle(computation, clauses, None, expression.span),
             ExprKind::Call { callee, arguments } => {
                 // `resume(k, value)` is migration syntax for the ordinary
                 // generated-resumption callable form `k(value)`. Normalize it
@@ -3857,6 +3857,7 @@ impl Elaborator<'_> {
     fn expression_expected(&mut self, id: ExprId, expected: Option<Type>) -> CoreId {
         let expression = self.body.expression(id).clone();
         match expression.kind {
+            ExprKind::Literal(text) => self.literal_expected(text, expected, expression.span),
             ExprKind::Block(values) => self.block_expected(values, expected, expression.span),
             ExprKind::Tuple(values) => self.tuple_expected(values, expected, expression.span),
             ExprKind::Array(values) => self.array_expected(values, expected, expression.span),
@@ -3930,8 +3931,67 @@ impl Elaborator<'_> {
                     "contextual block has no resolved expected type",
                 ),
             },
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => self.handle(computation, clauses, expected, expression.span),
             _ => self.expression(id),
         }
+    }
+
+    /// Source literals are contextual. The distributed standard library keeps
+    /// `Bool` as `Result<(), ()>`, so its ordinary `true` and `false`
+    /// spellings must build that nominal carrier when a Bool is expected.
+    fn literal_expected(&mut self, text: String, expected: Option<Type>, span: Span) -> CoreId {
+        if matches!(text.as_str(), "true" | "false")
+            && let Some((definition, arguments, variant)) =
+                self.canonical_bool_literal_variant(expected.as_ref(), &text)
+        {
+            let unit = self.alloc(CoreKind::Tuple(vec![]), Type::Unit, span);
+            return self.alloc(
+                CoreKind::Enum {
+                    definition,
+                    variant,
+                    fields: vec![unit],
+                },
+                Type::Nominal {
+                    definition,
+                    arguments,
+                },
+                span,
+            );
+        }
+        let ty = match (expected, text.as_str()) {
+            (Some(Type::Scalar(scalar)), literal) if literal_is_numeric(literal) => {
+                Type::Scalar(scalar)
+            }
+            _ => literal_type(&text),
+        };
+        self.alloc(CoreKind::Literal(text), ty, span)
+    }
+
+    fn canonical_bool_literal_variant(
+        &self,
+        expected: Option<&Type>,
+        literal: &str,
+    ) -> Option<(DefKey, Vec<GenericArgument>, u32)> {
+        let Type::Nominal {
+            definition,
+            arguments,
+        } = expected?
+        else {
+            return None;
+        };
+        let name = match literal {
+            "true" => "Ok",
+            "false" => "Err",
+            _ => return None,
+        };
+        let (variant, fields) = self
+            .signatures
+            .instantiate_enum_variant_generic(*definition, arguments, name)
+            .ok()?;
+        (fields == vec![Type::Unit]).then(|| (*definition, arguments.clone(), variant))
     }
     /// Strict expression forms evaluate their children from left to right. If
     /// any child cannot return normally, the enclosing construction cannot
@@ -7721,7 +7781,13 @@ impl Elaborator<'_> {
             "effect operation arguments do not match its declaration",
         )
     }
-    fn handle(&mut self, computation: ExprId, clauses: Vec<HandlerClause>, span: Span) -> CoreId {
+    fn handle(
+        &mut self,
+        computation: ExprId,
+        clauses: Vec<HandlerClause>,
+        expected: Option<Type>,
+        span: Span,
+    ) -> CoreId {
         // With no operation or completion arm, the standard completion arm is
         // the identity `value => value`.  Avoid materializing a vacuous
         // handler node so normal computations retain their ordinary Core/MIR
@@ -7739,7 +7805,7 @@ impl Elaborator<'_> {
             }
         }
         if operation_clauses.is_empty() {
-            return self.completion_handle(computation, &completion_clauses, span);
+            return self.completion_handle(computation, &completion_clauses, expected, span);
         }
         let mut resolved = Vec::with_capacity(operation_clauses.len());
         for clause in operation_clauses {
@@ -8010,7 +8076,7 @@ impl Elaborator<'_> {
         if completion_clauses.is_empty() {
             handler
         } else {
-            self.completion_handle_core(handler, &completion_clauses, span)
+            self.completion_handle_core(handler, &completion_clauses, expected, span)
         }
     }
     /// Normal-completion dispatch is a distinct Core node.  Keeping its
@@ -8021,15 +8087,17 @@ impl Elaborator<'_> {
         &mut self,
         computation: ExprId,
         clauses: &[HandlerClause],
+        expected: Option<Type>,
         span: Span,
     ) -> CoreId {
         let subject = self.expression(computation);
-        self.completion_handle_core(subject, clauses, span)
+        self.completion_handle_core(subject, clauses, expected, span)
     }
     fn completion_handle_core(
         &mut self,
         subject: CoreId,
         clauses: &[HandlerClause],
+        expected: Option<Type>,
         span: Span,
     ) -> CoreId {
         // Operation-arm inference has already established the handler result
@@ -8047,7 +8115,7 @@ impl Elaborator<'_> {
             } => Some((subject, pattern, refinement)),
             _ => None,
         };
-        let result = self.inference.fresh();
+        let result = expected.unwrap_or_else(|| self.inference.fresh());
         let mut core_clauses = Vec::with_capacity(clauses.len());
         for clause in clauses {
             let Some(pattern) = clause.completion else {
@@ -8140,7 +8208,7 @@ impl Elaborator<'_> {
                         .map(|(name, _)| name.clone()),
                 );
             }
-            let body = self.expression(clause.body);
+            let body = self.expression_expected(clause.body, Some(result.clone()));
             self.active_refinement_bindings = previous_refinement_bindings;
             self.locals.leave();
             let body_ty = self.expressions[body.0 as usize].ty.clone();
@@ -10410,6 +10478,10 @@ fn literal_type(text: &str) -> Type {
     } else {
         Type::Scalar(ScalarType::I64)
     }
+}
+
+fn literal_is_numeric(text: &str) -> bool {
+    !matches!(text, "true" | "false") && !text.starts_with('"') && !text.starts_with('\'')
 }
 
 /// A refinement pack is available only to a completion arm whose own pattern

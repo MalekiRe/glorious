@@ -3467,6 +3467,39 @@ fn handler_pattern_matrix_rejects_unreachable_rows_and_accepts_closed_bool_cover
 }
 
 #[test]
+fn result_carried_bool_literals_and_patterns_remain_source_level_control() {
+    let core = core_for(
+        "core-result-bool-literals@0.1.0",
+        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; pub fn main(value: Bool) -> Bool { handle value { true => true, false => false } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let Some(completion) = core
+        .expressions
+        .iter()
+        .find(|expression| matches!(expression.kind, CoreKind::Completion { .. }))
+    else {
+        panic!("result-carried Bool handle must lower to completion dispatch");
+    };
+    let CoreKind::Completion { clauses, .. } = &completion.kind else {
+        unreachable!();
+    };
+    assert!(
+        matches!(clauses[0].pattern, CorePattern::Enum { variant: 0, .. }),
+        "{clauses:#?}"
+    );
+    assert!(matches!(
+        clauses[1].pattern,
+        CorePattern::Enum { variant: 1, .. }
+    ));
+    for clause in clauses {
+        assert!(matches!(
+            core.expression(clause.body).kind,
+            CoreKind::Enum { fields: ref values, .. } if values.len() == 1
+        ));
+    }
+}
+
+#[test]
 fn handler_pattern_matrix_rejects_duplicate_unbounded_literal_rows() {
     let core = core_for(
         "core-handler-pattern-unbounded-literal@0.1.0",

@@ -4738,6 +4738,27 @@ impl Elaborator<'_> {
                 );
                 return Type::Error;
             }
+            // `Bool` is a source-level standard-library carrier in the
+            // canonical bootstrap.  A local alias must therefore win over
+            // Stage-0's legacy scalar fallback; otherwise
+            // `type Bool = Result<(), ()>` is silently ignored and every
+            // source-defined truth literal receives the wrong type.
+            if name == "Bool"
+                && let ResolutionState::Resolved(definition) =
+                    self.index
+                        .resolve_path(DefinitionNamespace::Type, self.module, path)
+            {
+                let expected = self.index.type_generic_arity(definition).unwrap_or(0) as usize;
+                if expected != arguments.len() {
+                    self.arity(name, expected, arguments.len());
+                    return Type::Error;
+                }
+                let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
+                return Type::Nominal {
+                    definition,
+                    arguments: self.elaborate_type_generic_arguments(name, &arguments, kinds),
+                };
+            }
             if let Some(scalar) = scalar(name) {
                 return if arguments.is_empty() {
                     Type::Scalar(scalar)
