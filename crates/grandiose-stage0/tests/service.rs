@@ -241,6 +241,14 @@ fn service_selects_generic_qualified_trait_method_arguments() {
 }
 
 #[test]
+fn service_selects_explicit_trait_method_operation_arguments() {
+    let source = "trait Replace { fn replace<T>(value: i64, replacement: T) -> T; } impl Replace for i64 { fn replace<T>(value: i64, replacement: T) -> T { replacement } } pub fn main() -> Text { Replace::replace<Text>(0, \"selected\") }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_text().unwrap(), "selected");
+}
+
+#[test]
 fn service_selects_generic_qualified_trait_instances() {
     let source = "trait Identity<T> { fn identity(value: T) -> T; } impl<T> Identity<T> for T { fn identity(value: T) -> T { value } } pub fn main() -> i64 { Identity<i64>::identity(42) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -880,6 +888,30 @@ fn service_executes_a_generic_effect_handler_through_vm_frames() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_instantiates_generic_effect_operations_at_the_call_and_handler() {
+    let source = "effect Ask { ask<T>(value: T) -> T; } pub fn main() -> i64 { handle Ask::ask<i64>(41) { Ask::ask<i64>(value) => value + 1 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_infers_generic_effect_operation_arguments_at_the_call_and_handler() {
+    let source = "effect Ask { ask<T>(value: T) -> T; } pub fn main() -> i64 { handle Ask::ask(41) { Ask::ask(value) => value + 1 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_keeps_protocol_and_operation_generic_arguments_in_distinct_slots() {
+    let source = "effect State<T> { replace<U>(value: T, replacement: U) -> U; } pub fn main() -> Text { handle State<i64>::replace<Text>(0, \"selected\") { State<i64>::replace<Text>(value, replacement) => replacement } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_text().unwrap(), "selected");
 }
 
 #[test]

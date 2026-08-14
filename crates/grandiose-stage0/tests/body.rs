@@ -196,11 +196,54 @@ fn body_parser_keeps_generic_effect_instance_arguments_on_calls_and_handlers() {
     };
     assert!(matches!(
         body.expression(*callee).kind,
-        ExprKind::GenericPath { ref path, ref effect_arguments }
+        ExprKind::GenericPath { ref path, ref effect_arguments, .. }
             if path == &["Fail", "fail"] && effect_arguments.len() == 1
     ));
     assert_eq!(clauses[0].path, ["Fail", "fail"]);
     assert_eq!(clauses[0].effect_arguments.len(), 1);
+}
+
+#[test]
+fn body_parser_keeps_operation_generic_arguments_separate_from_effect_arguments() {
+    let package = PackageKey("body-operation-generic@0.1.0".into());
+    let source =
+        "{ handle perform Ask<i64>::ask<Text>(\"value\") { Ask<i64>::ask<Text>(value) => value } }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let range = TokenRange {
+        start: 0,
+        end: lexed.tokens.len() - 1,
+    };
+    let body = BodySyntax::parse(&lexed, source, range);
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected outer block")
+    };
+    let ExprKind::Handle {
+        computation,
+        clauses,
+    } = &body.expression(values[0]).kind
+    else {
+        panic!("expected handler")
+    };
+    let ExprKind::Call { callee, .. } = &body.expression(*computation).kind else {
+        panic!("expected effect operation call")
+    };
+    assert!(matches!(
+        body.expression(*callee).kind,
+        ExprKind::GenericPath {
+            ref path,
+            ref effect_arguments,
+            ref operation_arguments,
+        } if path == &["Ask", "ask"]
+            && effect_arguments.len() == 1
+            && operation_arguments.len() == 1
+    ));
+    assert_eq!(clauses[0].effect_arguments.len(), 1);
+    assert_eq!(clauses[0].operation_arguments.len(), 1);
 }
 
 #[test]

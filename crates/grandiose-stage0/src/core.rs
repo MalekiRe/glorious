@@ -8,7 +8,7 @@ use crate::{
     interface::{Definition, DefinitionNamespace},
     pattern::{PatternDecision, elaborate_pattern},
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
-    signature::{ElaboratedHeader, ElaboratedInterface},
+    signature::{ElaboratedEffect, ElaboratedHeader, ElaboratedInterface},
     source::Span,
     trait_solver::{TraitAnswer, TraitGoal, TraitMethodAnswer, TraitSolver},
     types::{EffectInstance, EffectRow, InferContext, Mutability, ScalarType, Type},
@@ -742,28 +742,39 @@ impl Elaborator<'_> {
                         if let Some(value) = self.trait_method_call(
                             path.clone(),
                             vec![],
+                            vec![],
                             arguments.clone(),
                             expression.span,
                         ) {
                             return value;
                         }
-                        if let Some(value) =
-                            self.perform(path.clone(), vec![], arguments.clone(), expression.span)
-                        {
+                        if let Some(value) = self.perform(
+                            path.clone(),
+                            vec![],
+                            vec![],
+                            arguments.clone(),
+                            expression.span,
+                        ) {
                             return value;
                         }
                     }
                     ExprKind::GenericPath {
                         path,
                         effect_arguments,
+                        operation_arguments,
                     } => {
                         let effect_arguments = effect_arguments
+                            .iter()
+                            .map(|argument| self.header_type(argument))
+                            .collect::<Vec<_>>();
+                        let operation_arguments = operation_arguments
                             .iter()
                             .map(|argument| self.header_type(argument))
                             .collect::<Vec<_>>();
                         if let Some(value) = self.trait_method_call(
                             path.clone(),
                             effect_arguments.clone(),
+                            operation_arguments.clone(),
                             arguments.clone(),
                             expression.span,
                         ) {
@@ -772,6 +783,7 @@ impl Elaborator<'_> {
                         if let Some(value) = self.perform(
                             path.clone(),
                             effect_arguments,
+                            operation_arguments,
                             arguments.clone(),
                             expression.span,
                         ) {
@@ -1973,6 +1985,7 @@ impl Elaborator<'_> {
         &mut self,
         path: Vec<String>,
         trait_arguments: Vec<Type>,
+        operation_arguments: Vec<Type>,
         supplied: Vec<ExprId>,
         span: Span,
     ) -> Option<CoreId> {
@@ -2019,9 +2032,20 @@ impl Elaborator<'_> {
             ));
         };
         let subject = self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
-        let method_arguments = (0..method_header.generics)
-            .map(|_| self.inference.fresh())
-            .collect::<Vec<_>>();
+        let method_arguments = if operation_arguments.is_empty() {
+            (0..method_header.generics)
+                .map(|_| self.inference.fresh())
+                .collect::<Vec<_>>()
+        } else {
+            if operation_arguments.len() != method_header.generics as usize {
+                return Some(self.fail(
+                    span,
+                    "G4168",
+                    "trait method operation arguments do not match its declaration",
+                ));
+            }
+            operation_arguments
+        };
         let answer = TraitSolver::new(self.signatures).select_method(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
@@ -2100,6 +2124,7 @@ impl Elaborator<'_> {
         &mut self,
         path: Vec<String>,
         effect_arguments: Vec<Type>,
+        operation_arguments: Vec<Type>,
         arguments: Vec<ExprId>,
         span: Span,
     ) -> Option<CoreId> {
@@ -2133,15 +2158,27 @@ impl Elaborator<'_> {
                 "effect operation protocol arguments do not match its declaration",
             ));
         }
+        let operation_arguments =
+            match self.operation_generic_arguments(effect, operation_name, operation_arguments) {
+                Some(arguments) => arguments,
+                None => {
+                    return Some(self.fail(
+                        span,
+                        "G4152",
+                        "effect does not declare the requested operation",
+                    ));
+                }
+            };
         let Some((operation_index, operation)) = self.signatures.instantiate_effect_operation(
             effect_definition,
             &effect_arguments,
+            &operation_arguments,
             operation_name,
         ) else {
             return Some(self.fail(
                 span,
                 "G4152",
-                "effect does not declare the requested non-generic operation",
+                "effect operation arguments do not match its declaration",
             ));
         };
         if operation.parameters.len() != arguments.len() {
@@ -2183,6 +2220,25 @@ impl Elaborator<'_> {
             operation.result.clone(),
             span,
         ))
+    }
+    /// Supply operation-generic arguments independently from the enclosing
+    /// effect instance. Omitted arguments become caller-owned inference
+    /// variables; explicit applications must have the exact operation arity.
+    fn operation_generic_arguments(
+        &mut self,
+        effect: &ElaboratedEffect,
+        name: &str,
+        supplied: Vec<Type>,
+    ) -> Option<Vec<Type>> {
+        let operation = effect
+            .operations
+            .iter()
+            .find(|operation| operation.name == name)?;
+        let count = operation.generics.checked_sub(effect.generics)? as usize;
+        if supplied.is_empty() && count != 0 {
+            return Some((0..count).map(|_| self.inference.fresh()).collect());
+        }
+        (supplied.len() == count).then_some(supplied)
     }
     fn handle(&mut self, computation: ExprId, clauses: Vec<HandlerClause>, span: Span) -> CoreId {
         // With no operation or completion arm, the standard completion arm is
@@ -2597,6 +2653,11 @@ impl Elaborator<'_> {
             .iter()
             .map(|argument| self.header_type(argument))
             .collect::<Vec<_>>();
+        let operation_arguments = source
+            .operation_arguments
+            .iter()
+            .map(|argument| self.header_type(argument))
+            .collect::<Vec<_>>();
         if declaration.generics as usize != effect_arguments.len() {
             self.error(
                 source.span,
@@ -2606,10 +2667,23 @@ impl Elaborator<'_> {
             self.recovered = true;
             return ResolvedHandlerClause::error(source);
         }
-        let Some((operation_index, operation)) =
-            self.signatures
-                .instantiate_effect_operation(effect, &effect_arguments, operation_name)
+        let Some(operation_arguments) =
+            self.operation_generic_arguments(declaration, operation_name, operation_arguments)
         else {
+            self.error(
+                source.span,
+                "G4162",
+                "handler operation arguments do not match its declaration",
+            );
+            self.recovered = true;
+            return ResolvedHandlerClause::error(source);
+        };
+        let Some((operation_index, operation)) = self.signatures.instantiate_effect_operation(
+            effect,
+            &effect_arguments,
+            &operation_arguments,
+            operation_name,
+        ) else {
             self.error(
                 source.span,
                 "G4162",

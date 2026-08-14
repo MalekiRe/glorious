@@ -326,13 +326,15 @@ impl ElaboratedInterface {
     }
 
     /// Instantiate a canonical protocol operation at one concrete protocol
-    /// identity.  Declaration binders occupy the leading operation slots;
-    /// source operation-generic arguments are deliberately rejected until the
-    /// body grammar can carry a separate operation application.
+    /// identity and one operation-generic application. Declaration binders
+    /// occupy the leading substitution slots; the operation's own binders
+    /// follow them, so runtime effect identity stays nominally tied only to
+    /// the protocol arguments.
     pub fn instantiate_effect_operation(
         &self,
         definition: DefKey,
         arguments: &[Type],
+        operation_arguments: &[Type],
         name: &str,
     ) -> Option<(u32, ElaboratedEffectOperation)> {
         let ElaboratedHeader::Effect(effect) = self.definitions.get(&definition)? else {
@@ -346,9 +348,12 @@ impl ElaboratedInterface {
             .iter()
             .enumerate()
             .find(|(_, operation)| operation.name == name)?;
-        if operation.generics != effect.generics {
+        let operation_generics = operation.generics.checked_sub(effect.generics)?;
+        if operation_generics as usize != operation_arguments.len() {
             return None;
         }
+        let mut substitutions = arguments.to_vec();
+        substitutions.extend_from_slice(operation_arguments);
         Some((
             index as u32,
             ElaboratedEffectOperation {
@@ -358,9 +363,9 @@ impl ElaboratedInterface {
                     .parameters
                     .iter()
                     .cloned()
-                    .map(|ty| substitute_alias_generics(ty, arguments))
+                    .map(|ty| substitute_alias_generics(ty, &substitutions))
                     .collect(),
-                result: substitute_alias_generics(operation.result.clone(), arguments),
+                result: substitute_alias_generics(operation.result.clone(), &substitutions),
                 terminal: operation.terminal,
                 resumption: operation.resumption,
             },

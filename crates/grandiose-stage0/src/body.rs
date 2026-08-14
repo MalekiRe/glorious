@@ -54,9 +54,13 @@ pub struct HandlerClause {
     pub operation_candidate: bool,
     pub path: Vec<String>,
     /// Type arguments on the protocol portion of `Protocol<Args>::operation`.
-    /// Operation-generic arguments remain a later surface extension; these
-    /// arguments establish the nominal effect-instance identity today.
+    /// Protocol arguments establish the nominal effect-instance identity.
     pub effect_arguments: Vec<HeaderType>,
+    /// Type arguments applied to the operation itself, after its final path
+    /// segment: `Effect::operation<T>(...)`. These are distinct from the
+    /// protocol arguments above, since only protocol arguments contribute to
+    /// the nominal runtime effect-instance identity.
+    pub operation_arguments: Vec<HeaderType>,
     pub patterns: Vec<PatternId>,
     pub resumption: Option<String>,
     /// The final unified arm pattern was `_`, spelling a discarded
@@ -75,7 +79,12 @@ pub enum ExprKind {
     /// generic entity; the parser must not guess from its spelling.
     GenericPath {
         path: Vec<String>,
+        /// Type arguments applied to the leading protocol or trait path,
+        /// before `::`: `Effect<T>::operation`.
         effect_arguments: Vec<HeaderType>,
+        /// Type arguments applied to the final operation or method path,
+        /// after `::`: `Effect::operation<T>`.
+        operation_arguments: Vec<HeaderType>,
     },
     Tuple(Vec<ExprId>),
     /// Finite machine-array construction. Its element type is inferred by
@@ -506,7 +515,7 @@ impl Parser<'_> {
                 continue;
             }
             let clause_position = self.position;
-            let (path, effect_arguments) = self.parse_effect_path()?;
+            let (path, effect_arguments, operation_arguments) = self.parse_effect_path()?;
             // `Type::Variant` and `Type { field: ... }` are completion
             // patterns, not malformed operation arms. Rewind and parse the
             // structural pattern so its nominal type can be resolved later.
@@ -565,6 +574,7 @@ impl Parser<'_> {
                 operation_candidate: true,
                 path,
                 effect_arguments,
+                operation_arguments,
                 patterns,
                 resumption,
                 discard_resumption: false,
@@ -611,6 +621,7 @@ impl Parser<'_> {
             operation_candidate: false,
             path: vec![],
             effect_arguments: vec![],
+            operation_arguments: vec![],
             patterns: vec![],
             resumption: None,
             discard_resumption: false,
@@ -619,7 +630,7 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_effect_path(&mut self) -> Option<(Vec<String>, Vec<HeaderType>)> {
+    fn parse_effect_path(&mut self) -> Option<(Vec<String>, Vec<HeaderType>, Vec<HeaderType>)> {
         let first = self.expect_identifier()?;
         let mut effect_arguments = vec![];
         if self.generic_path_ahead() {
@@ -642,7 +653,12 @@ impl Parser<'_> {
             self.position += 2;
             path.push(self.expect_identifier()?);
         }
-        Some((path, effect_arguments))
+        let operation_arguments = if path.len() > 1 && self.operation_generic_ahead() {
+            self.parse_type_arguments("G4026", "expected `>` in handler operation application")?
+        } else {
+            vec![]
+        };
+        Some((path, effect_arguments, operation_arguments))
     }
 
     fn record_literal_ahead(&self) -> bool {
@@ -695,6 +711,61 @@ impl Parser<'_> {
         false
     }
 
+    /// Final-segment type arguments are unambiguous only when followed by a
+    /// call/pattern argument list. This prevents ordinary `value < other`
+    /// comparisons from being parsed as generic applications.
+    fn operation_generic_ahead(&self) -> bool {
+        if !self.at_operator("<") {
+            return false;
+        }
+        let mut depth = 0u32;
+        for position in self.position..self.tokens.len() {
+            let token = self.tokens[position];
+            if self.lexed.tokens[token].kind != TokenKind::Operator {
+                continue;
+            }
+            match self.text(token) {
+                "<" => depth += 1,
+                ">" if depth > 0 => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return self.tokens.get(position + 1).is_some_and(|next| {
+                            self.lexed.tokens[*next].kind == TokenKind::Punctuation('(')
+                        });
+                    }
+                }
+                ">" => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn parse_type_arguments(
+        &mut self,
+        code: &'static str,
+        missing_message: &'static str,
+    ) -> Option<Vec<HeaderType>> {
+        if !self.at_operator("<") {
+            return Some(vec![]);
+        }
+        self.position += 1;
+        let mut arguments = vec![];
+        while !self.at_operator(">") && self.current().is_some() {
+            arguments.push(self.closure_type()?);
+            if !self.at_punctuation(',') {
+                break;
+            }
+            self.position += 1;
+        }
+        if !self.at_operator(">") {
+            self.error_current(code, missing_message);
+            return None;
+        }
+        self.position += 1;
+        Some(arguments)
+    }
+
     fn parse_record(&mut self, path: Vec<String>, start: Span) -> Option<ExprId> {
         self.expect_punctuation('{')?;
         let mut fields = vec![];
@@ -738,31 +809,26 @@ impl Parser<'_> {
                 let mut path = vec![self.text(index).to_owned()];
                 let mut effect_arguments = vec![];
                 if self.generic_path_ahead() {
-                    self.position += 1;
-                    while !self.at_operator(">") && self.current().is_some() {
-                        effect_arguments.push(self.closure_type()?);
-                        if !self.at_punctuation(',') {
-                            break;
-                        }
-                        self.position += 1;
-                    }
-                    if !self.at_operator(">") {
-                        self.error_current("G4026", "expected `>` in effect application");
-                        return None;
-                    }
-                    self.position += 1;
+                    effect_arguments =
+                        self.parse_type_arguments("G4026", "expected `>` in effect application")?;
                 }
                 while self.at_punctuation(':') && self.peek_punctuation(1, ':') {
                     self.position += 2;
                     path.push(self.expect_identifier()?);
                 }
+                let operation_arguments = if path.len() > 1 && self.operation_generic_ahead() {
+                    self.parse_type_arguments("G4026", "expected `>` in operation application")?
+                } else {
+                    vec![]
+                };
                 let end = self.lexed.tokens[self.tokens[self.position - 1]].span;
-                let kind = if effect_arguments.is_empty() {
+                let kind = if effect_arguments.is_empty() && operation_arguments.is_empty() {
                     ExprKind::Path(path)
                 } else {
                     ExprKind::GenericPath {
                         path,
                         effect_arguments,
+                        operation_arguments,
                     }
                 };
                 Some(self.alloc(kind, join(token.span, end)))
