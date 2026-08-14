@@ -75,12 +75,17 @@ impl CompileDiagnostic {
     /// published result must neither depend on phase traversal order nor make
     /// clients render that fact repeatedly.
     pub fn canonicalize(mut diagnostics: Vec<Self>) -> Vec<Self> {
-        diagnostics.sort_by(|left, right| left.stable_key().cmp(&right.stable_key()));
-        diagnostics.dedup_by(|left, right| left.stable_key() == right.stable_key());
+        // De-duplication is about identity, while rendering order is about
+        // source priority.  Keep those two concerns separate: sorting by the
+        // identity key first makes `dedup_by` deterministic, then the public
+        // batch is reordered according to the documented source-first order.
+        diagnostics.sort_by(|left, right| left.fact_key().cmp(&right.fact_key()));
+        diagnostics.dedup_by(|left, right| left.fact_key() == right.fact_key());
+        diagnostics.sort_by(|left, right| left.presentation_key().cmp(&right.presentation_key()));
         diagnostics
     }
 
-    fn stable_key(
+    fn fact_key(
         &self,
     ) -> (
         &'static str,
@@ -97,6 +102,30 @@ impl CompileDiagnostic {
             self.class,
             self.severity,
             self.primary,
+            &self.message,
+        )
+    }
+
+    fn presentation_key(
+        &self,
+    ) -> (
+        u8,
+        Option<SourceSpan>,
+        Severity,
+        &'static str,
+        DiagnosticClass,
+        &str,
+    ) {
+        // Source facts appear before diagnostics without a primary location;
+        // the latter still have a deterministic order after the source bundle.
+        // `SourceSpan` supplies the stable file/start/end tie-breakers, while
+        // severity and code implement the frontend diagnostic contract.
+        (
+            u8::from(self.primary.is_none()),
+            self.primary,
+            self.severity,
+            self.code,
+            self.class,
             &self.message,
         )
     }

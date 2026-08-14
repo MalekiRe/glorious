@@ -226,6 +226,81 @@ fn compile_diagnostic_canonicalization_is_stable_and_deduplicates_exact_facts() 
 }
 
 #[test]
+fn compile_diagnostic_canonicalization_presents_source_facts_by_span_then_severity_and_code() {
+    let request = request("pub fn main() -> i64 { missing_name }");
+    let file = request.sources[0].key;
+    let at_ten = grandiose_stage0::SourceSpan {
+        file,
+        start: 10,
+        end: 11,
+    };
+    let at_twenty = grandiose_stage0::SourceSpan {
+        file,
+        start: 20,
+        end: 21,
+    };
+    let at_ten_warning = CompileDiagnostic {
+        code: "G0002",
+        message: "warning at byte ten".into(),
+        class: DiagnosticClass::Source,
+        severity: Severity::Warning,
+        primary: Some(at_ten),
+        input_fingerprint: None,
+    };
+    let at_ten_error_later_code = CompileDiagnostic {
+        code: "G0003",
+        message: "later error code at byte ten".into(),
+        class: DiagnosticClass::Source,
+        severity: Severity::Error,
+        primary: Some(at_ten),
+        input_fingerprint: None,
+    };
+    let at_ten_error_earlier_code = CompileDiagnostic {
+        code: "G0001",
+        message: "earlier error code at byte ten".into(),
+        class: DiagnosticClass::Source,
+        severity: Severity::Error,
+        primary: Some(at_ten),
+        input_fingerprint: None,
+    };
+    let at_twenty_error = CompileDiagnostic {
+        code: "G0000",
+        message: "error at byte twenty".into(),
+        class: DiagnosticClass::Source,
+        severity: Severity::Error,
+        primary: Some(at_twenty),
+        input_fingerprint: None,
+    };
+    let unspanned_request = CompileDiagnostic {
+        code: "G9999",
+        message: "request failure".into(),
+        class: DiagnosticClass::Request,
+        severity: Severity::Error,
+        primary: None,
+        input_fingerprint: None,
+    };
+
+    let diagnostics = CompileDiagnostic::canonicalize(vec![
+        unspanned_request.clone(),
+        at_twenty_error.clone(),
+        at_ten_warning.clone(),
+        at_ten_error_later_code.clone(),
+        at_ten_error_earlier_code.clone(),
+    ]);
+
+    assert_eq!(
+        diagnostics,
+        vec![
+            at_ten_error_earlier_code,
+            at_ten_error_later_code,
+            at_ten_warning,
+            at_twenty_error,
+            unspanned_request,
+        ]
+    );
+}
+
+#[test]
 fn service_instantiates_generic_callable_signatures_at_each_direct_call() {
     let source =
         "pub fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { identity(42) }";
