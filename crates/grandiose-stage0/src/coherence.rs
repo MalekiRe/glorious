@@ -65,6 +65,20 @@ impl CoherenceSet {
             else {
                 continue;
             };
+            let trait_local = index
+                .owner(trait_definition)
+                .is_some_and(|owner| owner.package == module.package);
+            let self_local = resolve_self_head(index, &module, &header.self_ty)
+                .and_then(|definition| index.owner(definition))
+                .is_some_and(|owner| owner.package == module.package);
+            if !trait_local && !self_local {
+                result.diagnostics.push(CoherenceDiagnostic {
+                    code: "G3407",
+                    span,
+                    message: "implementation violates the orphan boundary: trait and self type are both foreign".into(),
+                });
+                continue;
+            }
             validate_negative_generics(header, span, &mut result.diagnostics);
             let head = ImplHead {
                 definition,
@@ -125,6 +139,22 @@ impl CoherenceSet {
                 ))
         });
         result
+    }
+}
+
+fn resolve_self_head(
+    index: &DefinitionIndex,
+    module: &ModuleKey,
+    ty: &HeaderType,
+) -> Option<DefKey> {
+    let path = match ty {
+        HeaderType::Path(path) => path,
+        HeaderType::Application(base, _) => return resolve_self_head(index, module, base),
+        _ => return None,
+    };
+    match index.resolve_path(DefinitionNamespace::Type, module, path) {
+        ResolutionState::Resolved(definition) => Some(definition),
+        _ => None,
     }
 }
 
