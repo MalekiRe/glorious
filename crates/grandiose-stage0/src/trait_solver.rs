@@ -5,7 +5,7 @@
 //! body arenas.  Associated projections, HRTBs, and inference variables build
 //! on the same goal/table boundary later.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{
     CallableSignature, DefKey, Digest, EffectInstance, EffectRow, ElaboratedEnumVariantPayload,
@@ -321,16 +321,16 @@ fn select_answer(
 /// scratch; every entry is keyed by a span-free canonical goal digest.
 #[derive(Clone)]
 pub struct TraitSolver {
-    rules: Vec<Rule>,
+    rules: Arc<Vec<Rule>>,
     /// Trait declarations carry associated-item defaults.  The solver owns a
     /// frozen copy alongside implementation rules so projection selection
     /// remains self-contained and deterministic.
-    traits: BTreeMap<DefKey, ElaboratedTrait>,
+    traits: Arc<BTreeMap<DefKey, ElaboratedTrait>>,
     /// Frozen layouts are needed for source-declared auto traits to turn a
     /// nominal application into its field obligations. Keeping them in the
     /// solver preserves the same body-local, interface-only boundary as impl
     /// rule selection.
-    definitions: BTreeMap<DefKey, ElaboratedHeader>,
+    definitions: Arc<BTreeMap<DefKey, ElaboratedHeader>>,
     tables: BTreeMap<Digest, TableState>,
     limits: TraitSolverLimits,
     steps: u32,
@@ -419,9 +419,9 @@ impl TraitSolver {
             })
             .collect();
         Self {
-            rules,
-            traits,
-            definitions: signatures.definitions.clone(),
+            rules: Arc::new(rules),
+            traits: Arc::new(traits),
+            definitions: Arc::new(signatures.definitions.clone()),
             tables: BTreeMap::new(),
             limits,
             steps: 0,
@@ -437,6 +437,17 @@ impl TraitSolver {
             return TraitAnswer::NoSolution;
         }
         self.solve_at(goal, 0, false).into()
+    }
+
+    /// Begin an independent solver query over the same frozen interface.
+    /// Table entries and resource steps are per-query facts: retaining either
+    /// would let one body expression consume another expression's limit or
+    /// inherit its active-cycle state. The immutable rule/interface snapshot
+    /// is reference counted, so creating a fresh query avoids recloning the
+    /// full semantic world.
+    pub fn reset_query(&mut self) {
+        self.tables.clear();
+        self.steps = 0;
     }
 
     /// Solve a trait goal under declaration-owned assumptions.
@@ -3305,5 +3316,36 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. })
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ScalarType;
+
+    #[test]
+    fn reset_query_restores_the_independent_step_budget() {
+        let signatures = ElaboratedInterface::default();
+        let relation = ElaboratedTraitReference {
+            definition: DefKey(Digest::of_bytes(b"missing-trait")),
+            arguments: vec![],
+        };
+        let goal = TraitGoal {
+            relation,
+            subject: Type::Scalar(ScalarType::I64),
+        };
+        let mut solver = TraitSolver::with_limits(
+            &signatures,
+            TraitSolverLimits {
+                max_depth: DEFAULT_MAX_TRAIT_DEPTH,
+                max_steps: 1,
+            },
+        );
+
+        assert_eq!(solver.solve(goal.clone()), TraitAnswer::NoSolution);
+        assert_eq!(solver.solve(goal.clone()), TraitAnswer::Overflow);
+        solver.reset_query();
+        assert_eq!(solver.solve(goal), TraitAnswer::NoSolution);
     }
 }

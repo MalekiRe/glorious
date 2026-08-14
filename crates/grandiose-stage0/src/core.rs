@@ -2771,6 +2771,7 @@ impl TypedBody {
             body,
             index,
             signatures,
+            trait_solver: TraitSolver::new(signatures),
             fixities,
             definition: definition.key,
             module: &definition.module,
@@ -2959,6 +2960,7 @@ impl TypedBody {
             body,
             index,
             signatures,
+            trait_solver: TraitSolver::new(signatures),
             fixities,
             definition: DefKey(Digest::of_parts([
                 b"grandiose-stage0-implementation-method".as_slice(),
@@ -3111,6 +3113,7 @@ impl TypedBody {
             body,
             index,
             signatures,
+            trait_solver: TraitSolver::new(signatures),
             fixities,
             definition: definition.key,
             module: &definition.module,
@@ -3205,6 +3208,7 @@ impl TypedBody {
             body,
             index,
             signatures,
+            trait_solver: TraitSolver::new(signatures),
             fixities,
             definition: definition.key,
             module: &definition.module,
@@ -3296,6 +3300,10 @@ struct Elaborator<'a> {
     body: &'a BodySyntax,
     index: &'a DefinitionIndex,
     signatures: &'a ElaboratedInterface,
+    /// A body-local query engine over an immutable frozen solver world.
+    /// Individual uses reset their tables and step counter, matching the
+    /// former fresh-solver behavior without repeatedly cloning interfaces.
+    trait_solver: TraitSolver,
     fixities: &'a FixityTable,
     definition: DefKey,
     module: &'a ModuleKey,
@@ -4342,7 +4350,7 @@ impl Elaborator<'_> {
     /// selected associated definition must reduce recursively before ordinary
     /// type unification compares the declared result with the body value.
     fn normalize_concrete_type_projections(&mut self, value: Type) -> Type {
-        match TraitSolver::new(self.signatures).normalize_type(value) {
+        match self.trait_query().normalize_type(value) {
             Ok(value) => value,
             Err(answer) => self.projection_normalization_error(*answer),
         }
@@ -4353,10 +4361,18 @@ impl Elaborator<'_> {
     /// binders remain symbolic for lexical forwarding.  Keep a failed
     /// normalization intact so the ordinary effect checker can issue its
     /// source diagnostic rather than silently dropping a forged projection.
-    fn normalize_concrete_effect_row(&self, value: EffectRow) -> EffectRow {
-        TraitSolver::new(self.signatures)
+    fn normalize_concrete_effect_row(&mut self, value: EffectRow) -> EffectRow {
+        self.trait_query()
             .normalize_effect_row(value.clone())
             .unwrap_or(value)
+    }
+
+    /// Every former `TraitSolver::new` call represented a fresh resource
+    /// budget and table namespace. Retain that per-query isolation while
+    /// reusing this elaborator's immutable frozen rule snapshot.
+    fn trait_query(&mut self) -> &mut TraitSolver {
+        self.trait_solver.reset_query();
+        &mut self.trait_solver
     }
     fn projection_normalization_error(&mut self, answer: TraitProjectionAnswer) -> Type {
         match answer {
@@ -4502,7 +4518,7 @@ impl Elaborator<'_> {
         else {
             unreachable!("projection was just constructed")
         };
-        let answer = TraitSolver::new(self.signatures).normalize_associated_type_application(
+        let answer = self.trait_query().normalize_associated_type_application(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
@@ -4864,13 +4880,14 @@ impl Elaborator<'_> {
         ) else {
             return structural_const_error(expected);
         };
-        match TraitSolver::new(self.signatures).normalize_associated_const(
+        let subject = self.header_type(subject);
+        match self.trait_query().normalize_associated_const(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
                     arguments,
                 },
-                subject: self.header_type(subject),
+                subject,
             },
             name,
             expected,
@@ -5237,7 +5254,8 @@ impl Elaborator<'_> {
                         self.recovered = true;
                         continue;
                     }
-                    match TraitSolver::new(self.signatures)
+                    match self
+                        .trait_query()
                         .normalize_associated_effect_row_application(
                             TraitGoal {
                                 relation: crate::ElaboratedTraitReference {
@@ -6964,18 +6982,20 @@ impl Elaborator<'_> {
             // arguments. Derive them from receiver patterns in the frozen
             // impl set, then keep the normal solver as the single selector of
             // implementation evidence.
-            for relation in
-                TraitSolver::new(self.signatures).relations_for_subject(definition, &subject)
+            for relation in self
+                .trait_query()
+                .relations_for_subject(definition, &subject)
             {
-                let Some(method_generic_kinds) =
-                    TraitSolver::new(self.signatures).method_generic_kinds(&relation, &operator)
+                let Some(method_generic_kinds) = self
+                    .trait_query()
+                    .method_generic_kinds(&relation, &operator)
                 else {
                     continue;
                 };
                 let method_arguments =
                     self.inferred_method_generic_arguments(&method_generic_kinds);
                 let trait_arguments = relation.arguments.clone();
-                match TraitSolver::new(self.signatures).select_method(
+                match self.trait_query().select_method(
                     TraitGoal {
                         relation,
                         subject: subject.clone(),
@@ -7243,7 +7263,7 @@ impl Elaborator<'_> {
             "G4168",
             "trait method qualification generic arguments do not match its declaration",
         )?;
-        let Some(method_generic_kinds) = TraitSolver::new(self.signatures).method_generic_kinds(
+        let Some(method_generic_kinds) = self.trait_query().method_generic_kinds(
             &crate::ElaboratedTraitReference {
                 definition: trait_definition,
                 arguments: trait_arguments.clone(),
@@ -7271,13 +7291,14 @@ impl Elaborator<'_> {
             )?
         };
         let assumptions = self.ambient_trait_solver_assumptions();
-        let answer = TraitSolver::new(self.signatures).select_method_with_assumptions(
+        let subject = self.zonk_type(subject, span);
+        let answer = self.trait_query().select_method_with_assumptions(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
                     arguments: trait_arguments.clone(),
                 },
-                subject: self.zonk_type(subject, span),
+                subject,
             },
             name,
             &method_arguments,
@@ -7403,7 +7424,7 @@ impl Elaborator<'_> {
             "G4168",
             "trait method qualification generic arguments do not match its declaration",
         )?;
-        let Some(method_generic_kinds) = TraitSolver::new(self.signatures).method_generic_kinds(
+        let Some(method_generic_kinds) = self.trait_query().method_generic_kinds(
             &crate::ElaboratedTraitReference {
                 definition: trait_definition,
                 arguments: trait_arguments.clone(),
@@ -7443,7 +7464,7 @@ impl Elaborator<'_> {
             )?
         };
         let assumptions = self.ambient_trait_solver_assumptions();
-        let answer = TraitSolver::new(self.signatures).select_method_with_assumptions(
+        let answer = self.trait_query().select_method_with_assumptions(
             TraitGoal {
                 relation: crate::ElaboratedTraitReference {
                     definition: trait_definition,
@@ -9021,17 +9042,19 @@ impl Elaborator<'_> {
                 self.recovered = true;
                 return;
             }
-            match TraitSolver::new(self.signatures).normalize_associated_effect_row_application(
-                TraitGoal {
-                    relation: crate::ElaboratedTraitReference {
-                        definition: projection.trait_definition,
-                        arguments: projection.trait_arguments.clone(),
+            match self
+                .trait_query()
+                .normalize_associated_effect_row_application(
+                    TraitGoal {
+                        relation: crate::ElaboratedTraitReference {
+                            definition: projection.trait_definition,
+                            arguments: projection.trait_arguments.clone(),
+                        },
+                        subject: *projection.subject,
                     },
-                    subject: *projection.subject,
-                },
-                &projection.name,
-                &projection.item_arguments,
-            ) {
+                    &projection.name,
+                    &projection.item_arguments,
+                ) {
                 TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
                     effects.effects.extend(row.effects);
                     projections.extend(row.projections);
@@ -9156,7 +9179,7 @@ impl Elaborator<'_> {
             ) {
                 continue;
             }
-            let answer = TraitSolver::new(self.signatures).normalize_associated_type_application(
+            let answer = self.trait_query().normalize_associated_type_application(
                 TraitGoal { relation, subject },
                 &binding.name,
                 &item_arguments,
@@ -9194,7 +9217,8 @@ impl Elaborator<'_> {
             ) {
                 continue;
             }
-            let answer = TraitSolver::new(self.signatures)
+            let answer = self
+                .trait_query()
                 .normalize_associated_effect_row_application(
                     TraitGoal { relation, subject },
                     &binding.name,
@@ -9322,7 +9346,6 @@ impl Elaborator<'_> {
         bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
         span: Span,
     ) {
-        let solver = TraitSolver::new(self.signatures);
         let assumptions = self.ambient_trait_solver_assumptions();
         let mut failed = false;
         for (subject, relation) in bounds {
@@ -9367,7 +9390,10 @@ impl Elaborator<'_> {
                 },
                 subject,
             };
-            match solver.solve_with_assumptions(goal, &assumptions) {
+            match self
+                .trait_query()
+                .solve_with_assumptions(goal, &assumptions)
+            {
                 TraitAnswer::Proven { .. } => {}
                 TraitAnswer::Refuted { .. } => {
                     self.error(
