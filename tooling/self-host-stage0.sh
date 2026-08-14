@@ -87,6 +87,15 @@ runtime_manifest=(
     --runtime-leaf text-eq crate __g1_text_eq
     --runtime-leaf text-from-utf8-checked crate __g1_text_from_utf8_checked
     --runtime-leaf text-as-bytes crate __g1_text_as_bytes
+    --runtime-leaf bytes-len crate __g1_bytes_len
+    --runtime-leaf bytes-concat crate __g1_bytes_concat
+    --runtime-leaf bytes-get crate __g1_bytes_get
+    --runtime-leaf bytes-slice crate __g1_bytes_slice
+    --runtime-leaf bytes-from-array-move crate __g1_bytes_from_array_move
+    --runtime-leaf bytes-to-array crate __g1_bytes_to_array
+    --runtime-leaf bytes-utf8-valid-up-to crate __g1_bytes_utf8_valid_up_to
+    --runtime-leaf char-from-u32-checked crate __g1_char_from_u32_checked
+    --runtime-leaf char-to-u32 crate __g1_char_to_u32
     --runtime-leaf int-checked-add crate __g1_int_checked_add
     --runtime-leaf int-wrapping-add crate __g1_int_wrapping_add
     --runtime-leaf int-wrapping-sub crate __g1_int_wrapping_sub
