@@ -348,18 +348,18 @@ wrapping_convert_to_i128<T>(value: T) -> i128 { __g1_int_convert_wrapping_to_i12
 
 wrapping_convert_to_isize<T>(value: T) -> isize { __g1_int_convert_wrapping_to_isize(move value) }
 
-// Exact, request-granted host imports. Their declaration identities freeze
-// the Host ABI symbol; `process_args`, `file_read`, `file_write`, and
-// `diagnostic` are explicit request capabilities, never ambient process
-// authority. The public effect handlers at the bottom of this library are
-// the only normal callers.
-host process_args fn __g1_process_args_get() -> Array<Text>;
+// Seed-compatible host placeholders. The bootstrap manifest binds these
+// exact declaration identities to their capability and ABI symbols; source
+// bodies are never elaborated as ordinary code when that trusted binding is
+// present. `process_args`, `file_read`, `file_write`, and `diagnostic` are
+// therefore explicit request capabilities, never ambient authority.
+__g1_process_args_get() -> Array<Text> { () }
 
-host file_read fn __g1_fs_read(path: Text) -> Bytes;
+__g1_fs_read(path: Text) -> Bytes { () }
 
-host file_write fn __g1_fs_write(path: Text, bytes: Bytes);
+__g1_fs_write(path: Text, bytes: Bytes) { () }
 
-host diagnostic fn __g1_diagnostic_write(text: Text);
+__g1_diagnostic_write(text: Text) { () }
 
 // Whole-value ownership utilities. `replace` and `swap` are deliberately
 // expressed through unique-reference move-out plus exact reinitialization, so
