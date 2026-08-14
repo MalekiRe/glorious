@@ -138,6 +138,7 @@ pub enum PrimitiveRole {
     IntConvertWrappingToI8,
     IntConvertCheckedToU64,
     IntConvertWrappingToU64,
+    IntConvertCheckedToIsize,
 }
 
 impl PrimitiveRole {
@@ -206,6 +207,7 @@ impl PrimitiveRole {
             Self::IntConvertWrappingToI8 => "int-convert-wrapping-to-i8",
             Self::IntConvertCheckedToU64 => "int-convert-checked-to-u64",
             Self::IntConvertWrappingToU64 => "int-convert-wrapping-to-u64",
+            Self::IntConvertCheckedToIsize => "int-convert-checked-to-isize",
         }
     }
 
@@ -274,6 +276,7 @@ impl PrimitiveRole {
             "int-convert-wrapping-to-i8" => Self::IntConvertWrappingToI8,
             "int-convert-checked-to-u64" => Self::IntConvertCheckedToU64,
             "int-convert-wrapping-to-u64" => Self::IntConvertWrappingToU64,
+            "int-convert-checked-to-isize" => Self::IntConvertCheckedToIsize,
             _ => return None,
         })
     }
@@ -805,6 +808,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::IntConvertCheckedToIsize => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0)],
+            result: Type::Scalar(crate::ScalarType::Isize),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::IntConvertWrappingToUsize => crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
@@ -969,6 +983,7 @@ fn manifest_digest(
             PrimitiveRole::IntConvertWrappingToI8 => 60,
             PrimitiveRole::IntConvertCheckedToU64 => 61,
             PrimitiveRole::IntConvertWrappingToU64 => 62,
+            PrimitiveRole::IntConvertCheckedToIsize => 63,
         });
         bytes.extend_from_slice(&definition.0.as_bytes());
     }

@@ -340,6 +340,10 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    I64ToIsizeChecked {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     MakeTuple {
         dst: MirLocal,
         fields: Vec<MirLocal>,
@@ -1504,6 +1508,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::I64ToI8Wrapping { dst, .. }
         | MirInstruction::I64ToU64Checked { dst, .. }
         | MirInstruction::I64ToU64Wrapping { dst, .. }
+        | MirInstruction::I64ToIsizeChecked { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -3426,7 +3431,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         MirInstruction::I64ToI8Checked { .. }
         | MirInstruction::I64ToI8Wrapping { .. }
         | MirInstruction::I64ToU64Checked { .. }
-        | MirInstruction::I64ToU64Wrapping { .. } => Ok(()),
+        | MirInstruction::I64ToU64Wrapping { .. }
+        | MirInstruction::I64ToIsizeChecked { .. } => Ok(()),
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -4170,8 +4176,9 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::I64ToI32Wrapping { dst, value } => vec![*dst, *value],
         MirInstruction::I64ToI8Checked { dst, value }
         | MirInstruction::I64ToI8Wrapping { dst, value }
-        | MirInstruction::I64ToU64Checked { dst, value } => vec![*dst, *value],
-        MirInstruction::I64ToU64Wrapping { dst, value } => vec![*dst, *value],
+        | MirInstruction::I64ToU64Checked { dst, value }
+        | MirInstruction::I64ToU64Wrapping { dst, value }
+        | MirInstruction::I64ToIsizeChecked { dst, value } => vec![*dst, *value],
         MirInstruction::MakeTuple { dst, fields }
         | MirInstruction::MakeArray { dst, fields, .. } => std::iter::once(*dst)
             .chain(fields.iter().copied())
@@ -14451,6 +14458,29 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::I64ToU64Checked { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::IntConvertCheckedToIsize) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic checked isize conversion requires one operand",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Isize)
+                                {
+                                    self.error("G6005", "generic checked isize conversion is only authorized for frozen i64");
+                                    return None;
+                                }
+                                self.instructions
+                                    .push(MirInstruction::I64ToIsizeChecked { dst, value: *value });
                             }
                             None => match host_import {
                                 Some(import) => self.instructions.push(MirInstruction::HostCall {
