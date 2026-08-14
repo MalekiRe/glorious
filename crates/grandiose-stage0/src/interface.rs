@@ -389,9 +389,10 @@ impl Definition {
 
 fn namespace(kind: DeclarationKind) -> Option<DefinitionNamespace> {
     Some(match kind {
-        DeclarationKind::Function | DeclarationKind::HostImport | DeclarationKind::Constant => {
-            DefinitionNamespace::Value
-        }
+        DeclarationKind::Function
+        | DeclarationKind::HostImport
+        | DeclarationKind::Constant
+        | DeclarationKind::ValueAlias => DefinitionNamespace::Value,
         DeclarationKind::Struct | DeclarationKind::Enum | DeclarationKind::TypeAlias => {
             DefinitionNamespace::Type
         }

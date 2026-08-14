@@ -19,6 +19,8 @@ pub enum DeclarationKind {
     Effect,
     TypeAlias,
     Constant,
+    /// A frozen top-level value forwarding contract: `let alias = target;`.
+    ValueAlias,
     Module,
     Import,
     Fixity,
@@ -212,6 +214,31 @@ impl Scanner<'_> {
             return matches!(token.kind, TokenKind::Identifier | TokenKind::Operator)
                 .then(|| self.lexed.text(self.source, token).to_owned());
         }
+        if kind == DeclarationKind::ValueAlias {
+            let mut position = self.position;
+            let mut path = vec![];
+            loop {
+                let index = self.significant.get(position).copied()?;
+                let token = &self.lexed.tokens[index];
+                if token.kind != TokenKind::Identifier {
+                    return None;
+                }
+                path.push(self.lexed.text(self.source, token).to_owned());
+                let separated = self
+                    .significant
+                    .get(position + 1)
+                    .zip(self.significant.get(position + 2))
+                    .is_some_and(|(left, right)| {
+                        self.lexed.tokens[*left].kind == TokenKind::Punctuation(':')
+                            && self.lexed.tokens[*right].kind == TokenKind::Punctuation(':')
+                    });
+                if !separated {
+                    break;
+                }
+                position += 3;
+            }
+            return Some(path.join("::"));
+        }
         self.current().and_then(|index| {
             let token = &self.lexed.tokens[index];
             (token.kind == TokenKind::Identifier)
@@ -243,8 +270,10 @@ impl Scanner<'_> {
                     cursor += 1;
                 }
                 TokenKind::Operator
-                    if kind == DeclarationKind::Constant
-                        && self.lexed.text(self.source, token) == "=" =>
+                    if matches!(
+                        kind,
+                        DeclarationKind::Constant | DeclarationKind::ValueAlias
+                    ) && self.lexed.text(self.source, token) == "=" =>
                 {
                     cursor += 1;
                     initializer_start = self.significant.get(cursor).copied();
@@ -323,10 +352,14 @@ impl Scanner<'_> {
                     }
                 },
                 TokenKind::Punctuation(';') => {
-                    let body = initializer_start.map(|start| TokenRange {
-                        start,
-                        end: token_index,
-                    });
+                    let body = if kind == DeclarationKind::Constant {
+                        initializer_start.map(|start| TokenRange {
+                            start,
+                            end: token_index,
+                        })
+                    } else {
+                        None
+                    };
                     return (token_index + 1, body, cursor + 1);
                 }
                 TokenKind::End => {
@@ -393,6 +426,7 @@ fn declaration_kind(keyword: &str) -> Option<DeclarationKind> {
         "effect" => DeclarationKind::Effect,
         "type" => DeclarationKind::TypeAlias,
         "const" => DeclarationKind::Constant,
+        "let" => DeclarationKind::ValueAlias,
         "mod" => DeclarationKind::Module,
         "use" => DeclarationKind::Import,
         "infixl" | "infixr" | "infix" | "prefix" => DeclarationKind::Fixity,

@@ -4037,6 +4037,64 @@ fn service_transfers_callable_obligations_through_a_typed_argument_boundary() {
 }
 
 #[test]
+fn service_lowers_a_top_level_value_alias_to_its_callable_target() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } let increment = add_one; pub fn main() -> i64 { increment(41) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_lowers_a_qualified_value_alias_receiver_spelling() {
+    let source = "pub fn __g1_vec_len(value: i64) -> i64 { value + 1 } let Vec::len = __g1_vec_len; pub fn main() -> i64 { Vec::len(41) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_freezes_canonical_enum_constructor_value_aliases() {
+    let source = "pub enum Result { Ok(i64), Err } let Option::Some = Result::Ok; pub fn main() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_resolves_public_value_aliases_across_modules() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_modules(
+            "pub mod api; pub fn main() -> i64 { api::increment(41) }",
+            &[(
+                "api",
+                "pub fn add_one(value: i64) -> i64 { value + 1 } pub let increment = add_one;",
+            )],
+        ))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_cyclic_or_unknown_top_level_value_aliases() {
+    for source in [
+        "let first = second; let second = first; pub fn main() -> i64 { 0 }",
+        "let missing = not_found; pub fn main() -> i64 { 0 }",
+    ] {
+        let error = StageZeroCompiler::new()
+            .compile(request(source))
+            .unwrap_err();
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G3340"),
+            "missing value-alias interface diagnostic: {error:#?}"
+        );
+    }
+}
+
+#[test]
 fn service_rejects_sequential_callable_escapes_that_exceed_one_owner_contract() {
     let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(function: (i64) -> i64, value: i64) -> i64 { function(value) } pub fn relay(function: (i64) -> i64) -> i64 { apply(function, 20) + apply(function, 21) } pub fn main() -> i64 { relay(add_one) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

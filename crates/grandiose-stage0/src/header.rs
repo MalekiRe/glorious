@@ -435,6 +435,12 @@ pub enum ParsedHeader {
     Constant {
         ty: Option<HeaderType>,
     },
+    /// A source-level value forwarding contract. Paths are retained until the
+    /// complete package index can resolve visibility and alias cycles.
+    ValueAlias {
+        name: Vec<String>,
+        target: Vec<String>,
+    },
     Import(ImportHeader),
     Fixity(FixityHeader),
     Trait(TraitHeader),
@@ -512,6 +518,17 @@ impl HeaderParse {
                     parser.error("G3219", "expected `=` in constant declaration");
                 }
                 ParsedHeader::Constant { ty }
+            }
+            DeclarationKind::ValueAlias => {
+                let name = parser.path();
+                if !parser.operator("=") {
+                    parser.error("G3220", "expected `=` in value alias");
+                }
+                let target = parser.path();
+                if !parser.punctuation(';') {
+                    parser.error("G3221", "expected `;` after value alias");
+                }
+                ParsedHeader::ValueAlias { name, target }
             }
             DeclarationKind::Import => ParsedHeader::Import(parser.import()),
             DeclarationKind::Fixity => ParsedHeader::Fixity(parser.fixity(keyword.as_deref())),

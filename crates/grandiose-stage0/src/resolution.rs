@@ -618,6 +618,24 @@ impl DefinitionIndex {
         let Some(name) = path.last() else {
             return ResolutionState::Unresolved;
         };
+        // Top-level value aliases may deliberately occupy a qualified
+        // receiver spelling (`Vec::len`) without declaring a module named
+        // `Vec`. Prefer that exact interface-owned binding before treating
+        // the segments as a module traversal.
+        if namespace == DefinitionNamespace::Value && path.len() > 1 {
+            let spelling = path.join("::");
+            let direct = self.resolve_member(
+                namespace,
+                owner,
+                &spelling,
+                owner,
+                false,
+                &mut BTreeSet::new(),
+            );
+            if !matches!(direct, ResolutionState::Unresolved) {
+                return direct;
+            }
+        }
         let module = if path.len() == 1 {
             let resolved =
                 self.resolve_member(namespace, owner, name, owner, false, &mut BTreeSet::new());

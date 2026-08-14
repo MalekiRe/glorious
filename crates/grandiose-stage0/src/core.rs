@@ -3105,7 +3105,10 @@ impl TypedBody {
 
 fn callable(header: &ElaboratedHeader) -> Option<&crate::signature::CallableSignature> {
     match header {
-        ElaboratedHeader::Callable(value) => Some(value),
+        ElaboratedHeader::Callable(value)
+        | ElaboratedHeader::ValueAlias {
+            signature: value, ..
+        } => Some(value),
         _ => None,
     }
 }
@@ -5976,82 +5979,88 @@ impl Elaborator<'_> {
             .index
             .resolve_path(DefinitionNamespace::Value, self.module, &path)
         {
-            ResolutionState::Resolved(definition) => match self
-                .signatures
-                .definitions
-                .get(&definition)
-                .and_then(callable)
-            {
-                Some(signature) => {
-                    let generic_kinds = signature.generic_kinds.clone();
-                    // Every omitted generic receives a value in its native
-                    // semantic domain.  In particular, an `EffectRow` slot
-                    // gets a fresh row variable rather than `{}`: a nominal
-                    // parameter such as `Token<e>` can then constrain it to
-                    // the row carried by the call argument.  The old
-                    // type-only instantiator silently fixed those slots to
-                    // empty, rejecting valid implicit calls and losing the
-                    // caller-owned row identity in Core.
-                    let arguments = generic_kinds
-                        .iter()
-                        .enumerate()
-                        .map(|kind| match kind {
-                            (_, crate::GenericKind::Type) => {
-                                GenericArgument::Type(self.inference.fresh())
-                            }
-                            (_, crate::GenericKind::EffectRow) => {
-                                GenericArgument::EffectRow(self.inference.fresh_effects())
-                            }
-                            // Preserve declaration-region identity in the
-                            // unopened callable contract. `call` opens it
-                            // against the actual arguments after freezing
-                            // reference provenance; replacing it with
-                            // `Elided` here would make two distinct generic
-                            // lifetimes indistinguishable before that proof.
-                            (index, crate::GenericKind::Lifetime) => {
-                                GenericArgument::Lifetime(Lifetime::Generic(index as u32))
-                            }
-                            (_, crate::GenericKind::Const(kind)) => {
-                                self.inference.fresh_const(*kind)
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                    let signature = self
-                        .signatures
-                        .instantiate_callable_generic(definition, &arguments)
-                        .expect("fresh arguments match the callable generic contract");
-                    let parameters = signature
-                        .parameters
-                        .into_iter()
-                        .map(|parameter| self.normalize_concrete_type_projections(parameter))
-                        .collect();
-                    let result = self.normalize_concrete_type_projections(signature.result);
-                    self.alloc(
-                        CoreKind::Function {
-                            definition,
-                            arguments,
-                            host_import: self.signatures.host_imports.get(&definition).cloned(),
-                        },
-                        Type::Callable {
-                            lifetime_binders: 0,
-                            parameters,
-                            result: Box::new(result),
-                            effects: signature.effects,
-                            invocation: signature.invocation,
-                        },
-                        span,
-                    )
+            ResolutionState::Resolved(definition) => {
+                let definition = self
+                    .signatures
+                    .value_alias_target(definition)
+                    .unwrap_or(definition);
+                match self
+                    .signatures
+                    .definitions
+                    .get(&definition)
+                    .and_then(callable)
+                {
+                    Some(signature) => {
+                        let generic_kinds = signature.generic_kinds.clone();
+                        // Every omitted generic receives a value in its native
+                        // semantic domain.  In particular, an `EffectRow` slot
+                        // gets a fresh row variable rather than `{}`: a nominal
+                        // parameter such as `Token<e>` can then constrain it to
+                        // the row carried by the call argument.  The old
+                        // type-only instantiator silently fixed those slots to
+                        // empty, rejecting valid implicit calls and losing the
+                        // caller-owned row identity in Core.
+                        let arguments = generic_kinds
+                            .iter()
+                            .enumerate()
+                            .map(|kind| match kind {
+                                (_, crate::GenericKind::Type) => {
+                                    GenericArgument::Type(self.inference.fresh())
+                                }
+                                (_, crate::GenericKind::EffectRow) => {
+                                    GenericArgument::EffectRow(self.inference.fresh_effects())
+                                }
+                                // Preserve declaration-region identity in the
+                                // unopened callable contract. `call` opens it
+                                // against the actual arguments after freezing
+                                // reference provenance; replacing it with
+                                // `Elided` here would make two distinct generic
+                                // lifetimes indistinguishable before that proof.
+                                (index, crate::GenericKind::Lifetime) => {
+                                    GenericArgument::Lifetime(Lifetime::Generic(index as u32))
+                                }
+                                (_, crate::GenericKind::Const(kind)) => {
+                                    self.inference.fresh_const(*kind)
+                                }
+                            })
+                            .collect::<Vec<_>>();
+                        let signature = self
+                            .signatures
+                            .instantiate_callable_generic(definition, &arguments)
+                            .expect("fresh arguments match the callable generic contract");
+                        let parameters = signature
+                            .parameters
+                            .into_iter()
+                            .map(|parameter| self.normalize_concrete_type_projections(parameter))
+                            .collect();
+                        let result = self.normalize_concrete_type_projections(signature.result);
+                        self.alloc(
+                            CoreKind::Function {
+                                definition,
+                                arguments,
+                                host_import: self.signatures.host_imports.get(&definition).cloned(),
+                            },
+                            Type::Callable {
+                                lifetime_binders: 0,
+                                parameters,
+                                result: Box::new(result),
+                                effects: signature.effects,
+                                invocation: signature.invocation,
+                            },
+                            span,
+                        )
+                    }
+                    None => match self.signatures.definitions.get(&definition) {
+                        Some(ElaboratedHeader::Constant(Some(ty))) => {
+                            self.alloc(CoreKind::Constant(definition), ty.clone(), span)
+                        }
+                        Some(ElaboratedHeader::Constant(None)) => {
+                            self.fail(span, "G4102", "constant value has no frozen type")
+                        }
+                        _ => self.fail(span, "G4102", "value does not have a callable signature"),
+                    },
                 }
-                None => match self.signatures.definitions.get(&definition) {
-                    Some(ElaboratedHeader::Constant(Some(ty))) => {
-                        self.alloc(CoreKind::Constant(definition), ty.clone(), span)
-                    }
-                    Some(ElaboratedHeader::Constant(None)) => {
-                        self.fail(span, "G4102", "constant value has no frozen type")
-                    }
-                    _ => self.fail(span, "G4102", "value does not have a callable signature"),
-                },
-            },
+            }
             ResolutionState::Ambiguous(_) => self.fail(span, "G4103", "ambiguous value reference"),
             ResolutionState::Inaccessible(_) => self.fail(
                 span,
@@ -6089,6 +6098,10 @@ impl Elaborator<'_> {
                 "generic callable path is unresolved in the value namespace",
             );
         };
+        let definition = self
+            .signatures
+            .value_alias_target(definition)
+            .unwrap_or(definition);
         let Some(signature) = self
             .signatures
             .definitions

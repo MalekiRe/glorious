@@ -228,6 +228,13 @@ pub enum ElaboratedNominalLayout {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ElaboratedHeader {
     Callable(CallableSignature),
+    /// A value alias is resolved against the complete frozen definition index
+    /// and carries the target's exact callable contract. Core lowers calls to
+    /// `target`, never to a synthetic alias body.
+    ValueAlias {
+        target: DefKey,
+        signature: CallableSignature,
+    },
     /// Aliases retain both their binder arity and their frozen target.  The
     /// normalizer substitutes these at every consuming signature boundary;
     /// aliases therefore never become runtime nominal identities.
@@ -317,6 +324,127 @@ fn generic_binder_kinds(kinds: &[GenericKind]) -> String {
         })
         .collect::<Vec<_>>();
     format!("<{}>", values.join(", "))
+}
+
+fn callable_signature(header: &ElaboratedHeader) -> Option<&CallableSignature> {
+    match header {
+        ElaboratedHeader::Callable(signature) | ElaboratedHeader::ValueAlias { signature, .. } => {
+            Some(signature)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_value_alias(
+    key: DefKey,
+    aliases: &BTreeMap<DefKey, (ModuleKey, Vec<String>)>,
+    index: &DefinitionIndex,
+    definitions: &BTreeMap<DefKey, ElaboratedHeader>,
+    resolved: &mut BTreeMap<DefKey, (DefKey, CallableSignature)>,
+    active: &mut Vec<DefKey>,
+) -> Result<(DefKey, CallableSignature), String> {
+    if let Some(value) = resolved.get(&key) {
+        return Ok(value.clone());
+    }
+    if active.contains(&key) {
+        return Err("value alias cycle cannot be frozen".into());
+    }
+    let Some((module, path)) = aliases.get(&key) else {
+        return Err("value alias has no frozen target declaration".into());
+    };
+    active.push(key);
+    let target = match index.resolve_path(DefinitionNamespace::Value, module, path) {
+        ResolutionState::Resolved(target) => target,
+        ResolutionState::Inaccessible(_) => {
+            active.pop();
+            return Err("value alias target is private to another module".into());
+        }
+        ResolutionState::Ambiguous(_) => {
+            active.pop();
+            return Err("value alias target is ambiguous".into());
+        }
+        ResolutionState::Unresolved | ResolutionState::Recovered => {
+            match enum_constructor_alias(module, path, index, definitions) {
+                Some(value) => {
+                    active.pop();
+                    resolved.insert(key, value.clone());
+                    return Ok(value);
+                }
+                None => {
+                    active.pop();
+                    return Err("value alias target is unresolved".into());
+                }
+            }
+        }
+    };
+    let value = if aliases.contains_key(&target) {
+        resolve_value_alias(target, aliases, index, definitions, resolved, active)
+    } else {
+        definitions
+            .get(&target)
+            .and_then(callable_signature)
+            .cloned()
+            .map(|signature| (target, signature))
+            .ok_or_else(|| "value alias target is not a callable value".into())
+    };
+    active.pop();
+    if let Ok(value) = &value {
+        resolved.insert(key, value.clone());
+    }
+    value
+}
+
+/// Enum constructors are declaration-owned values even though their identity
+/// is stored in the nominal layout rather than as a synthetic source `fn`.
+/// Freezing their callable shape here admits canonical forwarding declarations
+/// such as `let Option::Some = Result::Ok;` without pretending the variant is
+/// a module member.
+fn enum_constructor_alias(
+    module: &ModuleKey,
+    path: &[String],
+    index: &DefinitionIndex,
+    definitions: &BTreeMap<DefKey, ElaboratedHeader>,
+) -> Option<(DefKey, CallableSignature)> {
+    let (variant_name, enum_path) = path.split_last()?;
+    let definition = match index.resolve_path(DefinitionNamespace::Type, module, enum_path) {
+        ResolutionState::Resolved(definition) => definition,
+        _ => return None,
+    };
+    let ElaboratedHeader::Nominal {
+        generic_kinds,
+        layout: ElaboratedNominalLayout::Enum(variants),
+        ..
+    } = definitions.get(&definition)?
+    else {
+        return None;
+    };
+    let variant = variants
+        .iter()
+        .find(|variant| variant.name == *variant_name)?;
+    let parameters = match &variant.payload {
+        ElaboratedEnumVariantPayload::Unit => vec![],
+        ElaboratedEnumVariantPayload::Tuple(fields) => fields.clone(),
+        ElaboratedEnumVariantPayload::Struct(fields) => {
+            fields.iter().map(|field| field.ty.clone()).collect()
+        }
+    };
+    Some((
+        definition,
+        CallableSignature {
+            generics: generic_kinds.len() as u32,
+            generic_kinds: generic_kinds.clone(),
+            parameters,
+            result: Type::Nominal {
+                definition,
+                arguments: nominal_identity_arguments(generic_kinds),
+            },
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+    ))
 }
 
 fn fallback_structural_const(kind: ConstKind) -> GenericArgument {
@@ -457,6 +585,7 @@ impl ElaboratedInterface {
             result.diagnostics.extend(elaborator.diagnostics);
         }
         result.normalize_aliases();
+        result.resolve_value_aliases(interface, index);
         result.validate_owned_nominal_layout_recursion();
         result.validate_associated_type_definitions();
         result.validate_trait_supertrait_cycles();
@@ -492,6 +621,47 @@ impl ElaboratedInterface {
     /// for aliases written inside a body.
     pub fn normalize_type_aliases(&self, value: Type) -> Type {
         normalize_alias_type(value, &self.definitions, &mut vec![], &mut vec![])
+    }
+
+    pub fn value_alias_target(&self, definition: DefKey) -> Option<DefKey> {
+        match self.definitions.get(&definition) {
+            Some(ElaboratedHeader::ValueAlias { target, .. }) => Some(*target),
+            _ => None,
+        }
+    }
+
+    fn resolve_value_aliases(&mut self, interface: &PackageInterface, index: &DefinitionIndex) {
+        let aliases = interface
+            .definitions
+            .iter()
+            .filter_map(|definition| match &definition.syntax.header {
+                ParsedHeader::ValueAlias { target, .. } => {
+                    Some((definition.key, (definition.module.clone(), target.clone())))
+                }
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut resolved = BTreeMap::new();
+        for key in aliases.keys().copied().collect::<Vec<_>>() {
+            let mut active = vec![];
+            match resolve_value_alias(
+                key,
+                &aliases,
+                index,
+                &self.definitions,
+                &mut resolved,
+                &mut active,
+            ) {
+                Ok((target, signature)) => {
+                    self.definitions
+                        .insert(key, ElaboratedHeader::ValueAlias { target, signature });
+                }
+                Err(message) => self.diagnostics.push(SignatureDiagnostic {
+                    code: "G3340",
+                    message,
+                }),
+            }
+        }
     }
 
     /// Reject layouts that would require an infinitely-sized owned value.
@@ -822,7 +992,8 @@ impl ElaboratedInterface {
 
         for (definition, header) in &definitions {
             match header {
-                ElaboratedHeader::Callable(signature) => {
+                ElaboratedHeader::Callable(signature)
+                | ElaboratedHeader::ValueAlias { signature, .. } => {
                     self.validate_callable_projection_obligations(
                         signature,
                         vec![],
@@ -1814,7 +1985,8 @@ impl ElaboratedInterface {
         let mut diagnostics = vec![];
         for header in self.definitions.values_mut() {
             match header {
-                ElaboratedHeader::Callable(signature) => {
+                ElaboratedHeader::Callable(signature)
+                | ElaboratedHeader::ValueAlias { signature, .. } => {
                     normalize_callable_signature(signature, &aliases, &mut diagnostics);
                 }
                 ElaboratedHeader::Alias { target, .. } => {
@@ -2872,6 +3044,7 @@ impl Elaborator<'_> {
             ParsedHeader::Constant { ty } => {
                 ElaboratedHeader::Constant(ty.as_ref().map(|value| self.ty(value)))
             }
+            ParsedHeader::ValueAlias { .. } => ElaboratedHeader::Opaque,
             ParsedHeader::Nominal { generics, layout } => {
                 self.bind_generics(generics);
                 ElaboratedHeader::Nominal {
