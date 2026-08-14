@@ -28,6 +28,9 @@ pub struct BootstrapManifest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BootstrapConvergenceError {
     UnsupportedSchema { found: u32 },
+    InvalidStage { ordinal: u32, reason: &'static str },
+    StageOrderMismatch { earlier: u32, later: u32 },
+    ProducerMismatch { expected: Digest, found: Digest },
     SourceWorldMismatch { left: Digest, right: Digest },
     CodegenInputMismatch { left: Digest, right: Digest },
     ArtifactMismatch { left: Digest, right: Digest },
@@ -63,10 +66,13 @@ impl BootstrapManifest {
         }
     }
 
-    /// Compare stage products under the contract required for stage-two/stage-
-    /// three convergence. Producer and stage ordinal intentionally do not
-    /// participate: they must differ between those stages, while semantic and
-    /// code-generation inputs must not.
+    /// Compare adjacent stage products under the self-host convergence
+    /// contract.  The later stage must be exactly the successor of this one
+    /// and must name this verified artifact as its producer.  Producer and
+    /// stage ordinal are intentionally absent from the byte-identity
+    /// projection below, but they are essential provenance evidence: without
+    /// this binding a forged or skipped manifest pair could claim convergence
+    /// merely because two unrelated artifacts happened to be byte-identical.
     pub fn compare_convergence(&self, later: &Self) -> Result<(), BootstrapConvergenceError> {
         for manifest in [self, later] {
             if manifest.schema != BOOTSTRAP_MANIFEST_SCHEMA {
@@ -74,6 +80,30 @@ impl BootstrapManifest {
                     found: manifest.schema,
                 });
             }
+            if let Err(BootstrapManifestError::InvalidStage { reason }) = manifest.validate() {
+                return Err(BootstrapConvergenceError::InvalidStage {
+                    ordinal: manifest.stage.ordinal,
+                    reason,
+                });
+            }
+        }
+        let expected_ordinal = self.stage.ordinal.checked_add(1).ok_or(
+            BootstrapConvergenceError::StageOrderMismatch {
+                earlier: self.stage.ordinal,
+                later: later.stage.ordinal,
+            },
+        )?;
+        if later.stage.ordinal != expected_ordinal {
+            return Err(BootstrapConvergenceError::StageOrderMismatch {
+                earlier: self.stage.ordinal,
+                later: later.stage.ordinal,
+            });
+        }
+        if later.stage.producer != self.artifact {
+            return Err(BootstrapConvergenceError::ProducerMismatch {
+                expected: self.artifact,
+                found: later.stage.producer,
+            });
         }
         if self.source_semantics != later.source_semantics {
             return Err(BootstrapConvergenceError::SourceWorldMismatch {
@@ -229,6 +259,18 @@ fn validate_stage(stage: &BootstrapStage) -> Result<(), BootstrapManifestError> 
         return Err(BootstrapManifestError::InvalidStage {
             reason: "stage limits must be positive",
         });
+    }
+    if stage.ordinal > 1 {
+        let Some(expected) = stage.expected_artifact else {
+            return Err(BootstrapManifestError::InvalidStage {
+                reason: "non-seed stages must pin their predecessor artifact",
+            });
+        };
+        if expected != stage.producer {
+            return Err(BootstrapManifestError::InvalidStage {
+                reason: "non-seed producer must equal the pinned predecessor artifact",
+            });
+        }
     }
     Ok(())
 }

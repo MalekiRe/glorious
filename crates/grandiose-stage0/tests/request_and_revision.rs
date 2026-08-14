@@ -212,9 +212,11 @@ fn bootstrap_worlds_canonically_include_producer_and_enforce_fixed_bounds() {
         expected_artifact: None,
     });
     let mut second = first.clone();
+    let stage_one_artifact = Digest::of_bytes(b"stage-one-artifact");
     second.mode = CompilationMode::Bootstrap(BootstrapStage {
-        producer: Digest::of_bytes(b"stage-one"),
+        producer: stage_one_artifact,
         ordinal: 2,
+        expected_artifact: Some(stage_one_artifact),
         ..match first.mode {
             CompilationMode::Bootstrap(ref stage) => stage.clone(),
             _ => unreachable!(),
@@ -237,6 +239,47 @@ fn bootstrap_worlds_canonically_include_producer_and_enforce_fixed_bounds() {
     assert!(matches!(
         bounded.normalize(),
         Err(InputError::BootstrapSourceLimit { .. })
+    ));
+}
+
+#[test]
+fn bootstrap_rejects_a_non_seed_stage_without_its_exact_producer_artifact() {
+    let package = PackageKey("compiler@0.1.0".into());
+    let source = SourceInput::new(
+        package.clone(),
+        LogicalPath::parse("src/main.glorious").unwrap(),
+        b"main() { () }".as_slice(),
+    );
+    let mut missing_predecessor = request(vec![source.clone()]);
+    missing_predecessor.root_package = package.clone();
+    missing_predecessor.mode = CompilationMode::Bootstrap(BootstrapStage {
+        ordinal: 2,
+        producer: Digest::of_bytes(b"unbound-stage-one"),
+        optimization_level: 2,
+        limits: BootstrapLimits::new(1, 128),
+        expected_artifact: None,
+    });
+    assert!(matches!(
+        missing_predecessor.normalize(),
+        Err(InputError::InvalidBootstrapStage {
+            reason: "non-seed stages must pin their predecessor artifact"
+        })
+    ));
+
+    let mut substituted_producer = request(vec![source]);
+    substituted_producer.root_package = package;
+    substituted_producer.mode = CompilationMode::Bootstrap(BootstrapStage {
+        ordinal: 2,
+        producer: Digest::of_bytes(b"substituted-producer"),
+        optimization_level: 2,
+        limits: BootstrapLimits::new(1, 128),
+        expected_artifact: Some(Digest::of_bytes(b"stage-one-artifact")),
+    });
+    assert!(matches!(
+        substituted_producer.normalize(),
+        Err(InputError::InvalidBootstrapStage {
+            reason: "non-seed producer must equal the pinned predecessor artifact"
+        })
     ));
 }
 

@@ -405,6 +405,18 @@ fn validate_bootstrap_stage(
             reason: "source limits must be positive",
         });
     }
+    if stage.ordinal > 1 {
+        let Some(expected) = stage.expected_artifact else {
+            return Err(InputError::InvalidBootstrapStage {
+                reason: "non-seed stages must pin their predecessor artifact",
+            });
+        };
+        if expected != stage.producer {
+            return Err(InputError::InvalidBootstrapStage {
+                reason: "non-seed producer must equal the pinned predecessor artifact",
+            });
+        }
+    }
     if request.sources.len() > stage.limits.max_sources as usize {
         return Err(InputError::InvalidBootstrapStage {
             reason: "source count exceeds bootstrap source limit",

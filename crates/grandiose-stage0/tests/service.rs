@@ -1,11 +1,11 @@
 use grandiose_stage0::{
-    BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError, BootstrapLimits, BootstrapManifest,
-    BootstrapManifestError, BootstrapStage, Budget, CancellationToken, CompilationMode,
-    CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus,
-    DiagnosticClass, Digest, FileKey, InstanceLimits, LogicalPath, ModuleKey, PackageKey,
-    RetentionReport, Severity, SourceInput, StageZeroCompiler, VmArtifactError,
-    VmContinuationPolicy, VmExecutionLimits, VmGenericArgument, VmInstruction, VmType,
-    decode_and_verify_program, decode_program, encode_program,
+    BOOTSTRAP_MANIFEST_MAGIC, BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError,
+    BootstrapLimits, BootstrapManifest, BootstrapManifestError, BootstrapStage, Budget,
+    CancellationToken, CompilationMode, CompilationRequest, CompileDiagnostic,
+    CompilerBuildIdentity, DependencyNode, DependencyStatus, DiagnosticClass, Digest, FileKey,
+    InstanceLimits, LogicalPath, ModuleKey, PackageKey, RetentionReport, Severity, SourceInput,
+    StageZeroCompiler, VmArtifactError, VmContinuationPolicy, VmExecutionLimits, VmGenericArgument,
+    VmInstruction, VmType, decode_and_verify_program, decode_program, encode_program,
 };
 use std::collections::BTreeMap;
 
@@ -5208,7 +5208,7 @@ fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
     stage_two.build.compiler = Digest::of_bytes(b"stage-one-compiler");
     stage_two.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 2,
-        producer: Digest::of_bytes(b"stage-one-artifact"),
+        producer: first_manifest.artifact,
         optimization_level: 2,
         limits: BootstrapLimits::new(4, 16 * 1024),
         expected_artifact: Some(first_manifest.artifact),
@@ -5224,6 +5224,25 @@ fn bootstrap_stages_record_path_free_manifests_and_prove_convergence() {
     first_manifest
         .compare_convergence(&second_manifest)
         .unwrap();
+
+    let mut stage_three = request(source);
+    stage_three.build.compiler = Digest::of_bytes(b"stage-two-compiler");
+    stage_three.mode = CompilationMode::Bootstrap(BootstrapStage {
+        ordinal: 3,
+        producer: second_manifest.artifact,
+        optimization_level: 2,
+        limits: BootstrapLimits::new(4, 16 * 1024),
+        expected_artifact: Some(second_manifest.artifact),
+    });
+    let third_manifest = compiler
+        .compile(stage_three)
+        .unwrap()
+        .bootstrap_manifest
+        .unwrap();
+    second_manifest
+        .compare_convergence(&third_manifest)
+        .unwrap();
+    assert_eq!(second_manifest.artifact, third_manifest.artifact);
 }
 
 #[test]
@@ -5231,7 +5250,7 @@ fn bootstrap_stage_rejects_a_nonconvergent_expected_artifact() {
     let mut request = request("pub fn main() -> i64 { 42 }");
     request.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 2,
-        producer: Digest::of_bytes(b"stage-one-artifact"),
+        producer: Digest::of_bytes(b"not-this-program"),
         optimization_level: 2,
         limits: BootstrapLimits::new(4, 16 * 1024),
         expected_artifact: Some(Digest::of_bytes(b"not-this-program")),
@@ -5267,10 +5286,10 @@ fn bootstrap_manifest_rejects_mismatched_codegen_even_when_artifacts_match() {
     second.target = "different-vm".into();
     second.mode = CompilationMode::Bootstrap(BootstrapStage {
         ordinal: 2,
-        producer: Digest::of_bytes(b"first"),
+        producer: first.artifact,
         optimization_level: 1,
         limits: BootstrapLimits::new(4, 16 * 1024),
-        expected_artifact: None,
+        expected_artifact: Some(first.artifact),
     });
     let second = StageZeroCompiler::new()
         .compile(second)
@@ -5284,12 +5303,68 @@ fn bootstrap_manifest_rejects_mismatched_codegen_even_when_artifacts_match() {
 }
 
 #[test]
+fn bootstrap_convergence_rejects_skipped_or_substituted_successors() {
+    let common = |stage: BootstrapStage, artifact: Digest| BootstrapManifest {
+        schema: BOOTSTRAP_MANIFEST_SCHEMA,
+        stage,
+        world: Digest::of_bytes(b"stage-world"),
+        source_semantics: Digest::of_bytes(b"stage-source"),
+        codegen: Digest::of_bytes(b"stage-codegen"),
+        artifact,
+    };
+    let stage_one_artifact = Digest::of_bytes(b"stage-one-artifact");
+    let first = common(
+        BootstrapStage {
+            ordinal: 1,
+            producer: Digest::of_bytes(b"rust-seed"),
+            optimization_level: 2,
+            limits: BootstrapLimits::new(4, 16 * 1024),
+            expected_artifact: None,
+        },
+        stage_one_artifact,
+    );
+    let substituted = common(
+        BootstrapStage {
+            ordinal: 2,
+            producer: Digest::of_bytes(b"substituted-stage-one"),
+            optimization_level: 2,
+            limits: BootstrapLimits::new(4, 16 * 1024),
+            expected_artifact: Some(Digest::of_bytes(b"substituted-stage-one")),
+        },
+        stage_one_artifact,
+    );
+    assert!(matches!(
+        first.compare_convergence(&substituted),
+        Err(BootstrapConvergenceError::ProducerMismatch { expected, found })
+            if expected == stage_one_artifact && found == Digest::of_bytes(b"substituted-stage-one")
+    ));
+
+    let skipped = common(
+        BootstrapStage {
+            ordinal: 3,
+            producer: stage_one_artifact,
+            optimization_level: 2,
+            limits: BootstrapLimits::new(4, 16 * 1024),
+            expected_artifact: Some(stage_one_artifact),
+        },
+        stage_one_artifact,
+    );
+    assert!(matches!(
+        first.compare_convergence(&skipped),
+        Err(BootstrapConvergenceError::StageOrderMismatch {
+            earlier: 1,
+            later: 3
+        })
+    ));
+}
+
+#[test]
 fn bootstrap_manifests_round_trip_canonically_and_reject_corruption() {
     let manifest = BootstrapManifest {
         schema: BOOTSTRAP_MANIFEST_SCHEMA,
         stage: BootstrapStage {
             ordinal: 2,
-            producer: Digest::of_bytes(b"stage-one"),
+            producer: Digest::of_bytes(b"stage-one-artifact"),
             optimization_level: 2,
             limits: BootstrapLimits::new(4, 16 * 1024),
             expected_artifact: Some(Digest::of_bytes(b"stage-one-artifact")),
@@ -5316,6 +5391,26 @@ fn bootstrap_manifests_round_trip_canonically_and_reject_corruption() {
     assert!(matches!(
         BootstrapManifest::decode(&bytes[..bytes.len() - 1]),
         Err(BootstrapManifestError::Truncated)
+    ));
+    // A hostile manifest cannot relabel a stage-two record as an unbound
+    // successor by merely removing the optional-artifact payload. Decode
+    // validates the reconstructed stage before returning evidence.
+    let expected_tag_offset = BOOTSTRAP_MANIFEST_MAGIC.len()
+        + std::mem::size_of::<u32>()
+        + std::mem::size_of::<u32>()
+        + 32
+        + std::mem::size_of::<u8>()
+        + std::mem::size_of::<u32>()
+        + std::mem::size_of::<u64>();
+    let mut unbound_successor = bytes.clone();
+    assert_eq!(unbound_successor[expected_tag_offset], 1);
+    unbound_successor[expected_tag_offset] = 0;
+    unbound_successor.drain(expected_tag_offset + 1..expected_tag_offset + 1 + 32);
+    assert!(matches!(
+        BootstrapManifest::decode(&unbound_successor),
+        Err(BootstrapManifestError::InvalidStage {
+            reason: "non-seed stages must pin their predecessor artifact"
+        })
     ));
     let mut trailing = bytes;
     trailing.push(0);
