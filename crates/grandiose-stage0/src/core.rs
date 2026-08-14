@@ -3962,7 +3962,9 @@ impl Elaborator<'_> {
             );
         }
         let ty = match (expected, text.as_str()) {
-            (Some(Type::Scalar(scalar)), literal) if literal_is_numeric(literal) => {
+            (Some(Type::Scalar(scalar)), literal)
+                if literal_is_numeric(literal) && scalar_is_numeric(scalar) =>
+            {
                 Type::Scalar(scalar)
             }
             _ => literal_type(&text),
@@ -10482,6 +10484,26 @@ fn literal_type(text: &str) -> Type {
 
 fn literal_is_numeric(text: &str) -> bool {
     !matches!(text, "true" | "false") && !text.starts_with('"') && !text.starts_with('\'')
+}
+
+fn scalar_is_numeric(scalar: ScalarType) -> bool {
+    matches!(
+        scalar,
+        ScalarType::U8
+            | ScalarType::U16
+            | ScalarType::U32
+            | ScalarType::U64
+            | ScalarType::U128
+            | ScalarType::Usize
+            | ScalarType::I8
+            | ScalarType::I16
+            | ScalarType::I32
+            | ScalarType::I64
+            | ScalarType::I128
+            | ScalarType::Isize
+            | ScalarType::F32
+            | ScalarType::F64
+    )
 }
 
 /// A refinement pack is available only to a completion arm whose own pattern
