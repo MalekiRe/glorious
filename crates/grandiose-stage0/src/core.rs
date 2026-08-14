@@ -1655,6 +1655,7 @@ impl ResolvedHandlerClause {
             operation: crate::signature::ElaboratedEffectOperation {
                 name: "<error>".into(),
                 generics: 0,
+                generic_kinds: vec![],
                 parameters: vec![],
                 result: Type::Error,
                 terminal: false,
@@ -6440,23 +6441,10 @@ impl Elaborator<'_> {
             } => (*definition, arguments.clone()),
             _ => return,
         };
-        // The legacy callable-substitution API still accepts a type vector.
-        // Preserve its source-slot alignment with placeholders for non-type
-        // arguments; those cannot occur in a value-type where-bound subject,
-        // and their canonical identities remain on `CoreKind::Function`.
-        let arguments = arguments
-            .into_iter()
-            .map(|argument| match argument {
-                GenericArgument::Type(argument) => argument,
-                GenericArgument::EffectRow(_)
-                | GenericArgument::Lifetime(_)
-                | GenericArgument::ConstU32(_)
-                | GenericArgument::ConstU32Expr(_)
-                | GenericArgument::ConstQuantity(_)
-                | GenericArgument::ConstGeneric { .. } => Type::Error,
-            })
-            .collect::<Vec<_>>();
-        let Some(signature) = self.signatures.instantiate_callable(definition, &arguments) else {
+        let Ok(signature) = self
+            .signatures
+            .instantiate_callable_generic(definition, &arguments)
+        else {
             self.error(
                 span,
                 "G4140",

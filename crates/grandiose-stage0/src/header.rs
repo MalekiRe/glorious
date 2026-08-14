@@ -931,10 +931,9 @@ impl Parser<'_> {
         }
         while self.current().is_some() && !self.at_punctuation('}') {
             let start = self.current().unwrap();
-            let resumption = self.quantity().unwrap_or(Quantity::ONCE);
-            let has_quantity = self
-                .previous()
-                .is_some_and(|index| self.lexed.tokens[index].kind == TokenKind::Punctuation(']'));
+            let resumption = self.quantity();
+            let has_quantity = resumption.is_some();
+            let resumption = resumption.unwrap_or(Quantity::ONCE);
             let name = self.identifier().unwrap_or_else(|| {
                 self.error("G3249", "expected effect operation name");
                 "<error>".into()
@@ -1059,9 +1058,11 @@ impl Parser<'_> {
         if !self.punctuation('[') {
             return None;
         }
-        let lower = self.integer(
+        let lower = self.structural_integer_expression(
             "G3257",
             "resumption quantity lower bound must be a non-negative integer",
+            "G3265",
+            "resumption quantity arithmetic overflowed or divided by zero",
         );
         if !self.punctuation(',') {
             self.error("G3258", "expected `,` between resumption quantity bounds");
@@ -1070,9 +1071,11 @@ impl Parser<'_> {
             self.position += 1;
             None
         } else {
-            Some(self.integer(
+            Some(self.structural_integer_expression(
                 "G3259",
                 "resumption quantity upper bound must be a non-negative integer or `*`",
+                "G3265",
+                "resumption quantity arithmetic overflowed or divided by zero",
             ))
         };
         if !self.punctuation(']') {

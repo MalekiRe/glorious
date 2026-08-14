@@ -42,9 +42,9 @@ fn callable_signatures_preserve_const_binder_kinds_and_reject_type_misuse() {
 }
 
 #[test]
-fn generic_instantiation_validates_kinds_before_type_only_lowering() {
+fn generic_instantiation_preserves_all_source_kinds_before_runtime_lowering() {
     let package = PackageKey("signature-generic-instantiation-boundary@0.1.0".into());
-    let source = "pub fn typed<T>(value: T) -> T { value } pub fn region<'a>() -> i64 { 0 } pub fn row<e: EffectRow>() -> i64 { 0 } pub fn count<n: u32>() -> i64 { 0 } pub struct region_record<'a> {}";
+    let source = "pub fn typed<T>(value: T) -> T { value } pub fn region<'a>() -> i64 { 0 } pub fn row<e: EffectRow>() -> i64 { 0 } pub fn count<n: u32>() -> i64 { 0 } pub fn quota<q: Quantity>() -> Budget<q> { panic } pub struct Budget<q: Quantity> {} pub struct region_record<'a> {}";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -70,11 +70,17 @@ fn generic_instantiation_validates_kinds_before_type_only_lowering() {
         ("region", GenericArgument::Lifetime(Lifetime::Static)),
         ("row", GenericArgument::EffectRow(EffectRow::empty())),
         ("count", GenericArgument::ConstU32(3)),
+        (
+            "quota",
+            GenericArgument::ConstQuantity(Quantity::new(1, Some(2)).unwrap()),
+        ),
     ] {
-        assert!(matches!(
-            signatures.instantiate_callable_generic(definition(name), std::slice::from_ref(&argument)),
-            Err(InstantiationError::RequiresType { slot: 0, argument: found }) if *found == argument
-        ));
+        assert!(
+            signatures
+                .instantiate_callable_generic(definition(name), std::slice::from_ref(&argument))
+                .is_ok(),
+            "callable substitution lost source kind for `{name}`"
+        );
     }
     let argument = GenericArgument::Lifetime(Lifetime::Static);
     assert!(matches!(
@@ -321,6 +327,43 @@ fn nominal_const_applications_normalize_literal_arithmetic() {
         result("budget"),
         Type::Nominal { arguments, .. }
             if arguments == vec![GenericArgument::ConstQuantity(Quantity::new(5, Some(12)).unwrap())]
+    ));
+}
+
+#[test]
+fn effect_quantity_arguments_and_resumption_bounds_preserve_kind_and_normal_form() {
+    let package = PackageKey("signature-effect-quantity-contract@0.1.0".into());
+    let source = "effect Retry<budget: Quantity> { [1 + 1, 3 * 2] retry() -> i64; }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let retry = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Retry"))
+        .expect("effect definition")
+        .key;
+    let budget = GenericArgument::ConstQuantity(Quantity::new(2, Some(4)).unwrap());
+    let (index, operation) = signatures
+        .instantiate_effect_operation_generic(retry, std::slice::from_ref(&budget), &[], "retry")
+        .expect("quantity application must satisfy the effect kind contract");
+    assert_eq!(index, 0);
+    assert_eq!(operation.resumption, Quantity::new(2, Some(6)).unwrap());
+    assert!(matches!(
+        signatures.instantiate_effect_operation_generic(
+            retry,
+            &[GenericArgument::ConstU32(2)],
+            &[],
+            "retry"
+        ),
+        Err(InstantiationError::WrongKind { .. })
     ));
 }
 

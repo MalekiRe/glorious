@@ -140,6 +140,11 @@ pub struct ElaboratedEffectOperation {
     /// Declaration and operation binders share this namespace.  The first
     /// `effect_generics` slots belong to the protocol declaration.
     pub generics: u32,
+    /// Full declaration-plus-operation generic kinds in the same slot order
+    /// as `generics`. Effect instantiation must retain quantity, region, and
+    /// row identity rather than forcing every protocol argument through a
+    /// type-only substitution boundary.
+    pub generic_kinds: Vec<GenericKind>,
     pub parameters: Vec<Type>,
     pub result: Type,
     pub terminal: bool,
@@ -684,9 +689,33 @@ impl ElaboratedInterface {
         else {
             return Err(InstantiationError::WrongLayout);
         };
-        let arguments = validated_type_arguments(&signature.generic_kinds, arguments)?;
-        self.instantiate_callable(definition, &arguments)
-            .ok_or(InstantiationError::WrongLayout)
+        validate_generic_arguments(&signature.generic_kinds, arguments)?;
+        Ok(CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: signature
+                .parameters
+                .iter()
+                .cloned()
+                .map(|ty| substitute_alias_generic_identity(ty, arguments))
+                .collect(),
+            result: substitute_alias_generic_identity(signature.result.clone(), arguments),
+            effects: substitute_alias_generic_identity_effect_row(
+                signature.effects.clone(),
+                arguments,
+            ),
+            invocation: signature.invocation,
+            where_bounds: signature
+                .where_bounds
+                .iter()
+                .map(|(subject, relation)| {
+                    (
+                        substitute_alias_generic_identity(subject.clone(), arguments),
+                        substitute_trait_reference(relation, arguments),
+                    )
+                })
+                .collect(),
+        })
     }
 
     pub fn instantiate_callable(
@@ -744,21 +773,42 @@ impl ElaboratedInterface {
         else {
             return Err(InstantiationError::WrongLayout);
         };
-        let declaration = validated_type_arguments(&effect.generic_kinds, arguments)?;
-        let operation_count = effect
+        validate_generic_arguments(&effect.generic_kinds, arguments)?;
+        let operation = effect
             .operations
             .iter()
             .find(|operation| operation.name == name)
-            .ok_or(InstantiationError::MissingMember)?
-            .generics
-            .checked_sub(effect.generics)
-            .ok_or(InstantiationError::WrongLayout)? as usize;
-        let operation = validated_type_arguments(
-            &vec![GenericKind::Type; operation_count],
-            operation_arguments,
-        )?;
-        self.instantiate_effect_operation(definition, &declaration, &operation, name)
-            .ok_or(InstantiationError::WrongLayout)
+            .ok_or(InstantiationError::MissingMember)?;
+        let operation_kinds = operation
+            .generic_kinds
+            .get(effect.generics as usize..)
+            .ok_or(InstantiationError::WrongLayout)?;
+        validate_generic_arguments(operation_kinds, operation_arguments)?;
+        let mut substitutions = arguments.to_vec();
+        substitutions.extend_from_slice(operation_arguments);
+        let (index, operation) = effect
+            .operations
+            .iter()
+            .enumerate()
+            .find(|(_, operation)| operation.name == name)
+            .ok_or(InstantiationError::MissingMember)?;
+        Ok((
+            index as u32,
+            ElaboratedEffectOperation {
+                name: operation.name.clone(),
+                generics: 0,
+                generic_kinds: vec![],
+                parameters: operation
+                    .parameters
+                    .iter()
+                    .cloned()
+                    .map(|ty| substitute_alias_generic_identity(ty, &substitutions))
+                    .collect(),
+                result: substitute_alias_generic_identity(operation.result.clone(), &substitutions),
+                terminal: operation.terminal,
+                resumption: operation.resumption,
+            },
+        ))
     }
 
     pub fn instantiate_effect_operation(
@@ -790,6 +840,7 @@ impl ElaboratedInterface {
             ElaboratedEffectOperation {
                 name: operation.name.clone(),
                 generics: 0,
+                generic_kinds: vec![],
                 parameters: operation
                     .parameters
                     .iter()
@@ -1122,6 +1173,42 @@ fn validated_type_arguments(
             }
         })
         .collect()
+}
+
+/// Validate a source-kind-preserving substitution. Effect operation
+/// instantiation is identity-sensitive rather than type-only: it may carry
+/// lifetime, row, `u32`, and quantity arguments through nested parameter and
+/// effect-row terms even when no runtime value is produced for those slots.
+fn validate_generic_arguments(
+    kinds: &[GenericKind],
+    arguments: &[GenericArgument],
+) -> Result<(), InstantiationError> {
+    if kinds.len() != arguments.len() {
+        return Err(InstantiationError::WrongArity {
+            expected: kinds.len(),
+            found: arguments.len(),
+        });
+    }
+    for (slot, (kind, argument)) in kinds.iter().zip(arguments).enumerate() {
+        let valid = match (kind, argument) {
+            (GenericKind::Type, GenericArgument::Type(_))
+            | (GenericKind::EffectRow, GenericArgument::EffectRow(_))
+            | (GenericKind::Lifetime, GenericArgument::Lifetime(_))
+            | (GenericKind::Const(ConstKind::U32), GenericArgument::ConstU32(_))
+            | (GenericKind::Const(ConstKind::Quantity), GenericArgument::ConstQuantity(_)) => true,
+            (GenericKind::Const(expected), GenericArgument::ConstGeneric { kind: found, .. }) => {
+                expected == found
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(InstantiationError::WrongKind {
+                slot,
+                expected: *kind,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn normalize_callable_signature(
@@ -2194,6 +2281,12 @@ impl Elaborator<'_> {
                 ElaboratedEffectOperation {
                     name: operation.name.clone(),
                     generics: base + operation.generics.len() as u32,
+                    generic_kinds: header
+                        .generics
+                        .kinds()
+                        .into_iter()
+                        .chain(operation.generics.kinds())
+                        .collect(),
                     parameters: operation
                         .parameters
                         .iter()

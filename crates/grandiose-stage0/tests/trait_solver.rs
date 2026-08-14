@@ -344,6 +344,34 @@ fn tabled_solver_matches_structural_const_trait_arguments() {
 }
 
 #[test]
+fn tabled_solver_substitutes_quantity_binders_without_aliasing_intervals() {
+    let (interface, signatures) = signatures(
+        "trait Budget<q: Quantity> {} struct Packet<q: Quantity> {} impl<q: Quantity> Budget<q> for Packet<q> {}",
+    );
+    let budget = key(&interface, "Budget");
+    let packet = key(&interface, "Packet");
+    let accepted = Quantity::new(1, Some(2)).unwrap();
+    let relation = |quantity| ElaboratedTraitReference {
+        definition: budget,
+        arguments: vec![GenericArgument::ConstQuantity(quantity)],
+    };
+    let subject = Type::Nominal {
+        definition: packet,
+        arguments: vec![GenericArgument::ConstQuantity(accepted)],
+    };
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: relation(accepted),
+        subject: subject.clone(),
+    });
+    assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
+    let rejected = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: relation(Quantity::new(1, Some(3)).unwrap()),
+        subject,
+    });
+    assert_eq!(rejected, TraitAnswer::NoSolution);
+}
+
+#[test]
 fn trait_solver_rejects_cross_kind_const_substitution() {
     let (interface, signatures) = signatures(
         "trait Capacity<n: u32> {} struct Tag<n: u32> {} impl<n: u32> Capacity<n> for Tag<n> {}",

@@ -178,6 +178,23 @@ fn typed_core_retains_explicit_direct_callable_generic_arguments() {
 }
 
 #[test]
+fn typed_core_substitutes_explicit_quantity_callable_arguments() {
+    let core = core_for(
+        "core-explicit-quantity-generic@0.1.0",
+        "pub struct Budget<q: Quantity> {} pub fn identity<q: Quantity>(value: Budget<q>) -> Budget<q> { value } pub fn main(value: Budget<[1, 2]>) -> Budget<[1, 2]> { identity<[1, 2]>(value) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::Function { arguments, .. }
+                if arguments.as_slice()
+                    == [GenericArgument::ConstQuantity(Quantity::new(1, Some(2)).unwrap())]
+        )
+    }));
+}
+
+#[test]
 fn typed_core_retains_explicit_trait_method_generic_arguments() {
     let core = core_for(
         "core-explicit-trait-generic@0.1.0",
@@ -2588,6 +2605,73 @@ fn exact_one_shot_tail_resumption_lowers_to_a_runtime_handler_frame() {
         instructions
             .iter()
             .any(|instruction| matches!(instruction, MirInstruction::Resume { .. }))
+    );
+}
+
+#[test]
+fn normalized_quantity_bounds_drive_finite_resumption_core_and_mir_contracts() {
+    let package = PackageKey("core-handler-quantity-arithmetic@0.1.0".into());
+    let source = "effect Ask<budget: Quantity> { [1 + 1, 3 - 1] ask() -> i64; } pub fn main() -> i64 { handle Ask<[2, 2]>::ask() { Ask<[2, 2]>::ask() with resume => resume(40) + resume(41) } }";
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let continuation = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Handle { clauses, .. } => clauses.first()?.continuation.as_ref(),
+            _ => None,
+        })
+        .expect("handler continuation contract");
+    assert_eq!(continuation.invocation, Quantity::new(2, Some(2)).unwrap());
+    assert_eq!(continuation.direct_uses, 2);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    let mir = MirLowering::lower(definition.key, &core, &flow)
+        .function
+        .expect("finite normalized resumption lowers to MIR");
+    assert!(mir.validate().is_ok(), "{mir:#?}");
+    assert!(
+        mir.blocks.len() >= 2,
+        "finite replay must retain an executable MIR schedule: {mir:#?}"
+    );
+}
+
+#[test]
+fn normalized_quantity_bounds_reject_implicit_one_shot_resumption() {
+    let core = core_for(
+        "core-handler-quantity-arithmetic-rejection@0.1.0",
+        "effect Ask<budget: Quantity> { [1 + 1, 3 - 1] ask() -> i64; } pub fn main() -> i64 { handle Ask<[2, 2]>::ask() { Ask<[2, 2]>::ask() => 42 } }",
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6005"),
+        "tail resumption must not be admitted by a normalized exact-two contract: {:#?}",
+        core.diagnostics
     );
 }
 

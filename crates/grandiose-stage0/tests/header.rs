@@ -554,6 +554,43 @@ fn terminal_effect_operations_reject_resumption_quantities() {
 }
 
 #[test]
+fn effect_resumption_bounds_share_structural_quantity_normalization() {
+    let package = PackageKey("header-effect-quantity-arithmetic@0.1.0".into());
+    let source = "effect Retry { [(1 + 1), 3 * 2] retry() -> i64; }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Effect(effect) = parsed.header else {
+        panic!("expected effect header")
+    };
+    assert_eq!(
+        effect.operations[0].resumption,
+        Quantity::new(2, Some(6)).unwrap()
+    );
+}
+
+#[test]
+fn effect_resumption_quantity_arithmetic_reports_deterministic_overflow() {
+    let package = PackageKey("header-effect-quantity-overflow@0.1.0".into());
+    let source = "effect Retry { [18446744073709551615 + 1, 2] retry(); }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert_eq!(
+        parsed
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "G3265")
+            .count(),
+        1,
+        "{parsed:#?}"
+    );
+}
+
+#[test]
 fn callable_headers_preserve_closed_effect_row_annotations() {
     let package = PackageKey("header-effect-row@0.1.0".into());
     let source = "fn read() -> i64 / { Console, Trace } { 0 }";
