@@ -1969,9 +1969,60 @@ impl ElaboratedInterface {
         arguments: &[GenericArgument],
     ) -> Result<Vec<NominalField>, InstantiationError> {
         let kinds = self.nominal_kinds(definition)?;
-        let arguments = validated_type_arguments(kinds, arguments)?;
-        self.instantiate_struct_fields(definition, &arguments)
-            .ok_or(InstantiationError::WrongLayout)
+        validate_generic_arguments(kinds, arguments)?;
+        // VM nominal signatures retain type and structural-const identity,
+        // but not region or effect-row identity. Keep that executable-layout
+        // boundary explicit while allowing const-generic layouts to cross it;
+        // the former type-only query rejected both categories together.
+        if let Some((slot, argument)) = arguments.iter().enumerate().find(|(_, argument)| {
+            matches!(
+                argument,
+                GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_)
+            )
+        }) {
+            return Err(InstantiationError::RequiresType {
+                slot,
+                argument: Box::new(argument.clone()),
+            });
+        }
+        let Some(ElaboratedHeader::Nominal {
+            generic_kinds,
+            layout,
+            ..
+        }) = self.definitions.get(&definition)
+        else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        if generic_kinds.len() != arguments.len() {
+            return Err(InstantiationError::WrongArity {
+                expected: generic_kinds.len(),
+                found: arguments.len(),
+            });
+        }
+        let ElaboratedNominalLayout::Struct(fields) = layout else {
+            return Err(InstantiationError::WrongLayout);
+        };
+        Ok(fields
+            .iter()
+            .map(|field| {
+                let ty = substitute_alias_generic_identity(field.ty.clone(), arguments);
+                // A layout can carry a declaration-owned projection that only
+                // becomes concrete once this nominal application supplies
+                // its complete mixed-kind argument vector.  Normalize it at
+                // the shared interface query so Core, MIR copy descriptors,
+                // and source-level field access agree on the executable
+                // field type. Symbolic generic projections remain intact.
+                let ty = crate::TraitSolver::new(self)
+                    .normalize_type(ty)
+                    .unwrap_or_else(|_| {
+                        substitute_alias_generic_identity(field.ty.clone(), arguments)
+                    });
+                NominalField {
+                    name: field.name.clone(),
+                    ty,
+                }
+            })
+            .collect())
     }
 
     pub fn instantiate_struct_fields(

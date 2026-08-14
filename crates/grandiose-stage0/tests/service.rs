@@ -2835,6 +2835,35 @@ fn service_enforces_trait_method_value_associated_bindings() {
 }
 
 #[test]
+fn service_instantiates_nominal_field_associated_type_projections() {
+    let source = "trait Has { type Item; } impl Has for i64 { type Item = i64; } pub struct Box { item: <i64 as Has>::Item } pub fn main() -> i64 { let value = Box { item: 41 }; value.item + 1 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let rejected = "trait Has { type Item; } impl Has for i64 { type Item = Text; } pub struct Box { item: <i64 as Has>::Item } pub fn main() -> i64 { let value = Box { item: 41 }; 0 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(rejected))
+    else {
+        panic!("a nominal field projection accepted the wrong concrete item type");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4126"),
+        "missing instantiated nominal field mismatch diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_instantiates_structural_const_nominal_layouts_at_record_construction() {
+    let source = "pub struct Carrier<n: u32, T> { value: T } pub fn main() -> i64 { let value = Carrier<7, i64> { value: 41 }; value.value + 1 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_lowers_structural_is_patterns_into_verified_vm_tests() {
     let enum_source = "pub enum Result { Ok(i64), Err(Text) } pub fn main() -> Bool { Result::Ok(42) is Result::Ok(42) }";
     let outcome = StageZeroCompiler::new()

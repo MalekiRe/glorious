@@ -6289,7 +6289,10 @@ fn validate_vm_nominal_copy_descriptors(
             });
         }
         for argument in &descriptor.arguments {
-            validate_vm_type(argument)?;
+            // These are nominal identity slots, not value registers. A
+            // structural const is valid metadata here even though it is
+            // rejected as a standalone runtime value type.
+            validate_vm_nominal_argument_type(argument)?;
         }
         for variant in &descriptor.variants {
             for field in variant {

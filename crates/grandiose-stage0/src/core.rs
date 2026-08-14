@@ -6619,9 +6619,14 @@ impl Elaborator<'_> {
                 self.recovered = true;
                 continue;
             };
-            let value = self.expression_expected(value, Some(field.ty.clone()));
+            // A generic nominal layout is instantiated at this constructor
+            // boundary.  Its field may contain a now-concrete associated
+            // projection, so normalize it before handing the expectation to
+            // body inference or freezing it into Core/MIR.
+            let field_ty = self.normalize_concrete_type_projections(field.ty);
+            let value = self.expression_expected(value, Some(field_ty.clone()));
             let actual = self.expressions[value.0 as usize].ty.clone();
-            if self.unify_rigid_lifetimes(field.ty, actual, span).is_err() {
+            if self.unify_rigid_lifetimes(field_ty, actual, span).is_err() {
                 self.error(
                     span,
                     "G4126",
@@ -6811,13 +6816,18 @@ impl Elaborator<'_> {
         else {
             return self.fail(span, "G4129", "struct does not declare the requested field");
         };
+        // Layout instantiation can turn an interface-owned projection into a
+        // concrete goal. Normalize at the same field boundary as record
+        // construction so Core and MIR never retain a projection whose
+        // selected implementation is already known.
+        let field_ty = self.normalize_concrete_type_projections(field.ty);
         self.alloc(
             CoreKind::Field {
                 base,
                 index: index as u32,
                 field_count,
             },
-            field.ty,
+            field_ty,
             span,
         )
     }
