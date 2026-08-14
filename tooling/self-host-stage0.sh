@@ -108,6 +108,7 @@ runtime_manifest=(
     --runtime-leaf int-convert-wrapping-to-usize crate __g1_int_convert_wrapping_to_usize
     --runtime-leaf int-convert-checked-to-u8 crate __g1_int_convert_checked_to_u8
     --runtime-leaf int-convert-wrapping-to-u8 crate __g1_int_convert_wrapping_to_u8
+    --runtime-leaf int-convert-checked-to-u16 crate __g1_int_convert_checked_to_u16
 )
 
 case "$mode" in
