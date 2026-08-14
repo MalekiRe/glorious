@@ -605,7 +605,7 @@ fn generic_associated_type_defaults_substitute_trait_and_item_binders() {
             },
         },
         "Output",
-        &[Type::Scalar(ScalarType::Text)],
+        &[GenericArgument::Type(Type::Scalar(ScalarType::Text))],
     );
     assert!(matches!(
         answer,
@@ -641,6 +641,33 @@ fn explicit_associated_type_definitions_override_trait_defaults() {
             ty: Type::Scalar(ScalarType::I64),
             ..
         }
+    ));
+}
+
+#[test]
+fn associated_effect_row_defaults_normalize_when_a_positive_impl_omits_the_item() {
+    let (interface, signatures) = signatures(
+        "effect Trace { note(); } trait Capability { type Effects: EffectRow = { Trace }; } struct Value {} impl Capability for Value {}",
+    );
+    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+    let answer = TraitSolver::new(&signatures).normalize_associated_effect_row_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: key(&interface, "Capability"),
+                arguments: vec![],
+            },
+            subject: Type::Nominal {
+                definition: key(&interface, "Value"),
+                arguments: vec![],
+            },
+        },
+        "Effects",
+        &[],
+    );
+    assert!(matches!(
+        answer,
+        TraitEffectRowProjectionAnswer::Normalized { row, .. }
+            if row.effects.iter().any(|effect| effect.definition == key(&interface, "Trace"))
     ));
 }
 #[test]
