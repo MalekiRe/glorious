@@ -103,6 +103,7 @@ runtime_manifest=(
     --runtime-leaf int-convert-checked-to-i64 crate __g1_int_convert_checked_to_i64
     --runtime-leaf int-convert-wrapping-to-i64 crate __g1_int_convert_wrapping_to_i64
     --runtime-leaf int-convert-checked-to-u32 crate __g1_int_convert_checked_to_u32
+    --runtime-leaf int-convert-wrapping-to-u32 crate __g1_int_convert_wrapping_to_u32
 )
 
 case "$mode" in
