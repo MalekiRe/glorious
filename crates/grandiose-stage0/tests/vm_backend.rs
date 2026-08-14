@@ -414,6 +414,48 @@ fn schema_26_leave_payload_mutations_reject_before_vm_execution() {
 }
 
 #[test]
+fn program_envelope_rejects_truncation_and_function_count_amplification_before_allocation() {
+    let entry = DefKey(Digest::of_bytes(b"program-decode-limit-entry"));
+    let function = VmFunction {
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry,
+        functions: BTreeMap::from([(entry, function)]),
+        fingerprint: Digest::of_bytes(b"program-decode-limit-fingerprint"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    for length in 0..bytes.len() {
+        assert!(
+            decode_program(&bytes[..length]).is_err(),
+            "truncated program at {length}"
+        );
+    }
+    // Program envelope: magic (8), schema (4), entry (32), fingerprint (32),
+    // no manifest tag (1), then the bounded function-count vector.
+    let mut amplified = bytes;
+    amplified[77..85]
+        .copy_from_slice(&(grandiose_stage0::STAGE0_MAX_DECODE_FUNCTIONS + 1).to_le_bytes());
+    assert!(matches!(
+        decode_and_verify_program(&amplified),
+        Err(VmArtifactError::DecodeLimit {
+            kind: "functions",
+            limit: grandiose_stage0::STAGE0_MAX_DECODE_FUNCTIONS,
+        })
+    ));
+}
+
+#[test]
 fn cleanup_carrying_leave_has_standalone_and_multifunction_program_parity() {
     let standalone_definition = DefKey(Digest::of_bytes(b"leave-parity-standalone"));
     let standalone_function = cleanup_carrying_leave_entry(

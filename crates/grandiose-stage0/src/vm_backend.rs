@@ -620,10 +620,15 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Older layouts cannot be decoded safely because the operation field now
 /// follows a sequence of canonical VM types.
 pub const STAGE0_VM_SCHEMA: u32 = 26;
-const MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
-const MAX_DECODE_REGISTERS: u64 = 1 << 20;
-const MAX_DECODE_INSTRUCTIONS: u64 = 1 << 22;
-const MAX_DECODE_TEXT_BYTES: u64 = 1 << 26;
+/// Static process-boundary decoding caps, enforced before vector allocation.
+pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
+pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
+pub const STAGE0_MAX_DECODE_INSTRUCTIONS: u64 = 1 << 22;
+pub const STAGE0_MAX_DECODE_TEXT_BYTES: u64 = 1 << 26;
+const MAX_DECODE_FUNCTIONS: u64 = STAGE0_MAX_DECODE_FUNCTIONS;
+const MAX_DECODE_REGISTERS: u64 = STAGE0_MAX_DECODE_REGISTERS;
+const MAX_DECODE_INSTRUCTIONS: u64 = STAGE0_MAX_DECODE_INSTRUCTIONS;
+const MAX_DECODE_TEXT_BYTES: u64 = STAGE0_MAX_DECODE_TEXT_BYTES;
 const MAX_DECODE_TYPE_DEPTH: u64 = 128;
 
 pub fn encode_artifact(artifact: &CandidateVmArtifact) -> Vec<u8> {
