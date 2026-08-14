@@ -1455,6 +1455,12 @@ fn service_rejects_a_direct_one_resume_lowering_for_an_exact_two_shot_contract()
             .any(|diagnostic| diagnostic.code == "G6005"),
         "missing direct-resumption quantity diagnostic: {diagnostics:#?}"
     );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5012"),
+        "missing structured continuation-use diagnostic: {diagnostics:#?}"
+    );
 }
 
 #[test]
@@ -1519,6 +1525,38 @@ fn service_materializes_named_functions_as_first_class_callable_values() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_excessive_local_callable_use_before_mir() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn twice(function: (i64) -> i64) -> i64 { function(20) + function(21) } pub fn main() -> i64 { twice(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("twice-used exact callable unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing structured callable-use diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_multiplies_captured_callable_use_by_closure_invocations() {
+    let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn through_closure(function: (i64) -> i64) -> i64 { let call = (value: i64) -> i64 { function(value) }; call(20) + call(21) } pub fn main() -> i64 { through_closure(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("repeated closure capture unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing captured callable-use diagnostic: {diagnostics:#?}"
+    );
 }
 
 #[test]
