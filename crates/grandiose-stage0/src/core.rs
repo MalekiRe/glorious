@@ -4546,60 +4546,29 @@ impl Elaborator<'_> {
         }
     }
 
-    /// Existing callable and effect-operation signature substitution is
-    /// deliberately type-valued. Keep that boundary explicit instead of
-    /// coercing a well-kinded source row, lifetime, or const into `Type::Error`.
+    /// Create omitted method arguments in their own semantic domains. Trait
+    /// selection consumes these same values, so a row or const never has to
+    /// masquerade as a value type just to reach substitution.
     fn inferred_method_generic_arguments(
         &mut self,
         kinds: &[crate::GenericKind],
-    ) -> (Vec<GenericArgument>, Vec<Type>) {
-        // Trait selection's current signature-instantiation API has one
-        // placeholder per declared method binder.  Preserve the real kind in
-        // Core metadata and use an internal non-type placeholder only for
-        // that legacy type-indexed selector; otherwise a lifetime binder
-        // would escape as a spurious `Type::Infer` at the Core boundary.
+    ) -> Vec<GenericArgument> {
         kinds
             .iter()
             .enumerate()
             .map(|(index, kind)| match kind {
-                crate::GenericKind::Type => {
-                    let ty = self.inference.fresh();
-                    (GenericArgument::Type(ty.clone()), ty)
-                }
+                crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
                 crate::GenericKind::EffectRow => {
-                    (GenericArgument::EffectRow(EffectRow::empty()), Type::Error)
+                    GenericArgument::EffectRow(self.inference.fresh_effects())
                 }
+                // Preserve declaration-region identity until call lifetime
+                // opening relates it to the actual receiver or value.
                 crate::GenericKind::Lifetime => {
-                    (GenericArgument::Lifetime(Lifetime::Elided), Type::Error)
+                    GenericArgument::Lifetime(Lifetime::Generic(index as u32))
                 }
-                crate::GenericKind::Const(kind) => (
-                    GenericArgument::ConstGeneric {
-                        index: index as u32,
-                        kind: *kind,
-                    },
-                    Type::Error,
-                ),
+                crate::GenericKind::Const(kind) => self.inference.fresh_const(*kind),
             })
-            .unzip()
-    }
-
-    fn generic_arguments_as_types(
-        &mut self,
-        arguments: Vec<GenericArgument>,
-        span: Span,
-        code: &'static str,
-        message: &'static str,
-    ) -> Option<Vec<Type>> {
-        let mut values = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            let GenericArgument::Type(value) = argument else {
-                self.error(span, code, message);
-                self.recovered = true;
-                return None;
-            };
-            values.push(value);
-        }
-        Some(values)
+            .collect()
     }
     fn header_path(
         &mut self,
@@ -6680,7 +6649,7 @@ impl Elaborator<'_> {
         ) else {
             return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
         };
-        let (method_arguments, method_types) = if operation_arguments.is_empty() {
+        let method_arguments = if operation_arguments.is_empty() {
             self.inferred_method_generic_arguments(&method_generic_kinds)
         } else {
             if operation_arguments.len() != method_generic_kinds.len() {
@@ -6690,20 +6659,13 @@ impl Elaborator<'_> {
                     "trait method operation arguments do not match its declaration",
                 ));
             }
-            let method_arguments = self.body_generic_arguments(
+            self.body_generic_arguments(
                 &operation_arguments,
                 &method_generic_kinds,
                 span,
                 "G4168",
                 "trait method operation arguments do not match its declaration",
-            )?;
-            let method_types = self.generic_arguments_as_types(
-                method_arguments.clone(),
-                span,
-                "G4168",
-                "qualified trait methods require type-valued operation arguments",
-            )?;
-            (method_arguments, method_types)
+            )?
         };
         let answer = TraitSolver::new(self.signatures).select_method(
             TraitGoal {
@@ -6714,7 +6676,7 @@ impl Elaborator<'_> {
                 subject: self.zonk_type(subject, span),
             },
             name,
-            &method_types,
+            &method_arguments,
         );
         let (evidence, method, signature) = match answer {
             TraitMethodAnswer::Selected {
@@ -6856,7 +6818,7 @@ impl Elaborator<'_> {
             ));
         };
         let subject = self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
-        let (method_arguments, method_types) = if operation_arguments.is_empty() {
+        let method_arguments = if operation_arguments.is_empty() {
             self.inferred_method_generic_arguments(&method_generic_kinds)
         } else {
             if operation_arguments.len() != method_generic_kinds.len() {
@@ -6866,20 +6828,13 @@ impl Elaborator<'_> {
                     "trait method operation arguments do not match its declaration",
                 ));
             }
-            let method_arguments = self.body_generic_arguments(
+            self.body_generic_arguments(
                 &operation_arguments,
                 &method_generic_kinds,
                 span,
                 "G4168",
                 "trait method operation arguments do not match its declaration",
-            )?;
-            let method_types = self.generic_arguments_as_types(
-                method_arguments.clone(),
-                span,
-                "G4168",
-                "qualified trait methods require type-valued operation arguments",
-            )?;
-            (method_arguments, method_types)
+            )?
         };
         let answer = TraitSolver::new(self.signatures).select_method(
             TraitGoal {
@@ -6890,7 +6845,7 @@ impl Elaborator<'_> {
                 subject,
             },
             name,
-            &method_types,
+            &method_arguments,
         );
         let (evidence, method, signature) = match answer {
             TraitMethodAnswer::Selected {

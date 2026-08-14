@@ -5,9 +5,9 @@ use grandiose_stage0::{
     EffectRow, EffectRowProjection, EnvironmentBrand, GenericArgument, GenericKind, InferVar,
     InstanceKey, Lifetime, LoanFact, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment,
     MirCleanupPlan, MirContinuationPolicy, MirEditor, MirFunction, MirInstance, MirInstruction,
-    MirLocal, MirLocalDecl, MirPattern, MirPatternField, MirProgram, MirTerminator, MoveFact,
-    Mutability, Quantity, ScalarType, Type, VmArtifactError, emit_vm, emit_vm_program,
-    optimize_mir, verify_vm,
+    MirLocal, MirLocalDecl, MirPattern, MirPatternField, MirProgram, MirTerminator,
+    MirTraitMethodInstance, MoveFact, Mutability, Quantity, ScalarType, Type, VmArtifactError,
+    emit_vm, emit_vm_program, optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -797,6 +797,46 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
     assert!(
         emit_vm_program(&program).is_err(),
         "VM emission must independently reject a forged unresolved const hole"
+    );
+
+    let mut trait_metadata = graph();
+    trait_metadata.blocks[0]
+        .instructions
+        .push(MirInstruction::Call {
+            dst: MirLocal(1),
+            callee: DefKey(Digest::of_bytes(b"trait-metadata-target")),
+            generic_arguments: vec![],
+            trait_instance: Some(MirTraitMethodInstance {
+                evidence: DefKey(Digest::of_bytes(b"trait-metadata-evidence")),
+                trait_arguments: vec![GenericArgument::EffectRow(EffectRow {
+                    effects: BTreeSet::new(),
+                    projections: vec![],
+                    tail: Some(grandiose_stage0::EffectTail::Infer(
+                        grandiose_stage0::EffectVar(2),
+                    )),
+                })],
+                method_arguments: vec![GenericArgument::ConstInfer {
+                    variable: ConstInferVar(3),
+                    kind: ConstKind::U32,
+                }],
+            }),
+            arguments: vec![],
+        });
+    let entry = trait_metadata.definition;
+    let program = MirProgram {
+        entry,
+        functions: BTreeMap::from([(entry, trait_metadata)]),
+        instances: BTreeMap::new(),
+    };
+    assert!(
+        program
+            .validate()
+            .is_err_and(|error| error.contains("unresolved inference")),
+        "trait method metadata must reject native-domain inference before VM erasure"
+    );
+    assert!(
+        emit_vm_program(&program).is_err(),
+        "VM emission must independently reject forged trait method metadata"
     );
 
     let mut escaped_effect_lifetime = graph();

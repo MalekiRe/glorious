@@ -1914,8 +1914,30 @@ fn instantiate_trait_method_contract(
     let implementation_generic_count = implementation.generics;
     let mut arguments = implementation.relation.arguments.clone();
     arguments.extend(
-        (0..method.generics)
-            .map(|offset| GenericArgument::Type(Type::Generic(implementation.generics + offset))),
+        method
+            .generic_kinds
+            .iter()
+            .enumerate()
+            .map(|(offset, kind)| {
+                let implementation_slot = implementation.generics + offset as u32;
+                match kind {
+                    GenericKind::Type => GenericArgument::Type(Type::Generic(implementation_slot)),
+                    GenericKind::EffectRow => GenericArgument::EffectRow(EffectRow {
+                        effects: BTreeSet::new(),
+                        projections: vec![],
+                        tail: Some(EffectTail::Generic(implementation_slot)),
+                    }),
+                    // Lifetime rebasing below translates this trait-method slot to
+                    // the implementation method's binder prefix.
+                    GenericKind::Lifetime => GenericArgument::Lifetime(Lifetime::Generic(
+                        trait_generic_count + offset as u32,
+                    )),
+                    GenericKind::Const(kind) => GenericArgument::ConstGeneric {
+                        index: implementation_slot,
+                        kind: *kind,
+                    },
+                }
+            }),
     );
     CallableSignature {
         generics: method.generics,
@@ -4462,7 +4484,16 @@ fn substitute_trait_type_generics(value: Type, arguments: &[GenericArgument]) ->
             referent,
         } => Type::Reference {
             mutability,
-            lifetime,
+            lifetime: match lifetime {
+                Lifetime::Generic(index) => arguments
+                    .get(index as usize)
+                    .and_then(|argument| match argument {
+                        GenericArgument::Lifetime(lifetime) => Some(*lifetime),
+                        _ => None,
+                    })
+                    .unwrap_or(lifetime),
+                lifetime => lifetime,
+            },
             referent: Box::new(substitute_trait_type_generics(*referent, arguments)),
         },
         Type::Callable {
@@ -4513,7 +4544,8 @@ fn generic_argument_as_const_type(argument: &GenericArgument, kind: ConstKind) -
 }
 
 fn substitute_trait_effect_row(value: EffectRow, arguments: &[GenericArgument]) -> EffectRow {
-    EffectRow {
+    let tail = value.tail;
+    let mut result = EffectRow {
         effects: value
             .effects
             .into_iter()
@@ -4549,7 +4581,14 @@ fn substitute_trait_effect_row(value: EffectRow, arguments: &[GenericArgument]) 
                     .collect(),
             })
             .collect(),
-        tail: value.tail,
+        tail,
+    };
+    if let Some(EffectTail::Generic(index)) = tail
+        && let Some(GenericArgument::EffectRow(row)) = arguments.get(index as usize)
+    {
+        result.effects.extend(row.effects.iter().cloned());
+        result.projections.extend(row.projections.iter().cloned());
+        result.tail = row.tail;
     }
-    .canonicalized()
+    result.canonicalized()
 }

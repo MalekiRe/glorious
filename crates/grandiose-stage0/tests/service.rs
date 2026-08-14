@@ -2217,6 +2217,14 @@ fn service_selects_explicit_trait_method_operation_arguments() {
 }
 
 #[test]
+fn service_selects_trait_methods_with_mixed_non_type_operation_arguments() {
+    let source = "trait Relay { fn relay<'a, e: EffectRow, n: u32, q: Quantity>(receiver: i64) -> i64 / {| e}; } impl Relay for i64 { fn relay<'a, e: EffectRow, n: u32, q: Quantity>(receiver: i64) -> i64 / {| e} { receiver } } pub fn main() -> i64 { Relay::relay<'static, {}, 7, [1, 1]>(42) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_selects_generic_qualified_trait_instances() {
     let source = "trait Identity<T> { fn identity(value: T) -> T; } impl<T> Identity<T> for T { fn identity(value: T) -> T { value } } pub fn main() -> i64 { Identity<i64>::identity(42) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

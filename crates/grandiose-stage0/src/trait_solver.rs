@@ -1478,7 +1478,7 @@ impl TraitSolver {
         &mut self,
         goal: TraitGoal,
         name: &str,
-        arguments: &[Type],
+        arguments: &[GenericArgument],
     ) -> TraitMethodAnswer {
         let goal = match self.find_method_goal(&goal, name, &mut Vec::new()) {
             SupertraitLookup::Found(goal) => goal,
@@ -1500,13 +1500,18 @@ impl TraitSolver {
                         found: arguments.len() as u32,
                     };
                 }
+                if !generic_arguments_match_kinds(arguments, &method.generic_kinds) {
+                    return TraitMethodAnswer::NoSolution;
+                }
                 let Some(mut substitution) = match_rule(&rule.implementation, &goal) else {
                     return TraitMethodAnswer::NoSolution;
                 };
                 for (offset, argument) in arguments.iter().cloned().enumerate() {
-                    substitution
-                        .types
-                        .insert(rule.implementation.generics + offset as u32, argument);
+                    install_item_argument(
+                        &mut substitution,
+                        rule.implementation.generics + offset as u32,
+                        argument,
+                    );
                 }
                 TraitMethodAnswer::Selected {
                     method: implementation_method_key(evidence, name),

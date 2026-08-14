@@ -1554,7 +1554,7 @@ fn method_selection_substitutes_impl_and_method_generic_arguments() {
             },
         },
         "convert",
-        &[Type::Scalar(ScalarType::Text)],
+        &[GenericArgument::Type(Type::Scalar(ScalarType::Text))],
     );
     let implementation = interface
         .definitions
@@ -1568,6 +1568,56 @@ fn method_selection_substitutes_impl_and_method_generic_arguments() {
                 && signature.parameters == vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)]
                 && signature.result == Type::Tuple(vec![Type::Scalar(ScalarType::I64), Type::Scalar(ScalarType::Text)])
     ));
+}
+
+#[test]
+fn method_selection_preserves_mixed_method_generic_argument_kinds() {
+    let (interface, signatures) = signatures(
+        "struct Token<'a, e: EffectRow, n: u32, q: Quantity> {} trait Relay { fn relay<'a, e: EffectRow, n: u32, q: Quantity>(value: Token<'a, e, n, q>) -> Token<'a, e, n, q> / {| e}; } impl Relay for i64 { fn relay<'a, e: EffectRow, n: u32, q: Quantity>(value: Token<'a, e, n, q>) -> Token<'a, e, n, q> / {| e} { value } }",
+    );
+    let answer = TraitSolver::new(&signatures).select_method(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: key(&interface, "Relay"),
+                arguments: vec![],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        },
+        "relay",
+        &[
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::EffectRow(EffectRow::empty()),
+            GenericArgument::ConstU32(7),
+            GenericArgument::ConstQuantity(Quantity::ONCE),
+        ],
+    );
+    let token = key(&interface, "Token");
+    assert!(
+        matches!(
+            answer,
+            TraitMethodAnswer::Selected { ref signature, .. }
+                if signature.parameters == vec![Type::Nominal {
+                    definition: token,
+                    arguments: vec![
+                        GenericArgument::Lifetime(Lifetime::Static),
+                        GenericArgument::EffectRow(EffectRow::empty()),
+                        GenericArgument::ConstU32(7),
+                        GenericArgument::ConstQuantity(Quantity::ONCE),
+                    ],
+                }]
+                    && signature.result == Type::Nominal {
+                        definition: token,
+                        arguments: vec![
+                            GenericArgument::Lifetime(Lifetime::Static),
+                            GenericArgument::EffectRow(EffectRow::empty()),
+                            GenericArgument::ConstU32(7),
+                            GenericArgument::ConstQuantity(Quantity::ONCE),
+                        ],
+                    }
+                    && signature.effects == EffectRow::empty()
+        ),
+        "{answer:#?}"
+    );
 }
 
 #[test]

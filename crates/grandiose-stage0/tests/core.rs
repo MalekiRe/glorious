@@ -1,11 +1,11 @@
 use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
-    ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, CorePattern, CorePlace,
-    DeclarationScan, DefKey, DefinitionIndex, Digest, EffectInstance, EffectRow,
-    EffectRowProjection, EffectTail, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey,
-    FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath,
-    MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span,
-    StructuralU32Expr, Type, TypedBody, UseFlow, implementation_method_key,
+    ClosureCapture, ConstInferVar, ConstKind, CoreExpr, CoreHandlerResumption, CoreId, CoreKind,
+    CorePattern, CorePlace, DeclarationScan, DefKey, DefinitionIndex, Digest, EffectInstance,
+    EffectRow, EffectRowProjection, EffectTail, ElaboratedInterface, EnvironmentBrand, EscapeFlow,
+    FileKey, FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime,
+    LogicalPath, MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity,
+    ScalarType, Span, StructuralU32Expr, Type, TypedBody, UseFlow, implementation_method_key,
 };
 use std::collections::BTreeSet;
 
@@ -681,8 +681,18 @@ fn typed_core_validation_rejects_inference_hidden_in_trait_method_metadata() {
             kind: CoreKind::TraitMethod {
                 evidence: DefKey(Digest::of_bytes(b"evidence")),
                 method: DefKey(Digest::of_bytes(b"method")),
-                trait_arguments: vec![GenericArgument::Type(Type::Infer(InferVar(3)))],
-                method_arguments: vec![],
+                trait_arguments: vec![
+                    GenericArgument::Type(Type::Infer(InferVar(3))),
+                    GenericArgument::EffectRow(EffectRow {
+                        effects: BTreeSet::new(),
+                        projections: vec![],
+                        tail: Some(EffectTail::Infer(grandiose_stage0::EffectVar(4))),
+                    }),
+                ],
+                method_arguments: vec![GenericArgument::ConstInfer {
+                    variable: ConstInferVar(5),
+                    kind: ConstKind::U32,
+                }],
             },
             ty: Type::Callable {
                 lifetime_binders: 0,
