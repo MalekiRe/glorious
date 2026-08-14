@@ -6068,6 +6068,41 @@ fn handler_clause_label_transfer_preserves_brand_cleanup_and_vm_frame_exit() {
 }
 
 #[test]
+fn nested_handler_leave_preserves_the_outer_label_destination_contract() {
+    let core = core_for(
+        "core-nested-handler-label-contract@0.1.0",
+        "effect Ask { [1, 1] ask() -> i64; } pub fn main() -> i64 { label outer { label inner { handle Ask::ask() { Ask::ask() => transfer outer 42 } } } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let outer = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } if brand.label == 0 => Some(brand),
+            _ => None,
+        })
+        .expect("outer label brand");
+    let lowered = MirLowering::lower(outer.owner, &core, &flow);
+    let mir = lowered
+        .function
+        .unwrap_or_else(|| panic!("nested handler transfer lowers: {:#?}", lowered.diagnostics));
+    assert!(matches!(
+        mir.blocks[2].terminator,
+        grandiose_stage0::MirTerminator::Leave { brand, .. } if brand == outer
+    ));
+    assert_eq!(
+        grandiose_stage0::verify_vm(
+            grandiose_stage0::emit_vm(&mir).expect("emit nested handler leave")
+        )
+        .expect("verify nested handler leave")
+        .run_i64()
+        .expect("run nested handler leave"),
+        42
+    );
+}
+
+#[test]
 fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
     let core = core_for(
         "core-completion-label-transfer@0.1.0",

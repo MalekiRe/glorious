@@ -3726,6 +3726,81 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
 }
 
 #[test]
+fn verifier_rejects_a_label_brand_retargeted_to_another_typed_destination() {
+    let definition = DefKey(Digest::of_bytes(b"forged-vm-label-contract"));
+    let owner = DefKey(Digest::of_bytes(b"forged-vm-label-contract-owner"));
+    let function = VmFunction {
+        definition,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Bool, VmType::I64, VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstBool {
+                dst: 0,
+                value: true,
+            },
+            VmInstruction::BranchBool {
+                condition: 0,
+                then_target: 2,
+                else_target: 4,
+            },
+            VmInstruction::ConstI64 { dst: 1, value: 1 },
+            VmInstruction::Leave {
+                brand_owner: owner,
+                brand_label: 0,
+                target: 6,
+                arguments: vec![1],
+                destinations: vec![3],
+                cleanup: VmCleanupProof {
+                    moved_places: vec![],
+                    active_loans: vec![],
+                },
+            },
+            VmInstruction::ConstI64 { dst: 2, value: 2 },
+            VmInstruction::Leave {
+                brand_owner: owner,
+                brand_label: 0,
+                target: 7,
+                arguments: vec![2],
+                destinations: vec![2],
+                cleanup: VmCleanupProof {
+                    moved_places: vec![],
+                    active_loans: vec![],
+                },
+            },
+            VmInstruction::Return { value: 3 },
+            VmInstruction::Return { value: 2 },
+        ],
+    };
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: function.clone(),
+        fingerprint: Digest::of_bytes(b"stale-forged-vm-label-contract"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(artifact),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry: definition,
+        functions: BTreeMap::from([(definition, function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"stale-forged-vm-label-contract-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(program),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+}
+
+#[test]
 fn verifier_rejects_branch_targets_outside_the_instruction_stream() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,

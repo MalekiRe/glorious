@@ -726,6 +726,12 @@ pub enum VmArtifactError {
     InvalidCallableEnvironment {
         message: &'static str,
     },
+    /// A nominal label brand denotes one lexical destination and its exact
+    /// typed payload ABI.  A candidate must not repurpose it as an arbitrary
+    /// jump capability on another path.
+    InvalidLabelContract {
+        message: &'static str,
+    },
     /// Stage 0 can rebase shared references into frame-independent callable
     /// captures, but must not snapshot a unique reference and lose write-back.
     UnsupportedEscapingUniqueReference,
@@ -4019,6 +4025,47 @@ impl DerefMut for VerifierState {
     }
 }
 
+/// Check the frozen counterpart of MIR's lexical-label invariant.  A leave
+/// need not carry a runtime label object, but its nominal brand is still a
+/// capability for one destination only.  In particular, equal register types
+/// are insufficient: a forged artifact must not retarget a leave to another
+/// block (or write a different set of registers) under an existing brand.
+fn verify_label_brand_contracts(function: &VmFunction) -> Result<(), VmArtifactError> {
+    let mut contracts = BTreeMap::<(DefKey, u32), (u32, Vec<u32>, Vec<VmType>)>::new();
+    for instruction in &function.instructions {
+        let VmInstruction::Leave {
+            brand_owner,
+            brand_label,
+            target,
+            destinations,
+            ..
+        } = instruction
+        else {
+            continue;
+        };
+        if *target as usize >= function.instructions.len() {
+            return Err(VmArtifactError::InvalidInstructionTarget { target: *target });
+        }
+        let layout = destinations
+            .iter()
+            .map(|destination| register_type(function, *destination))
+            .collect::<Result<Vec<_>, _>>()?;
+        let contract = (*target, destinations.clone(), layout);
+        match contracts.get(&(*brand_owner, *brand_label)) {
+            Some(previous) if previous != &contract => {
+                return Err(VmArtifactError::InvalidLabelContract {
+                    message: "label brand has contradictory destination or payload layout",
+                });
+            }
+            Some(_) => {}
+            None => {
+                contracts.insert((*brand_owner, *brand_label), contract);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
@@ -4038,6 +4085,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             _ => {}
         }
     }
+    verify_label_brand_contracts(function)?;
     verify_handler_entry_boundaries(function)?;
     let mut initial = vec![None; function.registers.len()];
     if function.captures > function.parameters {

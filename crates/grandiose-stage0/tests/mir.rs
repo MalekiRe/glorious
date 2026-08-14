@@ -50,6 +50,89 @@ fn mir_rejects_a_forged_nonfinite_replay_budget() {
 }
 
 #[test]
+fn mir_rejects_one_label_brand_with_contradictory_destinations() {
+    let owner = DefKey(Digest::of_bytes(b"forged-mir-label-contract-owner"));
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"forged-mir-label-contract")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(Type::Scalar(ScalarType::Bool)),
+            local(Type::Scalar(ScalarType::I64)),
+            local(Type::Scalar(ScalarType::I64)),
+            local(Type::Scalar(ScalarType::I64)),
+            local(Type::Scalar(ScalarType::I64)),
+        ],
+        result: Type::Scalar(ScalarType::I64),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstBool {
+                    dst: MirLocal(0),
+                    value: true,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition: MirLocal(0),
+                    then_target: MirBlockId(1),
+                    then_arguments: vec![],
+                    else_target: MirBlockId(2),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(1),
+                    value: 1,
+                }],
+                terminator: MirTerminator::Leave {
+                    brand: grandiose_stage0::LabelBrand { owner, label: 0 },
+                    target: MirBlockId(3),
+                    arguments: vec![MirLocal(1)],
+                    cleanup: MirCleanupPlan {
+                        moved_places: vec![],
+                        active_loans: vec![],
+                    },
+                },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(2),
+                    value: 2,
+                }],
+                terminator: MirTerminator::Leave {
+                    brand: grandiose_stage0::LabelBrand { owner, label: 0 },
+                    target: MirBlockId(4),
+                    arguments: vec![MirLocal(2)],
+                    cleanup: MirCleanupPlan {
+                        moved_places: vec![],
+                        active_loans: vec![],
+                    },
+                },
+            },
+            MirBlock {
+                parameters: vec![MirLocal(3)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(3) },
+            },
+            MirBlock {
+                parameters: vec![MirLocal(2)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(2) },
+            },
+        ],
+    };
+    assert!(
+        function
+            .validate()
+            .expect_err("one label brand cannot authorize two destinations")
+            .contains("contradictory destination or payload layout")
+    );
+}
+
+#[test]
 fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
     let leave = |cleanup| MirFunction {
         definition: DefKey(Digest::of_bytes(b"forged-mir-cleanup")),

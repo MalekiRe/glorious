@@ -2084,6 +2084,44 @@ impl MirFunction {
             }
             self.validate_terminator(index, &block.terminator)?;
         }
+        self.validate_label_contracts()?;
+        Ok(())
+    }
+    /// A nominal label brand is proof of exactly one lexical destination.
+    /// Several source paths may leave the same label, but they must all enter
+    /// the same block through that block's one typed parameter layout.  Keep
+    /// this check at the frozen MIR boundary as well as the VM boundary: a
+    /// hand-built MIR graph must not be able to reuse one brand as a general
+    /// purpose nonlocal jump capability.
+    fn validate_label_contracts(&self) -> Result<(), String> {
+        let mut contracts =
+            BTreeMap::<crate::LabelBrand, (MirBlockId, Vec<MirLocal>, Vec<Type>)>::new();
+        for block in &self.blocks {
+            let MirTerminator::Leave { brand, target, .. } = &block.terminator else {
+                continue;
+            };
+            let destination = self
+                .blocks
+                .get(target.0 as usize)
+                .ok_or_else(|| format!("MIR label target block {} is absent", target.0))?;
+            let destinations = destination.parameters.clone();
+            let layout = destinations
+                .iter()
+                .map(|local| self.local_type(*local).cloned())
+                .collect::<Result<Vec<_>, _>>()?;
+            let contract = (*target, destinations, layout);
+            match contracts.get(brand) {
+                Some(previous) if previous != &contract => {
+                    return Err(
+                        "MIR label brand has contradictory destination or payload layout".into(),
+                    );
+                }
+                Some(_) => {}
+                None => {
+                    contracts.insert(*brand, contract);
+                }
+            }
+        }
         Ok(())
     }
     fn local_type(&self, local: MirLocal) -> Result<&Type, String> {
@@ -3862,24 +3900,7 @@ impl Lowerer<'_> {
         let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
             return None;
         };
-        let (computation, clauses, label_prefix) = match self.body.expression(body).kind.clone() {
-            CoreKind::Handle {
-                computation,
-                clauses,
-            } => (computation, clauses, Vec::new()),
-            CoreKind::Block(values) => {
-                let (last, prefix) = values.split_last()?;
-                let CoreKind::Handle {
-                    computation,
-                    clauses,
-                } = self.body.expression(*last).kind.clone()
-                else {
-                    return None;
-                };
-                (computation, clauses, prefix.to_vec())
-            }
-            _ => return None,
-        };
+        let (computation, clauses, label_prefix) = self.lexical_handle(body)?;
         let CoreKind::Perform {
             effect,
             operation,
@@ -3984,6 +4005,29 @@ impl Lowerer<'_> {
                 },
             ],
         })
+    }
+
+    /// Find the direct protected computation beneath transparent nested label
+    /// scopes. Labels mint brands but have no ordinary runtime work; a transfer
+    /// to an enclosing brand still crosses every nested scope before reaching
+    /// the selected handler clause. Keeping the intervening block prefix in
+    /// source order preserves effects that execute before installation.
+    fn lexical_handle(&self, id: CoreId) -> Option<(CoreId, Vec<CoreHandlerClause>, Vec<CoreId>)> {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => Some((computation, clauses, Vec::new())),
+            CoreKind::Label { body, .. } => self.lexical_handle(body),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                let (computation, clauses, nested_prefix) = self.lexical_handle(*last)?;
+                let mut prefix = prefix.to_vec();
+                prefix.extend(nested_prefix);
+                Some((computation, clauses, prefix))
+            }
+            _ => None,
+        }
     }
     /// Lower a lexical label transfer into its own checked CFG edge.  This is
     /// deliberately a source/Core operation rather than an emitter shortcut:
