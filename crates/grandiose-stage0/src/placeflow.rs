@@ -205,6 +205,8 @@ type HandlerExit = (
     BTreeMap<String, LocalState>,
     Vec<ProjectionLoan>,
     BTreeSet<Projection>,
+    BTreeMap<String, String>,
+    BTreeMap<String, ProjectionLoan>,
 );
 
 impl Analyzer<'_> {
@@ -332,11 +334,15 @@ impl Analyzer<'_> {
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
                 let incoming_moves = self.moved_places.clone();
+                let incoming_parents = self.reborrow_parents.clone();
+                let incoming_origins = self.reference_origins.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
                     self.projection_loans = incoming_loans.clone();
                     self.moved_places = incoming_moves.clone();
+                    self.reborrow_parents = incoming_parents.clone();
+                    self.reference_origins = incoming_origins.clone();
                     for (name, _) in clause.bindings {
                         self.states.insert(name, LocalState::Initialized);
                     }
@@ -350,17 +356,20 @@ impl Analyzer<'_> {
                         self.states.clone(),
                         self.projection_loans.clone(),
                         self.moved_places.clone(),
+                        self.reborrow_parents.clone(),
+                        self.reference_origins.clone(),
                     ));
                 }
                 if !exits.is_empty() {
                     self.states = join_handler_exits(
                         &exits
                             .iter()
-                            .map(|(states, _, _)| states.clone())
+                            .map(|(states, _, _, _, _)| states.clone())
                             .collect::<Vec<_>>(),
                     );
                     self.projection_loans = join_handler_projection_loans(&exits, &incoming);
                     self.moved_places = join_handler_moves(&exits, &incoming);
+                    self.join_reborrow_facts(&exits, &incoming);
                 }
             }
             CoreKind::Completion {
@@ -375,11 +384,15 @@ impl Analyzer<'_> {
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
                 let incoming_moves = self.moved_places.clone();
+                let incoming_parents = self.reborrow_parents.clone();
+                let incoming_origins = self.reference_origins.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.states = incoming.clone();
                     self.projection_loans = incoming_loans.clone();
                     self.moved_places = incoming_moves.clone();
+                    self.reborrow_parents = incoming_parents.clone();
+                    self.reference_origins = incoming_origins.clone();
                     for (name, _) in clause.bindings {
                         self.states.insert(name, LocalState::Initialized);
                     }
@@ -388,17 +401,20 @@ impl Analyzer<'_> {
                         self.states.clone(),
                         self.projection_loans.clone(),
                         self.moved_places.clone(),
+                        self.reborrow_parents.clone(),
+                        self.reference_origins.clone(),
                     ));
                 }
                 if !exits.is_empty() {
                     self.states = join_handler_exits(
                         &exits
                             .iter()
-                            .map(|(states, _, _)| states.clone())
+                            .map(|(states, _, _, _, _)| states.clone())
                             .collect::<Vec<_>>(),
                     );
                     self.projection_loans = join_handler_projection_loans(&exits, &incoming);
                     self.moved_places = join_handler_moves(&exits, &incoming);
+                    self.join_reborrow_facts(&exits, &incoming);
                 }
             }
             CoreKind::Tuple(values) | CoreKind::Array(values) => {
@@ -1150,6 +1166,25 @@ impl Analyzer<'_> {
             .unwrap_or_default()
     }
 
+    fn join_reborrow_facts(
+        &mut self,
+        exits: &[HandlerExit],
+        incoming: &BTreeMap<String, LocalState>,
+    ) {
+        self.reborrow_parents = exits
+            .iter()
+            .flat_map(|(_, _, _, parents, _)| parents)
+            .filter(|(child, _)| incoming.contains_key(*child))
+            .map(|(child, parent)| (child.clone(), parent.clone()))
+            .collect();
+        self.reference_origins = exits
+            .iter()
+            .flat_map(|(_, _, _, _, origins)| origins)
+            .filter(|(_, loan)| incoming.contains_key(&loan.place.root))
+            .map(|(name, loan)| (name.clone(), loan.clone()))
+            .collect();
+    }
+
     fn error(&mut self, span: Span, code: &'static str, message: String) {
         self.diagnostics.push(FlowDiagnostic {
             code,
@@ -1210,7 +1245,7 @@ fn join_handler_projection_loans(
 ) -> Vec<ProjectionLoan> {
     let mut loans = exits
         .iter()
-        .flat_map(|(_, loans, _)| loans)
+        .flat_map(|(_, loans, _, _, _)| loans)
         .filter(|loan| incoming.contains_key(&loan.place.root))
         .cloned()
         .collect::<Vec<_>>();
@@ -1230,7 +1265,7 @@ fn join_handler_moves(
 ) -> BTreeSet<Projection> {
     let mut moves = exits
         .iter()
-        .flat_map(|(_, _, moves)| moves)
+        .flat_map(|(_, _, moves, _, _)| moves)
         .filter(|place| incoming.contains_key(&place.root))
         .cloned()
         .collect::<Vec<_>>();
