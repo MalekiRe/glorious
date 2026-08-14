@@ -1720,6 +1720,16 @@ fn generic_argument_contains_out_of_scope_bound_lifetime(
         GenericArgument::EffectRow(value) => {
             effect_row_contains_out_of_scope_bound_lifetime(value, binders)
         }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            type_contains_out_of_scope_bound_lifetime_in(subject, binders)
+                || trait_arguments.iter().any(|argument| {
+                    generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
+                })
+        }
         GenericArgument::Lifetime(value) => lifetime_is_out_of_scope_bound(*value, binders),
         GenericArgument::ConstU32(_)
         | GenericArgument::ConstU32Expr(_)
@@ -2344,8 +2354,9 @@ impl TypedBody {
         {
             if let Some(header) = definition.callable_header() {
                 for (parameter, ty) in header.parameters.iter().zip(signature.parameters.iter()) {
+                    let ty = elaborator.normalize_concrete_type_projections(ty.clone());
                     elaborator.locals.define(parameter.name.clone(), ty.clone());
-                    parameters.push((parameter.name.clone(), ty.clone()));
+                    parameters.push((parameter.name.clone(), ty));
                 }
             }
         } else {
@@ -2521,8 +2532,9 @@ impl TypedBody {
             .iter()
             .zip(context.signature.parameters.iter())
         {
+            let ty = elaborator.normalize_concrete_type_projections(ty.clone());
             elaborator.locals.define(parameter.name.clone(), ty.clone());
-            parameters.push((parameter.name.clone(), ty.clone()));
+            parameters.push((parameter.name.clone(), ty));
         }
         let root =
             elaborator.expression_expected(body.root, Some(context.signature.result.clone()));
@@ -5561,6 +5573,12 @@ impl Elaborator<'_> {
                         .signatures
                         .instantiate_callable_generic(definition, &arguments)
                         .expect("fresh arguments match the callable generic contract");
+                    let parameters = signature
+                        .parameters
+                        .into_iter()
+                        .map(|parameter| self.normalize_concrete_type_projections(parameter))
+                        .collect();
+                    let result = self.normalize_concrete_type_projections(signature.result);
                     self.alloc(
                         CoreKind::Function {
                             definition,
@@ -5569,8 +5587,8 @@ impl Elaborator<'_> {
                         },
                         Type::Callable {
                             lifetime_binders: 0,
-                            parameters: signature.parameters,
-                            result: Box::new(signature.result),
+                            parameters,
+                            result: Box::new(result),
                             effects: signature.effects,
                             invocation: signature.invocation,
                         },
@@ -5662,6 +5680,12 @@ impl Elaborator<'_> {
                 );
             }
         };
+        let parameters = signature
+            .parameters
+            .into_iter()
+            .map(|parameter| self.normalize_concrete_type_projections(parameter))
+            .collect();
+        let result = self.normalize_concrete_type_projections(signature.result);
         self.alloc(
             CoreKind::Function {
                 definition,
@@ -5670,8 +5694,8 @@ impl Elaborator<'_> {
             },
             Type::Callable {
                 lifetime_binders: 0,
-                parameters: signature.parameters,
-                result: Box::new(signature.result),
+                parameters,
+                result: Box::new(result),
                 effects: signature.effects,
                 invocation: signature.invocation,
             },
@@ -8929,7 +8953,8 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::Lifetime(Lifetime::Generic(_) | Lifetime::Bound { .. })
-        | GenericArgument::ConstGeneric { .. } => false,
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstProjection { .. } => false,
     }
 }
 

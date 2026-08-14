@@ -2424,6 +2424,9 @@ fn validate_mir_generic_argument(
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
         | GenericArgument::ConstGeneric { .. } => Ok(()),
+        GenericArgument::ConstProjection { .. } => {
+            Err("MIR cannot contain an unresolved associated structural-constant projection".into())
+        }
     }
 }
 

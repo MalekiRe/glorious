@@ -1854,6 +1854,30 @@ fn service_type_checks_implementation_method_bodies_with_impl_generics() {
 }
 
 #[test]
+fn service_normalizes_concrete_associated_const_signature_projections_before_vm() {
+    let source = "trait Width { const Value: u32; } pub struct Chosen<n: u32> {} impl Width for i64 { const Value = 7; } pub fn mirror(value: Chosen<<i64 as Width>::Value>) -> Chosen<<i64 as Width>::Value> { value } pub fn main() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_unselected_concrete_associated_const_signature_projection() {
+    let source = "trait Width { const Value: u32; } pub struct Chosen<n: u32> {} pub fn invalid(value: Chosen<<i64 as Width>::Value>) -> i64 { 0 } pub fn main() -> i64 { 42 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("unselected associated const signature projection entered an artifact");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4152"),
+        "missing concrete associated-const selection diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_and_executes_explicit_trait_method_calls() {
     let source = "trait Increment { fn increment(value: i64) -> i64; } impl Increment for i64 { fn increment(value: i64) -> i64 { value + 1 } } pub fn main() -> i64 { Increment::increment(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

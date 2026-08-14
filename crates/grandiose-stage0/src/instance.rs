@@ -157,6 +157,14 @@ fn instance_argument_depth(value: &InstanceArgument) -> usize {
         | InstanceArgument::ConstQuantity(_)
         | InstanceArgument::ConstGeneric { .. } => 1,
         InstanceArgument::ConstU32Expr(value) => structural_u32_depth(value),
+        InstanceArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => nested_depth(
+            std::iter::once(type_depth(subject))
+                .chain(trait_arguments.iter().map(instance_argument_depth)),
+        ),
     }
 }
 
@@ -355,7 +363,7 @@ fn is_concrete_generic_argument(value: &GenericArgument) -> bool {
         }
         GenericArgument::ConstU32(_) | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::ConstU32Expr(_) => false,
-        GenericArgument::ConstGeneric { .. } => false,
+        GenericArgument::ConstGeneric { .. } | GenericArgument::ConstProjection { .. } => false,
     }
 }
 

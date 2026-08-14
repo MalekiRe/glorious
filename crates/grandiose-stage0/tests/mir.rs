@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use grandiose_stage0::{
-    CallableId, CaptureMode, CoreId, DefKey, Digest, EffectInstance, EffectRow,
+    CallableId, CaptureMode, ConstKind, CoreId, DefKey, Digest, EffectInstance, EffectRow,
     EffectRowProjection, EnvironmentBrand, GenericArgument, GenericKind, InferVar, InstanceKey,
     Lifetime, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment, MirContinuationPolicy,
     MirEditor, MirFunction, MirInstance, MirInstruction, MirLocal, MirLocalDecl, MirPattern,
@@ -65,6 +65,36 @@ fn cfg_validation_checks_typed_block_edges_and_returns() {
     };
     *then_arguments = vec![MirLocal(0)];
     assert!(invalid.validate().is_err());
+}
+
+#[test]
+fn mir_validation_rejects_unresolved_associated_const_projection_identity() {
+    let nominal = Type::Nominal {
+        definition: DefKey(Digest::of_bytes(b"mir-associated-const-carrier")),
+        arguments: vec![GenericArgument::ConstProjection {
+            subject: Box::new(Type::Generic(0)),
+            trait_definition: DefKey(Digest::of_bytes(b"mir-associated-const-trait")),
+            trait_arguments: vec![],
+            name: "Width".into(),
+            kind: ConstKind::U32,
+        }],
+    };
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-associated-const-function")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(nominal.clone())],
+        result: nominal,
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![],
+            terminator: MirTerminator::Return { value: MirLocal(0) },
+        }],
+    };
+    assert!(function.validate().is_err_and(|error| {
+        error.contains("unresolved associated structural-constant projection")
+    }));
 }
 
 #[test]

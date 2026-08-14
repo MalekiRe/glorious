@@ -495,6 +495,38 @@ fn unify_overlap_argument(
         (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) => {
             unify_overlap_effect_row(left, right, bindings).map(GenericArgument::EffectRow)
         }
+        (
+            GenericArgument::ConstProjection {
+                subject: left_subject,
+                trait_definition: left_trait,
+                trait_arguments: left_arguments,
+                name: left_name,
+                kind: left_kind,
+            },
+            GenericArgument::ConstProjection {
+                subject: right_subject,
+                trait_definition: right_trait,
+                trait_arguments: right_arguments,
+                name: right_name,
+                kind: right_kind,
+            },
+        ) if left_trait == right_trait
+            && left_name == right_name
+            && left_kind == right_kind
+            && left_arguments.len() == right_arguments.len() =>
+        {
+            Some(GenericArgument::ConstProjection {
+                subject: Box::new(unify_overlap_type(left_subject, right_subject, bindings)?),
+                trait_definition: *left_trait,
+                trait_arguments: left_arguments
+                    .iter()
+                    .zip(right_arguments)
+                    .map(|(left, right)| unify_overlap_argument(left, right, bindings))
+                    .collect::<Option<_>>()?,
+                name: left_name.clone(),
+                kind: *left_kind,
+            })
+        }
         (GenericArgument::Lifetime(left), GenericArgument::Lifetime(right)) if left == right => {
             Some(GenericArgument::Lifetime(*left))
         }
@@ -943,6 +975,16 @@ fn contains_overlap_argument_generic(
 ) -> bool {
     match argument {
         GenericArgument::Type(value) => contains_overlap_generic(value, index, bindings),
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            contains_overlap_generic(subject, index, bindings)
+                || trait_arguments
+                    .iter()
+                    .any(|argument| contains_overlap_argument_generic(argument, index, bindings))
+        }
         GenericArgument::EffectRow(_)
         | GenericArgument::Lifetime(_)
         | GenericArgument::ConstU32(_)
@@ -988,6 +1030,22 @@ fn resolve_overlap_argument(
             }
             argument.clone()
         }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(resolve_overlap_type(subject, bindings)),
+            trait_definition: *trait_definition,
+            trait_arguments: trait_arguments
+                .iter()
+                .map(|argument| resolve_overlap_argument(argument, bindings))
+                .collect(),
+            name: name.clone(),
+            kind: *kind,
+        },
         argument => argument.clone(),
     }
 }
@@ -1240,6 +1298,22 @@ fn rebase_overlap_argument(argument: &GenericArgument, offset: u32) -> GenericAr
         GenericArgument::EffectRow(value) => {
             GenericArgument::EffectRow(rebase_overlap_effect_row(value, offset))
         }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(rebase_overlap_type(subject, offset)),
+            trait_definition: *trait_definition,
+            trait_arguments: trait_arguments
+                .iter()
+                .map(|argument| rebase_overlap_argument(argument, offset))
+                .collect(),
+            name: name.clone(),
+            kind: *kind,
+        },
         argument => argument.clone(),
     }
 }

@@ -4,7 +4,7 @@ use grandiose_stage0::{
     ConstKind, DeclarationScan, DefKey, DefinitionIndex, Digest, EffectRow, EffectTail,
     ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout, FileKey, GenericArgument,
     GenericKind, InstantiationError, InterfaceSet, LexedFile, Lifetime, LogicalPath, NominalField,
-    PackageKey, Quantity, ScalarType, StructuralU32Expr, Type,
+    PackageKey, Quantity, ScalarType, StructuralU32Expr, TraitSolver, Type,
 };
 
 #[test]
@@ -41,6 +41,73 @@ fn callable_signatures_preserve_const_binder_kinds_and_reject_type_misuse() {
         "{:#?}",
         signatures.diagnostics
     );
+}
+
+#[test]
+fn frozen_public_signatures_retain_symbolic_associated_const_projection_identity() {
+    let package = PackageKey("signature-associated-const-projection@0.1.0".into());
+    let source = "trait Width { const Value: u32; } pub struct Chosen<n: u32> {} impl Width for i64 { const Value = 7; } pub fn retain<T>(value: Chosen<<T as Width>::Value>) -> Chosen<<T as Width>::Value> { value }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let retain = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("retain"))
+        .expect("retain definition");
+    let width = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Width"))
+        .expect("Width definition");
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&retain.key).unwrap()
+    else {
+        panic!("expected callable signature")
+    };
+    let assert_projection = |ty: &Type| {
+        assert!(matches!(
+            ty,
+            Type::Nominal { arguments, .. }
+                if matches!(
+                    arguments.as_slice(),
+                    [GenericArgument::ConstProjection {
+                        subject,
+                        trait_definition,
+                        trait_arguments,
+                        name,
+                        kind: ConstKind::U32,
+                    }]
+                    if **subject == Type::Generic(0)
+                        && *trait_definition == width.key
+                        && trait_arguments.is_empty()
+                        && name == "Value"
+                )
+        ));
+    };
+    assert_projection(&signature.parameters[0]);
+    assert_projection(&signature.result);
+
+    let instantiated = signatures
+        .instantiate_callable_generic(
+            retain.key,
+            &[GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        )
+        .expect("the type binder accepts i64");
+    let normalized = TraitSolver::new(&signatures)
+        .normalize_type(instantiated.result)
+        .expect("concrete associated const projection normalizes");
+    assert!(matches!(
+        normalized,
+        Type::Nominal { arguments, .. }
+            if arguments == vec![GenericArgument::ConstU32(7)]
+    ));
 }
 
 #[test]

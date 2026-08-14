@@ -2049,6 +2049,16 @@ fn generic_argument_contains_open_type_parameter(value: &crate::types::GenericAr
         crate::types::GenericArgument::EffectRow(row) => {
             effect_row_contains_open_type_parameter(row)
         }
+        crate::types::GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            contains_open_type_parameter(subject)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_contains_open_type_parameter)
+        }
         crate::types::GenericArgument::Lifetime(_)
         | crate::types::GenericArgument::ConstU32(_)
         | crate::types::GenericArgument::ConstQuantity(_)

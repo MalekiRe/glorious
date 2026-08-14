@@ -784,6 +784,16 @@ fn generic_argument_contains_open_type_parameter(value: &GenericArgument) -> boo
     match value {
         GenericArgument::Type(value) => contains_open_type_parameter(value),
         GenericArgument::EffectRow(row) => effect_row_contains_open_type_parameter(row),
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            contains_open_type_parameter(subject)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_contains_open_type_parameter)
+        }
         GenericArgument::Lifetime(_)
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstQuantity(_)

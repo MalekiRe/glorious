@@ -1500,6 +1500,7 @@ fn vm_nominal_argument(value: &GenericArgument) -> Result<VmType, Box<Type>> {
             index: *index,
             kind: *kind,
         }),
+        GenericArgument::ConstProjection { .. } => Err(Box::new(Type::Error)),
         GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_) => Err(Box::new(Type::Error)),
     }
 }
@@ -1574,6 +1575,12 @@ fn vm_effect_argument(
             index: *index,
             kind: *kind,
         },
+        GenericArgument::ConstProjection { .. } => {
+            return Err(VmArtifactError::UnsupportedEffectArgumentType {
+                effect,
+                ty: Box::new(Type::Error),
+            });
+        }
     })
 }
 fn encode_type(value: &VmType, output: &mut Vec<u8>) {

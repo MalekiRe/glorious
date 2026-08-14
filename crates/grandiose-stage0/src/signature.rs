@@ -1922,6 +1922,22 @@ fn substitute_trait_generic_argument(
         GenericArgument::EffectRow(value) => {
             GenericArgument::EffectRow(substitute_trait_effect_row(value, arguments))
         }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(substitute_trait_type_generics(*subject, arguments)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|argument| substitute_trait_generic_argument(argument, arguments))
+                .collect(),
+            name,
+            kind,
+        },
         GenericArgument::ConstGeneric { index, kind } => arguments
             .get(index as usize)
             .filter(|argument| generic_argument_matches_const_kind(argument, kind))
@@ -1943,7 +1959,21 @@ fn generic_argument_matches_const_kind(argument: &GenericArgument, kind: ConstKi
         (argument, kind),
         (GenericArgument::ConstU32(_), ConstKind::U32)
             | (GenericArgument::ConstU32Expr(_), ConstKind::U32)
+            | (
+                GenericArgument::ConstProjection {
+                    kind: ConstKind::U32,
+                    ..
+                },
+                ConstKind::U32
+            )
             | (GenericArgument::ConstQuantity(_), ConstKind::Quantity)
+            | (
+                GenericArgument::ConstProjection {
+                    kind: ConstKind::Quantity,
+                    ..
+                },
+                ConstKind::Quantity
+            )
             | (
                 GenericArgument::ConstGeneric {
                     kind: ConstKind::U32,
@@ -3125,6 +3155,23 @@ impl Elaborator<'_> {
                 (HeaderGenericArgument::U32(value), GenericKind::Const(ConstKind::U32)) => {
                     GenericArgument::ConstU32(*value)
                 }
+                (
+                    HeaderGenericArgument::Type(HeaderType::Projection {
+                        subject,
+                        trait_path,
+                        trait_arguments,
+                        name: projection_name,
+                        item_arguments,
+                    }),
+                    GenericKind::Const(kind),
+                ) => self.associated_const_projection_argument(
+                    subject,
+                    trait_path,
+                    trait_arguments,
+                    projection_name,
+                    item_arguments,
+                    *kind,
+                ),
                 (HeaderGenericArgument::StructuralConst(value), GenericKind::Const(ConstKind::U32)) => {
                     self.structural_const(value, ConstKind::U32)
                 }
@@ -3192,6 +3239,37 @@ impl Elaborator<'_> {
                 }
             })
             .collect()
+    }
+
+    /// Preserve an associated structural-constant selection in a frozen
+    /// signature.  Unlike a body, a declaration may be generic over its
+    /// subject, so selecting implementation evidence here would be both
+    /// premature and order dependent.  The canonical `ConstProjection`
+    /// carrier records the complete mixed-kind trait head for later concrete
+    /// instantiation.
+    fn associated_const_projection_argument(
+        &mut self,
+        subject: &HeaderType,
+        trait_path: &[String],
+        trait_arguments: &[HeaderGenericArgument],
+        name: &str,
+        item_arguments: &[HeaderGenericArgument],
+        kind: ConstKind,
+    ) -> GenericArgument {
+        if !item_arguments.is_empty() {
+            self.error(
+                "G4135",
+                "associated constants do not accept item arguments".into(),
+            );
+        }
+        let relation = self.trait_ref_parts(trait_path, trait_arguments);
+        GenericArgument::ConstProjection {
+            subject: Box::new(self.ty(subject)),
+            trait_definition: relation.definition,
+            trait_arguments: relation.arguments,
+            name: name.into(),
+            kind,
+        }
     }
 
     /// A projection preserves the enclosing trait's complete source-slot
@@ -3553,6 +3631,22 @@ fn substitute_alias_generic_identity_argument(
         GenericArgument::EffectRow(value) => GenericArgument::EffectRow(
             substitute_alias_generic_identity_effect_row(value, arguments),
         ),
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(substitute_alias_generic_identity(*subject, arguments)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|argument| substitute_alias_generic_identity_argument(argument, arguments))
+                .collect(),
+            name,
+            kind,
+        },
         GenericArgument::Lifetime(value) => {
             GenericArgument::Lifetime(substitute_alias_lifetime(value, arguments))
         }

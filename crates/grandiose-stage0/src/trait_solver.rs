@@ -1726,6 +1726,72 @@ impl TraitSolver {
             GenericArgument::Type(value) => self
                 .normalize_type_projections(value, active)
                 .map(GenericArgument::Type),
+            GenericArgument::ConstProjection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                kind,
+            } => {
+                let subject = self.normalize_type_projections(*subject, active)?;
+                let trait_arguments = trait_arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_trait_argument(argument, active))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let projection = GenericArgument::ConstProjection {
+                    subject: Box::new(subject),
+                    trait_definition,
+                    trait_arguments,
+                    name,
+                    kind,
+                };
+                let GenericArgument::ConstProjection {
+                    subject,
+                    trait_definition,
+                    trait_arguments,
+                    name,
+                    kind,
+                } = projection
+                else {
+                    unreachable!("associated const projection was just constructed")
+                };
+                if !projection_is_concrete(&subject)
+                    || !trait_arguments.iter().all(generic_argument_is_concrete)
+                {
+                    return Ok(GenericArgument::ConstProjection {
+                        subject,
+                        trait_definition,
+                        trait_arguments,
+                        name,
+                        kind,
+                    });
+                }
+                match self.normalize_associated_const(
+                    TraitGoal {
+                        relation: ElaboratedTraitReference {
+                            definition: trait_definition,
+                            arguments: trait_arguments,
+                        },
+                        subject: *subject,
+                    },
+                    &name,
+                    kind,
+                ) {
+                    TraitConstProjectionAnswer::Normalized { value, .. } => Ok(value),
+                    TraitConstProjectionAnswer::Ambiguous => {
+                        Err(Box::new(TraitProjectionAnswer::Ambiguous))
+                    }
+                    TraitConstProjectionAnswer::Overflow => {
+                        Err(Box::new(TraitProjectionAnswer::Overflow))
+                    }
+                    TraitConstProjectionAnswer::Refuted { .. }
+                    | TraitConstProjectionAnswer::NoSolution
+                    | TraitConstProjectionAnswer::MissingAssociatedConst { .. }
+                    | TraitConstProjectionAnswer::AssociatedConstKind { .. } => {
+                        Err(Box::new(TraitProjectionAnswer::NoSolution))
+                    }
+                }
+            }
             // The runtime projection carriers are still type-only. Trait
             // selection nevertheless preserves every other kind exactly;
             // there is no type normalizer allowed to reinterpret it here.
@@ -1853,7 +1919,21 @@ fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::Generi
                 crate::GenericKind::Const(crate::ConstKind::U32)
             )
             | (
+                GenericArgument::ConstProjection {
+                    kind: crate::ConstKind::U32,
+                    ..
+                },
+                crate::GenericKind::Const(crate::ConstKind::U32)
+            )
+            | (
                 GenericArgument::ConstQuantity(_),
+                crate::GenericKind::Const(crate::ConstKind::Quantity)
+            )
+            | (
+                GenericArgument::ConstProjection {
+                    kind: crate::ConstKind::Quantity,
+                    ..
+                },
                 crate::GenericKind::Const(crate::ConstKind::Quantity)
             )
             | (
@@ -1892,7 +1972,8 @@ fn install_item_argument(
         GenericArgument::ConstU32(_)
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstQuantity(_)
-        | GenericArgument::ConstGeneric { .. } => {
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstProjection { .. } => {
             substitution.generic_arguments.insert(index, argument);
         }
     }
@@ -1942,6 +2023,34 @@ fn match_generic_argument_at(
         ) => match_lifetime(*index, *actual, substitution, binder_depth),
         (GenericArgument::EffectRow(template), GenericArgument::EffectRow(actual)) => {
             match_effect_row_at(template, actual, substitution, binder_depth)
+        }
+        (
+            GenericArgument::ConstProjection {
+                subject: template_subject,
+                trait_definition: template_trait,
+                trait_arguments: template_arguments,
+                name: template_name,
+                kind: template_kind,
+            },
+            GenericArgument::ConstProjection {
+                subject: actual_subject,
+                trait_definition: actual_trait,
+                trait_arguments: actual_arguments,
+                name: actual_name,
+                kind: actual_kind,
+            },
+        ) if template_trait == actual_trait
+            && template_name == actual_name
+            && template_kind == actual_kind
+            && template_arguments.len() == actual_arguments.len() =>
+        {
+            match_type_at(template_subject, actual_subject, substitution, binder_depth)?;
+            template_arguments
+                .iter()
+                .zip(actual_arguments)
+                .try_for_each(|(template, actual)| {
+                    match_generic_argument_at(template, actual, substitution, binder_depth)
+                })
         }
         (GenericArgument::ConstGeneric { index, kind }, actual)
             if generic_argument_is_const_kind(actual, *kind) =>
@@ -2094,7 +2203,21 @@ fn generic_argument_is_const_kind(argument: &GenericArgument, expected: crate::C
         (GenericArgument::ConstU32(_), crate::ConstKind::U32)
             | (GenericArgument::ConstU32Expr(_), crate::ConstKind::U32)
             | (
+                GenericArgument::ConstProjection {
+                    kind: crate::ConstKind::U32,
+                    ..
+                },
+                crate::ConstKind::U32
+            )
+            | (
                 GenericArgument::ConstQuantity(_),
+                crate::ConstKind::Quantity
+            )
+            | (
+                GenericArgument::ConstProjection {
+                    kind: crate::ConstKind::Quantity,
+                    ..
+                },
                 crate::ConstKind::Quantity
             )
             | (
@@ -2309,6 +2432,16 @@ fn generic_argument_contains_escaping_hrtb(value: &GenericArgument) -> bool {
     match value {
         GenericArgument::Type(value) => has_free_hrtb_placeholder(value, 0),
         GenericArgument::EffectRow(row) => effect_row_contains_free_hrtb_placeholder(row, 0),
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            has_free_hrtb_placeholder(subject, 0)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_contains_escaping_hrtb)
+        }
         GenericArgument::Lifetime(crate::Lifetime::Bound { .. }) => true,
         GenericArgument::Lifetime(_)
         | GenericArgument::ConstU32(_)
@@ -2376,6 +2509,16 @@ fn generic_argument_contains_free_hrtb_placeholder(
         GenericArgument::Type(value) => has_free_hrtb_placeholder(value, callable_nesting),
         GenericArgument::EffectRow(row) => {
             effect_row_contains_free_hrtb_placeholder(row, callable_nesting)
+        }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            has_free_hrtb_placeholder(subject, callable_nesting)
+                || trait_arguments.iter().any(|argument| {
+                    generic_argument_contains_free_hrtb_placeholder(argument, callable_nesting)
+                })
         }
         GenericArgument::Lifetime(crate::Lifetime::Bound { depth, .. }) => {
             *depth >= callable_nesting
@@ -2474,6 +2617,22 @@ fn substitute_generic_argument(
         GenericArgument::EffectRow(value) => {
             GenericArgument::EffectRow(substitute_effect_row(value, substitution))
         }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(substitute_type(subject, substitution)),
+            trait_definition: *trait_definition,
+            trait_arguments: trait_arguments
+                .iter()
+                .map(|argument| substitute_generic_argument(argument, substitution))
+                .collect(),
+            name: name.clone(),
+            kind: *kind,
+        },
         GenericArgument::ConstGeneric { index, kind } => substitution
             .generic_arguments
             .get(index)
@@ -2824,6 +2983,7 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::ConstU32Expr(_) => false,
+        GenericArgument::ConstProjection { .. } => false,
         GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. })
         | GenericArgument::ConstGeneric { .. } => false,
     }

@@ -256,6 +256,18 @@ pub enum GenericArgument {
         index: u32,
         kind: ConstKind,
     },
+    /// A delayed associated structural-constant normalization.  This is the
+    /// const-kinded counterpart of [`Type::Projection`]: a public generic
+    /// contract may require `Array<T, <T as Width>::Value>` before `T` has a
+    /// concrete implementation.  Keeping the full mixed-kind trait head
+    /// prevents that contract from being erased into a fake type argument.
+    ConstProjection {
+        subject: Box<Type>,
+        trait_definition: DefKey,
+        trait_arguments: Vec<GenericArgument>,
+        name: String,
+        kind: ConstKind,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -886,6 +898,34 @@ impl InferContext {
                 (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) => self
                     .unify_effect_rows(left, right)
                     .map(GenericArgument::EffectRow),
+                (
+                    GenericArgument::ConstProjection {
+                        subject: left_subject,
+                        trait_definition: left_trait,
+                        trait_arguments: left_arguments,
+                        name: left_name,
+                        kind: left_kind,
+                    },
+                    GenericArgument::ConstProjection {
+                        subject: right_subject,
+                        trait_definition: right_trait,
+                        trait_arguments: right_arguments,
+                        name: right_name,
+                        kind: right_kind,
+                    },
+                ) if left_trait == right_trait
+                    && left_name == right_name
+                    && left_kind == right_kind =>
+                {
+                    Ok(GenericArgument::ConstProjection {
+                        subject: Box::new(self.unify(*left_subject, *right_subject)?),
+                        trait_definition: left_trait,
+                        trait_arguments: self
+                            .unify_generic_arguments(left_arguments, right_arguments)?,
+                        name: left_name,
+                        kind: left_kind,
+                    })
+                }
                 (left, right) if left == right => Ok(left),
                 _ => Err(TypeError::Mismatch {
                     expected: Box::new(Type::Error),
@@ -1285,6 +1325,16 @@ impl InferContext {
         match argument {
             GenericArgument::Type(value) => self.effect_occurs_in_type(variable, value),
             GenericArgument::EffectRow(value) => self.effect_occurs_in_row(variable, value),
+            GenericArgument::ConstProjection {
+                subject,
+                trait_arguments,
+                ..
+            } => {
+                self.effect_occurs_in_type(variable, subject)
+                    || trait_arguments
+                        .iter()
+                        .any(|argument| self.effect_occurs_in_generic_argument(variable, argument))
+            }
             GenericArgument::Lifetime(_)
             | GenericArgument::ConstU32(_)
             | GenericArgument::ConstU32Expr(_)
@@ -1398,6 +1448,32 @@ impl InferContext {
             (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) => {
                 self.effect_rows_may_unify(left, right)
             }
+            (
+                GenericArgument::ConstProjection {
+                    subject: left_subject,
+                    trait_definition: left_trait,
+                    trait_arguments: left_arguments,
+                    name: left_name,
+                    kind: left_kind,
+                },
+                GenericArgument::ConstProjection {
+                    subject: right_subject,
+                    trait_definition: right_trait,
+                    trait_arguments: right_arguments,
+                    name: right_name,
+                    kind: right_kind,
+                },
+            ) => {
+                left_trait == right_trait
+                    && left_name == right_name
+                    && left_kind == right_kind
+                    && self.types_may_unify(left_subject, right_subject)
+                    && left_arguments.len() == right_arguments.len()
+                    && left_arguments
+                        .iter()
+                        .zip(right_arguments)
+                        .all(|(left, right)| self.generic_arguments_may_unify(left, right))
+            }
             _ => left == right,
         }
     }
@@ -1468,6 +1544,22 @@ impl InferContext {
             GenericArgument::EffectRow(value) => self
                 .zonk_effects_allowing_generic_tail(value)
                 .map(GenericArgument::EffectRow),
+            GenericArgument::ConstProjection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                kind,
+            } => Ok(GenericArgument::ConstProjection {
+                subject: Box::new(self.zonk(*subject)?),
+                trait_definition,
+                trait_arguments: trait_arguments
+                    .into_iter()
+                    .map(|argument| self.zonk_generic_argument(argument))
+                    .collect::<Result<_, _>>()?,
+                name,
+                kind,
+            }),
             argument => Ok(argument),
         }
     }
@@ -1476,6 +1568,16 @@ impl InferContext {
         match argument {
             GenericArgument::Type(value) => self.occurs(variable, value),
             GenericArgument::EffectRow(value) => self.effect_row_type_occurs(variable, value),
+            GenericArgument::ConstProjection {
+                subject,
+                trait_arguments,
+                ..
+            } => {
+                self.occurs(variable, subject)
+                    || trait_arguments
+                        .iter()
+                        .any(|argument| self.generic_argument_occurs(variable, argument))
+            }
             GenericArgument::Lifetime(_)
             | GenericArgument::ConstU32(_)
             | GenericArgument::ConstU32Expr(_)
@@ -1870,6 +1972,16 @@ fn generic_argument_identity_is_well_formed(value: &GenericArgument) -> bool {
     match value {
         GenericArgument::Type(value) => type_identity_is_well_formed(value),
         GenericArgument::EffectRow(value) => effect_row_identity_is_well_formed(value),
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            type_identity_is_well_formed(subject)
+                && trait_arguments
+                    .iter()
+                    .all(generic_argument_identity_is_well_formed)
+        }
         GenericArgument::ConstU32Expr(value) => value.clone().normalized().is_ok(),
         GenericArgument::ConstQuantity(value) => quantity_is_well_formed(*value),
         GenericArgument::Lifetime(_)
@@ -1928,8 +2040,22 @@ pub(crate) fn projection_item_arguments_match_kinds(
                         GenericArgument::ConstU32Expr(_)
                     )
                     | (
+                        GenericKind::Const(ConstKind::U32),
+                        GenericArgument::ConstProjection {
+                            kind: ConstKind::U32,
+                            ..
+                        }
+                    )
+                    | (
                         GenericKind::Const(ConstKind::Quantity),
                         GenericArgument::ConstQuantity(_)
+                    )
+                    | (
+                        GenericKind::Const(ConstKind::Quantity),
+                        GenericArgument::ConstProjection {
+                            kind: ConstKind::Quantity,
+                            ..
+                        }
                     )
                     | (
                         GenericKind::Const(ConstKind::U32),
@@ -1955,6 +2081,22 @@ fn canonicalize_generic_argument_identity(value: GenericArgument) -> GenericArgu
         GenericArgument::EffectRow(value) => {
             GenericArgument::EffectRow(canonicalize_effect_row_identity(value))
         }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(canonicalize_type_identity(*subject)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(canonicalize_generic_argument_identity)
+                .collect(),
+            name,
+            kind,
+        },
         GenericArgument::ConstU32Expr(value) => match value.clone().normalized() {
             Ok(StructuralU32Expr::Literal(value)) => GenericArgument::ConstU32(value),
             Ok(value) => GenericArgument::ConstU32Expr(value),
@@ -2113,6 +2255,24 @@ fn encode_generic_argument(value: &GenericArgument, output: &mut Vec<u8>) {
         GenericArgument::ConstGeneric { index, kind } => {
             output.push(5);
             output.extend_from_slice(&index.to_le_bytes());
+            output.push(match kind {
+                ConstKind::U32 => 0,
+                ConstKind::Quantity => 1,
+            });
+        }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => {
+            output.push(7);
+            encode_type(subject, output);
+            output.extend_from_slice(&trait_definition.0.as_bytes());
+            encode_generic_arguments(trait_arguments, output);
+            output.extend_from_slice(&(name.len() as u64).to_le_bytes());
+            output.extend_from_slice(name.as_bytes());
             output.push(match kind {
                 ConstKind::U32 => 0,
                 ConstKind::Quantity => 1,
