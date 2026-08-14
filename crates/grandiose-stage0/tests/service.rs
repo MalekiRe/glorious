@@ -130,6 +130,25 @@ fn service_applies_host_instance_discovery_limits_before_lowering() {
 }
 
 #[test]
+fn service_discovers_concrete_generic_direct_call_instances() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request(
+            "pub fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { identity(42) }",
+        ))
+        .unwrap();
+    let instances = outcome
+        .instance_graph
+        .expect("instance discovery evidence")
+        .ordered();
+    assert_eq!(instances.len(), 2, "{instances:#?}");
+    assert!(
+        instances
+            .iter()
+            .any(|instance| !instance.arguments().is_empty())
+    );
+}
+
+#[test]
 fn service_finalizes_main_as_a_closed_zero_argument_effect_boundary() {
     for (source, message) in [
         (

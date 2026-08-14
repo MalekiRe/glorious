@@ -220,7 +220,7 @@ impl Analyzer<'_> {
         match e.kind {
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
+            | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => {}
@@ -550,7 +550,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
+            | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => {}

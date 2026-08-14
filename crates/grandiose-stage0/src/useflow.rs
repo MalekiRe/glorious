@@ -325,7 +325,7 @@ impl Analyzer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
+            | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => Summary::default(),
@@ -605,7 +605,7 @@ impl Analyzer<'_> {
                 .get(name)
                 .cloned()
                 .unwrap_or(Binding::Other),
-            CoreKind::Function(_) | CoreKind::TraitMethod { .. } => Binding::GlobalCallable,
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => Binding::GlobalCallable,
             CoreKind::Field { base, index, .. } => match self.binding_for_value(*base, environment)
             {
                 Binding::Aggregate(fields) => fields.get(index).cloned().unwrap_or(Binding::Other),

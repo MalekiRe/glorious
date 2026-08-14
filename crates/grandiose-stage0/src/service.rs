@@ -1072,19 +1072,20 @@ impl StageZeroCompiler {
                 let crate::core::CoreKind::Call { callee, .. } = expression.kind else {
                     continue;
                 };
-                let crate::core::CoreKind::Function(callee) = body.expression(callee).kind else {
-                    continue;
-                };
-                let Some(ElaboratedHeader::Callable(signature)) =
-                    signatures.definitions.get(&callee)
+                let crate::core::CoreKind::Function {
+                    definition: callee,
+                    arguments,
+                } = &body.expression(callee).kind
                 else {
                     continue;
                 };
-                if !signature.generic_kinds.is_empty() {
+                let Some(ElaboratedHeader::Callable(signature)) =
+                    signatures.definitions.get(callee)
+                else {
                     continue;
-                }
-                let key = InstanceKey::new(callee, &signature.generic_kinds, vec![]).map_err(
-                    |error| {
+                };
+                let key = InstanceKey::new(*callee, &signature.generic_kinds, arguments.clone())
+                    .map_err(|error| {
                         failed(
                             input_fingerprint,
                             vec![CompileDiagnostic::invariant(
@@ -1093,8 +1094,7 @@ impl StageZeroCompiler {
                             )],
                             &source_lengths,
                         )
-                    },
-                )?;
+                    })?;
                 instance_graph
                     .discover_callee(&caller, key, limits)
                     .map_err(|error| {

@@ -104,7 +104,7 @@ impl Analyzer<'_> {
         match expression.kind {
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
+            | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error

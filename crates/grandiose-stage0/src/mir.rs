@@ -3222,7 +3222,7 @@ impl Lowerer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
+            | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => None,
@@ -3327,7 +3327,7 @@ impl Lowerer<'_> {
             | CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
+            | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => false,
@@ -7745,7 +7745,10 @@ impl Lowerer<'_> {
             // Named callables are first-class values just like anonymous
             // closures. Their environment is statically empty, while the
             // function identity selects the verified code target.
-            CoreKind::Function(callee) | CoreKind::TraitMethod { method: callee, .. } => {
+            CoreKind::Function {
+                definition: callee, ..
+            }
+            | CoreKind::TraitMethod { method: callee, .. } => {
                 self.instructions.push(MirInstruction::MakeCallable {
                     dst,
                     callee,
@@ -8162,7 +8165,10 @@ impl Lowerer<'_> {
                     .map(|argument| self.value(argument))
                     .collect::<Option<Vec<_>>>()?;
                 match self.body.expression(callee).kind.clone() {
-                    CoreKind::Function(callee) | CoreKind::TraitMethod { method: callee, .. } => {
+                    CoreKind::Function {
+                        definition: callee, ..
+                    }
+                    | CoreKind::TraitMethod { method: callee, .. } => {
                         self.instructions.push(MirInstruction::Call {
                             dst,
                             callee,
@@ -8309,7 +8315,7 @@ impl Lowerer<'_> {
             }
             CoreKind::Call { callee, arguments } => {
                 let definition = match self.body.expression(callee).kind {
-                    CoreKind::Function(definition)
+                    CoreKind::Function { definition, .. }
                     | CoreKind::TraitMethod {
                         method: definition, ..
                     } => definition,
@@ -8420,7 +8426,7 @@ impl Lowerer<'_> {
                 .last()
                 .is_some_and(|value| self.has_direct_perform(*value)),
             CoreKind::Call { callee, arguments } => {
-                matches!(self.body.expression(callee).kind, CoreKind::Function(definition)
+                matches!(self.body.expression(callee).kind, CoreKind::Function { definition, .. }
                     | CoreKind::TraitMethod { method: definition, .. }
                     if self.direct_known_perform(definition, arguments.clone()).is_some())
             }
@@ -8438,7 +8444,7 @@ impl Lowerer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
+            | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. } => true,
             CoreKind::Constant(_)
             | CoreKind::Error
@@ -8485,7 +8491,7 @@ impl Lowerer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
+            | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. } => true,
             CoreKind::Constant(_)
             | CoreKind::Error

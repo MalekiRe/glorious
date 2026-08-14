@@ -1,9 +1,10 @@
 use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, ClosureCapture,
     CoreExpr, CoreHandlerResumption, CoreId, CoreKind, DeclarationScan, DefKey, DefinitionIndex,
-    Digest, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind, InferVar,
-    InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering, PackageKey,
-    PlaceFlow, Quantity, Span, Type, TypedBody, implementation_method_key,
+    Digest, ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind,
+    GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction,
+    MirLowering, PackageKey, PlaceFlow, Quantity, ScalarType, Span, Type, TypedBody,
+    implementation_method_key,
 };
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
@@ -84,6 +85,23 @@ fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
             .iter()
             .any(|expression| matches!(expression.kind, CoreKind::Binary { .. }))
     );
+}
+
+#[test]
+fn typed_core_retains_zonked_direct_call_specialization_arguments() {
+    let core = core_for(
+        "core-direct-instance@0.1.0",
+        "pub fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { identity(42) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::Function { arguments, .. }
+                if arguments.as_slice()
+                    == [GenericArgument::Type(Type::Scalar(ScalarType::I64))]
+        )
+    }));
 }
 
 #[test]

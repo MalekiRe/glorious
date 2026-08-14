@@ -311,7 +311,14 @@ pub enum CoreKind {
         id: ResumptionId,
         name: String,
     },
-    Function(DefKey),
+    /// A direct callable reference plus the caller-owned substitution used to
+    /// instantiate its frozen declaration contract. Keeping this on Core is
+    /// essential: a later instance/MIR query must never recreate inference
+    /// variables or infer specialization identity from a rendered type.
+    Function {
+        definition: DefKey,
+        arguments: Vec<GenericArgument>,
+    },
     /// A direct function value selected from a trait implementation. Retain
     /// proof evidence alongside the callable key until MIR consumes this
     /// source-free selection, rather than reconstructing lookup from a name.
@@ -415,7 +422,7 @@ impl CoreKind {
     /// named functions.
     pub fn callable_brand(&self) -> Option<CallableBrand> {
         match self {
-            Self::Function(definition) => Some(CallableBrand::Named(*definition)),
+            Self::Function { definition, .. } => Some(CallableBrand::Named(*definition)),
             Self::TraitMethod { method, .. } => Some(CallableBrand::Named(*method)),
             Self::Closure { environment, .. } => Some(CallableBrand::Closure(environment.brand)),
             _ => None,
@@ -587,9 +594,13 @@ impl CoreFingerprintEncoder<'_> {
                 self.debug(id);
                 self.bytes(name.as_bytes());
             }
-            CoreKind::Function(definition) => {
+            CoreKind::Function {
+                definition,
+                arguments,
+            } => {
                 self.bytes(b"function");
                 self.debug(definition);
+                self.debug(arguments);
             }
             CoreKind::TraitMethod { evidence, method } => {
                 self.bytes(b"trait-method");
@@ -804,7 +815,7 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
-        | CoreKind::Function(_)
+        | CoreKind::Function { .. }
         | CoreKind::TraitMethod { .. }
         | CoreKind::Constant(_)
         | CoreKind::Error => vec![],
@@ -1071,6 +1082,9 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
                     .any(|capture| type_contains_inference(&capture.ty))
         }
         CoreKind::Assign { place, .. } => place_contains_inference(place),
+        CoreKind::Function { arguments, .. } => {
+            arguments.iter().any(generic_argument_contains_inference)
+        }
         CoreKind::Perform { effect, .. } => effect
             .arguments
             .iter()
@@ -1104,7 +1118,6 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
-        | CoreKind::Function(_)
         | CoreKind::TraitMethod { .. }
         | CoreKind::Constant(_)
         | CoreKind::Tuple(_)
@@ -1233,7 +1246,6 @@ impl TypedBody {
             next_resumption: 0,
             next_refinement: 0,
             next_label: 0,
-            function_arguments: std::collections::BTreeMap::new(),
             generic_parameters,
             effect_row_parameters: definition
                 .callable_header()
@@ -1406,7 +1418,6 @@ impl TypedBody {
             next_resumption: 0,
             next_refinement: 0,
             next_label: 0,
-            function_arguments: std::collections::BTreeMap::new(),
             generic_parameters,
             effect_row_parameters: {
                 let mut parameters = std::collections::BTreeMap::new();
@@ -1542,7 +1553,6 @@ impl TypedBody {
             next_resumption: 0,
             next_refinement: 0,
             next_label: 0,
-            function_arguments: std::collections::BTreeMap::new(),
             generic_parameters: std::collections::BTreeMap::new(),
             effect_row_parameters: std::collections::BTreeMap::new(),
             lifetime_parameters: std::collections::BTreeMap::new(),
@@ -1662,7 +1672,6 @@ struct Elaborator<'a> {
     next_resumption: u32,
     next_refinement: u32,
     next_label: u32,
-    function_arguments: std::collections::BTreeMap<CoreId, Vec<Type>>,
     /// Callable-declaration generic binders are lexically visible in its
     /// body, including effect applications such as `State<T>::get()`. They
     /// remain stable `Type::Generic` slots; inference variables are reserved
@@ -3186,7 +3195,7 @@ impl Elaborator<'_> {
             CoreKind::Closure { .. }
             | CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
+            | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Error => {}
@@ -3221,6 +3230,13 @@ impl Elaborator<'_> {
             }
             CoreKind::Assign { place, .. } => self.zonk_place(place, span),
             CoreKind::Label { .. } | CoreKind::Transfer { .. } => {}
+            CoreKind::Function { arguments, .. } => {
+                *arguments = arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| self.zonk_generic_argument(argument, span))
+                    .collect();
+            }
             CoreKind::Perform { effect, .. } => {
                 effect.arguments = effect
                     .arguments
@@ -3271,7 +3287,6 @@ impl Elaborator<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
-            | CoreKind::Function(_)
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant(_)
             | CoreKind::Tuple(_)
@@ -3655,15 +3670,52 @@ impl Elaborator<'_> {
                 .and_then(callable)
             {
                 Some(signature) => {
-                    let arguments = (0..signature.generics)
-                        .map(|_| self.inference.fresh())
+                    let generic_kinds = signature.generic_kinds.clone();
+                    // Callable signatures still substitute value types
+                    // through their legacy type-only representation. Reserve
+                    // every source slot there, but mint inference variables
+                    // only for slots that are actually type-kinded. The
+                    // canonical Core identity below retains the real kind so
+                    // a row, region, or const never becomes a bogus type
+                    // inference variable merely to satisfy this compatibility
+                    // boundary.
+                    let type_arguments = generic_kinds
+                        .iter()
+                        .map(|kind| match kind {
+                            crate::GenericKind::Type => self.inference.fresh(),
+                            crate::GenericKind::EffectRow
+                            | crate::GenericKind::Lifetime
+                            | crate::GenericKind::Const(_) => Type::Error,
+                        })
                         .collect::<Vec<_>>();
                     let signature = self
                         .signatures
-                        .instantiate_callable(definition, &arguments)
+                        .instantiate_callable(definition, &type_arguments)
                         .expect("fresh arguments match the callable generic arity");
-                    let value = self.alloc(
-                        CoreKind::Function(definition),
+                    let arguments = generic_kinds
+                        .iter()
+                        .enumerate()
+                        .map(|(index, kind)| match kind {
+                            crate::GenericKind::Type => {
+                                GenericArgument::Type(type_arguments[index].clone())
+                            }
+                            crate::GenericKind::EffectRow => {
+                                GenericArgument::EffectRow(EffectRow::empty())
+                            }
+                            crate::GenericKind::Lifetime => {
+                                GenericArgument::Lifetime(Lifetime::Elided)
+                            }
+                            crate::GenericKind::Const(kind) => GenericArgument::ConstGeneric {
+                                index: index as u32,
+                                kind: *kind,
+                            },
+                        })
+                        .collect();
+                    self.alloc(
+                        CoreKind::Function {
+                            definition,
+                            arguments,
+                        },
                         Type::Callable {
                             lifetime_binders: 0,
                             parameters: signature.parameters,
@@ -3672,9 +3724,7 @@ impl Elaborator<'_> {
                             invocation: signature.invocation,
                         },
                         span,
-                    );
-                    self.function_arguments.insert(value, arguments);
-                    value
+                    )
                 }
                 None => match self.signatures.definitions.get(&definition) {
                     Some(ElaboratedHeader::Constant(Some(ty))) => {
@@ -5508,19 +5558,34 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
     }
-    /// Direct calls carry a body-local map from their function Core value to
-    /// the fresh type arguments used to instantiate its frozen signature.
-    /// This is the narrowest point at which ordinary callable bounds can be
-    /// checked: argument unification has constrained the variables, while no
-    /// unresolved inference state has crossed into a persistence boundary.
+    /// Direct calls retain their caller-owned substitution on the function
+    /// Core value. This is the narrowest point at which ordinary callable
+    /// bounds can be checked: argument unification has constrained the
+    /// variables, while no unresolved inference state has crossed into a
+    /// persistence boundary.
     fn check_call_where_bounds(&mut self, callee: CoreId, span: Span) {
-        let definition = match &self.expressions[callee.0 as usize].kind {
-            CoreKind::Function(definition) => *definition,
+        let (definition, arguments) = match &self.expressions[callee.0 as usize].kind {
+            CoreKind::Function {
+                definition,
+                arguments,
+            } => (*definition, arguments.clone()),
             _ => return,
         };
-        let Some(arguments) = self.function_arguments.get(&callee).cloned() else {
-            return;
-        };
+        // The legacy callable-substitution API still accepts a type vector.
+        // Preserve its source-slot alignment with placeholders for non-type
+        // arguments; those cannot occur in a value-type where-bound subject,
+        // and their canonical identities remain on `CoreKind::Function`.
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| match argument {
+                GenericArgument::Type(argument) => argument,
+                GenericArgument::EffectRow(_)
+                | GenericArgument::Lifetime(_)
+                | GenericArgument::ConstU32(_)
+                | GenericArgument::ConstQuantity(_)
+                | GenericArgument::ConstGeneric { .. } => Type::Error,
+            })
+            .collect::<Vec<_>>();
         let Some(signature) = self.signatures.instantiate_callable(definition, &arguments) else {
             self.error(
                 span,
