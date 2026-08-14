@@ -50,6 +50,48 @@ fn tabled_solver_proves_generic_impls_after_where_obligations() {
 }
 
 #[test]
+fn tabled_solver_substitutes_structural_const_impl_binders_into_where_obligations() {
+    let (interface, signatures) = signatures(
+        "trait Marker {} trait Ready {} struct Tag<n: u32> {} impl<n: u32> Marker for Tag<n> {} impl<n: u32> Ready for Tag<n> where Tag<n>: Marker {}",
+    );
+    let tag = key(&interface, "Tag");
+    let ready = key(&interface, "Ready");
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![],
+        },
+        subject: Type::Nominal {
+            definition: tag,
+            arguments: vec![Type::ConstU32(7)],
+        },
+    });
+    assert!(matches!(answer, TraitAnswer::Proven { .. }), "{answer:#?}");
+}
+
+#[test]
+fn tabled_solver_does_not_bind_const_impl_binders_to_ordinary_types() {
+    let (interface, signatures) =
+        signatures("trait Ready {} struct Tag<n: u32> {} impl<n: u32> Ready for Tag<n> {}");
+    let tag = key(&interface, "Tag");
+    let ready = key(&interface, "Ready");
+    let answer = TraitSolver::new(&signatures).solve(TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: ready,
+            arguments: vec![],
+        },
+        // This cannot be produced by the elaborator, which rejects ordinary
+        // types in const slots. Keep the solver defensive at its public API
+        // boundary too.
+        subject: Type::Nominal {
+            definition: tag,
+            arguments: vec![Type::Scalar(ScalarType::I64)],
+        },
+    });
+    assert_eq!(answer, TraitAnswer::NoSolution);
+}
+
+#[test]
 fn tabled_solver_distinguishes_negative_evidence_and_missing_evidence() {
     let (interface, signatures) =
         signatures("trait Ready {} struct Box<T> {} impl !Ready for Box<Text> {}");

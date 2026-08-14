@@ -831,12 +831,31 @@ fn match_type(
                 Some(())
             }
         },
+        // Const binders share the declaration's source-slot namespace with
+        // type binders, but they range over a deliberately closed structural
+        // value language.  Treating them as rigid terms means an otherwise
+        // generic implementation such as `impl<n: u32> Ready for Tag<n>` can
+        // never match `Tag<4>`.  Bind them just like type variables while
+        // retaining their kind check, so ordinary types cannot enter a const
+        // substitution by accident.
+        Type::ConstGeneric { index, kind } => {
+            if !is_const_argument_of_kind(actual, *kind) {
+                return None;
+            }
+            match substitution.get(index) {
+                Some(previous) if previous != actual => None,
+                Some(_) => Some(()),
+                None => {
+                    substitution.insert(*index, actual.clone());
+                    Some(())
+                }
+            }
+        }
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
         | Type::ConstU32(_)
         | Type::ConstQuantity(_)
-        | Type::ConstGeneric { .. }
         | Type::Error => (template == actual).then_some(()),
         Type::Nominal {
             definition,
@@ -936,6 +955,31 @@ fn match_type(
     }
 }
 
+/// Check that a solver-side substitution remains in the structural domain of
+/// its declared const binder.  Generic consts are valid actual terms because
+/// a canonical goal may itself be parameterized; their kind must still agree.
+fn is_const_argument_of_kind(value: &Type, expected: crate::ConstKind) -> bool {
+    matches!(
+        (value, expected),
+        (Type::ConstU32(_), crate::ConstKind::U32)
+            | (Type::ConstQuantity(_), crate::ConstKind::Quantity)
+            | (
+                Type::ConstGeneric {
+                    kind: crate::ConstKind::U32,
+                    ..
+                },
+                crate::ConstKind::U32,
+            )
+            | (
+                Type::ConstGeneric {
+                    kind: crate::ConstKind::Quantity,
+                    ..
+                },
+                crate::ConstKind::Quantity,
+            )
+    )
+}
+
 fn substitute_relation(
     relation: &ElaboratedTraitReference,
     substitution: &BTreeMap<u32, Type>,
@@ -953,6 +997,10 @@ fn substitute_relation(
 fn substitute_type(value: &Type, substitution: &BTreeMap<u32, Type>) -> Type {
     match value {
         Type::Generic(index) => substitution
+            .get(index)
+            .cloned()
+            .unwrap_or_else(|| value.clone()),
+        Type::ConstGeneric { index, .. } => substitution
             .get(index)
             .cloned()
             .unwrap_or_else(|| value.clone()),
