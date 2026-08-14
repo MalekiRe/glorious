@@ -62,6 +62,65 @@ fn typed_core_checks_a_function_body_against_its_declared_result() {
 }
 
 #[test]
+fn typed_core_uses_the_enclosing_callable_where_clause_as_bound_evidence() {
+    let package = PackageKey("core-ambient-where-bound@0.1.0".into());
+    let source = "trait Mark {} pub fn requires_mark<T>(value: T) -> T where T: Mark { value } pub fn forwards_mark<T>(value: T) -> T where T: Mark { requires_mark(value) }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("forwards_mark"))
+        .expect("forwarding definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("forwarding body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
+fn typed_core_does_not_invent_callable_where_bound_evidence() {
+    let package = PackageKey("core-missing-ambient-where-bound@0.1.0".into());
+    let source = "trait Mark {} pub fn requires_mark<T>(value: T) -> T where T: Mark { value } pub fn forwards_without_mark<T>(value: T) -> T { requires_mark(value) }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("forwards_without_mark"))
+        .expect("forwarding definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("forwarding body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4143"),
+        "missing unproven-bound diagnostic: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn typed_core_normalizes_nested_concrete_associated_type_projections() {
     let package = PackageKey("core-nested-associated-projection@0.1.0".into());
     let source = "trait Source { type Item; } trait Wrapper { type Item; } struct Value {} impl Source for Value { type Item = i64; } impl Wrapper for Value { type Item = <Value as Source>::Item; } pub fn value() -> <Value as Wrapper>::Item { 1 }";

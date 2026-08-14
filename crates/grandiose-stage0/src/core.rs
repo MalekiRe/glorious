@@ -362,6 +362,12 @@ impl TypedBody {
                 .and_then(callable)
                 .map(|signature| signature.effects.clone())
                 .unwrap_or_else(EffectRow::empty),
+            ambient_where_bounds: signatures
+                .definitions
+                .get(&definition.key)
+                .and_then(callable)
+                .map(|signature| signature.where_bounds.clone())
+                .unwrap_or_default(),
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
         };
@@ -513,6 +519,19 @@ impl TypedBody {
                 parameters
             },
             declared_effects: context.signature.effects.clone(),
+            ambient_where_bounds: signatures
+                .definitions
+                .get(&implementation.key)
+                .and_then(|header| match header {
+                    ElaboratedHeader::Implementation(implementation) => {
+                        Some(implementation.where_bounds.clone())
+                    }
+                    _ => None,
+                })
+                .into_iter()
+                .flatten()
+                .chain(context.signature.where_bounds.clone())
+                .collect(),
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
         };
@@ -582,6 +601,7 @@ impl TypedBody {
             lifetime_parameters: std::collections::BTreeMap::new(),
             const_parameters: std::collections::BTreeMap::new(),
             declared_effects: EffectRow::empty(),
+            ambient_where_bounds: vec![],
             handled_effects: std::collections::BTreeSet::new(),
             handled_operations: std::collections::BTreeSet::new(),
         };
@@ -701,6 +721,13 @@ struct Elaborator<'a> {
     /// argument of a kinded nominal application.
     const_parameters: std::collections::BTreeMap<String, (u32, crate::ConstKind)>,
     declared_effects: EffectRow,
+    /// Trait facts supplied by the callable contract currently being
+    /// elaborated. These are assumptions, not global solver rules: callers
+    /// must still prove the contract before crossing this callable boundary.
+    /// Keeping them in Typed Core prevents a generic implementation from
+    /// rejecting a call which is valid precisely because its own `where`
+    /// clause established the required evidence.
+    ambient_where_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
     /// Protocol instances exhaustively intercepted by lexically active deep
     /// handlers.  A partial handler never enters this set, so forwarding still
     /// requires the enclosing callable's outward effect declaration.
@@ -3634,6 +3661,9 @@ impl Elaborator<'_> {
                 },
                 subject,
             };
+            if self.ambient_where_bound_proves(&goal) {
+                continue;
+            }
             match solver.solve(goal) {
                 TraitAnswer::Proven { .. } => {}
                 TraitAnswer::Refuted { .. } => {
@@ -3669,6 +3699,18 @@ impl Elaborator<'_> {
         if failed {
             self.recovered = true;
         }
+    }
+    /// Discharge an obligation directly from the declaration contract in
+    /// scope.  This intentionally uses structural equality after zonking
+    /// rather than extending the global trait solver: a caller's assumptions
+    /// must never become implementation evidence for another callable.
+    fn ambient_where_bound_proves(&mut self, goal: &TraitGoal) -> bool {
+        self.ambient_where_bounds.iter().any(|(subject, relation)| {
+            self.inference
+                .zonk(subject.clone())
+                .ok()
+                .is_some_and(|subject| subject == goal.subject && relation == &goal.relation)
+        })
     }
     fn operators(&mut self, operands: Vec<ExprId>, operators: Vec<String>, span: Span) -> CoreId {
         if operands.len() != operators.len().saturating_add(1) {
