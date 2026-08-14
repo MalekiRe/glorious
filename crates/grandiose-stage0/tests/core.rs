@@ -3771,6 +3771,57 @@ fn forged_perform_reference_provenance_fails_core_validation() {
 }
 
 #[test]
+fn effect_operation_contract_freezes_the_selected_generic_lifetime_path() {
+    let mut core = core_for(
+        "core-perform-distinct-lifetime-contract@0.1.0",
+        "effect Select<'a, 'b> { [0, 1] choose(left: &'a i64, right: &'b i64) -> &'a i64; } pub fn main<'a, 'b>(left: &'a i64, right: &'b i64) -> &'a i64 / {Select<'a, 'b>} { Select<'a, 'b>::choose(left, right) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let (contract, origin) = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Perform {
+                reference_contract,
+                reference_origin,
+                ..
+            } => Some((reference_contract, reference_origin)),
+            _ => None,
+        })
+        .expect("effect operation did not retain a frozen lifetime contract");
+    assert!(matches!(contract, grandiose_stage0::CallReferenceOrigin::Paths(paths) if paths.len() == 1 && paths[0].argument == 0));
+    assert_eq!(origin, contract);
+    *origin = grandiose_stage0::CallReferenceOrigin::Paths(vec![
+        grandiose_stage0::CallReferencePath {
+            result_fields: vec![],
+            argument: 1,
+            argument_fields: vec![],
+        },
+    ]);
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4187"),
+        "forged effect operation retargeted a distinct generic lifetime: {:#?}",
+        core.validate()
+    );
+    let flow = PlaceFlow::analyze(&core);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-effect-operation-lifetime-relation")),
+        &core,
+        &flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR accepted a forged effect operation lifetime relation: {lowered:#?}"
+    );
+}
+
+#[test]
 fn handler_payload_reference_alias_preserves_its_parent_loan() {
     let core = core_for(
         "core-handler-payload-reference-provenance@0.1.0",

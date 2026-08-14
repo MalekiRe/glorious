@@ -453,6 +453,11 @@ pub enum CoreKind {
         operation: u32,
         arguments: Vec<CoreId>,
         terminal: bool,
+        /// The operation declaration's caller-region relation before body
+        /// inference can collapse distinct lifetime arguments.  Operations
+        /// are callable boundaries just like ordinary functions, so this
+        /// contract independently seals the selected payload path.
+        reference_contract: CallReferenceOrigin,
         /// Frozen caller-region provenance for the operation result.  Effect
         /// operations are callable boundaries too: the handler/resumption
         /// machinery must never infer a shorter region from an implementation
@@ -965,6 +970,7 @@ impl CoreFingerprintEncoder<'_> {
                 operation,
                 arguments,
                 terminal,
+                reference_contract,
                 reference_origin,
             } => {
                 self.bytes(b"perform");
@@ -972,6 +978,7 @@ impl CoreFingerprintEncoder<'_> {
                 self.bytes(&operation.to_le_bytes());
                 self.bytes(&[*terminal as u8]);
                 self.ids(arguments);
+                self.debug(reference_contract);
                 self.debug(reference_origin);
             }
             CoreKind::Handle {
@@ -1198,9 +1205,15 @@ fn call_reference_origin_error(body: &TypedBody, kind: &CoreKind, result: &Type)
         ),
         CoreKind::Perform {
             arguments,
+            reference_contract,
             reference_origin,
             ..
-        } => (arguments, reference_origin, "effect operation", None),
+        } => (
+            arguments,
+            reference_origin,
+            "effect operation",
+            Some(reference_contract.clone()),
+        ),
         _ => return None,
     };
     if let Some(contract) = callable_contract
@@ -4788,6 +4801,7 @@ impl Elaborator<'_> {
             CoreKind::Perform {
                 effect,
                 arguments,
+                reference_contract,
                 reference_origin,
                 ..
             } => {
@@ -4797,8 +4811,21 @@ impl Elaborator<'_> {
                     .cloned()
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
-                *reference_origin =
-                    call_reference_origin(self.signatures, &self.expressions, arguments, result);
+                // The declared operation relation is determined before
+                // zonking can collapse distinct generic lifetimes into the
+                // same caller-local representation.  Fall back to the
+                // realized expression types only for a genuinely opaque
+                // declaration contract, as ordinary calls do.
+                if matches!(reference_contract, CallReferenceOrigin::Opaque) {
+                    *reference_origin = call_reference_origin(
+                        self.signatures,
+                        &self.expressions,
+                        arguments,
+                        result,
+                    );
+                } else {
+                    *reference_origin = reference_contract.clone();
+                }
             }
             CoreKind::Call {
                 arguments,
@@ -6477,13 +6504,19 @@ impl Elaborator<'_> {
             arguments: effect_arguments,
         };
         self.check_effect_instance(&instance, Some(operation_index), span);
+        let reference_contract = callable_reference_origin_from_contract(
+            self.signatures,
+            &operation.parameters,
+            &operation.result,
+        );
         Some(self.alloc(
             CoreKind::Perform {
                 effect: instance,
                 operation: operation_index,
                 arguments: values,
                 terminal: operation.terminal,
-                reference_origin: CallReferenceOrigin::Opaque,
+                reference_origin: reference_contract.clone(),
+                reference_contract,
             },
             operation.result.clone(),
             span,
