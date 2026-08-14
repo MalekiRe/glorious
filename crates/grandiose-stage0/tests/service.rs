@@ -3235,6 +3235,105 @@ fn service_resolves_grouped_import_bindings() {
 }
 
 #[test]
+fn service_resolves_glob_imported_values_and_public_nested_reexports() {
+    let root = "pub mod math; pub mod facade; use facade::*; pub fn main() -> i64 { add(40) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            root,
+            &[
+                (
+                    "src/math/math.glorious",
+                    "pub mod nested; pub fn ignored() -> i64 { 0 }",
+                ),
+                (
+                    "src/math/nested/nested.glorious",
+                    "pub fn add(value: i64) -> i64 { value + 2 }",
+                ),
+                (
+                    "src/facade/facade.glorious",
+                    "pub use crate::math::nested::*;",
+                ),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_ambiguous_glob_imported_values() {
+    let root = "mod left; mod right; use left::*; use right::*; pub fn main() -> i64 { answer() }";
+    let error = StageZeroCompiler::new().compile(request_with_modules(
+        root,
+        &[
+            ("left", "pub fn answer() -> i64 { 1 }"),
+            ("right", "pub fn answer() -> i64 { 2 }"),
+        ],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = error else {
+        panic!("ambiguous glob imports unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4103"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_private_glob_imports_before_body_elaboration() {
+    let root = "mod outer; mod facade; pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new().compile(request_with_logical_sources(
+        root,
+        &[
+            ("src/outer/outer.glorious", "mod hidden;"),
+            (
+                "src/outer/hidden/hidden.glorious",
+                "pub fn answer() -> i64 { 42 }",
+            ),
+            ("src/facade/facade.glorious", "use crate::outer::hidden::*;"),
+        ],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = error else {
+        panic!("private glob import unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3326"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_public_glob_reexports_through_private_modules() {
+    let root = "pub mod outer; pub mod facade; pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new().compile(request_with_logical_sources(
+        root,
+        &[
+            ("src/outer/outer.glorious", "mod hidden;"),
+            (
+                "src/outer/hidden/hidden.glorious",
+                "pub fn answer() -> i64 { 42 }",
+            ),
+            (
+                "src/facade/facade.glorious",
+                "pub use crate::outer::hidden::*;",
+            ),
+        ],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = error else {
+        panic!("private public glob reexport unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_resolves_public_import_reexports_from_another_module() {
     let root = "mod math; mod facade; pub fn main() -> i64 { facade::add(40) }";
     let outcome = StageZeroCompiler::new()

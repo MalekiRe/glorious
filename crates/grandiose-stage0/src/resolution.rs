@@ -91,6 +91,11 @@ struct IndexedDefinition {
 /// same interface-owned fact.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ImportBinding {
+    /// A glob targets a module and contributes all names which are visible
+    /// through that module.  It is not flattened while interfaces are being
+    /// collected: modules from other source files may not have been indexed
+    /// yet, and flattening there would make import order observable.
+    pub glob: bool,
     pub path: Vec<String>,
     pub alias: String,
     pub module: ModuleKey,
@@ -168,15 +173,20 @@ impl DefinitionIndex {
             }
             if let ParsedHeader::Import(import) = &definition.syntax.header {
                 for binding in &import.bindings {
-                    let alias = binding
-                        .alias
-                        .clone()
-                        .or_else(|| binding.path.last().cloned())
-                        .unwrap_or_else(|| "<error>".into());
+                    let alias = if binding.glob {
+                        "<glob>".into()
+                    } else {
+                        binding
+                            .alias
+                            .clone()
+                            .or_else(|| binding.path.last().cloned())
+                            .unwrap_or_else(|| "<error>".into())
+                    };
                     self.imports
                         .entry(definition.module.clone())
                         .or_default()
                         .push(ImportBinding {
+                            glob: binding.glob,
                             path: binding.path.clone(),
                             alias,
                             module: definition.module.clone(),
@@ -298,6 +308,185 @@ impl DefinitionIndex {
         self.resolve_member(namespace, &module, name, owner, true, &mut BTreeSet::new())
     }
 
+    /// Check every import edge before bodies are demanded.  This prevents an
+    /// unused `use private::Thing` (and, especially, a glob through a private
+    /// module) from becoming a latent capability which happens to fail only
+    /// after an unrelated edit starts using it.
+    pub fn validate_imports(&self) -> Vec<ResolutionDiagnostic> {
+        let mut diagnostics = vec![];
+        for imports in self.imports.values() {
+            for import in imports {
+                // Exported edges have a stricter requester (a dependency
+                // consumer) and are diagnosed by `validate_exported_imports`
+                // below.  Checking them here as the importing module would
+                // produce a weaker, duplicate privacy diagnostic.
+                if import.public {
+                    continue;
+                }
+                let requester = &import.module;
+                if import.glob {
+                    match self.lexical_module(&import.module, requester, &import.path) {
+                        ModuleLookup::Found(_) => {}
+                        ModuleLookup::Inaccessible => diagnostics.push(ResolutionDiagnostic {
+                            code: "G3326",
+                            span: import.span,
+                            message: format!(
+                                "glob import `{}` traverses a private module path",
+                                import.path.join("::")
+                            ),
+                        }),
+                        ModuleLookup::Absent => diagnostics.push(ResolutionDiagnostic {
+                            code: "G3327",
+                            span: import.span,
+                            message: format!(
+                                "glob import `{}` does not name a module",
+                                import.path.join("::")
+                            ),
+                        }),
+                    }
+                    continue;
+                }
+
+                let states = [
+                    DefinitionNamespace::Type,
+                    DefinitionNamespace::Value,
+                    DefinitionNamespace::Trait,
+                    DefinitionNamespace::Effect,
+                    DefinitionNamespace::Module,
+                    DefinitionNamespace::Operator,
+                ]
+                .into_iter()
+                .map(|namespace| {
+                    self.resolve_direct_path(
+                        namespace,
+                        &import.module,
+                        requester,
+                        &import.path,
+                        &mut BTreeSet::new(),
+                    )
+                })
+                .collect::<Vec<_>>();
+                if states
+                    .iter()
+                    .all(|state| matches!(state, ResolutionState::Unresolved))
+                {
+                    diagnostics.push(ResolutionDiagnostic {
+                        code: "G3327",
+                        span: import.span,
+                        message: format!(
+                            "import `{}` does not resolve in any namespace",
+                            import.path.join("::")
+                        ),
+                    });
+                } else if states.iter().all(|state| {
+                    matches!(
+                        state,
+                        ResolutionState::Unresolved | ResolutionState::Inaccessible(_)
+                    )
+                }) {
+                    diagnostics.push(ResolutionDiagnostic {
+                        code: "G3326",
+                        span: import.span,
+                        message: format!(
+                            "import `{}` names an inaccessible definition",
+                            import.path.join("::")
+                        ),
+                    });
+                }
+            }
+        }
+        canonicalize_diagnostics(&mut diagnostics);
+        diagnostics
+    }
+
+    /// Source import sites are ordinary semantic occurrences.  Returning
+    /// them from the same index which resolves body paths keeps definition,
+    /// references, highlighting, and rename in agreement about aliases and
+    /// globs.  A glob has one occurrence for each imported semantic target;
+    /// all share the glob's source span because that is its one source site.
+    pub fn import_occurrences(&self) -> Vec<Occurrence> {
+        let mut occurrences = vec![];
+        for imports in self.imports.values() {
+            for import in imports {
+                if import.glob {
+                    let ModuleLookup::Found(target) =
+                        self.lexical_module(&import.module, &import.module, &import.path)
+                    else {
+                        occurrences.push(Occurrence {
+                            span: import.span,
+                            namespace: DefinitionNamespace::Module,
+                            role: OccurrenceRole::Import,
+                            state: ResolutionState::Unresolved,
+                        });
+                        continue;
+                    };
+                    for namespace in all_namespaces() {
+                        for name in
+                            self.module_member_names(&target, namespace, &mut BTreeSet::new())
+                        {
+                            occurrences.push(Occurrence {
+                                span: import.span,
+                                namespace,
+                                role: OccurrenceRole::Import,
+                                state: self.resolve_member(
+                                    namespace,
+                                    &import.module,
+                                    &name,
+                                    &import.module,
+                                    false,
+                                    &mut BTreeSet::new(),
+                                ),
+                            });
+                        }
+                    }
+                } else {
+                    let mut found = false;
+                    for namespace in all_namespaces() {
+                        let state = self.resolve_direct_path(
+                            namespace,
+                            &import.module,
+                            &import.module,
+                            &import.path,
+                            &mut BTreeSet::new(),
+                        );
+                        if !matches!(state, ResolutionState::Unresolved) {
+                            found = true;
+                            occurrences.push(Occurrence {
+                                span: import.span,
+                                namespace,
+                                role: OccurrenceRole::Import,
+                                state,
+                            });
+                        }
+                    }
+                    if !found {
+                        occurrences.push(Occurrence {
+                            span: import.span,
+                            namespace: DefinitionNamespace::Value,
+                            role: OccurrenceRole::Import,
+                            state: ResolutionState::Unresolved,
+                        });
+                    }
+                }
+            }
+        }
+        occurrences.sort_by_key(|occurrence| {
+            (
+                occurrence.span,
+                occurrence.namespace,
+                occurrence.role,
+                format!("{:?}", occurrence.state),
+            )
+        });
+        occurrences.dedup_by(|left, right| {
+            left.span == right.span
+                && left.namespace == right.namespace
+                && left.role == right.role
+                && left.state == right.state
+        });
+        occurrences
+    }
+
     /// Validate public import edges which are themselves reachable from the
     /// package root.  A `pub use` is part of the exported interface, so it
     /// cannot defer privacy checking until some unrelated local body happens
@@ -318,6 +507,22 @@ impl DefinitionIndex {
                     // or definition in this package.
                     path: "<dependency>".into(),
                 };
+                if import.glob {
+                    match self.lexical_module(&import.module, &external_requester, &import.path) {
+                        ModuleLookup::Found(_) => continue,
+                        ModuleLookup::Inaccessible | ModuleLookup::Absent => {
+                            diagnostics.push(ResolutionDiagnostic {
+                                code: "G3317",
+                                span: import.span,
+                                message: format!(
+                                    "public glob import `{}` exposes a private or absent module path",
+                                    import.path.join("::")
+                                ),
+                            });
+                            continue;
+                        }
+                    }
+                }
                 let mut any_public_target = false;
                 let mut saw_inaccessible = false;
                 for namespace in [
@@ -412,12 +617,24 @@ impl DefinitionIndex {
         let mut saw_inaccessible = false;
         for import in imports
             .iter()
-            .filter(|import| import.alias == alias && (!require_public || import.public))
+            .filter(|import| !require_public || import.public)
+            .filter(|import| import.glob || import.alias == alias)
         {
             // Preserve the original requester across every re-export hop.
             // Resolving a target as the facade module itself would grant its
             // local authority to callers and leak private modules/items.
-            match self.resolve_direct_path(namespace, owner, requester, &import.path, visited) {
+            let state = if import.glob {
+                match self.lexical_module(owner, requester, &import.path) {
+                    ModuleLookup::Found(module) => {
+                        self.resolve_member(namespace, &module, alias, requester, true, visited)
+                    }
+                    ModuleLookup::Inaccessible => ResolutionState::Inaccessible(vec![]),
+                    ModuleLookup::Absent => ResolutionState::Unresolved,
+                }
+            } else {
+                self.resolve_direct_path(namespace, owner, requester, &import.path, visited)
+            };
+            match state {
                 ResolutionState::Resolved(definition) => resolved.push(definition),
                 ResolutionState::Ambiguous(definitions) => ambiguous.extend(definitions),
                 ResolutionState::Inaccessible(definitions) => {
@@ -434,14 +651,14 @@ impl DefinitionIndex {
         canonicalize_keys(&mut resolved);
         canonicalize_keys(&mut ambiguous);
         canonicalize_keys(&mut inaccessible);
-        if resolved.len() == 1 {
-            ResolutionState::Resolved(resolved[0])
-        } else if resolved.len() > 1 {
+        if resolved.len() > 1 {
             ResolutionState::Ambiguous(resolved)
         } else if !ambiguous.is_empty() {
             ResolutionState::Ambiguous(ambiguous)
         } else if saw_inaccessible || !inaccessible.is_empty() {
             ResolutionState::Inaccessible(inaccessible)
+        } else if resolved.len() == 1 {
+            ResolutionState::Resolved(resolved[0])
         } else {
             ResolutionState::Unresolved
         }
@@ -611,6 +828,40 @@ impl DefinitionIndex {
         }
         true
     }
+
+    fn module_member_names(
+        &self,
+        module: &ModuleKey,
+        namespace: DefinitionNamespace,
+        visited: &mut BTreeSet<(ModuleKey, DefinitionNamespace)>,
+    ) -> BTreeSet<String> {
+        if !visited.insert((module.clone(), namespace)) {
+            return BTreeSet::new();
+        }
+        let mut names = self
+            .qualified
+            .keys()
+            .filter(|(candidate_namespace, candidate_module, _)| {
+                candidate_namespace == &namespace && candidate_module == module
+            })
+            .map(|(_, _, name)| name.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(imports) = self.imports.get(module) {
+            for import in imports {
+                if import.glob {
+                    if let ModuleLookup::Found(target) =
+                        self.lexical_module(module, module, &import.path)
+                    {
+                        names.extend(self.module_member_names(&target, namespace, visited));
+                    }
+                } else {
+                    names.insert(import.alias.clone());
+                }
+            }
+        }
+        visited.remove(&(module.clone(), namespace));
+        names
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -643,6 +894,24 @@ fn module_is_descendant_of(module: &ModuleKey, ancestor: &str) -> bool {
 fn canonicalize_keys(keys: &mut Vec<DefKey>) {
     keys.sort();
     keys.dedup();
+}
+
+fn all_namespaces() -> [DefinitionNamespace; 6] {
+    [
+        DefinitionNamespace::Type,
+        DefinitionNamespace::Value,
+        DefinitionNamespace::Trait,
+        DefinitionNamespace::Effect,
+        DefinitionNamespace::Module,
+        DefinitionNamespace::Operator,
+    ]
+}
+
+fn canonicalize_diagnostics(diagnostics: &mut Vec<ResolutionDiagnostic>) {
+    diagnostics.sort_by(|left, right| {
+        (left.code, left.span, &left.message).cmp(&(right.code, right.span, &right.message))
+    });
+    diagnostics.dedup();
 }
 
 /// Journaled lexical scopes with deterministic shadowing. Parsing and body
@@ -751,6 +1020,15 @@ impl ReferenceIndex {
                     .push(occurrence);
             }
             _ => self.unresolved.push(occurrence),
+        }
+    }
+
+    /// Add the import-site occurrences owned by an immutable definition
+    /// index.  Clients that build a revision reference index therefore do not
+    /// need a separate, alias-blind import walk.
+    pub fn record_imports(&mut self, definitions: &DefinitionIndex) {
+        for occurrence in definitions.import_occurrences() {
+            self.record(occurrence);
         }
     }
 

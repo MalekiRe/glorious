@@ -329,7 +329,7 @@ fn grouped_import_headers_expand_to_individual_bindings_without_body_parsing() {
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
     let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
-    let ParsedHeader::Import(import) = parsed.header else {
+    let ParsedHeader::Import(ref import) = parsed.header else {
         panic!("expected import header")
     };
     assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
@@ -339,10 +339,41 @@ fn grouped_import_headers_expand_to_individual_bindings_without_body_parsing() {
             grandiose_stage0::ImportBindingHeader {
                 path: vec!["crate".into(), "math".into(), "add".into()],
                 alias: Some("plus".into()),
+                glob: false,
             },
             grandiose_stage0::ImportBindingHeader {
                 path: vec!["crate".into(), "math".into(), "zero".into()],
                 alias: None,
+                glob: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn glob_import_headers_remain_module_facts_until_resolution() {
+    let package = PackageKey("header-glob-import@0.1.0".into());
+    let source = "use crate::math::{*, nested::*};";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    let ParsedHeader::Import(ref import) = parsed.header else {
+        panic!("expected import header")
+    };
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    assert_eq!(
+        import.bindings,
+        vec![
+            grandiose_stage0::ImportBindingHeader {
+                path: vec!["crate".into(), "math".into()],
+                alias: None,
+                glob: true,
+            },
+            grandiose_stage0::ImportBindingHeader {
+                path: vec!["crate".into(), "math".into(), "nested".into()],
+                alias: None,
+                glob: true,
             },
         ]
     );

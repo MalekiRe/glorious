@@ -606,6 +606,9 @@ impl StageZeroCompiler {
         let index = DefinitionIndex::from_interfaces(
             graph.modules.values().map(|node| &node.interface.interface),
         );
+        diagnostics.extend(index.validate_imports().into_iter().map(|diagnostic| {
+            CompileDiagnostic::source(diagnostic.code, diagnostic.message, Some(diagnostic.span))
+        }));
         diagnostics.extend(
             index
                 .validate_exported_imports()

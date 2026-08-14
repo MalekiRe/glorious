@@ -367,8 +367,13 @@ pub struct ImportHeader {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportBindingHeader {
+    /// The module path for a glob binding and the full declaration path for
+    /// an explicit binding.  A glob is deliberately a first-class header
+    /// fact, rather than an early parser expansion: only the package-wide
+    /// definition index knows which names are visible at the import edge.
     pub path: Vec<String>,
     pub alias: Option<String>,
+    pub glob: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1388,6 +1393,21 @@ impl Parser<'_> {
         ImportHeader { bindings }
     }
     fn import_bindings(&mut self, prefix: Vec<String>) -> Vec<ImportBindingHeader> {
+        // `use path::{*, name}` is useful at facade boundaries.  The star is
+        // a selector in its own right, not an identifier, so recognize it
+        // before requiring the first path segment for this recursive group.
+        if self.at_operator("*") {
+            self.position += 1;
+            if prefix.is_empty() {
+                self.error("G3216", "expected an imported module before `::*`");
+                return vec![];
+            }
+            return vec![ImportBindingHeader {
+                path: prefix,
+                alias: None,
+                glob: true,
+            }];
+        }
         let mut path = prefix;
         let Some(first) = self.identifier() else {
             self.error("G3216", "expected an imported path");
@@ -1410,8 +1430,11 @@ impl Parser<'_> {
             }
             if self.at_operator("*") {
                 self.position += 1;
-                self.error("G3218", "glob imports are not supported");
-                return vec![];
+                return vec![ImportBindingHeader {
+                    path,
+                    alias: None,
+                    glob: true,
+                }];
             }
             let Some(segment) = self.identifier() else {
                 self.error("G3216", "expected an imported path segment");
@@ -1425,7 +1448,11 @@ impl Parser<'_> {
         } else {
             None
         };
-        vec![ImportBindingHeader { path, alias }]
+        vec![ImportBindingHeader {
+            path,
+            alias,
+            glob: false,
+        }]
     }
     fn generics(&mut self) -> GenericParameters {
         if !self.operator("<") {

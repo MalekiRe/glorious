@@ -253,6 +253,86 @@ fn explicit_import_aliases_bind_in_their_declared_module_only() {
 }
 
 #[test]
+fn glob_imports_expand_deterministically_and_contribute_import_occurrences() {
+    let package = PackageKey("resolution-glob@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "use crate::math::*;");
+    let math = collect("crate::math", "pub fn answer() { () }");
+    let index = DefinitionIndex::from_interfaces([&root, &math]);
+    let owner = ModuleKey {
+        package,
+        path: "crate".into(),
+    };
+    let ResolutionState::Resolved(answer) =
+        index.resolve_path(DefinitionNamespace::Value, &owner, &["answer".into()])
+    else {
+        panic!("globbed value did not resolve")
+    };
+    let occurrences = index.import_occurrences();
+    assert!(occurrences.iter().any(|occurrence| {
+        occurrence.namespace == DefinitionNamespace::Value
+            && occurrence.role == OccurrenceRole::Import
+            && occurrence.state == ResolutionState::Resolved(answer)
+    }));
+    let mut references = ReferenceIndex::default();
+    references.record_imports(&index);
+    assert!(references.references(answer).iter().any(|occurrence| {
+        occurrence.role == OccurrenceRole::Import
+            && occurrence.namespace == DefinitionNamespace::Value
+    }));
+}
+
+#[test]
+fn glob_imports_preserve_ambiguity_instead_of_picking_source_order() {
+    let package = PackageKey("resolution-glob-collision@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "use crate::left::*; use crate::right::*;");
+    let left = collect("crate::left", "pub fn answer() { () }");
+    let right = collect("crate::right", "pub fn answer() { () }");
+    let index = DefinitionIndex::from_interfaces([&root, &left, &right]);
+    let owner = ModuleKey {
+        package,
+        path: "crate".into(),
+    };
+    assert!(matches!(
+        index.resolve_path(DefinitionNamespace::Value, &owner, &["answer".into()]),
+        ResolutionState::Ambiguous(_)
+    ));
+}
+
+#[test]
+fn private_glob_import_edges_are_rejected_without_waiting_for_a_body_use() {
+    let package = PackageKey("resolution-private-glob@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "mod outer; mod facade;");
+    let outer = collect("crate::outer", "mod hidden;");
+    let hidden = collect("crate::outer::hidden", "pub fn answer() { () }");
+    let facade = collect("crate::facade", "use crate::outer::hidden::*;");
+    let index = DefinitionIndex::from_interfaces([&root, &outer, &hidden, &facade]);
+    assert!(
+        index
+            .validate_imports()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3326")
+    );
+}
+
+#[test]
 fn interface_index_and_reference_index_share_one_stable_definition_identity() {
     let source = "pub fn answer() { () }";
     let package = PackageKey("resolution@0.1.0".into());
