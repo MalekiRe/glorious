@@ -621,6 +621,52 @@ fn nominal_identity_preserves_mixed_kind_generic_arguments() {
 }
 
 #[test]
+fn nominal_effect_row_arguments_unify_and_solve_open_tails() {
+    let wrapper = DefKey(Digest::of_bytes(b"row-generic-wrapper"));
+    let trace = DefKey(Digest::of_bytes(b"row-generic-trace"));
+    let mut inference = InferContext::default();
+    let open = inference.fresh_effects();
+    let left = Type::Nominal {
+        definition: wrapper,
+        arguments: vec![GenericArgument::EffectRow(open)],
+    };
+    let right = Type::Nominal {
+        definition: wrapper,
+        arguments: vec![GenericArgument::EffectRow(EffectRow::closed([trace]))],
+    };
+
+    let unified = inference.unify(left, right.clone()).unwrap();
+    assert_eq!(inference.zonk(unified).unwrap(), right);
+}
+
+#[test]
+fn effect_instance_row_arguments_participate_in_protocol_matching() {
+    let carrier = DefKey(Digest::of_bytes(b"row-argument-carrier-effect"));
+    let trace = DefKey(Digest::of_bytes(b"row-argument-trace"));
+    let mut inference = InferContext::default();
+    let open = inference.fresh_effects();
+    let row = |argument| {
+        EffectRow::closed_instances([EffectInstance {
+            definition: carrier,
+            arguments: vec![GenericArgument::EffectRow(argument)],
+        }])
+    };
+    let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects,
+        invocation: Quantity::ONCE,
+    };
+    let concrete = row(EffectRow::closed([trace]));
+
+    let unified = inference
+        .unify(callable(row(open)), callable(concrete.clone()))
+        .unwrap();
+    assert_eq!(inference.zonk(unified).unwrap(), callable(concrete));
+}
+
+#[test]
 fn effect_instance_ordering_is_total_during_error_recovery() {
     let definition = DefKey(Digest::of_bytes(b"recovery-effect"));
     let mut inference = InferContext::default();

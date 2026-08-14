@@ -5286,46 +5286,45 @@ impl Elaborator<'_> {
             {
                 Some(signature) => {
                     let generic_kinds = signature.generic_kinds.clone();
-                    // Callable signatures still substitute value types
-                    // through their legacy type-only representation. Reserve
-                    // every source slot there, but mint inference variables
-                    // only for slots that are actually type-kinded. The
-                    // canonical Core identity below retains the real kind so
-                    // a row, region, or const never becomes a bogus type
-                    // inference variable merely to satisfy this compatibility
-                    // boundary.
-                    let type_arguments = generic_kinds
+                    // Every omitted generic receives a value in its native
+                    // semantic domain.  In particular, an `EffectRow` slot
+                    // gets a fresh row variable rather than `{}`: a nominal
+                    // parameter such as `Token<e>` can then constrain it to
+                    // the row carried by the call argument.  The old
+                    // type-only instantiator silently fixed those slots to
+                    // empty, rejecting valid implicit calls and losing the
+                    // caller-owned row identity in Core.
+                    let arguments = generic_kinds
                         .iter()
+                        .enumerate()
                         .map(|kind| match kind {
-                            crate::GenericKind::Type => self.inference.fresh(),
-                            crate::GenericKind::EffectRow
-                            | crate::GenericKind::Lifetime
-                            | crate::GenericKind::Const(_) => Type::Error,
+                            (_, crate::GenericKind::Type) => {
+                                GenericArgument::Type(self.inference.fresh())
+                            }
+                            (_, crate::GenericKind::EffectRow) => {
+                                GenericArgument::EffectRow(self.inference.fresh_effects())
+                            }
+                            // Preserve declaration-region identity in the
+                            // unopened callable contract. `call` opens it
+                            // against the actual arguments after freezing
+                            // reference provenance; replacing it with
+                            // `Elided` here would make two distinct generic
+                            // lifetimes indistinguishable before that proof.
+                            (index, crate::GenericKind::Lifetime) => {
+                                GenericArgument::Lifetime(Lifetime::Generic(index as u32))
+                            }
+                            (index, crate::GenericKind::Const(kind)) => {
+                                GenericArgument::ConstGeneric {
+                                    index: index as u32,
+                                    kind: *kind,
+                                }
+                            }
                         })
                         .collect::<Vec<_>>();
                     let signature = self
                         .signatures
-                        .instantiate_callable(definition, &type_arguments)
-                        .expect("fresh arguments match the callable generic arity");
-                    let arguments = generic_kinds
-                        .iter()
-                        .enumerate()
-                        .map(|(index, kind)| match kind {
-                            crate::GenericKind::Type => {
-                                GenericArgument::Type(type_arguments[index].clone())
-                            }
-                            crate::GenericKind::EffectRow => {
-                                GenericArgument::EffectRow(EffectRow::empty())
-                            }
-                            crate::GenericKind::Lifetime => {
-                                GenericArgument::Lifetime(Lifetime::Elided)
-                            }
-                            crate::GenericKind::Const(kind) => GenericArgument::ConstGeneric {
-                                index: index as u32,
-                                kind: *kind,
-                            },
-                        })
-                        .collect();
+                        .instantiate_callable_generic(definition, &arguments)
+                        .expect("fresh arguments match the callable generic contract");
                     self.alloc(
                         CoreKind::Function {
                             definition,
@@ -7668,9 +7667,31 @@ impl Elaborator<'_> {
         {
             Ok(effects) => effects,
             Err(_) => {
-                self.error(span, "G4155", "call has an unresolved outward effect row");
-                self.recovered = true;
-                return;
+                // An implicit row argument is inferred from the caller's
+                // outward contract. Solve it before reporting an unresolved
+                // row: this is the row analogue of using an expected type to
+                // finish an otherwise unconstrained type variable.
+                if self
+                    .inference
+                    .constrain_effect_subset(effects.clone(), self.declared_effects.clone())
+                    .is_ok()
+                {
+                    match self
+                        .inference
+                        .zonk_effects_allowing_generic_tail(effects.clone())
+                    {
+                        Ok(effects) => effects,
+                        Err(_) => {
+                            self.error(span, "G4155", "call has an unresolved outward effect row");
+                            self.recovered = true;
+                            return;
+                        }
+                    }
+                } else {
+                    self.error(span, "G4155", "call has an unresolved outward effect row");
+                    self.recovered = true;
+                    return;
+                }
             }
         };
         let mut effects = effects;
@@ -8299,8 +8320,16 @@ fn align_lifetime_effect_row(
     mode: LifetimeMode,
     depth: u32,
 ) -> Result<EffectRow, LifetimeError> {
+    // An open body-local tail is a genuine inference term, not a malformed
+    // lifetime relation.  There is no corresponding effect instance whose
+    // nested reference lifetimes we could inspect until the ordinary row
+    // solver has bound it.  Preserve the expected row here and let
+    // `InferContext::unify_effect_rows` solve (or reject) the structural
+    // difference afterwards.  Treating this as an outlives failure made an
+    // implicit `fn id<e: EffectRow>(Token<e>)` call reject before `e` could
+    // learn the row carried by its argument.
     if expected.tail != actual.tail || expected.effects.len() != actual.effects.len() {
-        return Err(LifetimeError::UnsatisfiedOutlives);
+        return Ok(expected.clone());
     }
     let mut unmatched = actual.effects.iter().cloned().collect::<Vec<_>>();
     let mut effects = std::collections::BTreeSet::new();
@@ -8309,7 +8338,7 @@ fn align_lifetime_effect_row(
             actual_effect.definition == expected_effect.definition
                 && actual_effect.arguments.len() == expected_effect.arguments.len()
         }) else {
-            return Err(LifetimeError::UnsatisfiedOutlives);
+            return Ok(expected.clone());
         };
         let actual_effect = unmatched.remove(index);
         effects.insert(EffectInstance {
@@ -8325,7 +8354,7 @@ fn align_lifetime_effect_row(
         });
     }
     if expected.projections.len() != actual.projections.len() {
-        return Err(LifetimeError::UnsatisfiedOutlives);
+        return Ok(expected.clone());
     }
     let mut unmatched = actual.projections.clone();
     let mut projections = Vec::with_capacity(expected.projections.len());
@@ -8339,7 +8368,7 @@ fn align_lifetime_effect_row(
                     == expected_projection.item_arguments.len()
                 && actual_projection.item_generic_kinds == expected_projection.item_generic_kinds
         }) else {
-            return Err(LifetimeError::UnsatisfiedOutlives);
+            return Ok(expected.clone());
         };
         let actual_projection = unmatched.remove(index);
         projections.push(crate::EffectRowProjection {

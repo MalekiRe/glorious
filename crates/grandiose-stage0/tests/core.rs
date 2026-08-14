@@ -1,7 +1,7 @@
 use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
     ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, CorePlace, DeclarationScan,
-    DefKey, DefinitionIndex, Digest, EffectInstance, EffectRow, EffectRowProjection,
+    DefKey, DefinitionIndex, Digest, EffectInstance, EffectRow, EffectRowProjection, EffectTail,
     ElaboratedInterface, EnvironmentBrand, EscapeFlow, FileKey, FlowEventKind, GenericArgument,
     InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath, MirInstruction, MirLowering,
     MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span, StructuralU32Expr, Type,
@@ -438,6 +438,55 @@ fn typed_core_validation_rejects_inference_in_callable_effect_arguments() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4181"),
         "callable effect arguments must not conceal body-local inference"
+    );
+}
+
+#[test]
+fn forged_nominal_effect_row_inference_cannot_cross_the_core_or_mir_boundary() {
+    let package = PackageKey("core-nominal-effect-row-inference@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let body = TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Literal("0".into()),
+            ty: Type::Nominal {
+                definition: DefKey(Digest::of_bytes(b"forged-row-generic-nominal")),
+                arguments: vec![GenericArgument::EffectRow(EffectRow {
+                    effects: BTreeSet::new(),
+                    projections: vec![],
+                    tail: Some(EffectTail::Infer(grandiose_stage0::EffectVar(3))),
+                })],
+            },
+            span,
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+
+    assert!(
+        body.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4181"),
+        "an unresolved effect-row generic argument must not enter frozen Core"
+    );
+    let flow = PlaceFlow::analyze(&body);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-row-generic-nominal")),
+        &body,
+        &flow,
+    );
+    assert!(lowered.function.is_none());
+    assert!(
+        lowered
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR must independently reject a forged nominal effect-row inference tail"
     );
 }
 
@@ -879,6 +928,23 @@ fn typed_core_instantiates_unconstrained_effect_row_tails_to_a_closed_caller() {
         &signatures,
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
+fn implicit_calls_infer_effect_row_arguments_carried_by_nominals() {
+    let core = core_for(
+        "core-implicit-nominal-effect-row-inference@0.1.0",
+        "effect Trace { note(); } struct Token<e: EffectRow> {} pub fn identity<e: EffectRow>(value: Token<e>) -> Token<e> { value } pub fn main(value: Token<{Trace}>) -> Token<{Trace}> { identity(value) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::Function { arguments, .. }
+                if matches!(arguments.as_slice(), [GenericArgument::EffectRow(row)]
+                    if row.tail.is_none() && row.effects.len() == 1)
+        )
+    }));
 }
 
 #[test]

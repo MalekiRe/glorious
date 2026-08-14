@@ -869,6 +869,15 @@ impl InferContext {
                 (GenericArgument::Type(left), GenericArgument::Type(right)) => {
                     self.unify(left, right).map(GenericArgument::Type)
                 }
+                // Effect rows are first-class generic arguments, not opaque
+                // identity bytes.  A body-local row tail in `Box<e>` must be
+                // able to learn from `Box<{Trace}>` just as a type hole in
+                // `Box<T>` learns from `Box<i64>`.  Keeping this at the
+                // mixed-kind argument boundary also covers rows carried by
+                // associated-item applications and effect instances.
+                (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) => self
+                    .unify_effect_rows(left, right)
+                    .map(GenericArgument::EffectRow),
                 (left, right) if left == right => Ok(left),
                 _ => Err(TypeError::Mismatch {
                     expected: Box::new(Type::Error),
@@ -1378,8 +1387,68 @@ impl InferContext {
             (GenericArgument::Type(left), GenericArgument::Type(right)) => {
                 self.types_may_unify(left, right)
             }
+            (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) => {
+                self.effect_rows_may_unify(left, right)
+            }
             _ => left == right,
         }
+    }
+
+    /// A side-effect-free compatibility filter used only while matching
+    /// effect instances.  The real row solver remains
+    /// [`Self::unify_effect_rows`]; this predicate merely avoids treating an
+    /// inference-owned row argument as a permanently distinct protocol
+    /// instance before that solver can bind it.
+    fn effect_rows_may_unify(&mut self, left: &EffectRow, right: &EffectRow) -> bool {
+        let left = self.resolve_effects(left.clone()).canonicalized();
+        let right = self.resolve_effects(right.clone()).canonicalized();
+        if left == right {
+            return true;
+        }
+        if matches!(left.tail, Some(EffectTail::Infer(_)))
+            || matches!(right.tail, Some(EffectTail::Infer(_)))
+        {
+            return true;
+        }
+        let compatible_tails = match (left.tail, right.tail) {
+            (None, None) => true,
+            (Some(EffectTail::Generic(left)), Some(EffectTail::Generic(right))) => left == right,
+            _ => false,
+        };
+        compatible_tails
+            && left.effects.len() == right.effects.len()
+            && left.projections.len() == right.projections.len()
+            && left.effects.iter().all(|effect| {
+                right.effects.iter().any(|candidate| {
+                    effect.definition == candidate.definition
+                        && effect.arguments.len() == candidate.arguments.len()
+                        && effect
+                            .arguments
+                            .iter()
+                            .zip(&candidate.arguments)
+                            .all(|(left, right)| self.generic_arguments_may_unify(left, right))
+                })
+            })
+            && left.projections.iter().all(|projection| {
+                right.projections.iter().any(|candidate| {
+                    projection.trait_definition == candidate.trait_definition
+                        && projection.name == candidate.name
+                        && projection.item_generic_kinds == candidate.item_generic_kinds
+                        && projection.trait_arguments.len() == candidate.trait_arguments.len()
+                        && projection.item_arguments.len() == candidate.item_arguments.len()
+                        && self.types_may_unify(&projection.subject, &candidate.subject)
+                        && projection
+                            .trait_arguments
+                            .iter()
+                            .zip(&candidate.trait_arguments)
+                            .all(|(left, right)| self.types_may_unify(left, right))
+                        && projection
+                            .item_arguments
+                            .iter()
+                            .zip(&candidate.item_arguments)
+                            .all(|(left, right)| self.generic_arguments_may_unify(left, right))
+                })
+            })
     }
 
     fn zonk_generic_argument(
