@@ -3,10 +3,10 @@ use grandiose_stage0::{
     DefinitionIndex, Digest, ElaboratedInterface, FileKey, InterfaceSet, LabelBrand, LexedFile,
     LogicalPath, MirBlock, MirBlockId, MirCleanupPlan, MirFunction, MirInstruction, MirLocal,
     MirLocalDecl, MirLowering, MirProgram, MirTerminator, PackageKey, PlaceFlow, ScalarType, Type,
-    TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmFunction,
-    VmInstruction, VmPattern, VmType, decode_and_verify_artifact, decode_and_verify_program,
-    decode_artifact, decode_program, emit_vm, emit_vm_program, encode_artifact, encode_program,
-    verify_vm, verify_vm_program,
+    TypedBody, VmArtifactError, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmExecutionLimits,
+    VmFunction, VmInstruction, VmPattern, VmType, decode_and_verify_artifact,
+    decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
+    encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
 
@@ -152,6 +152,45 @@ fn make_leave_cleanup_noncanonical(function: &mut VmFunction) {
         panic!("cleanup parity fixture must contain a Leave at instruction 2");
     };
     cleanup.moved_places.push(cleanup.moved_places[0].clone());
+}
+
+/// A verified CFG with a statically reachable return, but whose true runtime
+/// branch repeatedly crosses a cleanup-carrying `Leave`. This is the smallest
+/// shape that proves nonlocal edges cannot skip instruction accounting.
+fn cleanup_leave_budget_loop(definition: DefKey) -> VmFunction {
+    VmFunction {
+        definition,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Bool, VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstBool {
+                dst: 0,
+                value: true,
+            },
+            VmInstruction::ConstI64 { dst: 1, value: 42 },
+            VmInstruction::BranchBool {
+                condition: 0,
+                then_target: 3,
+                else_target: 4,
+            },
+            VmInstruction::Leave {
+                brand_owner: definition,
+                brand_label: 4,
+                target: 2,
+                arguments: vec![],
+                destinations: vec![],
+                cleanup: VmCleanupProof {
+                    moved_places: vec![VmCleanupPlace {
+                        root: "loop".into(),
+                        fields: vec![0],
+                    }],
+                    active_loans: vec![],
+                },
+            },
+            VmInstruction::Return { value: 1 },
+        ],
+    }
 }
 
 #[test]
@@ -333,6 +372,94 @@ fn cleanup_carrying_leave_has_standalone_and_multifunction_program_parity() {
         Err(VmArtifactError::MalformedEncoding {
             message: "leave cleanup proof is not canonical"
         })
+    ));
+}
+
+#[test]
+fn cleanup_carrying_leave_cannot_evict_artifact_or_program_execution_limits() {
+    let definition = DefKey(Digest::of_bytes(b"leave-budget-loop"));
+    let loop_function = cleanup_leave_budget_loop(definition);
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: loop_function.clone(),
+        fingerprint: Digest::of_bytes(b"leave-budget-loop-artifact"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    let artifact = verify_vm(artifact).unwrap();
+    let step_limit = VmExecutionLimits {
+        max_call_depth: 1,
+        max_handler_depth: 1,
+        max_instructions: 4,
+    };
+    assert!(matches!(
+        artifact.run_i64_with_limits(step_limit),
+        Err(VmArtifactError::InstructionLimit { limit: 4 })
+    ));
+    assert!(matches!(
+        artifact.run_i64_with_limits(VmExecutionLimits {
+            max_call_depth: 0,
+            ..step_limit
+        }),
+        Err(VmArtifactError::CallDepthLimit { limit: 0 })
+    ));
+
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: definition,
+        functions: BTreeMap::from([(definition, loop_function)]),
+        fingerprint: Digest::of_bytes(b"leave-budget-loop-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let program = verify_vm_program(program).unwrap();
+    assert!(matches!(
+        program.run_i64_with_limits(step_limit),
+        Err(VmArtifactError::InstructionLimit { limit: 4 })
+    ));
+    assert!(matches!(
+        program.run_i64_with_limits(VmExecutionLimits {
+            max_call_depth: 0,
+            ..step_limit
+        }),
+        Err(VmArtifactError::CallDepthLimit { limit: 0 })
+    ));
+}
+
+#[test]
+fn program_call_depth_limit_classifies_recursive_execution() {
+    let definition = DefKey(Digest::of_bytes(b"recursive-call-depth"));
+    let recursive = VmFunction {
+        definition,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::Call {
+                dst: 0,
+                callee: definition,
+                arguments: vec![],
+            },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: definition,
+        functions: BTreeMap::from([(definition, recursive)]),
+        fingerprint: Digest::of_bytes(b"recursive-call-depth-fingerprint"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(program)
+            .unwrap()
+            .run_i64_with_limits(VmExecutionLimits {
+                max_call_depth: 2,
+                max_handler_depth: 1,
+                max_instructions: 100,
+            }),
+        Err(VmArtifactError::CallDepthLimit { limit: 2 })
     ));
 }
 

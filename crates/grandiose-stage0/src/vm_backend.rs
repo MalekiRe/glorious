@@ -715,35 +715,45 @@ impl VerifiedVmArtifact {
     pub fn runtime_manifest(&self) -> Option<Digest> {
         self.artifact.runtime_manifest
     }
+    fn execute_with_limits(&self, limits: VmExecutionLimits) -> Result<VmValue, VmArtifactError> {
+        let mut budget = ExecutionBudget {
+            limits,
+            instructions: 0,
+        };
+        execute(&self.artifact.function, &mut budget)
+    }
     pub fn run_i64(&self) -> Result<i64, VmArtifactError> {
-        expect_i64(execute(&self.artifact.function)?)
+        self.run_i64_with_limits(VmExecutionLimits::default())
+    }
+    pub fn run_i64_with_limits(&self, limits: VmExecutionLimits) -> Result<i64, VmArtifactError> {
+        expect_i64(self.execute_with_limits(limits)?)
     }
     pub fn run_tuple_i64(&self) -> Result<Vec<i64>, VmArtifactError> {
-        expect_tuple_i64(execute(&self.artifact.function)?)
+        expect_tuple_i64(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_array_i64(&self) -> Result<Vec<i64>, VmArtifactError> {
-        expect_array_i64(execute(&self.artifact.function)?)
+        expect_array_i64(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_record_i64(&self) -> Result<Vec<i64>, VmArtifactError> {
-        expect_record_i64(execute(&self.artifact.function)?)
+        expect_record_i64(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_enum_i64(&self) -> Result<Vec<i64>, VmArtifactError> {
-        expect_enum_i64(execute(&self.artifact.function)?)
+        expect_enum_i64(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_unit(&self) -> Result<(), VmArtifactError> {
-        expect_unit(execute(&self.artifact.function)?)
+        expect_unit(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_f64(&self) -> Result<f64, VmArtifactError> {
-        expect_f64(execute(&self.artifact.function)?)
+        expect_f64(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_bool(&self) -> Result<bool, VmArtifactError> {
-        expect_bool(execute(&self.artifact.function)?)
+        expect_bool(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_char(&self) -> Result<char, VmArtifactError> {
-        expect_char(execute(&self.artifact.function)?)
+        expect_char(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_text(&self) -> Result<String, VmArtifactError> {
-        Ok(expect_text(execute(&self.artifact.function)?)?.to_string())
+        Ok(expect_text(self.execute_with_limits(VmExecutionLimits::default())?)?.to_string())
     }
 }
 impl VerifiedVmProgram {
@@ -4396,12 +4406,24 @@ fn parse_pattern_text(text: &str) -> Option<String> {
     }
     Some(output)
 }
-fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
+/// Execute a standalone artifact under the same step and call-entry budget as
+/// a program. Standalone artifacts cannot contain calls, but a zero call-depth
+/// ceiling still rejects their root invocation deterministically.
+fn execute(
+    function: &VmFunction,
+    budget: &mut ExecutionBudget,
+) -> Result<VmValue, VmArtifactError> {
+    if budget.limits.max_call_depth == 0 {
+        return Err(VmArtifactError::CallDepthLimit {
+            limit: budget.limits.max_call_depth,
+        });
+    }
     let mut registers = vec![None; function.registers.len()];
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
     let mut next_handler_id = 0u64;
     let mut pc = 0usize;
     while let Some(instruction) = function.instructions.get(pc).cloned() {
+        budget.tick()?;
         match instruction {
             VmInstruction::ConstUnit { dst } => registers[dst as usize] = Some(VmValue::Unit),
             VmInstruction::ConstI64 { dst, value } => {
@@ -4664,19 +4686,26 @@ fn execute(function: &VmFunction) -> Result<VmValue, VmArtifactError> {
                 payload_destinations,
                 target,
                 ..
-            } => handlers.push(RuntimeHandlerFrame {
-                id: {
-                    let id = next_handler_id;
-                    next_handler_id = next_handler_id.saturating_add(1);
-                    id
-                },
-                effect,
-                effect_arguments,
-                operation,
-                payload_destinations,
-                target,
-                suspended: None,
-            }),
+            } => {
+                if handlers.len() >= budget.limits.max_handler_depth as usize {
+                    return Err(VmArtifactError::HandlerDepthLimit {
+                        limit: budget.limits.max_handler_depth,
+                    });
+                }
+                handlers.push(RuntimeHandlerFrame {
+                    id: {
+                        let id = next_handler_id;
+                        next_handler_id = next_handler_id.saturating_add(1);
+                        id
+                    },
+                    effect,
+                    effect_arguments,
+                    operation,
+                    payload_destinations,
+                    target,
+                    suspended: None,
+                })
+            }
             VmInstruction::UninstallHandler => {
                 let Some(frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerStackUnderflow);
