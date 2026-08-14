@@ -1165,6 +1165,76 @@ fn verifier_rejects_branch_targets_outside_the_instruction_stream() {
 }
 
 #[test]
+fn verifier_rejects_ordinary_control_flow_into_handler_clauses() {
+    let effect = DefKey(Digest::of_bytes(b"forged-handler-entry"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"branch-into-handler-clause")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::Bool],
+            instructions: vec![
+                VmInstruction::ConstBool {
+                    dst: 0,
+                    value: true,
+                },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::Unit,
+                    target: 4,
+                },
+                VmInstruction::BranchBool {
+                    condition: 0,
+                    then_target: 4,
+                    else_target: 3,
+                },
+                VmInstruction::Trap,
+                VmInstruction::Cancel,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"branch-into-handler-clause-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerTargetReachedByControlFlow { target: 4 })
+    ));
+
+    let mut fallthrough = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            definition: DefKey(Digest::of_bytes(b"fallthrough-into-handler-clause")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::Unit,
+                    target: 1,
+                },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"fallthrough-into-handler-clause-fingerprint"),
+    };
+    fallthrough.fingerprint = fallthrough.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(fallthrough),
+        Err(VmArtifactError::HandlerTargetReachedByControlFlow { target: 1 })
+    ));
+}
+
+#[test]
 fn vm_emits_and_executes_the_checked_mir_unreachable_terminal_as_a_trap() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let local = |ty| MirLocalDecl {

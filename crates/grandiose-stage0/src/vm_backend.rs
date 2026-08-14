@@ -371,6 +371,12 @@ pub enum VmArtifactError {
     InvalidInstructionTarget {
         target: u32,
     },
+    /// Ordinary CFG edges may not enter a handler clause.  A clause is entered
+    /// only by `Perform`, which installs its payload and one-shot continuation
+    /// state before transferring control.
+    HandlerTargetReachedByControlFlow {
+        target: u32,
+    },
     IncompatibleControlFlow {
         target: u32,
     },
@@ -2449,6 +2455,7 @@ impl DerefMut for VerifierState {
 }
 
 fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
+    verify_handler_entry_boundaries(function)?;
     let mut initial = vec![None; function.registers.len()];
     if function.captures > function.parameters {
         return Err(VmArtifactError::CallArity {
@@ -3149,6 +3156,60 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     } else {
         Err(VmArtifactError::NoReturn)
     }
+}
+
+/// Handler clause entry points are private control-flow boundaries.  Reaching
+/// one through an ordinary jump, branch, or fallthrough would let hostile
+/// bytecode execute a clause without the `Perform` transition that initializes
+/// payload destinations and records the continuation consumed by `Resume`,
+/// `Forward`, or `Cancel`.
+///
+/// This compact VM encodes no separate handler-region table, so the
+/// `InstallHandler` instruction is the authoritative declaration of the entry.
+/// A target must follow its install site, and only a dynamic perform transfer
+/// may enter it.
+fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifactError> {
+    let mut targets = BTreeSet::new();
+    for (pc, instruction) in function.instructions.iter().enumerate() {
+        let VmInstruction::InstallHandler { target, .. } = instruction else {
+            continue;
+        };
+        if *target as usize <= pc || function.instructions.get(*target as usize).is_none() {
+            return Err(VmArtifactError::InvalidInstructionTarget { target: *target });
+        }
+        targets.insert(*target);
+    }
+
+    for (pc, instruction) in function.instructions.iter().enumerate() {
+        let enters_handler = match instruction {
+            VmInstruction::Jump { target } => targets.contains(target),
+            VmInstruction::BranchBool {
+                then_target,
+                else_target,
+                ..
+            } => targets.contains(then_target) || targets.contains(else_target),
+            VmInstruction::Return { .. }
+            | VmInstruction::Trap
+            | VmInstruction::Resume { .. }
+            | VmInstruction::Forward
+            | VmInstruction::Cancel => false,
+            _ => targets.contains(&((pc + 1) as u32)),
+        };
+        if enters_handler {
+            let target = match instruction {
+                VmInstruction::Jump { target } => *target,
+                VmInstruction::BranchBool {
+                    then_target,
+                    else_target,
+                    ..
+                } if targets.contains(then_target) => *then_target,
+                VmInstruction::BranchBool { else_target, .. } => *else_target,
+                _ => (pc + 1) as u32,
+            };
+            return Err(VmArtifactError::HandlerTargetReachedByControlFlow { target });
+        }
+    }
+    Ok(())
 }
 fn propagate_state(
     incoming: &mut [Option<VerifierState>],
