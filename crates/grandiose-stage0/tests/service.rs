@@ -5571,6 +5571,14 @@ fn service_treats_a_trailing_contextual_block_as_the_next_direct_call_argument()
 }
 
 #[test]
+fn service_opens_a_direct_fn_bound_for_a_trailing_contextual_block() {
+    let source = "pub fn apply<F>(value: i64, callback: F) -> i64 where F: Fn<(), Output = i64> { callback() } pub fn main() -> i64 { apply(0) { 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_lowers_a_top_level_value_alias_to_its_callable_target() {
     let source = "pub fn add_one(value: i64) -> i64 { value + 1 } let increment = add_one; pub fn main() -> i64 { increment(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

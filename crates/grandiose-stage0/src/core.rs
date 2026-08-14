@@ -3758,12 +3758,16 @@ impl Elaborator<'_> {
                     .into_iter()
                     .enumerate()
                     .map(|(index, value)| {
+                        let parameter = expected
+                            .as_ref()
+                            .and_then(|parameters| parameters.get(index));
                         self.expression_expected(
                             value,
-                            expected
-                                .as_ref()
-                                .and_then(|parameters| parameters.get(index))
-                                .cloned(),
+                            parameter
+                                .and_then(|parameter| {
+                                    self.direct_bound_callable_contract(callee, parameter)
+                                })
+                                .or_else(|| parameter.cloned()),
                         )
                     })
                     .collect();
@@ -7128,6 +7132,68 @@ impl Elaborator<'_> {
         self.check_callable_contract_bounds(*signature, span);
         call
     }
+    /// Recover the concrete callable shape promised by an intrinsic `Fn`
+    /// bound on one parameter of a direct generic call.  The ordinary
+    /// parameter list only carries the fresh variable chosen for `F`; that
+    /// is insufficient to elaborate a contextual `{ ... }` argument, whose
+    /// body needs its zero-argument callable result contract before it can be
+    /// typed.  The declaration's already-instantiated bound and associated
+    /// `Output`/`Effects` equalities are the authoritative contract.
+    fn direct_bound_callable_contract(&self, callee: CoreId, parameter: &Type) -> Option<Type> {
+        let CoreKind::Function {
+            definition,
+            arguments,
+            ..
+        } = &self.expressions[callee.0 as usize].kind
+        else {
+            return None;
+        };
+        let signature = self
+            .signatures
+            .instantiate_callable_generic(*definition, arguments)
+            .ok()?;
+        let relation = signature
+            .where_bounds
+            .iter()
+            .find_map(|(subject, relation)| {
+                (subject == parameter && crate::is_intrinsic_callable_trait(relation))
+                    .then_some(relation)
+            })?;
+        let parameters = match relation.arguments.as_slice() {
+            [GenericArgument::Type(Type::Tuple(parameters))] => parameters.clone(),
+            [GenericArgument::Type(Type::Unit)] => vec![],
+            _ => return None,
+        };
+        let result = signature
+            .where_associated_type_bindings
+            .iter()
+            .find_map(|binding| {
+                (binding.subject == *parameter
+                    && binding.relation == *relation
+                    && binding.name == "Output"
+                    && binding.item_arguments.is_empty())
+                .then(|| binding.value.clone())
+            })?;
+        let effects = signature
+            .where_associated_effect_bindings
+            .iter()
+            .find_map(|binding| {
+                (binding.subject == *parameter
+                    && binding.relation == *relation
+                    && binding.name == "Effects"
+                    && binding.item_arguments.is_empty())
+                .then(|| binding.value.clone())
+            })
+            .unwrap_or_else(EffectRow::empty);
+        Some(Type::Callable {
+            lifetime_binders: 0,
+            parameters,
+            result: Box::new(result),
+            effects,
+            invocation: crate::Quantity::ONCE,
+        })
+    }
+
     fn call(&mut self, callee: CoreId, arguments: Vec<CoreId>, span: Span) -> CoreId {
         let callable = self.expressions[callee.0 as usize].ty.clone();
         let callable = match callable {
