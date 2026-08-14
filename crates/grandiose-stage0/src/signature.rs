@@ -511,7 +511,7 @@ fn nominal_identity_arguments(kinds: &[GenericKind]) -> Vec<GenericArgument> {
 fn owned_nominal_layout_cycle(
     value: &Type,
     definitions: &BTreeMap<DefKey, ElaboratedHeader>,
-    active: &mut Vec<DefKey>,
+    active: &mut Vec<(DefKey, Vec<GenericArgument>)>,
 ) -> Option<Vec<DefKey>> {
     match value {
         Type::Nominal {
@@ -521,10 +521,42 @@ fn owned_nominal_layout_cycle(
             let ElaboratedHeader::Nominal { layout, .. } = definitions.get(definition)? else {
                 return None;
             };
-            if let Some(index) = active.iter().position(|seen| seen == definition) {
-                return Some(active[index..].to_vec());
+            if let Some(index) = active.iter().position(|(seen, seen_arguments)| {
+                seen == definition && seen_arguments == arguments
+            }) {
+                return Some(
+                    active[index..]
+                        .iter()
+                        .map(|(definition, _)| *definition)
+                        .collect(),
+                );
             }
-            active.push(*definition);
+            // A declaration-only stack would reject the finite path
+            // `Result<EffectRow, ()> -> EffectRow -> Result<NameUse, ()>`.
+            // Distinct applications are therefore explored independently.
+            // One distinct re-entry can still terminate: Result<EffectRow,
+            // ()> reaches Result<Phantom<EffectRow>, ()> if Phantom erases
+            // its field argument. Once the same declaration is active twice,
+            // however, a further strict embedding (such as Node<T> ->
+            // Node<(T, T)> -> Node<((T, T), (T, T))>) proves unbounded
+            // owned growth without conflating a finite first re-entry.
+            let mut prior = active
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, (seen, _))| seen == definition);
+            if let Some((index, (_, seen_arguments))) = prior.next()
+                && prior.next().is_some()
+                && nominal_arguments_expand(arguments, seen_arguments)
+            {
+                return Some(
+                    active[index..]
+                        .iter()
+                        .map(|(definition, _)| *definition)
+                        .collect(),
+                );
+            }
+            active.push((*definition, arguments.clone()));
             let cycle = match layout {
                 ElaboratedNominalLayout::Struct(fields) => fields.iter().find_map(|field| {
                     let field = substitute_alias_generic_identity(field.ty.clone(), arguments);
@@ -564,6 +596,152 @@ fn owned_nominal_layout_cycle(
         | Type::Projection { .. }
         | Type::Infer(_)
         | Type::Error => None,
+    }
+}
+
+/// True if a recursively reached nominal application strictly embeds an
+/// argument from its earlier active application. Exact applications are
+/// handled separately above; this detects unbounded generic growth without
+/// conflating unrelated finite instantiations of a reusable nominal.
+fn nominal_arguments_expand(current: &[GenericArgument], earlier: &[GenericArgument]) -> bool {
+    current.iter().any(|current| {
+        earlier
+            .iter()
+            .any(|earlier| generic_argument_strictly_contains(current, earlier))
+    })
+}
+
+fn generic_argument_strictly_contains(
+    current: &GenericArgument,
+    earlier: &GenericArgument,
+) -> bool {
+    current != earlier && generic_argument_contains(current, earlier)
+}
+
+fn generic_argument_contains(current: &GenericArgument, earlier: &GenericArgument) -> bool {
+    if current == earlier {
+        return true;
+    }
+    match current {
+        GenericArgument::Type(value) => type_contains_generic_argument(value, earlier),
+        GenericArgument::EffectRow(row) => effect_row_contains_generic_argument(row, earlier),
+        GenericArgument::ConstU32Expr(value) => match earlier {
+            GenericArgument::ConstGeneric {
+                index,
+                kind: ConstKind::U32,
+            } => structural_u32_contains_param(value, *index),
+            GenericArgument::ConstU32Expr(earlier) => structural_u32_contains(value, earlier),
+            _ => false,
+        },
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            type_contains_generic_argument(subject, earlier)
+                || trait_arguments
+                    .iter()
+                    .any(|argument| generic_argument_contains(argument, earlier))
+        }
+        GenericArgument::Lifetime(_)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstInfer { .. } => false,
+    }
+}
+
+fn type_contains_generic_argument(value: &Type, argument: &GenericArgument) -> bool {
+    if matches!(argument, GenericArgument::Type(earlier) if value == earlier) {
+        return true;
+    }
+    match value {
+        Type::Nominal { arguments, .. } => arguments
+            .iter()
+            .any(|current| generic_argument_contains(current, argument)),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            type_contains_generic_argument(subject, argument)
+                || trait_arguments
+                    .iter()
+                    .chain(item_arguments)
+                    .any(|current| generic_argument_contains(current, argument))
+        }
+        Type::Tuple(values) => values
+            .iter()
+            .any(|current| type_contains_generic_argument(current, argument)),
+        Type::Array(value) => type_contains_generic_argument(value, argument),
+        Type::Reference { referent, .. } => type_contains_generic_argument(referent, argument),
+        Type::Callable {
+            parameters,
+            result,
+            effects,
+            ..
+        } => {
+            parameters
+                .iter()
+                .any(|current| type_contains_generic_argument(current, argument))
+                || type_contains_generic_argument(result, argument)
+                || effect_row_contains_generic_argument(effects, argument)
+        }
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Generic(_)
+        | Type::Infer(_)
+        | Type::Error => false,
+    }
+}
+
+fn effect_row_contains_generic_argument(row: &EffectRow, argument: &GenericArgument) -> bool {
+    row.effects.iter().any(|effect| {
+        effect
+            .arguments
+            .iter()
+            .any(|current| generic_argument_contains(current, argument))
+    }) || row.projections.iter().any(|projection| {
+        type_contains_generic_argument(&projection.subject, argument)
+            || projection
+                .trait_arguments
+                .iter()
+                .chain(&projection.item_arguments)
+                .any(|current| generic_argument_contains(current, argument))
+    })
+}
+
+fn structural_u32_contains(value: &StructuralU32Expr, earlier: &StructuralU32Expr) -> bool {
+    value == earlier
+        || match value {
+            StructuralU32Expr::Literal(_) | StructuralU32Expr::Param(_) => false,
+            StructuralU32Expr::Add(left, right)
+            | StructuralU32Expr::Sub(left, right)
+            | StructuralU32Expr::Mul(left, right)
+            | StructuralU32Expr::Div(left, right)
+            | StructuralU32Expr::Rem(left, right) => {
+                structural_u32_contains(left, earlier) || structural_u32_contains(right, earlier)
+            }
+        }
+}
+
+fn structural_u32_contains_param(value: &StructuralU32Expr, index: u32) -> bool {
+    match value {
+        StructuralU32Expr::Param(current) => *current == index,
+        StructuralU32Expr::Literal(_) => false,
+        StructuralU32Expr::Add(left, right)
+        | StructuralU32Expr::Sub(left, right)
+        | StructuralU32Expr::Mul(left, right)
+        | StructuralU32Expr::Div(left, right)
+        | StructuralU32Expr::Rem(left, right) => {
+            structural_u32_contains_param(left, index)
+                || structural_u32_contains_param(right, index)
+        }
     }
 }
 

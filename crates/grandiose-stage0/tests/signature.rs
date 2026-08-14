@@ -2598,7 +2598,7 @@ fn structural_u32_arithmetic_folds_closed_terms_and_rejects_checked_errors() {
 #[test]
 fn source_nominal_layouts_reject_owned_recursion_after_alias_normalization() {
     let package = PackageKey("signature-owned-layout-recursion@0.1.0".into());
-    let source = "type Alias = Direct; pub struct Direct { next: Alias } pub struct Wrap<T> { value: T } pub struct ThroughGeneric { next: Wrap<ThroughGeneric> } pub enum ThroughVariant { Again(ThroughVariant), Done } pub struct Linked { next: &Linked }";
+    let source = "type Alias = Direct; pub struct Direct { next: Alias } pub struct Wrap<T> { value: T } pub struct ThroughGeneric { next: Wrap<ThroughGeneric> } pub struct Growing<T> { next: Growing<(T, T)> } pub enum ThroughVariant { Again(ThroughVariant), Done } pub struct Linked { next: &Linked }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -2610,8 +2610,31 @@ fn source_nominal_layouts_reject_owned_recursion_after_alias_normalization() {
             .iter()
             .filter(|diagnostic| diagnostic.code == "G3320")
             .count(),
-        3,
-        "aliases, generic fields, and enum payloads must all participate in owned-layout recursion checking: {:#?}",
+        4,
+        "aliases, direct and growing generic fields, and enum payloads must all participate in owned-layout recursion checking: {:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
+fn source_nominal_layouts_accept_distinct_finite_generic_instantiations() {
+    let package = PackageKey("signature-owned-layout-instantiations@0.1.0".into());
+    // The outer Result carries EffectRow, but EffectRow's Option alias expands
+    // to a separate Result<Phantom<EffectRow>, ()>. Phantom erases its type
+    // argument, so this distinct finite Result instantiation is not a
+    // recursive owned layout.
+    let source = "pub enum Result<T, E> { Ok(T), Err(E) } pub type Option<T> = Result<T, ()>; pub struct Phantom<T> { marker: usize } pub struct EffectRow { row_tail: Option<Phantom<EffectRow>> } pub struct Callable { effects: Result<EffectRow, ()> }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        !signatures
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3320"),
+        "distinct finite generic applications must not be conflated into an owned-layout cycle: {:#?}",
         signatures.diagnostics
     );
 }
