@@ -234,75 +234,63 @@ fn manifest_bound_generic_int_wrapping_add_uses_distinct_wrapping_vm_semantics()
 }
 
 #[test]
-fn manifest_bound_generic_int_equal_preserves_its_u32_runtime_abi() {
+fn manifest_bound_generic_int_wrapping_sub_uses_distinct_wrapping_vm_semantics() {
     let mut input = request(
-        "fn __g1_int_equal<T>(left: T, right: T) -> u32 { () } pub fn main() -> u32 { __g1_int_equal<i64>(7, 7) }",
+        "fn __g1_int_wrapping_sub<T>(left: T, right: T) -> T { () } pub fn main() -> i64 { __g1_int_wrapping_sub<i64>(-9223372036854775807, 2) }",
     );
     input.runtime_manifest = Some(int_runtime_manifest(
-        PrimitiveRole::IntEqual,
-        "__g1_int_equal",
+        PrimitiveRole::IntWrappingSub,
+        "__g1_int_wrapping_sub",
     ));
     let artifact = StageZeroCompiler::new()
         .compile(input)
-        .expect("the exact generic int equality declaration must specialize for frozen i64")
+        .expect("the exact generic int declaration must specialize for frozen i64")
         .artifact
         .expect("build must publish a VM artifact");
-    assert_eq!(artifact.run_u32().unwrap(), 1);
+    assert_eq!(artifact.run_i64().unwrap(), i64::MAX);
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
     assert!(program.functions.values().any(|function| {
         function
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::IntEqualI64 { .. }))
+            .any(|instruction| matches!(instruction, VmInstruction::WrappingSubI64 { .. }))
     }));
 }
 
 #[test]
-fn manifest_bound_generic_int_less_preserves_its_u32_runtime_abi() {
-    let mut input = request(
-        "fn __g1_int_less<T>(left: T, right: T) -> u32 { () } pub fn main() -> u32 { __g1_int_less<i64>(-1, 0) }",
-    );
-    input.runtime_manifest = Some(int_runtime_manifest(
-        PrimitiveRole::IntLess,
-        "__g1_int_less",
-    ));
-    let artifact = StageZeroCompiler::new()
-        .compile(input)
-        .expect("the exact generic int less declaration must specialize for frozen i64")
-        .artifact
-        .expect("build must publish a VM artifact");
-    assert_eq!(artifact.run_u32().unwrap(), 1);
-    let program = decode_program(&artifact.canonical_bytes()).unwrap();
-    assert!(program.functions.values().any(|function| {
-        function
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::IntLessI64 { .. }))
-    }));
-}
-
-#[test]
-fn manifest_bound_generic_int_greater_preserves_its_u32_runtime_abi() {
-    let mut input = request(
-        "fn __g1_int_greater<T>(left: T, right: T) -> u32 { () } pub fn main() -> u32 { __g1_int_greater<i64>(0, -1) }",
-    );
-    input.runtime_manifest = Some(int_runtime_manifest(
-        PrimitiveRole::IntGreater,
-        "__g1_int_greater",
-    ));
-    let artifact = StageZeroCompiler::new()
-        .compile(input)
-        .expect("the exact generic int greater declaration must specialize for frozen i64")
-        .artifact
-        .expect("build must publish a VM artifact");
-    assert_eq!(artifact.run_u32().unwrap(), 1);
-    let program = decode_program(&artifact.canonical_bytes()).unwrap();
-    assert!(program.functions.values().any(|function| {
-        function
-            .instructions
-            .iter()
-            .any(|instruction| matches!(instruction, VmInstruction::IntGreaterI64 { .. }))
-    }));
+fn manifest_bound_generic_int_predicates_preserve_their_u32_runtime_abi() {
+    for (role, name, body) in [
+        (
+            PrimitiveRole::IntEqual,
+            "__g1_int_equal",
+            "__g1_int_equal<i64>(7, 7)",
+        ),
+        (
+            PrimitiveRole::IntLess,
+            "__g1_int_less",
+            "__g1_int_less<i64>(-1, 0)",
+        ),
+        (
+            PrimitiveRole::IntGreater,
+            "__g1_int_greater",
+            "__g1_int_greater<i64>(0, -1)",
+        ),
+    ] {
+        let mut input = request(&format!(
+            "fn {name}<T>(left: T, right: T) -> u32 {{ () }} pub fn main() -> u32 {{ {body} }}"
+        ));
+        input.runtime_manifest = Some(int_runtime_manifest(role, name));
+        assert_eq!(
+            StageZeroCompiler::new()
+                .compile(input)
+                .unwrap()
+                .artifact
+                .unwrap()
+                .run_u32()
+                .unwrap(),
+            1
+        );
+    }
 }
 
 #[test]

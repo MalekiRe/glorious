@@ -67,6 +67,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_wrapping_add<T>` in distributed
     /// std. Its i64 specialization has wrapping, not checked, overflow.
     IntWrappingAdd,
+    /// Exact generic declaration `__g1_int_wrapping_sub<T>` in distributed
+    /// std. Its i64 specialization has wrapping, not checked, overflow.
+    IntWrappingSub,
     /// Exact generic declaration `__g1_int_equal<T>` in distributed std.
     /// Its i64 specialization returns the canonical 0-or-1 u32 predicate.
     IntEqual,
@@ -118,6 +121,7 @@ impl PrimitiveRole {
             Self::UsizeToU32Checked => "usize-to-u32-checked",
             Self::IntCheckedAdd => "int-checked-add",
             Self::IntWrappingAdd => "int-wrapping-add",
+            Self::IntWrappingSub => "int-wrapping-sub",
             Self::IntEqual => "int-equal",
             Self::IntLess => "int-less",
             Self::IntGreater => "int-greater",
@@ -161,6 +165,7 @@ impl PrimitiveRole {
             "usize-to-u32-checked" => Self::UsizeToU32Checked,
             "int-checked-add" => Self::IntCheckedAdd,
             "int-wrapping-add" => Self::IntWrappingAdd,
+            "int-wrapping-sub" => Self::IntWrappingSub,
             "int-equal" => Self::IntEqual,
             "int-less" => Self::IntLess,
             "int-greater" => Self::IntGreater,
@@ -525,19 +530,20 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
-        PrimitiveRole::IntCheckedAdd | PrimitiveRole::IntWrappingAdd | PrimitiveRole::IntBitAnd => {
-            crate::CallableSignature {
-                generics: 1,
-                generic_kinds: vec![crate::GenericKind::Type],
-                parameters: vec![Type::Generic(0), Type::Generic(0)],
-                result: Type::Generic(0),
-                effects: EffectRow::empty(),
-                invocation: Quantity::ONCE,
-                where_bounds: vec![],
-                where_associated_type_bindings: vec![],
-                where_associated_effect_bindings: vec![],
-            }
-        }
+        PrimitiveRole::IntCheckedAdd
+        | PrimitiveRole::IntWrappingAdd
+        | PrimitiveRole::IntWrappingSub
+        | PrimitiveRole::IntBitAnd => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0), Type::Generic(0)],
+            result: Type::Generic(0),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
             crate::CallableSignature {
                 generics: 1,
@@ -596,6 +602,7 @@ fn manifest_digest(
             PrimitiveRole::UsizeToU32Checked => 31,
             PrimitiveRole::IntCheckedAdd => 32,
             PrimitiveRole::IntWrappingAdd => 33,
+            PrimitiveRole::IntWrappingSub => 35,
             PrimitiveRole::IntEqual => 34,
             PrimitiveRole::IntLess => 38,
             PrimitiveRole::IntGreater => 39,

@@ -443,6 +443,13 @@ pub enum MirInstruction {
         left: MirLocal,
         right: MirLocal,
     },
+    /// Distinct from `SubI64`: this exact runtime leaf wraps two's-complement
+    /// i64 overflow and is never selected for ordinary checked `-` source.
+    WrappingSubI64 {
+        dst: MirLocal,
+        left: MirLocal,
+        right: MirLocal,
+    },
     /// Exact generic `__g1_int_equal<i64>` runtime leaf. Its public ABI
     /// deliberately returns `u32` rather than the language `Bool` carrier.
     IntEqualI64 {
@@ -450,15 +457,13 @@ pub enum MirInstruction {
         left: MirLocal,
         right: MirLocal,
     },
-    /// Exact generic `__g1_int_less<i64>` runtime leaf with its public u32
-    /// predicate ABI.
+    /// Exact generic `__g1_int_less<i64>` runtime leaf with its public u32 predicate ABI.
     IntLessI64 {
         dst: MirLocal,
         left: MirLocal,
         right: MirLocal,
     },
-    /// Exact generic `__g1_int_greater<i64>` runtime leaf with its public u32
-    /// predicate ABI.
+    /// Exact generic `__g1_int_greater<i64>` runtime leaf with its public u32 predicate ABI.
     IntGreaterI64 {
         dst: MirLocal,
         left: MirLocal,
@@ -1050,10 +1055,11 @@ fn fold_block(
                 fold_i64(dst, &constants, left, right, i64::checked_add)
             }
             MirInstruction::WrappingAddI64 { .. } => None,
-            MirInstruction::IntEqualI64 { .. } => None,
-            MirInstruction::IntLessI64 { .. } => None,
-            MirInstruction::IntGreaterI64 { .. } => None,
-            MirInstruction::BitAndI64 { .. } => None,
+            MirInstruction::WrappingSubI64 { .. } => None,
+            MirInstruction::IntEqualI64 { .. }
+            | MirInstruction::IntLessI64 { .. }
+            | MirInstruction::IntGreaterI64 { .. }
+            | MirInstruction::BitAndI64 { .. } => None,
             MirInstruction::SubI64 { dst, left, right } => {
                 fold_i64(dst, &constants, left, right, i64::checked_sub)
             }
@@ -1284,6 +1290,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::NotBool { dst, .. }
         | MirInstruction::AddI64 { dst, .. }
         | MirInstruction::WrappingAddI64 { dst, .. }
+        | MirInstruction::WrappingSubI64 { dst, .. }
         | MirInstruction::IntEqualI64 { dst, .. }
         | MirInstruction::IntLessI64 { dst, .. }
         | MirInstruction::IntGreaterI64 { dst, .. }
@@ -3283,6 +3290,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::NotBool { .. }
         | MirInstruction::AddI64 { .. }
         | MirInstruction::WrappingAddI64 { .. }
+        | MirInstruction::WrappingSubI64 { .. }
         | MirInstruction::IntEqualI64 { .. }
         | MirInstruction::IntLessI64 { .. }
         | MirInstruction::IntGreaterI64 { .. }
@@ -4022,6 +4030,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::NotBool { dst, value } => vec![*dst, *value],
         MirInstruction::AddI64 { dst, left, right }
         | MirInstruction::WrappingAddI64 { dst, left, right }
+        | MirInstruction::WrappingSubI64 { dst, left, right }
         | MirInstruction::IntEqualI64 { dst, left, right }
         | MirInstruction::IntLessI64 { dst, left, right }
         | MirInstruction::IntGreaterI64 { dst, left, right }
@@ -13637,6 +13646,7 @@ impl Lowerer<'_> {
                             Some(
                                 role @ (PrimitiveRole::IntCheckedAdd
                                 | PrimitiveRole::IntWrappingAdd
+                                | PrimitiveRole::IntWrappingSub
                                 | PrimitiveRole::IntEqual
                                 | PrimitiveRole::IntLess
                                 | PrimitiveRole::IntGreater
@@ -13683,6 +13693,13 @@ impl Lowerer<'_> {
                                     },
                                     PrimitiveRole::IntWrappingAdd => {
                                         MirInstruction::WrappingAddI64 {
+                                            dst,
+                                            left: *left,
+                                            right: *right,
+                                        }
+                                    }
+                                    PrimitiveRole::IntWrappingSub => {
+                                        MirInstruction::WrappingSubI64 {
                                             dst,
                                             left: *left,
                                             right: *right,
