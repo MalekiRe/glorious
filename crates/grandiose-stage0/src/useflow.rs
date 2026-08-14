@@ -113,7 +113,7 @@ impl UseFlow {
             facts: BTreeMap::new(),
             projected_contracts: BTreeMap::new(),
             closure_values: BTreeMap::new(),
-            escapes: BTreeMap::new(),
+            escapes: EscapeSummary::default(),
             escaped_closures: BTreeSet::new(),
             value_obligations: vec![],
             diagnostics: vec![],
@@ -313,6 +313,64 @@ struct Escape {
     actual: Quantity,
 }
 
+/// Quantitative transfers produced by one control-flow fragment. `demand`
+/// is the semantic path summary used for contract checking; `facts` retains
+/// every concrete boundary for diagnostics and tooling. Keeping them separate
+/// is essential: two facts from alternative arms are both observable facts,
+/// but their demands must join rather than execute sequentially.
+#[derive(Clone, Debug, Default)]
+struct EscapeSummary {
+    facts: BTreeMap<ContractKey, Vec<Escape>>,
+    demand: BTreeMap<ContractKey, Quantity>,
+}
+
+impl EscapeSummary {
+    fn sequence(mut self, other: Self) -> Result<Self, QuantityError> {
+        for (key, facts) in other.facts {
+            self.facts.entry(key).or_default().extend(facts);
+        }
+        for (key, demand) in other.demand {
+            let total = self
+                .demand
+                .remove(&key)
+                .unwrap_or(Quantity::ZERO)
+                .sequence(demand)?;
+            self.demand.insert(key, total);
+        }
+        Ok(self)
+    }
+
+    fn branch_hull(mut self, other: Self) -> Self {
+        for (key, facts) in other.facts {
+            self.facts.entry(key).or_default().extend(facts);
+        }
+        let keys = self
+            .demand
+            .keys()
+            .chain(other.demand.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for key in keys {
+            let left = self.demand.remove(&key).unwrap_or(Quantity::ZERO);
+            let right = other.demand.get(&key).copied().unwrap_or(Quantity::ZERO);
+            self.demand.insert(key, left.branch_hull(right));
+        }
+        self
+    }
+
+    fn multiply(mut self, repetitions: Quantity) -> Result<Self, QuantityError> {
+        for facts in self.facts.values_mut() {
+            for escape in facts {
+                escape.actual = escape.actual.multiply(repetitions)?;
+            }
+        }
+        for demand in self.demand.values_mut() {
+            *demand = demand.multiply(repetitions)?;
+        }
+        Ok(self)
+    }
+}
+
 /// A straight-line handled computation with one directly intercepted
 /// operation. The prefix executes once before dispatch; each resumption
 /// replays the residual. Keeping this shape explicit avoids claiming CFG
@@ -361,7 +419,7 @@ struct Analyzer<'a> {
     /// removes its outer binding while the closure is evaluated, but the
     /// resulting closure remains the owner of that capability.
     closure_values: BTreeMap<CoreId, ClosureValue>,
-    escapes: BTreeMap<ContractKey, Vec<Escape>>,
+    escapes: EscapeSummary,
     escaped_closures: BTreeSet<CallableId>,
     value_obligations: Vec<ValueUseFact>,
     diagnostics: Vec<UseDiagnostic>,
@@ -632,7 +690,7 @@ impl Analyzer<'_> {
                 // represented explicitly in Core.
                 let before_computation = environment.clone();
                 let mut replay_residual = None;
-                let mut replay_escape_checkpoint = None;
+                let mut replay_escapes = None;
                 let (computation, incoming) =
                     if let Some(split) = direct_replay_split(self.body, computation, &clauses) {
                         let prefix = self.sequence(split.prefix, environment, expression.span);
@@ -643,12 +701,14 @@ impl Analyzer<'_> {
                         if let Some(name) = split.result_binding {
                             residual_environment.bindings.insert(name, Binding::Other);
                         }
-                        replay_escape_checkpoint = Some(self.escape_checkpoint());
+                        let prefix_escapes = self.take_escapes();
                         replay_residual = Some(self.sequence(
                             split.residual,
                             &mut residual_environment,
                             expression.span,
                         ));
+                        replay_escapes = Some(self.take_escapes());
+                        self.escapes = prefix_escapes;
                         (prefix, before_computation)
                     } else {
                         match self.discarded_prefix(computation, &clauses, environment) {
@@ -659,14 +719,14 @@ impl Analyzer<'_> {
                             ),
                         }
                     };
-                // The residual is walked once to derive its local use
-                // summary, but outgoing callback transfers belong to each
-                // selected resumption.  Detach those transfers now and add
-                // them back with the arm's replay multiplicity below.
-                let replay_escapes = replay_escape_checkpoint
-                    .as_ref()
-                    .map(|checkpoint| self.take_escapes_since(checkpoint));
+                // Every arm is a mutually exclusive dynamic path. Detach the
+                // transfers accumulated by the computation, then join each
+                // arm's own transfer summary with `branch_hull` below. This
+                // is deliberately conservative for unknown dispatch: an arm
+                // may happen, but two sibling arms never happen in sequence.
+                let computation_escapes = self.take_escapes();
                 let mut arms = None::<Summary>;
+                let mut arm_escapes = None::<EscapeSummary>;
                 for clause in clauses {
                     let mut arm_environment = incoming.clone();
                     // Payload binders own fresh capabilities for the one
@@ -724,7 +784,7 @@ impl Analyzer<'_> {
                         CoreHandlerResumption::Terminal => None,
                     };
                     let mut arm = self.expression(clause.body, &mut arm_environment);
-                    if let Some(key) = continuation_key {
+                    let replay_actual = if let Some(key) = continuation_key {
                         let actual = match clause.resumption {
                             CoreHandlerResumption::Tail { .. } => Quantity::ONCE,
                             CoreHandlerResumption::Discard { .. } => Quantity::ZERO,
@@ -743,17 +803,31 @@ impl Analyzer<'_> {
                         if let Some(residual) = replay_residual.clone() {
                             let replayed = self.repeat(clause.span, residual, actual);
                             arm = self.compose(clause.span, arm, replayed);
-                            if let Some(escapes) = &replay_escapes {
-                                self.record_scaled_escapes(escapes, actual);
-                            }
                         }
-                    }
+                        actual
+                    } else {
+                        Quantity::ZERO
+                    };
                     self.check_conditional_contracts(&mut arm, &payload_contracts);
+                    let mut escapes = self.take_escapes();
+                    if let Some(replay_escapes) = &replay_escapes {
+                        let replayed =
+                            self.scale_escapes(clause.span, replay_escapes.clone(), replay_actual);
+                        self.escapes = escapes;
+                        self.sequence_escapes(clause.span, replayed);
+                        escapes = self.take_escapes();
+                    }
+                    arm_escapes = Some(match arm_escapes {
+                        Some(previous) => previous.branch_hull(escapes),
+                        None => escapes,
+                    });
                     arms = Some(match arms {
                         Some(previous) => previous.branch_hull(arm),
                         None => arm,
                     });
                 }
+                self.escapes = computation_escapes;
+                self.sequence_escapes(expression.span, arm_escapes.unwrap_or_default());
                 self.compose(expression.span, computation, arms.unwrap_or_default())
             }
             CoreKind::Completion {
@@ -762,7 +836,9 @@ impl Analyzer<'_> {
             } => {
                 let computation = self.expression(computation, environment);
                 let incoming = environment.clone();
+                let computation_escapes = self.take_escapes();
                 let mut arms = None::<Summary>;
+                let mut arm_escapes = None::<EscapeSummary>;
                 for clause in clauses {
                     let mut arm_environment = incoming.clone();
                     // Completion patterns have the same conditional-owner
@@ -778,11 +854,18 @@ impl Analyzer<'_> {
                     let arm = self.expression(clause.body, &mut arm_environment);
                     let mut arm = arm;
                     self.check_conditional_contracts(&mut arm, &completion_contracts);
+                    let escapes = self.take_escapes();
+                    arm_escapes = Some(match arm_escapes {
+                        Some(previous) => previous.branch_hull(escapes),
+                        None => escapes,
+                    });
                     arms = Some(match arms {
                         Some(previous) => previous.branch_hull(arm),
                         None => arm,
                     });
                 }
+                self.escapes = computation_escapes;
+                self.sequence_escapes(expression.span, arm_escapes.unwrap_or_default());
                 self.compose(expression.span, computation, arms.unwrap_or_default())
             }
         }
@@ -877,7 +960,7 @@ impl Analyzer<'_> {
                 self.compose(span, summary, Summary::one(key))
             }
             Binding::Closure(closure) => {
-                let escapes_before = self.escape_checkpoint();
+                let enclosing_escapes = self.take_escapes();
                 let mut closure_environment = Environment {
                     bindings: closure.captures.clone(),
                 };
@@ -907,8 +990,10 @@ impl Analyzer<'_> {
                     closure_environment.bindings.insert(name.clone(), binding);
                 }
                 let body = self.expression(closure.body, &mut closure_environment);
-                let escapes = self.take_escapes_since(&escapes_before);
-                self.record_scaled_escapes(&escapes, closure.invocation);
+                let escapes = self.take_escapes();
+                self.escapes = enclosing_escapes;
+                let escapes = self.scale_escapes(span, escapes, closure.invocation);
+                self.sequence_escapes(span, escapes);
                 // A contextual closure can carry a finite, optional, or
                 // widened invocation interval from its expected callable
                 // type.  Replaying it multiplies every captured obligation.
@@ -1395,65 +1480,100 @@ impl Analyzer<'_> {
         span: Span,
         boundary: CallableEscapeBoundary,
     ) {
-        self.escapes.entry(key).or_default().push(Escape {
+        let escape = Escape {
             required,
             span,
             boundary,
             actual: Quantity::ONCE,
-        });
+        };
+        self.record_escape(key, escape);
     }
 
-    fn escape_checkpoint(&self) -> BTreeMap<ContractKey, usize> {
-        self.escapes
-            .iter()
-            .map(|(key, escapes)| (*key, escapes.len()))
-            .collect()
-    }
-
-    /// Extract transfers produced while evaluating one structural fragment.
-    /// The caller can then replay them with the same quantity algebra as the
-    /// fragment's local callable-use summary.
-    fn take_escapes_since(
-        &mut self,
-        checkpoint: &BTreeMap<ContractKey, usize>,
-    ) -> Vec<(ContractKey, Escape)> {
-        let keys = self.escapes.keys().copied().collect::<Vec<_>>();
-        let mut extracted = Vec::new();
-        for key in keys {
-            let start = checkpoint.get(&key).copied().unwrap_or(0);
-            let Some(escapes) = self.escapes.get_mut(&key) else {
-                continue;
-            };
-            if start < escapes.len() {
-                extracted.extend(escapes.drain(start..).map(|escape| (key, escape)));
-            }
-        }
-        self.escapes.retain(|_, escapes| !escapes.is_empty());
-        extracted
-    }
-
-    fn record_scaled_escapes(&mut self, escapes: &[(ContractKey, Escape)], multiplier: Quantity) {
-        for (key, escape) in escapes {
-            let actual = match escape.actual.multiply(multiplier) {
-                Ok(actual) => actual,
+    fn record_escape(&mut self, key: ContractKey, escape: Escape) {
+        if let Some(required) = escape.required {
+            let demanded = match required.multiply(escape.actual) {
+                Ok(demanded) => demanded,
                 Err(QuantityError::Overflow) => {
                     self.error(
                         escape.span,
                         "G5010",
-                        "quantitative callable escape count overflowed",
+                        "quantitative callable escape demand overflowed",
                     );
-                    continue;
+                    self.escapes.facts.entry(key).or_default().push(escape);
+                    return;
                 }
                 Err(QuantityError::EmptyInterval) => {
                     unreachable!("quantity products are never empty")
                 }
             };
-            self.escapes.entry(*key).or_default().push(Escape {
-                required: escape.required,
-                span: escape.span,
-                boundary: escape.boundary,
-                actual,
-            });
+            let total = self
+                .escapes
+                .demand
+                .get(&key)
+                .copied()
+                .unwrap_or(Quantity::ZERO)
+                .sequence(demanded);
+            match total {
+                Ok(total) => {
+                    self.escapes.demand.insert(key, total);
+                }
+                Err(QuantityError::Overflow) => self.error(
+                    escape.span,
+                    "G5010",
+                    "quantitative callable escape demand overflowed",
+                ),
+                Err(QuantityError::EmptyInterval) => {
+                    unreachable!("quantity summaries are never empty")
+                }
+            }
+        }
+        self.escapes.facts.entry(key).or_default().push(escape);
+    }
+
+    /// Detach transfers from the current evaluation fragment. Branches and
+    /// closure bodies use this to establish their own path summary before it
+    /// is sequenced back into the surrounding path.
+    fn take_escapes(&mut self) -> EscapeSummary {
+        std::mem::take(&mut self.escapes)
+    }
+
+    fn sequence_escapes(&mut self, span: Span, escapes: EscapeSummary) {
+        let current = self.take_escapes();
+        self.escapes = match current.clone().sequence(escapes) {
+            Ok(escapes) => escapes,
+            Err(QuantityError::Overflow) => {
+                self.error(
+                    span,
+                    "G5010",
+                    "quantitative callable escape demand overflowed",
+                );
+                current
+            }
+            Err(QuantityError::EmptyInterval) => {
+                unreachable!("quantity summaries are never empty")
+            }
+        };
+    }
+
+    fn scale_escapes(
+        &mut self,
+        span: Span,
+        escapes: EscapeSummary,
+        multiplier: Quantity,
+    ) -> EscapeSummary {
+        match escapes.multiply(multiplier) {
+            Ok(escapes) => escapes,
+            Err(QuantityError::Overflow) => {
+                self.error(
+                    span,
+                    "G5010",
+                    "quantitative callable escape count overflowed",
+                );
+                EscapeSummary::default()
+            }
+            Err(QuantityError::EmptyInterval) => {
+                unreachable!("quantity summaries are never empty")
+            }
         }
     }
 
@@ -1461,6 +1581,7 @@ impl Analyzer<'_> {
         if !self.escaped_closures.insert(closure.callable) {
             return;
         }
+        let enclosing_escapes = self.take_escapes();
         let mut environment = Environment {
             bindings: closure.captures,
         };
@@ -1469,10 +1590,11 @@ impl Analyzer<'_> {
         for (name, _) in closure.parameters {
             environment.bindings.insert(name, Binding::Other);
         }
-        let escapes_before = self.escape_checkpoint();
         let summary = self.expression(closure.body, &mut environment);
-        let escapes = self.take_escapes_since(&escapes_before);
-        self.record_scaled_escapes(&escapes, closure.invocation);
+        let escapes = self.take_escapes();
+        self.escapes = enclosing_escapes;
+        let escapes = self.scale_escapes(span, escapes, closure.invocation);
+        self.sequence_escapes(span, escapes);
         let summary = self.repeat(span, summary, closure.invocation);
         self.record(summary);
     }
@@ -1543,7 +1665,7 @@ impl Analyzer<'_> {
             return;
         }
 
-        let escapes = self.escapes.get(&key).cloned().unwrap_or_default();
+        let escapes = self.escapes.facts.get(&key).cloned().unwrap_or_default();
         if escapes.is_empty() {
             if contract.declared.contains(actual) {
                 return;
@@ -1555,10 +1677,9 @@ impl Analyzer<'_> {
         // Direct invocations and outgoing callable capabilities consume the
         // same source budget. A transfer may discharge a lower bound through
         // its receiver, but it cannot make a preceding local invocation free.
-        let mut escaped_demand = Quantity::ZERO;
         let mut escaped_at = None;
         for escape in escapes {
-            let Some(required) = escape.required else {
+            if escape.required.is_none() {
                 self.error(
                     escape.span,
                     "G5013",
@@ -1571,38 +1692,16 @@ impl Analyzer<'_> {
                     ),
                 );
                 continue;
-            };
-            let demanded = match required.multiply(escape.actual) {
-                Ok(demanded) => demanded,
-                Err(QuantityError::Overflow) => {
-                    self.error(
-                        escape.span,
-                        "G5010",
-                        "quantitative callable escape demand overflowed",
-                    );
-                    continue;
-                }
-                Err(QuantityError::EmptyInterval) => {
-                    unreachable!("quantity products are never empty")
-                }
-            };
-            escaped_demand = match escaped_demand.sequence(demanded) {
-                Ok(total) => total,
-                Err(QuantityError::Overflow) => {
-                    self.error(
-                        escape.span,
-                        "G5010",
-                        "quantitative callable escape demand overflowed",
-                    );
-                    continue;
-                }
-                Err(QuantityError::EmptyInterval) => {
-                    unreachable!("quantity summaries are never empty")
-                }
-            };
+            }
             escaped_at.get_or_insert((escape.span, escape.boundary));
         }
         if let Some((span, boundary)) = escaped_at {
+            let escaped_demand = self
+                .escapes
+                .demand
+                .get(&key)
+                .copied()
+                .unwrap_or(Quantity::ZERO);
             let total_demand = match actual.sequence(escaped_demand) {
                 Ok(total) => total,
                 Err(QuantityError::Overflow) => {
@@ -1693,6 +1792,7 @@ impl Analyzer<'_> {
         });
         let mut callable_escapes = self
             .escapes
+            .facts
             .iter()
             .flat_map(|(key, escapes)| {
                 let contract = &self.contracts[key];
@@ -1773,7 +1873,7 @@ fn display_place(place: &MoveFact) -> String {
 mod tests {
     use super::*;
     use crate::{
-        core::{CaptureMode, ClosureCapture, CoreExpr},
+        core::{CaptureMode, ClosureCapture, CoreCompletionClause, CoreExpr},
         identity::{FileKey, PackageKey},
         types::EffectRow,
     };
@@ -1980,6 +2080,124 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.code == "G5013"),
             "two outgoing transfers must consume one combined owner budget: {uses:#?}"
+        );
+    }
+
+    #[test]
+    fn frozen_core_joins_alternative_callable_transfers_without_sequencing_them() {
+        let callback = callable(Quantity::ONCE);
+        let apply = Type::Callable {
+            lifetime_binders: 0,
+            parameters: vec![
+                callback.clone(),
+                Type::Scalar(crate::types::ScalarType::I64),
+            ],
+            result: Box::new(Type::Scalar(crate::types::ScalarType::I64)),
+            effects: EffectRow::empty(),
+            invocation: Quantity::UNRESTRICTED,
+        };
+        let i64 = Type::Scalar(crate::types::ScalarType::I64);
+        let bool = Type::Scalar(crate::types::ScalarType::Bool);
+        let call = |callee, callback, value| CoreExpr {
+            kind: CoreKind::Call {
+                callee,
+                arguments: vec![callback, value],
+                reference_contract: crate::core::CallReferenceOrigin::None,
+                reference_origin: crate::core::CallReferenceOrigin::None,
+                reference_shape: crate::core::CallReferenceShape::None,
+            },
+            ty: i64.clone(),
+            span: span(),
+        };
+        // This valid frozen Core bypasses source elaboration. Its two call
+        // transfers are selected by distinct completion arms, so an exact
+        // callback must retain the one-use interval rather than become [2,2].
+        let body = TypedBody {
+            parameters: vec![("callback".into(), callback.clone())],
+            expressions: vec![
+                CoreExpr {
+                    kind: CoreKind::Function {
+                        definition: crate::DefKey(crate::Digest::of_bytes(b"apply-left")),
+                        arguments: vec![],
+                        host_import: None,
+                    },
+                    ty: apply.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Local("callback".into()),
+                    ty: callback.clone(),
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Literal("20".into()),
+                    ty: i64.clone(),
+                    span: span(),
+                },
+                call(CoreId(0), CoreId(1), CoreId(2)),
+                CoreExpr {
+                    kind: CoreKind::Function {
+                        definition: crate::DefKey(crate::Digest::of_bytes(b"apply-right")),
+                        arguments: vec![],
+                        host_import: None,
+                    },
+                    ty: apply,
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Local("callback".into()),
+                    ty: callback,
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Literal("21".into()),
+                    ty: i64.clone(),
+                    span: span(),
+                },
+                call(CoreId(4), CoreId(5), CoreId(6)),
+                CoreExpr {
+                    kind: CoreKind::Literal("true".into()),
+                    ty: bool,
+                    span: span(),
+                },
+                CoreExpr {
+                    kind: CoreKind::Completion {
+                        computation: CoreId(8),
+                        clauses: vec![
+                            CoreCompletionClause {
+                                pattern: CorePattern::Literal("true".into()),
+                                bindings: vec![],
+                                refinement: None,
+                                body: CoreId(3),
+                                span: span(),
+                            },
+                            CoreCompletionClause {
+                                pattern: CorePattern::Literal("false".into()),
+                                bindings: vec![],
+                                refinement: None,
+                                body: CoreId(7),
+                                span: span(),
+                            },
+                        ],
+                    },
+                    ty: i64,
+                    span: span(),
+                },
+            ],
+            root: CoreId(9),
+            diagnostics: vec![],
+            recovered: false,
+        };
+        assert!(
+            body.validate().is_empty(),
+            "forged Core must still be valid"
+        );
+        let ownership = PlaceFlow::analyze(&body);
+        assert!(ownership.diagnostics.is_empty(), "{ownership:#?}");
+        let uses = UseFlow::analyze(&body, &ownership);
+        assert!(
+            uses.diagnostics.is_empty(),
+            "alternative callable transfers must join as one use: {uses:#?}"
         );
     }
 

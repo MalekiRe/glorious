@@ -4041,6 +4041,30 @@ fn service_rejects_sequential_callable_escapes_that_exceed_one_owner_contract() 
 }
 
 #[test]
+fn service_allows_one_typed_callable_escape_from_each_completion_branch() {
+    let source = "pub enum Choice { Left, Right } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(function: (i64) -> i64, value: i64) -> i64 { function(value) } pub fn relay(function: (i64) -> i64, choice: Choice) -> i64 { handle choice { Choice::Left => apply(function, 20), Choice::Right => apply(function, 21) } } pub fn main() -> i64 { relay(add_one, Choice::Left) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 21);
+}
+
+#[test]
+fn service_rejects_a_maybe_skipped_exact_callable_escape_at_a_completion_join() {
+    let source = "pub enum Choice { Left, Right } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(function: (i64) -> i64, value: i64) -> i64 { function(value) } pub fn relay(function: (i64) -> i64, choice: Choice) -> i64 { handle choice { Choice::Left => apply(function, 20), Choice::Right => 0 } } pub fn main() -> i64 { relay(add_one, Choice::Left) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("a conditionally skipped exact callable transfer unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5013"),
+        "missing conditional callable-transfer diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_direct_callable_use_followed_by_a_typed_escape() {
     let source = "pub fn add_one(value: i64) -> i64 { value + 1 } pub fn apply(function: (i64) -> i64, value: i64) -> i64 { function(value) } pub fn relay(function: (i64) -> i64) -> i64 { function(20) + apply(function, 21) } pub fn main() -> i64 { relay(add_one) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
