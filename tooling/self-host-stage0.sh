@@ -66,7 +66,11 @@ esac
     exit 1
 }
 
-temporary_directory="$(mktemp -d /tmp/grandiose-self-host-stage0.XXXXXX)"
+# Honour TMPDIR so a constrained `/tmp` mount does not make an otherwise
+# hermetic bootstrap unavailable.  CI/worktree callers can direct only this
+# disposable materialization directory elsewhere without changing either the
+# checked-in source bundle or the emitted artifact locations.
+temporary_directory="$(mktemp -d "${TMPDIR:-/tmp}/grandiose-self-host-stage0.XXXXXX")"
 trap 'rm -rf "$temporary_directory"' EXIT
 canonical_source="$temporary_directory/compiler.glorious"
 
