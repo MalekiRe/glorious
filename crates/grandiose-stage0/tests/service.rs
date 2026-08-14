@@ -111,6 +111,39 @@ fn service_compiles_and_runs_a_verified_vm_artifact_from_an_immutable_request() 
 }
 
 #[test]
+fn service_resolves_public_module_aliases_inside_qualified_body_paths() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_modules(
+            "pub mod api; pub mod facade; pub fn main() -> i64 { facade::client::answer() }",
+            &[
+                ("api", "pub fn answer() -> i64 { 42 }"),
+                ("facade", "pub use crate::api as client;"),
+            ],
+        ))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_keeps_private_module_aliases_lexical_to_their_declaring_module() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_modules(
+            "pub mod api; pub mod facade; pub fn main() -> i64 { facade::call() }",
+            &[
+                ("api", "pub fn answer() -> i64 { 42 }"),
+                (
+                    "facade",
+                    "use crate::api as client; pub fn call() -> i64 { client::answer() }",
+                ),
+            ],
+        ))
+        .unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_applies_host_instance_discovery_limits_before_lowering() {
     let compiler = StageZeroCompiler::with_instance_limits(InstanceLimits {
         total: 1,

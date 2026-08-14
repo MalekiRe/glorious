@@ -253,6 +253,107 @@ fn explicit_import_aliases_bind_in_their_declared_module_only() {
 }
 
 #[test]
+fn module_import_aliases_are_real_qualified_path_segments() {
+    let package = PackageKey("resolution-module-alias@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod api; pub mod facade; mod caller;");
+    let api = collect("crate::api", "pub fn answer() { () }");
+    let facade = collect("crate::facade", "pub use crate::api as client;");
+    let caller = collect("crate::caller", "fn local() { () }");
+    let index = DefinitionIndex::from_interfaces([&root, &api, &facade, &caller]);
+    let owner = ModuleKey {
+        package,
+        path: "crate::caller".into(),
+    };
+
+    let state = index.resolve_path(
+        DefinitionNamespace::Value,
+        &owner,
+        &[
+            "crate".into(),
+            "facade".into(),
+            "client".into(),
+            "answer".into(),
+        ],
+    );
+    assert!(matches!(state, ResolutionState::Resolved(_)), "{state:?}");
+}
+
+#[test]
+fn private_module_aliases_cannot_be_used_as_public_facade_path_edges() {
+    let package = PackageKey("resolution-private-module-alias@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod api; pub mod facade; mod caller;");
+    let api = collect("crate::api", "pub fn answer() { () }");
+    let facade = collect("crate::facade", "use crate::api as client;");
+    let caller = collect("crate::caller", "fn local() { () }");
+    let index = DefinitionIndex::from_interfaces([&root, &api, &facade, &caller]);
+    let owner = ModuleKey {
+        package,
+        path: "crate::caller".into(),
+    };
+
+    assert!(matches!(
+        index.resolve_path(
+            DefinitionNamespace::Value,
+            &owner,
+            &[
+                "crate".into(),
+                "facade".into(),
+                "client".into(),
+                "answer".into(),
+            ],
+        ),
+        ResolutionState::Inaccessible(_)
+    ));
+}
+
+#[test]
+fn public_globs_make_public_child_modules_traversable_without_source_order() {
+    let package = PackageKey("resolution-glob-module@0.1.0".into());
+    let collect = |module: &str, source: &str| {
+        let file = FileKey::new(&package, &format!("src/{module}.glorious"));
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        InterfaceSet::collect(package.clone(), module, &lexed, source, &scan).interface
+    };
+    let root = collect("crate", "pub mod tree; pub mod facade; mod caller;");
+    let tree = collect("crate::tree", "pub mod child;");
+    let child = collect("crate::tree::child", "pub fn answer() { () }");
+    let facade = collect("crate::facade", "pub use crate::tree::*;");
+    let caller = collect("crate::caller", "fn local() { () }");
+    let index = DefinitionIndex::from_interfaces([&root, &tree, &child, &facade, &caller]);
+    let owner = ModuleKey {
+        package,
+        path: "crate::caller".into(),
+    };
+
+    assert!(matches!(
+        index.resolve_path(
+            DefinitionNamespace::Value,
+            &owner,
+            &[
+                "crate".into(),
+                "facade".into(),
+                "child".into(),
+                "answer".into(),
+            ],
+        ),
+        ResolutionState::Resolved(_)
+    ));
+}
+
+#[test]
 fn glob_imports_expand_deterministically_and_contribute_import_occurrences() {
     let package = PackageKey("resolution-glob@0.1.0".into());
     let collect = |module: &str, source: &str| {

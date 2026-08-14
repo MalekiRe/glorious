@@ -731,14 +731,35 @@ impl DefinitionIndex {
         requester: &ModuleKey,
         segments: &[String],
     ) -> ModuleLookup {
+        self.lexical_module_with_visited(lexical_owner, requester, segments, &mut BTreeSet::new())
+    }
+
+    /// Resolve the module portion of a path.  This deliberately walks one
+    /// segment at a time instead of formatting the whole suffix into a
+    /// `ModuleKey`: an import alias is itself a module-path segment, and may
+    /// appear after an ordinary module edge (`crate::facade::api::Thing`).
+    /// The visited set is shared across alias expansion so cyclic re-exports
+    /// remain a deterministic failed lookup rather than recursive resolver
+    /// entry.
+    fn lexical_module_with_visited(
+        &self,
+        lexical_owner: &ModuleKey,
+        requester: &ModuleKey,
+        segments: &[String],
+        visited_aliases: &mut BTreeSet<(ModuleKey, String)>,
+    ) -> ModuleLookup {
         let Some((first, rest)) = segments.split_first() else {
             return ModuleLookup::Absent;
         };
         if first == "crate" {
-            return self.module_key(lexical_owner, requester, "crate", rest);
+            let root = ModuleKey {
+                package: lexical_owner.package.clone(),
+                path: "crate".into(),
+            };
+            return self.walk_module_path(&root, requester, rest, visited_aliases);
         }
         if first == "self" {
-            return self.module_key(lexical_owner, requester, &lexical_owner.path, rest);
+            return self.walk_module_path(lexical_owner, requester, rest, visited_aliases);
         }
         if first == "super" {
             let mut base = lexical_owner.path.clone();
@@ -750,7 +771,11 @@ impl DefinitionIndex {
                 base = parent;
                 remaining = &remaining[1..];
             }
-            return self.module_key(lexical_owner, requester, &base, remaining);
+            let parent = ModuleKey {
+                package: lexical_owner.package.clone(),
+                path: base,
+            };
+            return self.walk_module_path(&parent, requester, remaining, visited_aliases);
         }
 
         // Ordinary qualified paths are lexical.  Prefer the nearest enclosing
@@ -759,7 +784,11 @@ impl DefinitionIndex {
         // deterministic in the presence of similarly named descendants.
         let mut base = lexical_owner.path.clone();
         loop {
-            match self.module_key(lexical_owner, requester, &base, segments) {
+            let start = ModuleKey {
+                package: lexical_owner.package.clone(),
+                path: base.clone(),
+            };
+            match self.walk_module_path(&start, requester, segments, visited_aliases) {
                 ModuleLookup::Found(module) => return ModuleLookup::Found(module),
                 ModuleLookup::Inaccessible => return ModuleLookup::Inaccessible,
                 ModuleLookup::Absent => {}
@@ -781,32 +810,126 @@ impl DefinitionIndex {
             // dependency by insertion order.
             return ModuleLookup::Absent;
         };
-        self.module_key(root, requester, "crate", rest)
+        self.walk_module_path(root, requester, rest, visited_aliases)
     }
 
-    fn module_key(
+    /// Follow actual child-module edges and imported module bindings.  A
+    /// child declaration shadows an import of the same spelling just as a
+    /// local declaration shadows an imported final name.  In particular, an
+    /// inaccessible child may not be bypassed through a conveniently named
+    /// alias.
+    fn walk_module_path(
         &self,
-        lexical_owner: &ModuleKey,
+        start: &ModuleKey,
         requester: &ModuleKey,
-        base: &str,
-        suffix: &[String],
+        segments: &[String],
+        visited_aliases: &mut BTreeSet<(ModuleKey, String)>,
     ) -> ModuleLookup {
-        let path = if suffix.is_empty() {
-            base.to_owned()
-        } else {
-            format!("{base}::{}", suffix.join("::"))
-        };
-        let module = ModuleKey {
-            package: lexical_owner.package.clone(),
-            path,
-        };
-        if !self.modules.contains_key(&module) {
+        if !self.modules.contains_key(start) {
             return ModuleLookup::Absent;
         }
-        if self.module_path_visible_to(&module, requester) {
-            ModuleLookup::Found(module)
-        } else {
-            ModuleLookup::Inaccessible
+        if !self.module_path_visible_to(start, requester) {
+            return ModuleLookup::Inaccessible;
+        }
+        let mut module = start.clone();
+        for segment in segments {
+            let child = ModuleKey {
+                package: module.package.clone(),
+                path: module_child_path(&module.path, segment),
+            };
+            if self.modules.contains_key(&child) {
+                if !self.module_path_visible_to(&child, requester) {
+                    return ModuleLookup::Inaccessible;
+                }
+                module = child;
+                continue;
+            }
+            match self.imported_module(&module, requester, segment, visited_aliases) {
+                ModuleLookup::Found(target) => module = target,
+                ModuleLookup::Inaccessible => return ModuleLookup::Inaccessible,
+                ModuleLookup::Absent => return ModuleLookup::Absent,
+            }
+        }
+        ModuleLookup::Found(module)
+    }
+
+    /// Resolve an alias (or a module name made available by a glob) from the
+    /// importing module.  The original requester is retained all the way
+    /// through this lookup: a public facade cannot use its own private import
+    /// authority to make a target traversable to another module or package.
+    fn imported_module(
+        &self,
+        owner: &ModuleKey,
+        requester: &ModuleKey,
+        alias: &str,
+        visited_aliases: &mut BTreeSet<(ModuleKey, String)>,
+    ) -> ModuleLookup {
+        let Some(imports) = self.imports.get(owner) else {
+            return ModuleLookup::Absent;
+        };
+        let mut candidates = BTreeSet::new();
+        let mut inaccessible = false;
+        for import in imports {
+            // A private import is lexical to its declaring module.  It must
+            // not become a module edge for an outside requester merely
+            // because the final imported definition happens to be public.
+            if !import.public && import.module != *requester {
+                if import.glob || import.alias == alias {
+                    inaccessible = true;
+                }
+                continue;
+            }
+            if !import.glob && import.alias == alias {
+                let cycle = (owner.clone(), alias.to_owned());
+                if !visited_aliases.insert(cycle) {
+                    continue;
+                }
+                match self.lexical_module_with_visited(
+                    &import.module,
+                    requester,
+                    &import.path,
+                    visited_aliases,
+                ) {
+                    ModuleLookup::Found(module) => {
+                        candidates.insert(module);
+                    }
+                    ModuleLookup::Inaccessible => inaccessible = true,
+                    ModuleLookup::Absent => {}
+                }
+                continue;
+            }
+            if import.glob {
+                let cycle = (owner.clone(), format!("<glob:{alias}>"));
+                if !visited_aliases.insert(cycle) {
+                    continue;
+                }
+                match self.lexical_module_with_visited(
+                    &import.module,
+                    requester,
+                    &import.path,
+                    visited_aliases,
+                ) {
+                    ModuleLookup::Found(target) => match self.walk_module_path(
+                        &target,
+                        requester,
+                        &[alias.to_owned()],
+                        visited_aliases,
+                    ) {
+                        ModuleLookup::Found(module) => {
+                            candidates.insert(module);
+                        }
+                        ModuleLookup::Inaccessible => inaccessible = true,
+                        ModuleLookup::Absent => {}
+                    },
+                    ModuleLookup::Inaccessible => inaccessible = true,
+                    ModuleLookup::Absent => {}
+                }
+            }
+        }
+        match candidates.len() {
+            1 => ModuleLookup::Found(candidates.into_iter().next().expect("one candidate")),
+            0 if inaccessible => ModuleLookup::Inaccessible,
+            _ => ModuleLookup::Absent,
         }
     }
 
