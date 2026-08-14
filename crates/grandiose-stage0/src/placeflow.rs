@@ -322,6 +322,7 @@ impl Analyzer<'_> {
                     self.use_deref_reference(*reference, e.span, true);
                 }
                 self.assign_place(&place, e.span);
+                self.record_assigned_reference_origin(&place, value);
             }
             CoreKind::Move(v) => {
                 // A move of a static place is validated directly. Visiting a
@@ -1116,7 +1117,7 @@ impl Analyzer<'_> {
                         && let Some(place) = self.projection(value)
                     {
                         self.reference_origins.insert(
-                            key,
+                            key.clone(),
                             ProjectionLoan {
                                 place,
                                 unique,
@@ -1124,9 +1125,44 @@ impl Analyzer<'_> {
                             },
                         );
                     }
+                    self.record_aggregate_reference_origins(&key, field);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn record_assigned_reference_origin(&mut self, place: &CorePlace, value: CoreId) {
+        let Some(key) = self.place_origin_key(place) else {
+            return;
+        };
+        self.reference_origins
+            .retain(|existing, _| existing != &key && !existing.starts_with(&(key.clone() + ".")));
+        if let CoreKind::Borrow { unique, value } = self.body.expression(value).kind
+            && let Some(place) = self.projection(value)
+        {
+            self.reference_origins.insert(
+                key.clone(),
+                ProjectionLoan {
+                    place,
+                    unique,
+                    owner: None,
+                },
+            );
+        }
+        self.record_aggregate_reference_origins(&key, value);
+    }
+
+    fn place_origin_key(&self, place: &CorePlace) -> Option<String> {
+        match place {
+            CorePlace::Local { name, .. } => Some(name.clone()),
+            CorePlace::Field { base, index, .. } => {
+                let mut key = self.place_origin_key(base)?;
+                key.push('.');
+                key.push_str(&index.to_string());
+                Some(key)
+            }
+            CorePlace::Deref { .. } | CorePlace::Error => None,
         }
     }
 

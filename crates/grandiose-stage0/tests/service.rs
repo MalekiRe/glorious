@@ -768,10 +768,11 @@ fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
 
     let aggregate_held = r#"
         pub struct Holder { reference: &mut i64 }
+        pub struct Outer { holder: Holder }
         pub fn main() -> i64 {
             let value = 1;
-            let holder = Holder { reference: &mut value };
-            let child = &mut *holder.reference;
+            let outer = Outer { holder: Holder { reference: &mut value } };
+            let child = &mut *outer.holder.reference;
             *child
         }
     "#;
@@ -779,6 +780,22 @@ fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
         .compile(request(aggregate_held))
         .expect("aggregate-held reborrow must retain its backing loan origin");
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 1);
+
+    let replacement = r#"
+        pub struct Holder { reference: &mut i64 }
+        pub fn main() -> i64 {
+            let first = 1;
+            let second = 2;
+            let holder = Holder { reference: &mut first };
+            holder.reference = &mut second;
+            let child = &mut *holder.reference;
+            *child
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(replacement))
+        .expect("reassigned aggregate reference must replace its origin");
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 2);
 }
 
 #[test]
