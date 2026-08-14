@@ -1,9 +1,10 @@
 use grandiose_stage0::{
     BOOTSTRAP_MANIFEST_SCHEMA, BootstrapConvergenceError, BootstrapLimits, BootstrapManifest,
     BootstrapManifestError, BootstrapStage, Budget, CancellationToken, CompilationMode,
-    CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, DiagnosticClass, Digest,
-    LogicalPath, PackageKey, RetentionReport, Severity, SourceInput, StageZeroCompiler,
-    VmArtifactError, VmExecutionLimits, VmInstruction, decode_and_verify_program, decode_program,
+    CompilationRequest, CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus,
+    DiagnosticClass, Digest, LogicalPath, ModuleKey, PackageKey, RetentionReport, Severity,
+    SourceInput, StageZeroCompiler, VmArtifactError, VmExecutionLimits, VmInstruction,
+    decode_and_verify_program, decode_program,
 };
 use std::collections::BTreeMap;
 
@@ -159,6 +160,111 @@ fn service_compiles_explicit_parent_and_child_revisions_without_world_mixing() {
 }
 
 #[test]
+fn service_tracks_private_body_edits_without_invalidating_public_products() {
+    let compiler = StageZeroCompiler::new();
+    let parent_request = request("pub fn helper() -> i64 { 1 } pub fn main() -> i64 { helper() }");
+    let parent = compiler.import_revision(parent_request, None).unwrap();
+    compiler.compile_revision(parent).unwrap();
+    let child_request = request("pub fn helper() -> i64 { 2 } pub fn main() -> i64 { helper() }");
+    let changed_file = child_request.sources[0].key;
+    let child = compiler
+        .import_revision(child_request, Some(parent))
+        .unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(child)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        2
+    );
+
+    let crate_module = ModuleKey {
+        package: PackageKey("app@0.1.0".into()),
+        path: "crate".into(),
+    };
+    assert!(matches!(
+        compiler
+            .dependency_trace(child, &DependencyNode::Input(changed_file))
+            .unwrap()
+            .status,
+        DependencyStatus::Red { .. }
+    ));
+    assert!(matches!(
+        compiler
+            .dependency_trace(child, &DependencyNode::Interface(crate_module.clone()))
+            .unwrap()
+            .status,
+        DependencyStatus::Green { parent: green_parent } if green_parent == parent
+    ));
+    assert!(matches!(
+        compiler
+            .dependency_trace(child, &DependencyNode::Fixity(crate_module))
+            .unwrap()
+            .status,
+        DependencyStatus::Green { .. }
+    ));
+    let traces = compiler.dependency_traces(child);
+    assert!(
+        traces
+            .iter()
+            .any(|trace| matches!(trace.node, DependencyNode::Core(_))
+                && matches!(trace.status, DependencyStatus::Red { .. }))
+    );
+    assert!(matches!(
+        traces
+            .iter()
+            .find(|trace| matches!(trace.node, DependencyNode::Artifact(_)))
+            .unwrap()
+            .status,
+        DependencyStatus::Red { ref first_changed, .. } if *first_changed == DependencyNode::Input(changed_file)
+    ));
+}
+
+#[test]
+fn service_tracks_public_interface_edits_without_invalidating_unaffected_bodies() {
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(
+            request("pub struct Version { value: i64 } pub fn main() -> i64 { 42 }"),
+            None,
+        )
+        .unwrap();
+    compiler.compile_revision(parent).unwrap();
+    let child = compiler
+        .import_revision(
+            request("pub struct Version { value: i64, next: i64 } pub fn main() -> i64 { 42 }"),
+            Some(parent),
+        )
+        .unwrap();
+    compiler.compile_revision(child).unwrap();
+    let traces = compiler.dependency_traces(child);
+    assert!(matches!(
+        compiler
+            .dependency_trace(
+                child,
+                &DependencyNode::Interface(ModuleKey {
+                    package: PackageKey("app@0.1.0".into()),
+                    path: "crate".into(),
+                }),
+            )
+            .unwrap()
+            .status,
+        DependencyStatus::Red { .. }
+    ));
+    // The body was revalidated against the new interface but its frozen Core
+    // is equal, so no downstream work need treat it as red.
+    assert!(
+        traces
+            .iter()
+            .any(|trace| matches!(trace.node, DependencyNode::Core(_))
+                && matches!(trace.status, DependencyStatus::Green { .. }))
+    );
+}
+
+#[test]
 fn service_sessions_pin_retired_revisions_without_mixing_live_worlds() {
     let compiler = StageZeroCompiler::new();
     let parent = compiler
@@ -266,6 +372,7 @@ fn cancelled_service_sessions_discard_staged_cache_artifacts_and_release_pins() 
     // cross the request publication boundary.
     assert_eq!(compiler.interface_cache_stats().hits, 0);
     assert_eq!(compiler.interface_cache_stats().misses, 0);
+    assert!(compiler.dependency_traces(revision).is_empty());
     assert_eq!(budget.spent(), 0);
 
     compiler.retire_revision(revision).unwrap();
@@ -290,6 +397,7 @@ fn failed_and_resource_limited_sessions_do_not_publish_staged_interfaces() {
     assert!(compiler.compile_session(&failed_session).is_err());
     assert_eq!(compiler.interface_cache_stats().hits, 0);
     assert_eq!(compiler.interface_cache_stats().misses, 0);
+    assert!(compiler.dependency_traces(failed_revision).is_empty());
 
     let limited_revision = compiler
         .import_revision(request("pub fn main() -> i64 { 42 }"), None)
@@ -303,6 +411,7 @@ fn failed_and_resource_limited_sessions_do_not_publish_staged_interfaces() {
     assert_eq!(budget.spent(), 0);
     assert_eq!(compiler.interface_cache_stats().hits, 0);
     assert_eq!(compiler.interface_cache_stats().misses, 0);
+    assert!(compiler.dependency_traces(limited_revision).is_empty());
 }
 
 #[test]

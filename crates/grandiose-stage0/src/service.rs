@@ -13,11 +13,11 @@ use crate::revision::RequestControlError;
 use crate::{
     BodySyntax, BootstrapManifest, Budget, BudgetError, CancellationToken, CoherenceSet,
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
-    DefinitionIndex, DiagnosticClass, Digest, ElaboratedHeader, ElaboratedInterface, EscapeFlow,
-    FixityTable, InputError, MirFunction, MirLowering, MirProgram, ModuleGraph, ParsedHeader,
-    PlaceFlow, PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId,
-    Severity, SourceSpan, Span, TrustedRuntimeManifest, TypedBody, UseFlow, VerifiedVmProgram,
-    emit_vm_program, implementation_method_key, verify_vm_program,
+    DefinitionIndex, DependencyNode, DependencyTrace, DiagnosticClass, Digest, ElaboratedHeader,
+    ElaboratedInterface, EscapeFlow, FixityTable, InputError, MirFunction, MirLowering, MirProgram,
+    ModuleGraph, ParsedHeader, PlaceFlow, PublicationGuard, RequestSession, RetentionReport,
+    RevisionError, RevisionId, Severity, SourceSpan, Span, TrustedRuntimeManifest, TypedBody,
+    UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -412,6 +412,21 @@ impl StageZeroCompiler {
     pub fn interface_cache_stats(&self) -> crate::InterfaceCacheStats {
         self.database.interface_cache_stats()
     }
+
+    /// Return the published red/green explanation for one typed compiler
+    /// product. This is inspection only; it never opens a revision or starts
+    /// a new compilation request.
+    pub fn dependency_trace(
+        &self,
+        revision: RevisionId,
+        node: &DependencyNode,
+    ) -> Option<DependencyTrace> {
+        self.database.dependency_trace(revision, node)
+    }
+
+    pub fn dependency_traces(&self, revision: RevisionId) -> Vec<DependencyTrace> {
+        self.database.dependency_traces(revision)
+    }
     pub fn compile(&self, request: CompilationRequest) -> Result<CompilationOutcome, ServiceError> {
         self.compile_with_parent(request, None)
     }
@@ -495,7 +510,16 @@ impl StageZeroCompiler {
         // Drop settles request accounting on every error/cancellation path.
         let _request_lease = session.checkpoint(1)?;
         let mut interfaces = self.database.interface_cache().transaction();
-        let outcome = self.compile_snapshot(session.snapshot(), session, &mut interfaces)?;
+        let mut dependencies = self
+            .database
+            .dependency_ledger()
+            .transaction(session.revision(), session.snapshot().parent());
+        let outcome = self.compile_snapshot(
+            session.snapshot(),
+            session,
+            &mut interfaces,
+            &mut dependencies,
+        )?;
         // One final cancellation check linearizes request publication. Before
         // it succeeds, dropping the outcome and transaction publishes neither
         // an artifact nor newly collected frozen interfaces.
@@ -503,6 +527,7 @@ impl StageZeroCompiler {
             .commit(session.cancellation())
             .map_err(|_| ServiceError::Cancelled)?;
         interfaces.commit();
+        dependencies.commit();
         Ok(outcome)
     }
 
@@ -511,6 +536,7 @@ impl StageZeroCompiler {
         snapshot: &DatabaseSnapshot,
         session: &RequestSession,
         interfaces: &mut crate::interface::InterfaceCacheTransaction<'_>,
+        dependencies: &mut crate::dependency::DependencyTransaction<'_>,
     ) -> Result<CompilationOutcome, ServiceError> {
         session.checkpoint(0)?;
         let input_fingerprint = snapshot.world().fingerprint;
@@ -526,6 +552,9 @@ impl StageZeroCompiler {
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        for source in snapshot.world().sources.iter() {
+            dependencies.record(DependencyNode::Input(source.key), source.digest, vec![]);
+        }
         let graph = ModuleGraph::build_with_interface_transaction(
             snapshot.world(),
             &snapshot.world().root_package,
@@ -542,6 +571,13 @@ impl StageZeroCompiler {
         let Some(root) = graph.modules.get(&graph.root) else {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         };
+        for node in graph.modules.values() {
+            dependencies.record(
+                DependencyNode::Interface(node.key.clone()),
+                node.interface.interface.public_fingerprint,
+                vec![DependencyNode::Input(node.file)],
+            );
+        }
         for node in graph.modules.values() {
             session.checkpoint(0)?;
             diagnostics.extend(node.interface.diagnostics.iter().map(|diagnostic| {
@@ -695,6 +731,11 @@ impl StageZeroCompiler {
                 std::str::from_utf8(&source.bytes).expect("normalized world only contains UTF-8");
             let lexed = crate::LexedFile::lex(source.key, text);
             let fixities = FixityTable::for_module(&node.interface.interface);
+            dependencies.record(
+                DependencyNode::Fixity(node.key.clone()),
+                fixities.fingerprint(),
+                vec![DependencyNode::Interface(node.key.clone())],
+            );
             for declaration in node
                 .interface
                 .interface
@@ -807,6 +848,18 @@ impl StageZeroCompiler {
                     && core_validation.is_empty()
                     && core.diagnostics.is_empty()
                     && body.diagnostics.is_empty();
+                let mut core_dependencies = graph
+                    .modules
+                    .values()
+                    .map(|module| DependencyNode::Interface(module.key.clone()))
+                    .collect::<Vec<_>>();
+                core_dependencies.push(DependencyNode::Input(node.file));
+                core_dependencies.push(DependencyNode::Fixity(node.key.clone()));
+                dependencies.record(
+                    DependencyNode::Core(declaration.key),
+                    core.semantic_fingerprint(),
+                    core_dependencies,
+                );
                 body_products.push((declaration.key, is_constant, valid, core, flow));
             }
             for implementation in node
@@ -927,13 +980,20 @@ impl StageZeroCompiler {
                         && core_validation.is_empty()
                         && core.diagnostics.is_empty()
                         && body.diagnostics.is_empty();
-                    body_products.push((
-                        implementation_method_key(implementation.key, &method.name),
-                        false,
-                        valid,
-                        core,
-                        flow,
-                    ));
+                    let method_key = implementation_method_key(implementation.key, &method.name);
+                    let mut core_dependencies = graph
+                        .modules
+                        .values()
+                        .map(|module| DependencyNode::Interface(module.key.clone()))
+                        .collect::<Vec<_>>();
+                    core_dependencies.push(DependencyNode::Input(node.file));
+                    core_dependencies.push(DependencyNode::Fixity(node.key.clone()));
+                    dependencies.record(
+                        DependencyNode::Core(method_key),
+                        core.semantic_fingerprint(),
+                        core_dependencies,
+                    );
+                    body_products.push((method_key, false, valid, core, flow));
                 }
             }
         }
@@ -964,6 +1024,11 @@ impl StageZeroCompiler {
                 if is_constant {
                     constants.insert(definition);
                 }
+                dependencies.record(
+                    DependencyNode::Mir(definition),
+                    mir_fingerprint(&mir),
+                    vec![DependencyNode::Core(definition)],
+                );
                 functions.insert(definition, mir);
                 for (lifted_definition, lifted) in lowered.lifted {
                     let lifted = match crate::mir::optimize(lifted) {
@@ -981,6 +1046,15 @@ impl StageZeroCompiler {
                             "G7009",
                             "lifted callable identity collided with another function",
                         ));
+                    } else {
+                        let lifted = functions
+                            .get(&lifted_definition)
+                            .expect("lifted function was inserted");
+                        dependencies.record(
+                            DependencyNode::Mir(lifted_definition),
+                            mir_fingerprint(lifted),
+                            vec![DependencyNode::Core(definition)],
+                        );
                     }
                 }
             }
@@ -1045,6 +1119,16 @@ impl StageZeroCompiler {
                 &source_lengths,
             )
         })?;
+        dependencies.record(
+            DependencyNode::Artifact(snapshot.world().root_package.clone()),
+            artifact.fingerprint(),
+            program
+                .functions
+                .keys()
+                .copied()
+                .map(DependencyNode::Mir)
+                .collect(),
+        );
         session.checkpoint(0)?;
         let bootstrap_manifest = match &snapshot.world().mode {
             CompilationMode::Bootstrap(stage) => {
@@ -1119,6 +1203,17 @@ fn reachable_functions(
                 .map(|body| (definition, body))
         })
         .collect()
+}
+
+/// MIR contains no source spans; its deterministic structural debug form is
+/// sufficient as a stage-zero product identity until the MIR serialization
+/// boundary becomes the canonical persisted representation.  Keeping this
+/// helper at the service boundary makes that future replacement local.
+fn mir_fingerprint(function: &MirFunction) -> Digest {
+    Digest::of_parts([
+        b"grandiose-stage0-mir-v1".as_slice(),
+        format!("{function:?}").as_bytes(),
+    ])
 }
 
 /// Attach the revision identity only at the service boundary, after every

@@ -78,6 +78,9 @@ It should distinguish:
 
 Defines how the compiler decides which facts remain valid after a change.
 
+**Current Stage 0 slice:** database-owned typed product ledger, atomic request
+publication, value-based red/green validation, and tooling invalidation traces.
+
 It should cover:
 
 - source dependencies;
