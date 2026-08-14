@@ -406,6 +406,16 @@ pub enum MirInstruction {
         trait_instance: Option<MirTraitMethodInstance>,
         arguments: Vec<MirLocal>,
     },
+    /// An explicit frozen host boundary. It never refers to a VM function,
+    /// so a decoded artifact cannot turn an import into ambient authority.
+    HostCall {
+        dst: MirLocal,
+        capability: String,
+        symbol: String,
+        parameters: Vec<Type>,
+        result: Type,
+        arguments: Vec<MirLocal>,
+    },
     /// Materialize a lifted callable together with its ordered environment.
     /// The target's capture parameters occupy the prefix of its parameter
     /// list, before ordinary invocation parameters.
@@ -969,6 +979,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::GtChar { dst, .. }
         | MirInstruction::GeChar { dst, .. }
         | MirInstruction::Call { dst, .. }
+        | MirInstruction::HostCall { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
@@ -2342,6 +2353,23 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
             }
             Ok(())
         }
+        MirInstruction::HostCall {
+            capability, symbol, ..
+        } if capability.is_empty()
+            || symbol.is_empty()
+            || capability.contains('*')
+            || capability.chars().any(char::is_whitespace) =>
+        {
+            Err("MIR host import identity is not canonical".into())
+        }
+        MirInstruction::HostCall {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .try_for_each(|ty| validate_mir_type(ty, &mut lifetime_binders))?;
+            validate_mir_type(result, &mut lifetime_binders)
+        }
         MirInstruction::ConstUnit { .. }
         | MirInstruction::ConstI64 { .. }
         | MirInstruction::ConstF64 { .. }
@@ -2849,6 +2877,9 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::GtChar { dst, left, right }
         | MirInstruction::GeChar { dst, left, right } => vec![*dst, *left, *right],
         MirInstruction::Call { dst, arguments, .. } => std::iter::once(*dst)
+            .chain(arguments.iter().copied())
+            .collect(),
+        MirInstruction::HostCall { dst, arguments, .. } => std::iter::once(*dst)
             .chain(arguments.iter().copied())
             .collect(),
         MirInstruction::MakeCallable { dst, captures, .. } => std::iter::once(*dst)
@@ -7352,6 +7383,7 @@ impl Lowerer<'_> {
                     CoreKind::Function {
                         definition,
                         arguments: generic_arguments,
+                        ..
                     } => MirInstruction::Call {
                         dst: inner_result,
                         callee: definition,
@@ -8056,6 +8088,7 @@ impl Lowerer<'_> {
             CoreKind::Function {
                 definition: callee,
                 arguments: generic_arguments,
+                ..
             } => entry.push(MirInstruction::Call {
                 dst: performed,
                 callee,
@@ -8216,6 +8249,7 @@ impl Lowerer<'_> {
             CoreKind::Function {
                 definition: callee,
                 arguments: generic_arguments,
+                ..
             } => entry.push(MirInstruction::Call {
                 dst: performed,
                 callee,
@@ -8427,6 +8461,7 @@ impl Lowerer<'_> {
             CoreKind::Function {
                 definition: callee,
                 arguments: generic_arguments,
+                ..
             } => entry.push(MirInstruction::Call {
                 dst: performed,
                 callee,
@@ -8633,6 +8668,7 @@ impl Lowerer<'_> {
             CoreKind::Function {
                 definition: callee,
                 arguments: generic_arguments,
+                ..
             } => entry.push(MirInstruction::Call {
                 dst: performed,
                 callee,
@@ -8933,6 +8969,7 @@ impl Lowerer<'_> {
             CoreKind::Function {
                 definition: callee,
                 arguments: generic_arguments,
+                ..
             } => entry.push(MirInstruction::Call {
                 dst: result,
                 callee,
@@ -9242,6 +9279,7 @@ impl Lowerer<'_> {
             CoreKind::Function {
                 definition: callee,
                 arguments: generic_arguments,
+                ..
             } => entry.push(MirInstruction::Call {
                 dst: result,
                 callee,
@@ -9486,6 +9524,7 @@ impl Lowerer<'_> {
             CoreKind::Function {
                 definition: callee,
                 arguments: generic_arguments,
+                ..
             } => entry.push(MirInstruction::Call {
                 dst: result,
                 callee,
@@ -10732,14 +10771,21 @@ impl Lowerer<'_> {
             CoreKind::Function {
                 definition: callee,
                 arguments: generic_arguments,
-            } => self.instructions.push(MirInstruction::MakeCallable {
-                dst,
-                callee,
-                captures: vec![],
-                generic_arguments,
-                trait_instance: None,
-                environment: None,
-            }),
+                host_import,
+            } => {
+                if host_import.is_some() {
+                    self.error("G6012", "host imports may only be invoked by a direct call");
+                    return None;
+                }
+                self.instructions.push(MirInstruction::MakeCallable {
+                    dst,
+                    callee,
+                    captures: vec![],
+                    generic_arguments,
+                    trait_instance: None,
+                    environment: None,
+                });
+            }
             CoreKind::TraitMethod {
                 evidence,
                 method: callee,
@@ -11180,13 +11226,27 @@ impl Lowerer<'_> {
                     CoreKind::Function {
                         definition: callee,
                         arguments: generic_arguments,
-                    } => self.instructions.push(MirInstruction::Call {
-                        dst,
-                        callee,
-                        generic_arguments,
-                        trait_instance: None,
-                        arguments,
-                    }),
+                        host_import,
+                    } => match host_import {
+                        Some(import) => self.instructions.push(MirInstruction::HostCall {
+                            dst,
+                            capability: import.capability,
+                            symbol: import.symbol,
+                            parameters: arguments
+                                .iter()
+                                .map(|argument| self.locals[argument.0 as usize].ty.clone())
+                                .collect(),
+                            result: self.body.expression(id).ty.clone(),
+                            arguments,
+                        }),
+                        None => self.instructions.push(MirInstruction::Call {
+                            dst,
+                            callee,
+                            generic_arguments,
+                            trait_instance: None,
+                            arguments,
+                        }),
+                    },
                     CoreKind::TraitMethod {
                         evidence,
                         method: callee,

@@ -111,6 +111,56 @@ fn service_compiles_and_runs_a_verified_vm_artifact_from_an_immutable_request() 
 }
 
 #[test]
+fn service_rejects_host_imports_not_granted_by_the_frozen_request_manifest() {
+    let error = StageZeroCompiler::new()
+        .compile(request(
+            "host clock fn now() -> i64; pub fn main() -> i64 { now() }",
+        ))
+        .unwrap_err();
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G7032"),
+        "{error:#?}"
+    );
+}
+
+#[test]
+fn service_emits_an_authorized_direct_host_import_without_an_ordinary_callee_body() {
+    let mut input = request("host clock fn now() -> i64; pub fn main() -> i64 { now() }");
+    input.capability_manifest.push("clock".into());
+    let outcome = StageZeroCompiler::new().compile(input).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{outcome:#?}");
+    let artifact = outcome
+        .artifact
+        .expect("authorized host import emits a program");
+    assert!(matches!(
+        artifact.run_i64(),
+        Err(VmArtifactError::HostCallRequiresAuthority { capability, symbol })
+            if capability == "clock" && symbol == "now"
+    ));
+}
+
+#[test]
+fn service_rejects_host_imports_escaping_as_ordinary_callable_values() {
+    let mut input =
+        request("host clock fn now() -> i64; pub fn main() -> i64 { let f = now; f() }");
+    input.capability_manifest.push("clock".into());
+    let error = StageZeroCompiler::new().compile(input).unwrap_err();
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G6012"
+                && diagnostic
+                    .message
+                    .contains("host imports may only be invoked")),
+        "{error:#?}"
+    );
+}
+
+#[test]
 fn service_resolves_public_module_aliases_inside_qualified_body_paths() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_modules(

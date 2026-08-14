@@ -29,6 +29,21 @@ fn callable_headers_share_generic_and_type_grammar_without_parsing_the_body() {
 }
 
 #[test]
+fn host_import_headers_freeze_the_capability_prefix_and_callable_abi() {
+    let package = PackageKey("header-host-import@0.1.0".into());
+    let source = "pub host clock fn now() -> i64;";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
+    let shell = &scan.declarations[0];
+    assert_eq!(shell.host_capability.as_deref(), Some("clock"));
+    let parsed = HeaderParse::parse(&lexed, source, shell);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    assert!(matches!(parsed.header, ParsedHeader::Function(_)));
+}
+
+#[test]
 fn headers_parse_higher_ranked_callable_lifetime_scopes() {
     let package = PackageKey("header-hrtb@0.1.0".into());
     let source = "pub fn use_callback(callback: for<'a> (&'a i64) -> &'a i64) { callback }";

@@ -40,6 +40,9 @@ pub struct Definition {
     pub span: Span,
     pub header: TokenRange,
     pub body: Option<TokenRange>,
+    /// Frozen request capability for a host import, if this definition is
+    /// imported from the embedding host rather than defined by source.
+    pub host_capability: Option<String>,
     pub header_fingerprint: Digest,
     /// Function bodies do not affect public interface identity, but a public
     /// constant's initializer is an exported semantic value and must.
@@ -330,6 +333,7 @@ impl InterfaceSet {
                 span: shell.span,
                 header: shell.header,
                 body: shell.body,
+                host_capability: shell.host_capability.clone(),
                 header_fingerprint: header_digest,
                 constant_value_fingerprint,
                 syntax,
@@ -385,7 +389,9 @@ impl Definition {
 
 fn namespace(kind: DeclarationKind) -> Option<DefinitionNamespace> {
     Some(match kind {
-        DeclarationKind::Function | DeclarationKind::Constant => DefinitionNamespace::Value,
+        DeclarationKind::Function | DeclarationKind::HostImport | DeclarationKind::Constant => {
+            DefinitionNamespace::Value
+        }
         DeclarationKind::Struct | DeclarationKind::Enum | DeclarationKind::TypeAlias => {
             DefinitionNamespace::Type
         }

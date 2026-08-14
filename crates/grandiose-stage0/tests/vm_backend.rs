@@ -64,6 +64,7 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: artifact.function.definition,
         functions: BTreeMap::from([(artifact.function.definition, artifact.function.clone())]),
         fingerprint: Digest::of_bytes(b"vm-effect-argument-program-stale"),
@@ -80,6 +81,88 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
 }
 
 #[test]
+fn program_host_capability_declarations_are_canonical_exact_and_fingerprinted() {
+    let entry = DefKey(Digest::of_bytes(b"host-capability-entry"));
+    let function = VmFunction {
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::HostCall {
+                dst: 0,
+                capability: "clock".into(),
+                symbol: "now".into(),
+                parameters: vec![],
+                result: VmType::I64,
+                arguments: vec![],
+            },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec!["clock".into()],
+        entry,
+        functions: BTreeMap::from([(entry, function)]),
+        fingerprint: Digest::of_bytes(b"stale-host-capability-fingerprint"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    assert_eq!(decode_program(&bytes).unwrap(), program);
+    let verified = verify_vm_program(program.clone()).unwrap();
+    assert!(matches!(
+        verified.run_i64(),
+        Err(VmArtifactError::HostCallRequiresAuthority { capability, symbol })
+            if capability == "clock" && symbol == "now"
+    ));
+
+    let mut missing = program.clone();
+    missing.host_capabilities.clear();
+    missing.fingerprint = missing.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(missing),
+        Err(VmArtifactError::MalformedEncoding { .. })
+    ));
+
+    let mut extra = program.clone();
+    extra.host_capabilities = vec!["clock".into(), "network".into()];
+    extra.fingerprint = extra.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(extra),
+        Err(VmArtifactError::MalformedEncoding { .. })
+    ));
+
+    let mut duplicate = program.clone();
+    duplicate.host_capabilities = vec!["clock".into(), "clock".into()];
+    duplicate.fingerprint = duplicate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(duplicate),
+        Err(VmArtifactError::MalformedEncoding { .. })
+    ));
+
+    let mut forged_abi = program.clone();
+    let instruction = &mut forged_abi.functions.get_mut(&entry).unwrap().instructions[0];
+    let VmInstruction::HostCall { result, .. } = instruction else {
+        panic!("fixture must retain a host instruction");
+    };
+    *result = VmType::Bool;
+    forged_abi.fingerprint = forged_abi.computed_fingerprint();
+    assert!(matches!(
+        verify_vm_program(forged_abi),
+        Err(VmArtifactError::TypeMismatch { .. })
+    ));
+
+    let mut fingerprint_tamper = program;
+    fingerprint_tamper.host_capabilities = vec!["network".into()];
+    assert!(matches!(
+        verify_vm_program(fingerprint_tamper),
+        Err(VmArtifactError::FingerprintMismatch)
+    ));
+}
+
+#[test]
 fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
     let effect = DefKey(Digest::of_bytes(b"cross-frame-ask"));
     let caller = DefKey(Digest::of_bytes(b"cross-frame-caller"));
@@ -87,6 +170,7 @@ fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: caller,
         functions: BTreeMap::from([
             (
@@ -176,6 +260,7 @@ fn program_forwards_a_nested_callee_performance_to_an_ancestor_handler() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: outer,
         functions: BTreeMap::from([
             (
@@ -277,6 +362,7 @@ fn program_replay_resumption_returns_after_the_original_caller_path_completes() 
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: caller,
         functions: BTreeMap::from([
             (
@@ -837,6 +923,7 @@ fn assert_continuation_budget_parity(function: VmFunction, max_instructions: u64
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, function)]),
         fingerprint: Digest::of_bytes(b"continuation-budget-program"),
@@ -870,6 +957,7 @@ fn assert_continuation_retention_parity(function: VmFunction) {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, function)]),
         fingerprint: Digest::of_bytes(b"continuation-retention-program"),
@@ -975,6 +1063,7 @@ fn program_envelope_rejects_truncation_and_function_count_amplification_before_a
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(entry, function)]),
         fingerprint: Digest::of_bytes(b"program-decode-limit-fingerprint"),
@@ -988,9 +1077,10 @@ fn program_envelope_rejects_truncation_and_function_count_amplification_before_a
         );
     }
     // Program envelope: magic (8), schema (4), entry (32), fingerprint (32),
-    // no manifest tag (1), then the bounded function-count vector.
+    // no manifest tag (1), empty capability vector (8), then the bounded
+    // function-count vector.
     let mut amplified = bytes;
-    amplified[77..85]
+    amplified[85..93]
         .copy_from_slice(&(grandiose_stage0::STAGE0_MAX_DECODE_FUNCTIONS + 1).to_le_bytes());
     assert!(matches!(
         decode_and_verify_program(&amplified),
@@ -1048,6 +1138,7 @@ fn cleanup_carrying_leave_has_standalone_and_multifunction_program_parity() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([
             (entry, entry_function.clone()),
@@ -1092,6 +1183,7 @@ fn cleanup_carrying_leave_has_standalone_and_multifunction_program_parity() {
     let mut malformed_program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(entry, malformed_entry_function), (helper, helper_function)]),
         fingerprint: Digest::of_bytes(b"leave-parity-malformed-program"),
@@ -1140,6 +1232,7 @@ fn cleanup_carrying_leave_cannot_evict_artifact_or_program_execution_limits() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, loop_function)]),
         fingerprint: Digest::of_bytes(b"leave-budget-loop-program"),
@@ -1179,6 +1272,7 @@ fn program_call_depth_limit_classifies_recursive_execution() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, recursive)]),
         fingerprint: Digest::of_bytes(b"recursive-call-depth-fingerprint"),
@@ -1235,6 +1329,7 @@ fn aggregate_and_handler_payload_allocation_limits_cover_both_vm_engines() {
     let mut aggregate_program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: aggregate_definition,
         functions: BTreeMap::from([(aggregate_definition, aggregate_function)]),
         fingerprint: Digest::of_bytes(b"aggregate-allocation-program"),
@@ -1276,6 +1371,7 @@ fn aggregate_and_handler_payload_allocation_limits_cover_both_vm_engines() {
     let mut payload_program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: payload_definition,
         functions: BTreeMap::from([(payload_definition, payload_function)]),
         fingerprint: Digest::of_bytes(b"handler-payload-allocation-program"),
@@ -1733,6 +1829,7 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: definition,
         functions: BTreeMap::from([(definition, function)]),
         fingerprint: Digest::of_bytes(b"replay-handler-program"),
@@ -2715,6 +2812,7 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
     let mut candidate = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: Some(Digest::of_bytes(b"trusted-runtime-manifest")),
+        host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(closure, closure_function), (entry, entry_function)]),
         fingerprint: Digest::of_bytes(b"callable-program"),
@@ -3201,6 +3299,7 @@ fn program_verifier_rejects_inconsistent_generic_call_bindings() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(generic, generic_function), (entry, entry_function)]),
         fingerprint: Digest::of_bytes(b"generic-call-mismatch"),
@@ -3244,6 +3343,7 @@ fn generic_vm_programs_round_trip_and_execute_after_call_instantiation() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry,
         functions: BTreeMap::from([(generic, generic_function), (entry, entry_function)]),
         fingerprint: Digest::of_bytes(b"generic-identity-program"),
@@ -3362,6 +3462,7 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: candidate.function.definition,
         functions: BTreeMap::from([(candidate.function.definition, candidate.function.clone())]),
         fingerprint: Digest::of_bytes(b"cleanup-carrying-leave-program"),
@@ -3513,6 +3614,7 @@ fn leave_from_a_handler_clause_abandons_its_suspended_continuation() {
     let mut program = CandidateVmProgram {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: vec![],
         entry: function.definition,
         functions: BTreeMap::from([(function.definition, function)]),
         fingerprint: Digest::of_bytes(b"leave-clause-program"),
@@ -3546,6 +3648,7 @@ fn cleanup_leave_program_artifacts_are_insertion_order_deterministic() {
         let mut program = CandidateVmProgram {
             schema: grandiose_stage0::STAGE0_VM_SCHEMA,
             runtime_manifest: None,
+            host_capabilities: vec![],
             entry,
             functions,
             fingerprint: Digest::of_bytes(b"deterministic-leave-seed"),

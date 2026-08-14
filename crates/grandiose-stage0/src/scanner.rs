@@ -10,6 +10,8 @@ use crate::source::{LexedFile, Span, TokenKind};
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DeclarationKind {
     Function,
+    /// A callable supplied by the embedding host, never a source body.
+    HostImport,
     Struct,
     Enum,
     Trait,
@@ -36,6 +38,8 @@ pub struct DeclarationShell {
     /// `auto trait` is retained by scanning so header parsing can preserve
     /// the declaration's solver policy without inspecting source text again.
     pub auto_trait: bool,
+    /// Exact request capability required by a host-import declaration.
+    pub host_capability: Option<String>,
     pub span: Span,
     pub header: TokenRange,
     pub body: Option<TokenRange>,
@@ -123,17 +127,35 @@ impl Scanner<'_> {
         if auto_trait {
             self.position += 1;
         }
+        let host_capability = if self.word_at(self.position) == Some("host") {
+            self.position += 1;
+            let Some(capability) = self.word_at(self.position).map(str::to_owned) else {
+                self.unexpected(start_position);
+                return;
+            };
+            self.position += 1;
+            Some(capability)
+        } else {
+            None
+        };
         let Some(keyword) = self.word_at(self.position) else {
             self.unexpected(start_position);
             return;
         };
-        let Some(kind) = declaration_kind(keyword) else {
+        let Some(mut kind) = declaration_kind(keyword) else {
             self.unexpected(start_position);
             return;
         };
         if auto_trait && kind != DeclarationKind::Trait {
             self.unexpected(start_position);
             return;
+        }
+        if host_capability.is_some() {
+            if kind != DeclarationKind::Function || auto_trait {
+                self.unexpected(start_position);
+                return;
+            }
+            kind = DeclarationKind::HostImport;
         }
         let declaration_position = self.position;
         self.position += 1;
@@ -150,6 +172,7 @@ impl Scanner<'_> {
             name,
             visibility_public: public,
             auto_trait,
+            host_capability,
             span,
             header: TokenRange {
                 start: header_start,
@@ -241,14 +264,16 @@ impl Scanner<'_> {
                 // members: a preceding `/` is the unambiguous structural
                 // delimiter, and the lossless delimiter map skips the row.
                 TokenKind::Punctuation('{')
-                    if kind == DeclarationKind::Function
-                        && self.significant.get(cursor.saturating_sub(1)).is_some_and(
-                            |previous| {
-                                self.lexed.tokens[*previous].kind == TokenKind::Operator
-                                    && self.lexed.text(self.source, &self.lexed.tokens[*previous])
-                                        == "/"
-                            },
-                        ) =>
+                    if matches!(
+                        kind,
+                        DeclarationKind::Function | DeclarationKind::HostImport
+                    ) && self.significant.get(cursor.saturating_sub(1)).is_some_and(
+                        |previous| {
+                            self.lexed.tokens[*previous].kind == TokenKind::Operator
+                                && self.lexed.text(self.source, &self.lexed.tokens[*previous])
+                                    == "/"
+                        },
+                    ) =>
                 {
                     let Some(close) = self.lexed.delimiters.matching(token_index) else {
                         self.diagnostics.push(ScanDiagnostic {

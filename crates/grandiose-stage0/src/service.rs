@@ -638,6 +638,33 @@ impl StageZeroCompiler {
         diagnostics.extend(signatures.diagnostics.iter().map(|diagnostic| {
             CompileDiagnostic::source(diagnostic.code, diagnostic.message.clone(), None)
         }));
+        // Host declarations are source-visible only when their exact frozen
+        // capability is present in this request world.  This check happens
+        // before bodies/Core are produced, so an unauthorized import can
+        // never enter an artifact or be recovered as an ordinary function.
+        for (definition, import) in &signatures.host_imports {
+            if !snapshot
+                .world()
+                .capability_manifest
+                .iter()
+                .any(|grant| grant == &import.capability)
+            {
+                let span = graph
+                    .modules
+                    .values()
+                    .flat_map(|node| node.interface.interface.definitions.iter())
+                    .find(|candidate| candidate.key == *definition)
+                    .map(|candidate| candidate.span);
+                diagnostics.push(CompileDiagnostic::source(
+                    "G7032",
+                    format!(
+                        "host import `{}` requires undeclared capability `{}`",
+                        import.symbol, import.capability
+                    ),
+                    span,
+                ));
+            }
+        }
         let runtime_manifest = snapshot
             .world()
             .runtime_manifest
@@ -760,7 +787,8 @@ impl StageZeroCompiler {
                 .definitions
                 .iter()
                 .filter(|definition| {
-                    definition.callable_header().is_some()
+                    (definition.callable_header().is_some()
+                        && definition.kind != crate::DeclarationKind::HostImport)
                         || definition.kind == crate::DeclarationKind::Constant
                 })
             {
@@ -1084,6 +1112,7 @@ impl StageZeroCompiler {
                     Some(crate::core::CoreKind::Function {
                         definition: callee,
                         arguments,
+                        ..
                     }) => {
                         let Some(ElaboratedHeader::Callable(signature)) =
                             signatures.definitions.get(callee)
@@ -1295,6 +1324,28 @@ impl StageZeroCompiler {
                 &source_lengths,
             )
         })?;
+        // Emission derives the declaration list from actual HostCall edges,
+        // not the request's broader grant set.  Recheck the subset at the
+        // artifact boundary so a future MIR producer cannot smuggle a host
+        // instruction past the source authorization pass above.
+        if let Some(capability) = candidate.host_capabilities.iter().find(|capability| {
+            !snapshot
+                .world()
+                .capability_manifest
+                .iter()
+                .any(|grant| grant == *capability)
+        }) {
+            return Err(failed(
+                input_fingerprint,
+                vec![CompileDiagnostic::verification(
+                    "G7033",
+                    format!(
+                        "emitted host capability `{capability}` is not granted by the request manifest"
+                    ),
+                )],
+                &source_lengths,
+            ));
+        }
         if let Some(manifest) = &runtime_manifest {
             candidate.runtime_manifest = Some(manifest.digest);
             candidate.fingerprint = candidate.computed_fingerprint();

@@ -447,13 +447,20 @@ impl HeaderParse {
         if parser.word() == Some("pub") {
             parser.position += 1;
         }
+        if shell.kind == DeclarationKind::HostImport {
+            // Scanner froze `host CAP fn`; only `fn` and its ABI remain for
+            // the ordinary callable parser.
+            parser.position += 2;
+        }
         if shell.auto_trait {
             parser.position += 1;
         }
         let keyword = parser.word().map(str::to_owned);
         parser.position += 1; // Scanner already proved the declaration keyword.
         let header = match shell.kind {
-            DeclarationKind::Function => ParsedHeader::Function(parser.callable()),
+            DeclarationKind::Function | DeclarationKind::HostImport => {
+                ParsedHeader::Function(parser.callable())
+            }
             DeclarationKind::TypeAlias => {
                 parser.identifier();
                 let generics = parser.generics();

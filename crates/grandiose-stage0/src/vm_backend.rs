@@ -400,6 +400,16 @@ pub enum VmInstruction {
         callee: DefKey,
         arguments: Vec<u32>,
     },
+    /// A host boundary carries its exact capability and ABI symbol in the
+    /// artifact. Execution receives no implicit host authority.
+    HostCall {
+        dst: u32,
+        capability: String,
+        symbol: String,
+        parameters: Vec<VmType>,
+        result: VmType,
+        arguments: Vec<u32>,
+    },
     MakeCallable {
         dst: u32,
         callee: DefKey,
@@ -526,6 +536,9 @@ pub struct CandidateVmArtifact {
 pub struct CandidateVmProgram {
     pub schema: u32,
     pub runtime_manifest: Option<Digest>,
+    /// Exact sorted capability declarations required by reachable HostCall
+    /// instructions. This is an artifact boundary, not host process state.
+    pub host_capabilities: Vec<String>,
     pub entry: DefKey,
     pub functions: BTreeMap<DefKey, VmFunction>,
     pub fingerprint: Digest,
@@ -582,6 +595,10 @@ pub enum VmArtifactError {
         definition: DefKey,
     },
     CallRequiresProgram,
+    HostCallRequiresAuthority {
+        capability: String,
+        symbol: String,
+    },
     CallArity {
         expected: u32,
         found: u32,
@@ -696,7 +713,9 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 // Schema 29 carries the frozen nominal-pattern arity used by the standalone
 // verifier.  Older bytecode lacks that proof and must fail closed rather than
 // being decoded with shifted field data.
-pub const STAGE0_VM_SCHEMA: u32 = 30;
+/// Schema 31 adds the canonical program-level host capability declaration
+/// set. Older programs have no boundary proof and must fail closed.
+pub const STAGE0_VM_SCHEMA: u32 = 31;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -768,6 +787,11 @@ pub fn encode_program(program: &CandidateVmProgram) -> Vec<u8> {
     bytes.extend_from_slice(&program.entry.0.as_bytes());
     bytes.extend_from_slice(&program.fingerprint.as_bytes());
     encode_optional_digest(program.runtime_manifest, &mut bytes);
+    bytes.extend_from_slice(&(program.host_capabilities.len() as u64).to_le_bytes());
+    for capability in &program.host_capabilities {
+        bytes.extend_from_slice(&(capability.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(capability.as_bytes());
+    }
     bytes.extend_from_slice(&(program.functions.len() as u64).to_le_bytes());
     for function in program.functions.values() {
         encode_function(function, &mut bytes);
@@ -786,6 +810,11 @@ pub fn decode_program(bytes: &[u8]) -> Result<CandidateVmProgram, VmArtifactErro
     let entry = decoder.def_key()?;
     let fingerprint = Digest::from_bytes(decoder.array()?);
     let runtime_manifest = decoder.optional_digest()?;
+    let capability_count = decoder.count("host capabilities", MAX_DECODE_REGISTERS)?;
+    let mut host_capabilities = Vec::with_capacity(capability_count);
+    for _ in 0..capability_count {
+        host_capabilities.push(decoder.text()?);
+    }
     let count = decoder.count("functions", MAX_DECODE_FUNCTIONS)?;
     let mut functions = BTreeMap::new();
     for _ in 0..count {
@@ -804,6 +833,7 @@ pub fn decode_program(bytes: &[u8]) -> Result<CandidateVmProgram, VmArtifactErro
     let program = CandidateVmProgram {
         schema,
         runtime_manifest,
+        host_capabilities,
         entry,
         functions,
         fingerprint,
@@ -819,7 +849,12 @@ pub fn decode_and_verify_program(bytes: &[u8]) -> Result<VerifiedVmProgram, VmAr
 }
 impl CandidateVmProgram {
     pub fn computed_fingerprint(&self) -> Digest {
-        program_fingerprint(self.entry, self.runtime_manifest, &self.functions)
+        program_fingerprint(
+            self.entry,
+            self.runtime_manifest,
+            &self.host_capabilities,
+            &self.functions,
+        )
     }
 }
 impl VerifiedVmArtifact {
@@ -1291,11 +1326,13 @@ pub fn emit_program(program: &MirProgram) -> Result<CandidateVmProgram, VmArtifa
         .iter()
         .map(|(definition, function)| Ok((*definition, emit(function)?.function)))
         .collect::<Result<BTreeMap<_, _>, VmArtifactError>>()?;
+    let host_capabilities = reachable_host_capabilities(program.entry, &functions);
     Ok(CandidateVmProgram {
         schema: STAGE0_VM_SCHEMA,
         runtime_manifest: None,
+        host_capabilities: host_capabilities.clone(),
         entry: program.entry,
-        fingerprint: program_fingerprint(program.entry, None, &functions),
+        fingerprint: program_fingerprint(program.entry, None, &host_capabilities, &functions),
         functions,
     })
 }
@@ -1602,11 +1639,17 @@ fn artifact_fingerprint(runtime_manifest: Option<Digest>, function: &VmFunction)
 fn program_fingerprint(
     entry: DefKey,
     runtime_manifest: Option<Digest>,
+    host_capabilities: &[String],
     functions: &BTreeMap<DefKey, VmFunction>,
 ) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-program-v22".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-program-v23".to_vec();
     bytes.extend_from_slice(&entry.0.as_bytes());
     encode_optional_digest(runtime_manifest, &mut bytes);
+    bytes.extend_from_slice(&(host_capabilities.len() as u64).to_le_bytes());
+    for capability in host_capabilities {
+        bytes.extend_from_slice(&(capability.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(capability.as_bytes());
+    }
     for function in functions.values() {
         encode_function(function, &mut bytes);
     }
@@ -2201,6 +2244,30 @@ impl<'a> Decoder<'a> {
                     cleanup: self.cleanup_proof()?,
                 })
             }
+            56 => {
+                let dst = self.u32()?;
+                let capability = self.text()?;
+                let symbol = self.text()?;
+                let parameter_count = self.count("host call parameters", MAX_DECODE_REGISTERS)?;
+                let mut parameters = Vec::with_capacity(parameter_count);
+                for _ in 0..parameter_count {
+                    parameters.push(self.vm_type()?);
+                }
+                let result = self.vm_type()?;
+                let count = self.count("host call arguments", MAX_DECODE_REGISTERS)?;
+                let mut arguments = Vec::with_capacity(count);
+                for _ in 0..count {
+                    arguments.push(self.u32()?);
+                }
+                Ok(VmInstruction::HostCall {
+                    dst,
+                    capability,
+                    symbol,
+                    parameters,
+                    result,
+                    arguments,
+                })
+            }
             3 => self.i64_arithmetic(|dst, left, right| VmInstruction::AddI64 { dst, left, right }),
             4 => self.i64_arithmetic(|dst, left, right| VmInstruction::SubI64 { dst, left, right }),
             5 => self.i64_arithmetic(|dst, left, right| VmInstruction::MulI64 { dst, left, right }),
@@ -2441,6 +2508,30 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
             definition: program.entry,
         });
     }
+    let declared = program
+        .host_capabilities
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if declared.len() != program.host_capabilities.len()
+        || declared.iter().any(|capability| {
+            capability.is_empty()
+                || capability.contains('*')
+                || capability.chars().any(char::is_whitespace)
+        })
+    {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "host capability declarations are not canonical",
+        });
+    }
+    let reachable = reachable_host_capabilities(program.entry, &program.functions)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if declared != reachable {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "host capability declarations do not match host imports",
+        });
+    }
     for function in program.functions.values() {
         verify_function(function)?;
         for instruction in &function.instructions {
@@ -2554,6 +2645,39 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
         }
     }
     Ok(VerifiedVmProgram { program })
+}
+
+/// Conservative executable reachability for artifact declarations. A direct
+/// call is an edge; materializing a callable is also an edge because a later
+/// `CallIndirect` may invoke it. This never omits a host capability while
+/// avoiding declarations from wholly unreachable emitted instances.
+fn reachable_host_capabilities(
+    entry: DefKey,
+    functions: &BTreeMap<DefKey, VmFunction>,
+) -> Vec<String> {
+    let mut pending = vec![entry];
+    let mut seen = BTreeSet::new();
+    let mut capabilities = BTreeSet::new();
+    while let Some(definition) = pending.pop() {
+        if !seen.insert(definition) {
+            continue;
+        }
+        let Some(function) = functions.get(&definition) else {
+            continue;
+        };
+        for instruction in &function.instructions {
+            match instruction {
+                VmInstruction::HostCall { capability, .. } => {
+                    capabilities.insert(capability.clone());
+                }
+                VmInstruction::Call { callee, .. } | VmInstruction::MakeCallable { callee, .. } => {
+                    pending.push(*callee)
+                }
+                _ => {}
+            }
+        }
+    }
+    capabilities.into_iter().collect()
 }
 
 /// Match a callee-side type against one caller-side type while collecting the
@@ -3040,6 +3164,26 @@ fn lower_instruction(
         } => VmInstruction::Call {
             dst: dst.0,
             callee: *callee,
+            arguments: arguments.iter().map(|argument| argument.0).collect(),
+        },
+        MirInstruction::HostCall {
+            dst,
+            capability,
+            symbol,
+            parameters,
+            result,
+            arguments,
+        } => VmInstruction::HostCall {
+            dst: dst.0,
+            capability: capability.clone(),
+            symbol: symbol.clone(),
+            parameters: parameters
+                .iter()
+                .map(vm_type)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: dst.0, ty })?,
+            result: vm_type(result)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: dst.0, ty })?,
             arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
         MirInstruction::MakeCallable {
@@ -4161,6 +4305,31 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 for &argument in arguments {
                     read(&states, argument)?;
                 }
+                write(&mut states, *dst)?
+            }
+            VmInstruction::HostCall {
+                dst,
+                capability,
+                symbol,
+                parameters,
+                result,
+                arguments,
+            } => {
+                if capability.is_empty()
+                    || symbol.is_empty()
+                    || capability.contains('*')
+                    || capability.chars().any(char::is_whitespace)
+                    || parameters.len() != arguments.len()
+                {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "invalid frozen host import boundary",
+                    });
+                }
+                for (argument, expected) in arguments.iter().zip(parameters) {
+                    read(&states, *argument)?;
+                    expect_type(function, *argument, expected.clone())?;
+                }
+                expect_type(function, *dst, result.clone())?;
                 write(&mut states, *dst)?
             }
             VmInstruction::MakeCallable { dst, captures, .. } => {
@@ -6088,6 +6257,11 @@ fn execute(
             | VmInstruction::CallIndirect { .. } => {
                 return Err(VmArtifactError::CallRequiresProgram);
             }
+            VmInstruction::HostCall {
+                capability, symbol, ..
+            } => {
+                return Err(VmArtifactError::HostCallRequiresAuthority { capability, symbol });
+            }
             VmInstruction::Jump { target } => {
                 pc = target as usize;
                 continue;
@@ -6566,6 +6740,30 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(6);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&callee.0.as_bytes());
+            output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+            for argument in arguments {
+                output.extend_from_slice(&argument.to_le_bytes());
+            }
+        }
+        VmInstruction::HostCall {
+            dst,
+            capability,
+            symbol,
+            parameters,
+            result,
+            arguments,
+        } => {
+            output.push(56);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&(capability.len() as u64).to_le_bytes());
+            output.extend_from_slice(capability.as_bytes());
+            output.extend_from_slice(&(symbol.len() as u64).to_le_bytes());
+            output.extend_from_slice(symbol.as_bytes());
+            output.extend_from_slice(&(parameters.len() as u64).to_le_bytes());
+            for parameter in parameters {
+                encode_type(parameter, output);
+            }
+            encode_type(result, output);
             output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
             for argument in arguments {
                 output.extend_from_slice(&argument.to_le_bytes());
@@ -7666,6 +7864,14 @@ fn execute_with_arguments(
                     )?,
                     *op,
                 )))
+            }
+            VmInstruction::HostCall {
+                capability, symbol, ..
+            } => {
+                return Err(VmArtifactError::HostCallRequiresAuthority {
+                    capability: capability.clone(),
+                    symbol: symbol.clone(),
+                });
             }
             VmInstruction::Call {
                 dst,

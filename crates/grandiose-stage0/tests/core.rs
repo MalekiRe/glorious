@@ -773,6 +773,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
                     Box::new(StructuralU32Expr::Literal(1)),
                     Box::new(StructuralU32Expr::Literal(0)),
                 ))],
+                host_import: None,
             },
             ty: Type::Unit,
             span,

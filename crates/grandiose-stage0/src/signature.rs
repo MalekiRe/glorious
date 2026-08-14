@@ -37,6 +37,15 @@ pub struct CallableSignature {
     pub where_bounds: Vec<(Type, ElaboratedTraitReference)>,
 }
 
+/// The frozen authority identity of one source-declared host import.  A
+/// capability is request-granted policy; the symbol is a stable ABI label,
+/// intentionally separate from source paths and VM function identities.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct HostImport {
+    pub capability: String,
+    pub symbol: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ElaboratedTraitReference {
     pub definition: DefKey,
@@ -243,6 +252,9 @@ pub enum InstantiationError {
 #[derive(Clone, Debug, Default)]
 pub struct ElaboratedInterface {
     pub definitions: BTreeMap<DefKey, ElaboratedHeader>,
+    /// Host imports are interface facts rather than an ambient service map.
+    /// Core snapshots this record into every direct host call before MIR.
+    pub host_imports: BTreeMap<DefKey, HostImport>,
     pub diagnostics: Vec<SignatureDiagnostic>,
 }
 
@@ -390,6 +402,22 @@ impl ElaboratedInterface {
             };
             let header = elaborator.definition(definition);
             result.definitions.insert(definition.key, header);
+            if let Some(capability) = &definition.host_capability {
+                let Some(symbol) = &definition.name else {
+                    result.diagnostics.push(SignatureDiagnostic {
+                        code: "G3318",
+                        message: "host import declaration has no callable identity".into(),
+                    });
+                    continue;
+                };
+                result.host_imports.insert(
+                    definition.key,
+                    HostImport {
+                        capability: capability.clone(),
+                        symbol: symbol.clone(),
+                    },
+                );
+            }
             result.diagnostics.extend(elaborator.diagnostics);
         }
         result.normalize_aliases();
@@ -407,6 +435,7 @@ impl ElaboratedInterface {
         let mut merged = Self::default();
         for part in parts {
             merged.definitions.extend(part.definitions);
+            merged.host_imports.extend(part.host_imports);
             merged.diagnostics.extend(part.diagnostics);
         }
         merged.normalize_aliases();

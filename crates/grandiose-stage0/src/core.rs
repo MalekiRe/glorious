@@ -8,7 +8,10 @@ use crate::{
     interface::{Definition, DefinitionNamespace},
     pattern::{PatternDecision, PatternGenericScope, elaborate_pattern_with_scope},
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
-    signature::{ElaboratedEffect, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout},
+    signature::{
+        ElaboratedEffect, ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout,
+        HostImport,
+    },
     source::Span,
     trait_solver::{
         TraitAnswer, TraitConstProjectionAnswer, TraitEffectRowProjectionAnswer, TraitGoal,
@@ -431,6 +434,9 @@ pub enum CoreKind {
     Function {
         definition: DefKey,
         arguments: Vec<GenericArgument>,
+        /// A declaration must explicitly carry this frozen boundary to be
+        /// lowered as a host call. Absent means an ordinary VM function.
+        host_import: Option<HostImport>,
     },
     /// A direct function value selected from a trait implementation. Retain
     /// proof evidence alongside the callable key until MIR consumes this
@@ -915,10 +921,19 @@ impl CoreFingerprintEncoder<'_> {
             CoreKind::Function {
                 definition,
                 arguments,
+                host_import,
             } => {
                 self.bytes(b"function");
                 self.debug(definition);
                 self.generic_arguments(arguments);
+                match host_import {
+                    Some(import) => {
+                        self.bytes(b"host-import");
+                        self.bytes(import.capability.as_bytes());
+                        self.bytes(import.symbol.as_bytes());
+                    }
+                    None => self.bytes(b"ordinary-function"),
+                }
             }
             CoreKind::TraitMethod {
                 evidence,
@@ -5410,6 +5425,7 @@ impl Elaborator<'_> {
                         CoreKind::Function {
                             definition,
                             arguments,
+                            host_import: self.signatures.host_imports.get(&definition).cloned(),
                         },
                         Type::Callable {
                             lifetime_binders: 0,
@@ -5510,6 +5526,7 @@ impl Elaborator<'_> {
             CoreKind::Function {
                 definition,
                 arguments,
+                host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
             Type::Callable {
                 lifetime_binders: 0,
@@ -7886,6 +7903,7 @@ impl Elaborator<'_> {
             CoreKind::Function {
                 definition,
                 arguments,
+                ..
             } => (*definition, arguments.clone()),
             _ => return,
         };

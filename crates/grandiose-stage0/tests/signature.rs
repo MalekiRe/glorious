@@ -2138,6 +2138,7 @@ fn forged_interface_nominal_layout_cycle_is_rejected_before_core_or_mir() {
                 }]),
             },
         )]),
+        host_imports: BTreeMap::new(),
         diagnostics: vec![],
     };
     let checked = ElaboratedInterface::merge([forged]);
