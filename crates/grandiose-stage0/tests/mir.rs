@@ -137,6 +137,58 @@ fn optimizer_folds_checked_scalar_constants_and_eliminates_known_branches() {
 }
 
 #[test]
+fn optimizer_folds_reflexive_integer_and_boolean_comparisons_without_constants() {
+    let bool_ty = Type::Scalar(ScalarType::Bool);
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-reflexive-comparisons")),
+        captures: 0,
+        parameters: vec![MirLocal(0), MirLocal(1)],
+        locals: vec![
+            local(i64_ty),
+            local(bool_ty.clone()),
+            local(bool_ty.clone()),
+            local(bool_ty.clone()),
+            local(bool_ty),
+        ],
+        result: Type::Scalar(ScalarType::Bool),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::LtI64 {
+                    dst: MirLocal(2),
+                    left: MirLocal(0),
+                    right: MirLocal(0),
+                },
+                MirInstruction::EqBool {
+                    dst: MirLocal(3),
+                    left: MirLocal(1),
+                    right: MirLocal(1),
+                },
+                MirInstruction::NeBool {
+                    dst: MirLocal(4),
+                    left: MirLocal(1),
+                    right: MirLocal(1),
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(3) },
+        }],
+    };
+
+    let (optimized, report) = optimize_mir(function).unwrap();
+    assert_eq!(report.constant_folds, 3);
+    assert!(matches!(
+        optimized.blocks[0].instructions.as_slice(),
+        [
+            MirInstruction::ConstBool { value: false, .. },
+            MirInstruction::ConstBool { value: true, .. },
+            MirInstruction::ConstBool { value: false, .. },
+        ]
+    ));
+}
+
+#[test]
 fn optimizer_propagates_constants_through_typed_block_arguments() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let function = MirFunction {

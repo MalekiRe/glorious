@@ -618,28 +618,44 @@ fn fold_block(
                 fold_i64(dst, &constants, left, right, i64::checked_rem)
             }
             MirInstruction::EqI64 { dst, left, right } => {
-                fold_i64_predicate(dst, &constants, left, right, |left, right| left == right)
+                fold_reflexive_predicate(dst, left, right, true).or_else(|| {
+                    fold_i64_predicate(dst, &constants, left, right, |left, right| left == right)
+                })
             }
             MirInstruction::NeI64 { dst, left, right } => {
-                fold_i64_predicate(dst, &constants, left, right, |left, right| left != right)
+                fold_reflexive_predicate(dst, left, right, false).or_else(|| {
+                    fold_i64_predicate(dst, &constants, left, right, |left, right| left != right)
+                })
             }
             MirInstruction::LtI64 { dst, left, right } => {
-                fold_i64_predicate(dst, &constants, left, right, |left, right| left < right)
+                fold_reflexive_predicate(dst, left, right, false).or_else(|| {
+                    fold_i64_predicate(dst, &constants, left, right, |left, right| left < right)
+                })
             }
             MirInstruction::LeI64 { dst, left, right } => {
-                fold_i64_predicate(dst, &constants, left, right, |left, right| left <= right)
+                fold_reflexive_predicate(dst, left, right, true).or_else(|| {
+                    fold_i64_predicate(dst, &constants, left, right, |left, right| left <= right)
+                })
             }
             MirInstruction::GtI64 { dst, left, right } => {
-                fold_i64_predicate(dst, &constants, left, right, |left, right| left > right)
+                fold_reflexive_predicate(dst, left, right, false).or_else(|| {
+                    fold_i64_predicate(dst, &constants, left, right, |left, right| left > right)
+                })
             }
             MirInstruction::GeI64 { dst, left, right } => {
-                fold_i64_predicate(dst, &constants, left, right, |left, right| left >= right)
+                fold_reflexive_predicate(dst, left, right, true).or_else(|| {
+                    fold_i64_predicate(dst, &constants, left, right, |left, right| left >= right)
+                })
             }
             MirInstruction::EqBool { dst, left, right } => {
-                fold_bool_predicate(dst, &constants, left, right, |left, right| left == right)
+                fold_reflexive_predicate(dst, left, right, true).or_else(|| {
+                    fold_bool_predicate(dst, &constants, left, right, |left, right| left == right)
+                })
             }
             MirInstruction::NeBool { dst, left, right } => {
-                fold_bool_predicate(dst, &constants, left, right, |left, right| left != right)
+                fold_reflexive_predicate(dst, left, right, false).or_else(|| {
+                    fold_bool_predicate(dst, &constants, left, right, |left, right| left != right)
+                })
             }
             _ => None,
         };
@@ -671,6 +687,16 @@ fn constant_instruction(dst: MirLocal, value: Option<&Constant>) -> Option<MirIn
         Some(Constant::Bool(value)) => Some(MirInstruction::ConstBool { dst, value: *value }),
         None => None,
     }
+}
+/// Integer and boolean comparisons are reflexive at every initialized MIR
+/// value.  Floats deliberately do not use this rule because `NaN != NaN`.
+fn fold_reflexive_predicate(
+    dst: MirLocal,
+    left: MirLocal,
+    right: MirLocal,
+    value: bool,
+) -> Option<MirInstruction> {
+    (left == right).then_some(MirInstruction::ConstBool { dst, value })
 }
 fn fold_i64(
     dst: MirLocal,
