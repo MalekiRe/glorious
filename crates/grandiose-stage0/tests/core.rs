@@ -1361,6 +1361,39 @@ fn generic_effect_instances_are_resolved_as_distinct_handler_identities() {
 }
 
 #[test]
+fn handler_effect_application_arity_is_diagnosed_as_an_operation_arm() {
+    let source = "effect State<S> { get() -> S; } pub fn main() -> i64 { handle State<i64>::get() { State<i64, Text>::get() => 0 } }";
+    let package = PackageKey("core-handler-effect-arity@0.1.0".into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(
+        core.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4163"),
+        "misapplied handler protocol was not diagnosed as an operation arm: {:#?}",
+        core.diagnostics
+    );
+}
+
+#[test]
 fn placeflow_joins_handler_arms_conservatively_after_dynamic_selection() {
     let package = PackageKey("core-handler-flow@0.1.0".into());
     let source = "effect Console { read() -> i64; } pub fn main() -> i64 { let value = 7; handle Console::read() { Console::read() => move value, Console::read() => 0 }; value }";

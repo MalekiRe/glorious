@@ -3210,11 +3210,17 @@ impl Elaborator<'_> {
         else {
             return false;
         };
-        declaration.generics as usize == source.effect_arguments.len()
-            && declaration
-                .operations
-                .iter()
-                .any(|operation| operation.name == *operation_name)
+        // Classify by the namespace and operation name only.  Arity belongs
+        // to `resolve_handler_clause`, where an effect-shaped arm can receive
+        // the precise protocol- or operation-application diagnostic.  Making
+        // classification depend on supplied protocol arguments would instead
+        // reinterpret (for example) `State<A, B>::get()` as a completion
+        // pattern, which both changes handler semantics and hides the actual
+        // source error.
+        declaration
+            .operations
+            .iter()
+            .any(|operation| operation.name == *operation_name)
     }
     fn resolve_handler_clause(&mut self, mut source: HandlerClause) -> ResolvedHandlerClause {
         let Some((operation_name, effect_path)) = source.path.split_last() else {
