@@ -6195,6 +6195,45 @@ fn service_leaves_a_label_from_a_later_call_argument() {
 }
 
 #[test]
+fn service_label_transfer_respects_lazy_boolean_branch_selection() {
+    for (source, expected) in [
+        (
+            "pub fn main() -> Bool { label done { false and transfer done true } }",
+            false,
+        ),
+        (
+            "pub fn main() -> Bool { label done { true and transfer done true } }",
+            true,
+        ),
+        (
+            "pub fn main() -> Bool { label done { true or transfer done false } }",
+            true,
+        ),
+        (
+            "pub fn main() -> Bool { label done { false or transfer done true } }",
+            true,
+        ),
+    ] {
+        let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        assert_eq!(outcome.artifact.unwrap().run_bool().unwrap(), expected);
+    }
+}
+
+#[test]
+fn service_lazy_label_transfer_rejoins_a_bound_continuation() {
+    let source = r#"
+        pub fn main() -> Bool {
+            let result = label done { false or transfer done true };
+            result
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert!(outcome.artifact.unwrap().run_bool().unwrap());
+}
+
+#[test]
 fn service_reborrows_each_nested_multi_variant_refinement_payload() {
     let source = r#"
         fn __g1_abort() -> ! { () }

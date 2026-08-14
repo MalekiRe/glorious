@@ -2026,6 +2026,26 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A transfer on the demanded side of `and`/`or` is a real lexical
+        // exit, but the skipped side remains the ordinary boolean result.
+        // Give that mixed normal/nonlocal control flow its own typed join
+        // before the generic label probe sees the `Never`-typed transfer.
+        if let Some(function) =
+            lowerer.lower_root_label_short_circuit_transfer(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         // Labels must claim their nonlocal edge before handler-specialization
         // probes inspect the body as an ordinary value expression.
         if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
@@ -5744,6 +5764,239 @@ impl Lowerer<'_> {
             | CoreKind::Constant { .. }
             | CoreKind::Error => None,
         }
+    }
+
+    /// Return the directly executable lazy boolean form whose demanded arm
+    /// leaves `label`.  The normal (skipped) arm is represented explicitly by
+    /// the lowering below; a transfer in the condition is not a lazy exit and
+    /// belongs to the ordinary strict-expression path instead.
+    fn label_short_circuit_transfer_parts(
+        &self,
+        label: CoreId,
+    ) -> Option<(crate::LabelBrand, Vec<CoreId>, String, CoreId, CoreId)> {
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let (binary, prefix) = match self.body.expression(body).kind.clone() {
+            CoreKind::Binary { .. } => (body, Vec::new()),
+            CoreKind::Block(values) => {
+                let (binary, prefix) = values.split_last()?;
+                matches!(self.body.expression(*binary).kind, CoreKind::Binary { .. })
+                    .then_some((*binary, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Binary {
+            operator,
+            left,
+            right,
+        } = self.body.expression(binary).kind.clone()
+        else {
+            return None;
+        };
+        (matches!(operator.as_str(), "and" | "or")
+            && !self.contains_label_transfer(left, brand)
+            && self.contains_label_transfer(right, brand))
+        .then_some((brand, prefix, operator, left, right))
+    }
+
+    /// Find an executable lazy label even when the label itself is used as an
+    /// operand of a surrounding strict expression.  Handler and closure
+    /// boundaries are deliberately excluded: they carry their own continuation
+    /// and brand proofs and cannot be tunneled through by lexical CFG replay.
+    fn find_label_short_circuit_transfer(&self, id: CoreId) -> Option<CoreId> {
+        if self.label_short_circuit_transfer_parts(id).is_some() {
+            return Some(id);
+        }
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Closure { .. } | CoreKind::Completion { .. } | CoreKind::Handle { .. } => {
+                None
+            }
+            CoreKind::Label { body, .. }
+            | CoreKind::Field { base: body, .. }
+            | CoreKind::PatternTest { subject: body, .. }
+            | CoreKind::Let { value: body, .. }
+            | CoreKind::Borrow { value: body, .. }
+            | CoreKind::Deref(body)
+            | CoreKind::Move(body)
+            | CoreKind::Unary { value: body, .. }
+            | CoreKind::Transfer { value: body, .. } => {
+                self.find_label_short_circuit_transfer(body)
+            }
+            CoreKind::Assign { value, .. } => self.find_label_short_circuit_transfer(value),
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
+                .into_iter()
+                .find_map(|value| self.find_label_short_circuit_transfer(value)),
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
+                .into_iter()
+                .find_map(|field| self.find_label_short_circuit_transfer(field)),
+            CoreKind::Binary { left, right, .. } => self
+                .find_label_short_circuit_transfer(left)
+                .or_else(|| self.find_label_short_circuit_transfer(right)),
+            CoreKind::Call {
+                callee, arguments, ..
+            } => self.find_label_short_circuit_transfer(callee).or_else(|| {
+                arguments
+                    .into_iter()
+                    .find_map(|argument| self.find_label_short_circuit_transfer(argument))
+            }),
+            CoreKind::Perform { arguments, .. } => arguments
+                .into_iter()
+                .find_map(|argument| self.find_label_short_circuit_transfer(argument)),
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant { .. }
+            | CoreKind::Error => None,
+        }
+    }
+
+    /// Lower a label transfer that occurs only on the demanded branch of a
+    /// lazy boolean operation.  The skipped branch reaches `join` normally;
+    /// the demanded branch evaluates the transfer path and reaches the same
+    /// typed join through a cleanup-carrying `Leave`.
+    fn lower_root_label_short_circuit_transfer(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let direct_site = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } if self.label_short_circuit_transfer_parts(root).is_some() => {
+                Some((root, None, Vec::new(), Vec::new()))
+            }
+            CoreKind::Block(values) => values
+                .iter()
+                .enumerate()
+                .find_map(|(index, id)| match self.body.expression(*id).kind.clone() {
+                    CoreKind::Label { .. }
+                        if self.label_short_circuit_transfer_parts(*id).is_some() =>
+                    {
+                        Some((index, *id, None))
+                    }
+                    CoreKind::Let { name, value }
+                        if self.label_short_circuit_transfer_parts(value).is_some() =>
+                    {
+                        Some((index, value, Some((name, *id))))
+                    }
+                    _ => None,
+                })
+                .map(|(index, label, binding)| {
+                    (
+                        label,
+                        binding,
+                        values[..index].to_vec(),
+                        values[index + 1..].to_vec(),
+                    )
+                }),
+            _ => None,
+        };
+        let (label, binding, prefix, suffix, replay_root_continuation) = match direct_site {
+            Some((label, binding, prefix, suffix)) => (label, binding, prefix, suffix, false),
+            None => (
+                self.find_label_short_circuit_transfer(root)?,
+                None,
+                Vec::new(),
+                Vec::new(),
+                true,
+            ),
+        };
+        let (brand, body_prefix, operator, left, right) =
+            self.label_short_circuit_transfer_parts(label)?;
+        let bool_ty = Type::Scalar(crate::types::ScalarType::Bool);
+        if self.body.expression(label).ty != bool_ty || self.body.expression(left).ty != bool_ty {
+            self.error(
+                "G6005",
+                "short-circuit label transfer lost its boolean type",
+            );
+            return Some(self.invalid_function(parameters));
+        }
+        for value in prefix {
+            self.statement(value)?;
+        }
+        if replay_root_continuation && !self.prepare_label_path(root, label) {
+            return None;
+        }
+        for value in body_prefix {
+            self.statement(value)?;
+        }
+        let condition = self.value(left)?;
+        let skipped = self.alloc(bool_ty.clone(), label);
+        self.instructions.push(MirInstruction::ConstBool {
+            dst: skipped,
+            value: operator == "or",
+        });
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let entry_values = self.values.clone();
+        let entry_named = self.named.clone();
+
+        let transferred = self.lower_label_transfer_path(right, brand)?;
+        let leave_instructions = std::mem::take(&mut self.instructions);
+        self.values = entry_values;
+        self.named = entry_named;
+
+        let join = self.alloc(bool_ty, CoreId(u32::MAX));
+        if let Some((name, _let_id)) = binding {
+            self.named.insert(name, join);
+        }
+        let result = if replay_root_continuation {
+            self.label_rejoins.insert(label, join);
+            self.value(root)?
+        } else if suffix.is_empty() {
+            join
+        } else {
+            for value in suffix.iter().take(suffix.len() - 1) {
+                self.statement(*value)?;
+            }
+            self.value(*suffix.last().expect("nonempty suffix"))?
+        };
+        let continuation_instructions = std::mem::take(&mut self.instructions);
+        let (then_target, then_arguments, else_target, else_arguments) = if operator == "and" {
+            (MirBlockId(1), vec![], MirBlockId(2), vec![skipped])
+        } else {
+            (MirBlockId(2), vec![skipped], MirBlockId(1), vec![])
+        };
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry_instructions,
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target,
+                        then_arguments,
+                        else_target,
+                        else_arguments,
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: leave_instructions,
+                    terminator: MirTerminator::Leave {
+                        brand,
+                        target: MirBlockId(2),
+                        arguments: vec![transferred],
+                        cleanup: MirCleanupPlan {
+                            moved_places: self.leave_cleanup.moved_places.clone(),
+                            active_loans: self.leave_cleanup.active_loans.clone(),
+                        },
+                    },
+                },
+                MirBlock {
+                    parameters: vec![join],
+                    instructions: continuation_instructions,
+                    terminator: MirTerminator::Return { value: result },
+                },
+            ],
+        })
     }
 
     /// Lower a lexical label transfer into its own checked CFG edge.  This is

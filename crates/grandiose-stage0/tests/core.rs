@@ -6810,6 +6810,54 @@ fn binary_operand_transfer_emits_a_cleanup_carrying_leave_edge() {
 }
 
 #[test]
+fn lazy_label_transfer_uses_a_boolean_join_for_the_skipped_branch() {
+    let core = core_for(
+        "core-lazy-label-transfer@0.1.0",
+        "pub fn main() -> Bool { label done { false or transfer done true } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label owner");
+    let mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("lazy label transfer lowers");
+    assert!(matches!(
+        &mir.blocks[0].terminator,
+        grandiose_stage0::MirTerminator::SwitchBool {
+            then_target,
+            then_arguments,
+            else_target,
+            else_arguments,
+            ..
+        } if *then_target == grandiose_stage0::MirBlockId(2)
+            && then_arguments.len() == 1
+            && *else_target == grandiose_stage0::MirBlockId(1)
+            && else_arguments.is_empty()
+    ));
+    assert!(matches!(
+        &mir.blocks[1].terminator,
+        grandiose_stage0::MirTerminator::Leave { target, cleanup, .. }
+            if *target == grandiose_stage0::MirBlockId(2)
+                && cleanup.moved_places == flow.moved_places
+                && cleanup.active_loans == flow.active_loans
+    ));
+    assert_eq!(mir.blocks[2].parameters.len(), 1);
+    assert!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).unwrap())
+            .unwrap()
+            .run_bool()
+            .unwrap()
+    );
+}
+
+#[test]
 fn label_operand_transfer_preserves_preceding_left_to_right_computation() {
     let core = core_for(
         "core-operand-label-prefix@0.1.0",
