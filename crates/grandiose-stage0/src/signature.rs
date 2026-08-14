@@ -2403,18 +2403,7 @@ fn normalize_trait_generic_argument(
     definitions: &BTreeMap<DefKey, ElaboratedHeader>,
     diagnostics: &mut Vec<SignatureDiagnostic>,
 ) -> GenericArgument {
-    match argument {
-        GenericArgument::Type(value) => GenericArgument::Type(normalize_alias_type(
-            value,
-            definitions,
-            &mut vec![],
-            diagnostics,
-        )),
-        GenericArgument::EffectRow(value) => {
-            GenericArgument::EffectRow(normalize_effect_row(value, definitions, diagnostics))
-        }
-        value => value,
-    }
+    normalize_alias_generic_argument(argument, definitions, &mut vec![], diagnostics)
 }
 
 fn substitute_trait_reference(
@@ -2543,53 +2532,7 @@ fn normalize_effect_row(
     definitions: &BTreeMap<DefKey, ElaboratedHeader>,
     diagnostics: &mut Vec<SignatureDiagnostic>,
 ) -> EffectRow {
-    EffectRow {
-        effects: value
-            .effects
-            .into_iter()
-            .map(|effect| EffectInstance {
-                definition: effect.definition,
-                arguments: effect
-                    .arguments
-                    .into_iter()
-                    .map(|argument| {
-                        normalize_trait_generic_argument(argument, definitions, diagnostics)
-                    })
-                    .collect(),
-            })
-            .collect(),
-        projections: value
-            .projections
-            .into_iter()
-            .map(|projection| EffectRowProjection {
-                subject: Box::new(normalize_alias_type(
-                    *projection.subject,
-                    definitions,
-                    &mut vec![],
-                    diagnostics,
-                )),
-                trait_definition: projection.trait_definition,
-                trait_arguments: projection
-                    .trait_arguments
-                    .into_iter()
-                    .map(|argument| {
-                        normalize_trait_generic_argument(argument, definitions, diagnostics)
-                    })
-                    .collect(),
-                name: projection.name,
-                item_generic_kinds: projection.item_generic_kinds,
-                item_arguments: projection
-                    .item_arguments
-                    .into_iter()
-                    .map(|argument| {
-                        normalize_trait_generic_argument(argument, definitions, diagnostics)
-                    })
-                    .collect(),
-            })
-            .collect(),
-        tail: value.tail,
-    }
-    .canonicalized()
+    normalize_alias_effect_row(value, definitions, &mut vec![], diagnostics)
 }
 
 struct Elaborator<'a> {
@@ -3885,33 +3828,93 @@ fn normalize_alias_generic_argument(
             GenericArgument::Type(normalize_alias_type(value, definitions, stack, diagnostics))
         }
         GenericArgument::EffectRow(value) => GenericArgument::EffectRow(
-            EffectRow {
-                effects: value
-                    .effects
-                    .into_iter()
-                    .map(|effect| EffectInstance {
-                        definition: effect.definition,
-                        arguments: effect
-                            .arguments
-                            .into_iter()
-                            .map(|argument| {
-                                normalize_alias_generic_argument(
-                                    argument,
-                                    definitions,
-                                    stack,
-                                    diagnostics,
-                                )
-                            })
-                            .collect(),
-                    })
-                    .collect(),
-                projections: value.projections,
-                tail: value.tail,
-            }
-            .canonicalized(),
+            normalize_alias_effect_row(value, definitions, stack, diagnostics),
         ),
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(normalize_alias_type(
+                *subject,
+                definitions,
+                stack,
+                diagnostics,
+            )),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|argument| {
+                    normalize_alias_generic_argument(argument, definitions, stack, diagnostics)
+                })
+                .collect(),
+            name,
+            kind,
+        },
         argument => argument,
     }
+}
+
+/// Normalize every semantic leaf carried by a row-valued alias argument.
+/// Rows can contain delayed associated effects whose subjects and generic
+/// applications are every bit as identity-bearing as direct effect instances.
+/// Leaving those leaves source-spelled made `Alias<{ <Value as Trait<Count>>::E
+/// }>` freeze differently from the alpha-equivalent direct `i64` spelling.
+fn normalize_alias_effect_row(
+    value: EffectRow,
+    definitions: &BTreeMap<DefKey, ElaboratedHeader>,
+    stack: &mut Vec<DefKey>,
+    diagnostics: &mut Vec<SignatureDiagnostic>,
+) -> EffectRow {
+    EffectRow {
+        effects: value
+            .effects
+            .into_iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(|argument| {
+                        normalize_alias_generic_argument(argument, definitions, stack, diagnostics)
+                    })
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| EffectRowProjection {
+                subject: Box::new(normalize_alias_type(
+                    *projection.subject,
+                    definitions,
+                    stack,
+                    diagnostics,
+                )),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(|argument| {
+                        normalize_alias_generic_argument(argument, definitions, stack, diagnostics)
+                    })
+                    .collect(),
+                name: projection.name,
+                item_generic_kinds: projection.item_generic_kinds,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(|argument| {
+                        normalize_alias_generic_argument(argument, definitions, stack, diagnostics)
+                    })
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    }
+    .canonicalized()
 }
 
 fn normalize_alias_type(
@@ -3988,7 +3991,7 @@ fn normalize_alias_type(
             item_arguments: item_arguments
                 .into_iter()
                 .map(|argument| {
-                    normalize_trait_generic_argument(argument, definitions, diagnostics)
+                    normalize_alias_generic_argument(argument, definitions, stack, diagnostics)
                 })
                 .collect(),
         },
@@ -4036,7 +4039,7 @@ fn normalize_alias_type(
                 stack,
                 diagnostics,
             )),
-            effects: normalize_effect_row(effects, definitions, diagnostics),
+            effects: normalize_alias_effect_row(effects, definitions, stack, diagnostics),
             invocation,
         },
         value => value,

@@ -1265,6 +1265,83 @@ fn cyclic_transparent_aliases_are_rejected_during_signature_freezing() {
 }
 
 #[test]
+fn aliases_normalize_delayed_effect_projection_arguments_before_freezing_identity() {
+    let package = PackageKey("signature-alias-delayed-effect-projection@0.1.0".into());
+    let source = "type Count = i64; trait Capability<T> { type Effects: EffectRow; } struct Value {} impl Capability<i64> for Value { type Effects = {}; } struct Carrier<e: EffectRow> {} type Wrapped<e: EffectRow> = Carrier<e>; pub fn worker(value: Wrapped<{ <Value as Capability<Count>>::Effects }>) -> i64 { 0 } pub fn direct(value: Carrier<{ <Value as Capability<i64>>::Effects }>) -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let worker = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("worker"))
+        .expect("worker declaration");
+    let ElaboratedHeader::Callable(signature) = signatures
+        .definitions
+        .get(&worker.key)
+        .expect("worker signature")
+    else {
+        panic!("expected callable")
+    };
+    let Type::Nominal { arguments, .. } = &signature.parameters[0] else {
+        panic!("transparent alias did not normalize to its carrier")
+    };
+    let [GenericArgument::EffectRow(row)] = arguments.as_slice() else {
+        panic!("carrier did not retain its effect-row application")
+    };
+    let [projection] = row.projections.as_slice() else {
+        panic!("delayed associated effect projection was lost")
+    };
+    assert_eq!(
+        projection.trait_arguments,
+        vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        "the alias-spelled trait argument must freeze as the canonical scalar identity"
+    );
+    let direct = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("direct"))
+        .expect("direct declaration");
+    let ElaboratedHeader::Callable(direct) = signatures
+        .definitions
+        .get(&direct.key)
+        .expect("direct signature")
+    else {
+        panic!("expected callable")
+    };
+    assert_eq!(
+        signature.parameters, direct.parameters,
+        "alias-spelled and direct delayed-effect applications must share one frozen identity"
+    );
+}
+
+#[test]
+fn alias_cycles_reached_through_delayed_effect_projections_fail_closed() {
+    let package = PackageKey("signature-alias-delayed-effect-cycle@0.1.0".into());
+    let source = "trait Capability { type Effects: EffectRow; } struct Carrier<e: EffectRow> {} type First = Second; type Second = First; type Wrapped = Carrier<{ <First as Capability>::Effects }>; pub fn worker(value: Wrapped) -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3307"),
+        "a delayed associated-effect projection hid an alias cycle: {:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn nominal_and_alias_applications_require_their_declared_generic_arity() {
     let package = PackageKey("signature-nominal-arity@0.1.0".into());
     let source = "pub struct Brand<T> {} type Pair<T, U> = (T, U); pub fn bad_one(value: Brand) -> i64 { ignored } pub fn bad_two(value: Brand<i64, Bool>) -> i64 { ignored } pub fn bad_three(value: Pair<i64>) -> i64 { ignored }";

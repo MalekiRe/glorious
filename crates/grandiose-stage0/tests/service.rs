@@ -5615,6 +5615,14 @@ fn service_normalizes_transparent_aliases_imported_from_another_module() {
 }
 
 #[test]
+fn service_freezes_alias_spelled_delayed_effect_projection_identity() {
+    let source = "type Count = i64; trait Capability<T> { type Effects: EffectRow; } struct Value {} impl Capability<i64> for Value { type Effects = {}; } struct Carrier<e: EffectRow> {} type Wrapped<e: EffectRow> = Carrier<e>; pub fn worker(value: Wrapped<{ <Value as Capability<Count>>::Effects }>) -> i64 { 0 } pub fn main() -> i64 { 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_executes_effectful_callback_aliases_with_their_sealed_effect_row() {
     let source = "effect Ask { [1,1] ask() -> i64; } type Callback = () -> i64 / Ask; pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn relay(callback: Callback) -> i64 / Ask { callback() } pub fn main() -> i64 { handle relay(leaf) { Ask::ask() with k => k(42) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

@@ -430,6 +430,86 @@ fn typed_core_projection_validation_rechecks_frozen_trait_evidence() {
 }
 
 #[test]
+fn typed_core_rejects_alias_spelled_delayed_effect_projection_metadata() {
+    let package = PackageKey("core-alias-delayed-effect-projection@0.1.0".into());
+    let source = "type Count = i64; trait Capability<T> { type Effects: EffectRow; } struct Value {} impl Capability<i64> for Value { type Effects = {}; } struct Carrier<e: EffectRow> {} pub fn main() -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let key = |name: &str| {
+        interface
+            .definitions
+            .iter()
+            .find(|definition| definition.name.as_deref() == Some(name))
+            .expect("fixture declaration")
+            .key
+    };
+    let span = Span {
+        file,
+        start: 0,
+        end: 1,
+    };
+    let effect_row = EffectRow {
+        effects: BTreeSet::new(),
+        projections: vec![EffectRowProjection {
+            subject: Box::new(Type::Nominal {
+                definition: key("Value"),
+                arguments: vec![],
+            }),
+            trait_definition: key("Capability"),
+            trait_arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+            name: "Effects".into(),
+            item_generic_kinds: vec![],
+            item_arguments: vec![],
+        }],
+        tail: None,
+    }
+    .canonicalized();
+    let mut body = TypedBody {
+        parameters: vec![],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Literal("0".into()),
+            ty: Type::Nominal {
+                definition: key("Carrier"),
+                arguments: vec![GenericArgument::EffectRow(effect_row)],
+            },
+            span,
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    assert!(
+        body.validate_projection_obligations(&signatures, &[])
+            .is_empty(),
+        "canonical delayed effect projection lost its selected evidence"
+    );
+    let Type::Nominal { arguments, .. } = &mut body.expressions[0].ty else {
+        unreachable!("fixture carrier")
+    };
+    let GenericArgument::EffectRow(row) = &mut arguments[0] else {
+        unreachable!("fixture row")
+    };
+    row.projections[0].trait_arguments[0] = GenericArgument::Type(Type::Nominal {
+        definition: key("Count"),
+        arguments: vec![],
+    });
+    assert!(
+        body.validate_projection_obligations(&signatures, &[])
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4190"),
+        "forged alias-spelled delayed projection bypassed frozen Core evidence"
+    );
+}
+
+#[test]
 fn typed_core_validation_rejects_impossible_structural_projection() {
     let package = PackageKey("core-structural-validation@0.1.0".into());
     let body = TypedBody {
