@@ -128,6 +128,24 @@ pub enum HeaderType {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum HeaderGenericArgument {
     Type(HeaderType),
+    /// An associated-item equality attached to a trait reference, such as
+    /// `Fn<(), Output = Result>`.  This is deliberately not represented as a
+    /// positional type argument: the item name and its own generic arguments
+    /// are part of the projection identity that a later signature phase must
+    /// retain.
+    AssociatedTypeBinding {
+        name: String,
+        item_arguments: Vec<HeaderGenericArgument>,
+        value: Box<HeaderType>,
+    },
+    /// The row-kinded sibling of an associated type equality, for example
+    /// `Fn<(), Effects = {| io}>`.  It uses the same named-item grammar but
+    /// must not be coerced through `HeaderType`.
+    AssociatedEffectBinding {
+        name: String,
+        item_arguments: Vec<HeaderGenericArgument>,
+        value: EffectRowHeader,
+    },
     /// A source lifetime supplied to a region generic slot. It stays distinct
     /// from a path-shaped type until the referenced declaration establishes
     /// the slot kind.
@@ -1743,7 +1761,28 @@ impl Parser<'_> {
         self.position += 1;
         let mut arguments = vec![];
         while self.current().is_some() && !self.at_operator(">") {
-            if self.at_punctuation('{') {
+            if self.associated_type_binding_ahead() {
+                let name = self
+                    .identifier()
+                    .expect("binding lookahead requires an identifier");
+                let item_arguments = self.generic_arguments();
+                if !self.operator("=") {
+                    self.error("G3229", "expected `=` after associated type binding name");
+                }
+                if self.at_punctuation('{') {
+                    arguments.push(HeaderGenericArgument::AssociatedEffectBinding {
+                        name,
+                        item_arguments,
+                        value: self.effect_row_literal(),
+                    });
+                } else {
+                    arguments.push(HeaderGenericArgument::AssociatedTypeBinding {
+                        name,
+                        item_arguments,
+                        value: Box::new(self.ty()),
+                    });
+                }
+            } else if self.at_punctuation('{') {
                 arguments.push(HeaderGenericArgument::EffectRow(self.effect_row_literal()));
             } else if self.word().is_some_and(|name| name.starts_with('\'')) {
                 arguments.push(HeaderGenericArgument::Lifetime(
@@ -1786,6 +1825,51 @@ impl Parser<'_> {
             self.error("G3208", "expected `>` after generic arguments");
         }
         arguments
+    }
+
+    /// Distinguish `Output = T` (and the GAT form `Item<A> = T`) from a
+    /// positional path argument without speculatively consuming source.  The
+    /// scanner has already balanced declaration delimiters, so this small
+    /// token walk is deterministic and leaves ordinary nested applications
+    /// under `ty()`.
+    fn associated_type_binding_ahead(&self) -> bool {
+        let Some(current) = self.current() else {
+            return false;
+        };
+        if self.lexed.tokens[current].kind != TokenKind::Identifier {
+            return false;
+        }
+        let mut offset = self.position + 1;
+        if self
+            .tokens
+            .get(offset)
+            .is_some_and(|token| self.at_operator_at(*token, "="))
+        {
+            return true;
+        }
+        if !self
+            .tokens
+            .get(offset)
+            .is_some_and(|token| self.at_operator_at(*token, "<"))
+        {
+            return false;
+        }
+        let mut depth = 0_u32;
+        while let Some(token) = self.tokens.get(offset) {
+            if self.at_operator_at(*token, "<") {
+                depth += 1;
+            } else if self.at_operator_at(*token, ">") {
+                depth -= 1;
+                if depth == 0 {
+                    return self
+                        .tokens
+                        .get(offset + 1)
+                        .is_some_and(|next| self.at_operator_at(*next, "="));
+                }
+            }
+            offset += 1;
+        }
+        false
     }
     fn structural_quantity_argument(&mut self) -> Quantity {
         debug_assert!(self.at_punctuation('['));

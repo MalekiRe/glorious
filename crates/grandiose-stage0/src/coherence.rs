@@ -390,6 +390,33 @@ fn collect_generic_argument_names(
 ) {
     match value {
         HeaderGenericArgument::Type(value) => collect_generic_names(value, declared, used),
+        HeaderGenericArgument::AssociatedTypeBinding {
+            item_arguments,
+            value,
+            ..
+        } => {
+            for argument in item_arguments {
+                collect_generic_argument_names(argument, declared, used);
+            }
+            collect_generic_names(value, declared, used);
+        }
+        HeaderGenericArgument::AssociatedEffectBinding {
+            item_arguments,
+            value,
+            ..
+        } => {
+            for argument in item_arguments {
+                collect_generic_argument_names(argument, declared, used);
+            }
+            for effect in &value.effects {
+                collect_generic_names(effect, declared, used);
+            }
+            if let Some(tail) = &value.tail
+                && declared.contains(tail)
+            {
+                used.insert(tail.clone());
+            }
+        }
         HeaderGenericArgument::Lifetime(value) if declared.contains(value) => {
             used.insert(value.clone());
         }

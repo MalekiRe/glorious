@@ -120,11 +120,12 @@ pub use service::{
 };
 pub use signature::{
     CallableSignature, ElaboratedAssociatedConst, ElaboratedAssociatedConstDefinition,
-    ElaboratedAssociatedEffectRowDefinition, ElaboratedAssociatedType,
-    ElaboratedAssociatedTypeDefinition, ElaboratedEffect, ElaboratedEffectOperation,
-    ElaboratedEnumVariant, ElaboratedEnumVariantPayload, ElaboratedHeader,
-    ElaboratedImplementation, ElaboratedInterface, ElaboratedNominalLayout, ElaboratedTrait,
-    ElaboratedTraitReference, InstantiationError, NominalField, SignatureDiagnostic,
+    ElaboratedAssociatedEffectBinding, ElaboratedAssociatedEffectRowDefinition,
+    ElaboratedAssociatedType, ElaboratedAssociatedTypeBinding, ElaboratedAssociatedTypeDefinition,
+    ElaboratedEffect, ElaboratedEffectOperation, ElaboratedEnumVariant,
+    ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedImplementation, ElaboratedInterface,
+    ElaboratedNominalLayout, ElaboratedTrait, ElaboratedTraitReference, InstantiationError,
+    NominalField, SignatureDiagnostic,
 };
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
 pub use trait_solver::{

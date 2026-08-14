@@ -35,6 +35,14 @@ pub struct CallableSignature {
     pub effects: EffectRow,
     pub invocation: Quantity,
     pub where_bounds: Vec<(Type, ElaboratedTraitReference)>,
+    /// Equalities declared alongside callable `where` evidence.  Keeping the
+    /// selected item separate from the trait relation preserves both the
+    /// trait's mixed-kind arguments and the associated item's own GAT
+    /// arguments in frozen metadata.
+    pub where_associated_type_bindings: Vec<ElaboratedAssociatedTypeBinding>,
+    /// Row-kinded associated equalities use the same evidence but retain an
+    /// effect-row value rather than masquerading as a type equality.
+    pub where_associated_effect_bindings: Vec<ElaboratedAssociatedEffectBinding>,
 }
 
 /// The frozen authority identity of one source-declared host import.  A
@@ -52,6 +60,26 @@ pub struct ElaboratedTraitReference {
     /// One canonical argument per declared trait slot. Trait identity keeps
     /// consts, rows, and regions out of the value-type namespace.
     pub arguments: Vec<GenericArgument>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ElaboratedAssociatedTypeBinding {
+    pub subject: Type,
+    pub relation: ElaboratedTraitReference,
+    pub name: String,
+    pub item_generic_kinds: Vec<GenericKind>,
+    pub item_arguments: Vec<GenericArgument>,
+    pub value: Type,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ElaboratedAssociatedEffectBinding {
+    pub subject: Type,
+    pub relation: ElaboratedTraitReference,
+    pub name: String,
+    pub item_generic_kinds: Vec<GenericKind>,
+    pub item_arguments: Vec<GenericArgument>,
+    pub value: EffectRow,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1043,6 +1071,38 @@ impl ElaboratedInterface {
             self.validate_type_projection_obligations(subject, &ambient, diagnostics);
             self.validate_trait_reference_projection_obligations(relation, &ambient, diagnostics);
         }
+        for binding in &signature.where_associated_type_bindings {
+            self.validate_type_projection_obligations(&binding.subject, &ambient, diagnostics);
+            self.validate_trait_reference_projection_obligations(
+                &binding.relation,
+                &ambient,
+                diagnostics,
+            );
+            for argument in &binding.item_arguments {
+                self.validate_generic_argument_projection_obligations(
+                    argument,
+                    &ambient,
+                    diagnostics,
+                );
+            }
+            self.validate_type_projection_obligations(&binding.value, &ambient, diagnostics);
+        }
+        for binding in &signature.where_associated_effect_bindings {
+            self.validate_type_projection_obligations(&binding.subject, &ambient, diagnostics);
+            self.validate_trait_reference_projection_obligations(
+                &binding.relation,
+                &ambient,
+                diagnostics,
+            );
+            for argument in &binding.item_arguments {
+                self.validate_generic_argument_projection_obligations(
+                    argument,
+                    &ambient,
+                    diagnostics,
+                );
+            }
+            self.validate_effect_row_projection_obligations(&binding.value, &ambient, diagnostics);
+        }
     }
 
     fn validate_type_projection_obligations(
@@ -1412,6 +1472,22 @@ impl ElaboratedInterface {
                     )
                 })
                 .collect(),
+            where_associated_type_bindings: signature
+                .where_associated_type_bindings
+                .iter()
+                .cloned()
+                .map(|binding| {
+                    substitute_alias_generic_identity_associated_type_binding(binding, arguments)
+                })
+                .collect(),
+            where_associated_effect_bindings: signature
+                .where_associated_effect_bindings
+                .iter()
+                .cloned()
+                .map(|binding| {
+                    substitute_alias_generic_identity_associated_effect_binding(binding, arguments)
+                })
+                .collect(),
         })
     }
 
@@ -1446,6 +1522,22 @@ impl ElaboratedInterface {
                         substitute_alias_generics(subject.clone(), arguments),
                         substitute_trait_reference_with_types(relation, arguments),
                     )
+                })
+                .collect(),
+            where_associated_type_bindings: signature
+                .where_associated_type_bindings
+                .iter()
+                .cloned()
+                .map(|binding| {
+                    substitute_alias_generics_associated_type_binding(binding, arguments)
+                })
+                .collect(),
+            where_associated_effect_bindings: signature
+                .where_associated_effect_bindings
+                .iter()
+                .cloned()
+                .map(|binding| {
+                    substitute_alias_generics_associated_effect_binding(binding, arguments)
                 })
                 .collect(),
         })
@@ -1924,6 +2016,39 @@ fn normalize_callable_signature(
         *subject = normalize_alias_type(subject.clone(), definitions, &mut vec![], diagnostics);
         normalize_trait_reference(relation, definitions, diagnostics);
     }
+    for binding in &mut signature.where_associated_type_bindings {
+        binding.subject = normalize_alias_type(
+            binding.subject.clone(),
+            definitions,
+            &mut vec![],
+            diagnostics,
+        );
+        normalize_trait_reference(&mut binding.relation, definitions, diagnostics);
+        binding.item_arguments = binding
+            .item_arguments
+            .clone()
+            .into_iter()
+            .map(|argument| normalize_trait_generic_argument(argument, definitions, diagnostics))
+            .collect();
+        binding.value =
+            normalize_alias_type(binding.value.clone(), definitions, &mut vec![], diagnostics);
+    }
+    for binding in &mut signature.where_associated_effect_bindings {
+        binding.subject = normalize_alias_type(
+            binding.subject.clone(),
+            definitions,
+            &mut vec![],
+            diagnostics,
+        );
+        normalize_trait_reference(&mut binding.relation, definitions, diagnostics);
+        binding.item_arguments = binding
+            .item_arguments
+            .clone()
+            .into_iter()
+            .map(|argument| normalize_trait_generic_argument(argument, definitions, diagnostics))
+            .collect();
+        binding.value = normalize_effect_row(binding.value.clone(), definitions, diagnostics);
+    }
 }
 
 /// Instantiate a trait method in an implementation's binder environment.
@@ -2026,6 +2151,34 @@ fn instantiate_trait_method_contract(
                         trait_generic_count,
                         implementation_generic_count,
                     ),
+                )
+            })
+            .collect(),
+        where_associated_type_bindings: method
+            .where_associated_type_bindings
+            .iter()
+            .cloned()
+            .map(|binding| {
+                instantiate_trait_method_associated_type_binding(
+                    binding,
+                    &arguments,
+                    &implementation.self_ty,
+                    trait_generic_count,
+                    implementation_generic_count,
+                )
+            })
+            .collect(),
+        where_associated_effect_bindings: method
+            .where_associated_effect_bindings
+            .iter()
+            .cloned()
+            .map(|binding| {
+                instantiate_trait_method_associated_effect_binding(
+                    binding,
+                    &arguments,
+                    &implementation.self_ty,
+                    trait_generic_count,
+                    implementation_generic_count,
                 )
             })
             .collect(),
@@ -2464,6 +2617,101 @@ fn substitute_trait_reference_with_types(
     substitute_trait_reference(relation, &arguments)
 }
 
+fn instantiate_trait_method_associated_type_binding(
+    binding: ElaboratedAssociatedTypeBinding,
+    arguments: &[GenericArgument],
+    self_ty: &Type,
+    trait_generic_count: u32,
+    implementation_generic_count: u32,
+) -> ElaboratedAssociatedTypeBinding {
+    let rebase_type = |value| {
+        rebase_method_lifetimes(
+            replace_trait_self_type(substitute_trait_type_generics(value, arguments), self_ty),
+            trait_generic_count,
+            implementation_generic_count,
+        )
+    };
+    ElaboratedAssociatedTypeBinding {
+        subject: rebase_type(binding.subject),
+        relation: rebase_method_lifetime_trait_reference(
+            replace_trait_self_trait_reference(
+                substitute_trait_reference(&binding.relation, arguments),
+                self_ty,
+            ),
+            trait_generic_count,
+            implementation_generic_count,
+        ),
+        name: binding.name,
+        item_generic_kinds: binding.item_generic_kinds,
+        item_arguments: binding
+            .item_arguments
+            .into_iter()
+            .map(|argument| {
+                rebase_method_lifetime_generic_argument(
+                    replace_trait_self_generic_argument(
+                        substitute_trait_generic_argument(argument, arguments),
+                        self_ty,
+                    ),
+                    trait_generic_count,
+                    implementation_generic_count,
+                )
+            })
+            .collect(),
+        value: rebase_type(binding.value),
+    }
+}
+
+fn instantiate_trait_method_associated_effect_binding(
+    binding: ElaboratedAssociatedEffectBinding,
+    arguments: &[GenericArgument],
+    self_ty: &Type,
+    trait_generic_count: u32,
+    implementation_generic_count: u32,
+) -> ElaboratedAssociatedEffectBinding {
+    ElaboratedAssociatedEffectBinding {
+        subject: rebase_method_lifetimes(
+            replace_trait_self_type(
+                substitute_trait_type_generics(binding.subject, arguments),
+                self_ty,
+            ),
+            trait_generic_count,
+            implementation_generic_count,
+        ),
+        relation: rebase_method_lifetime_trait_reference(
+            replace_trait_self_trait_reference(
+                substitute_trait_reference(&binding.relation, arguments),
+                self_ty,
+            ),
+            trait_generic_count,
+            implementation_generic_count,
+        ),
+        name: binding.name,
+        item_generic_kinds: binding.item_generic_kinds,
+        item_arguments: binding
+            .item_arguments
+            .into_iter()
+            .map(|argument| {
+                rebase_method_lifetime_generic_argument(
+                    replace_trait_self_generic_argument(
+                        substitute_trait_generic_argument(argument, arguments),
+                        self_ty,
+                    ),
+                    trait_generic_count,
+                    implementation_generic_count,
+                )
+            })
+            .collect(),
+        value: rebase_method_lifetime_effect_row(
+            replace_trait_self_effect_row(
+                substitute_trait_effect_row(binding.value, arguments),
+                self_ty,
+            ),
+            trait_generic_count,
+            implementation_generic_count,
+        ),
+    }
+}
+
 fn substitute_trait_generic_argument(
     argument: GenericArgument,
     arguments: &[GenericArgument],
@@ -2643,6 +2891,8 @@ impl Elaborator<'_> {
     }
     fn callable(&mut self, header: &CallableHeader) -> CallableSignature {
         self.bind_generics(&header.generics);
+        let (where_bounds, where_associated_type_bindings, where_associated_effect_bindings) =
+            self.callable_where_bounds(&header.where_bounds);
         CallableSignature {
             generics: header.generics.len() as u32,
             generic_kinds: header.generics.kinds(),
@@ -2658,11 +2908,9 @@ impl Elaborator<'_> {
                 .unwrap_or(Type::Unit),
             effects: self.effect_row(&header.effects),
             invocation: Quantity::ONCE,
-            where_bounds: header
-                .where_bounds
-                .iter()
-                .map(|bound| (self.ty(&bound.subject), self.trait_ref(&bound.relation)))
-                .collect(),
+            where_bounds,
+            where_associated_type_bindings,
+            where_associated_effect_bindings,
         }
     }
     fn trait_header(&mut self, header: &TraitHeader) -> ElaboratedTrait {
@@ -2683,6 +2931,11 @@ impl Elaborator<'_> {
                     "G4117",
                     "trait method generic shadows an outer generic",
                 );
+                let (
+                    where_bounds,
+                    where_associated_type_bindings,
+                    where_associated_effect_bindings,
+                ) = self.callable_where_bounds(&method.signature.where_bounds);
                 let signature = CallableSignature {
                     generics: method.signature.generics.len() as u32,
                     generic_kinds: method.signature.generics.kinds(),
@@ -2700,12 +2953,9 @@ impl Elaborator<'_> {
                         .unwrap_or(Type::Unit),
                     effects: self.effect_row(&method.signature.effects),
                     invocation: Quantity::ONCE,
-                    where_bounds: method
-                        .signature
-                        .where_bounds
-                        .iter()
-                        .map(|bound| (self.ty(&bound.subject), self.trait_ref(&bound.relation)))
-                        .collect(),
+                    where_bounds,
+                    where_associated_type_bindings,
+                    where_associated_effect_bindings,
                 };
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
@@ -2924,6 +3174,11 @@ impl Elaborator<'_> {
                     "G4118",
                     "implementation method generic shadows an outer generic",
                 );
+                let (
+                    where_bounds,
+                    where_associated_type_bindings,
+                    where_associated_effect_bindings,
+                ) = self.callable_where_bounds(&method.signature.where_bounds);
                 let signature = CallableSignature {
                     generics: method.signature.generics.len() as u32,
                     generic_kinds: method.signature.generics.kinds(),
@@ -2941,12 +3196,9 @@ impl Elaborator<'_> {
                         .unwrap_or(Type::Unit),
                     effects: self.effect_row(&method.signature.effects),
                     invocation: Quantity::ONCE,
-                    where_bounds: method
-                        .signature
-                        .where_bounds
-                        .iter()
-                        .map(|bound| (self.ty(&bound.subject), self.trait_ref(&bound.relation)))
-                        .collect(),
+                    where_bounds,
+                    where_associated_type_bindings,
+                    where_associated_effect_bindings,
                 };
                 self.generics = outer_generics;
                 self.effect_row_generics = outer_effect_row_generics;
@@ -3044,7 +3296,138 @@ impl Elaborator<'_> {
         }
     }
     fn trait_ref(&mut self, value: &TraitRefHeader) -> ElaboratedTraitReference {
-        self.trait_ref_parts(&value.path, &value.arguments)
+        let positional = value
+            .arguments
+            .iter()
+            .filter(|argument| {
+                !matches!(
+                    argument,
+                    HeaderGenericArgument::AssociatedTypeBinding { .. }
+                        | HeaderGenericArgument::AssociatedEffectBinding { .. }
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if positional.len() != value.arguments.len() {
+            self.error(
+                "G4162",
+                "associated type equality is only valid on a callable where-bound".into(),
+            );
+        }
+        self.trait_ref_parts(&value.path, &positional)
+    }
+
+    /// Elaborate callable evidence and its associated-item equalities together
+    /// so the equality is tied to the exact frozen trait relation rather than
+    /// a source path that could resolve differently in an importing module.
+    fn callable_where_bounds(
+        &mut self,
+        bounds: &[crate::header::WhereBoundHeader],
+    ) -> (
+        Vec<(Type, ElaboratedTraitReference)>,
+        Vec<ElaboratedAssociatedTypeBinding>,
+        Vec<ElaboratedAssociatedEffectBinding>,
+    ) {
+        let mut relations = vec![];
+        let mut type_bindings = vec![];
+        let mut effect_bindings = vec![];
+        for bound in bounds {
+            let subject = self.ty(&bound.subject);
+            let positional = bound
+                .relation
+                .arguments
+                .iter()
+                .filter(|argument| {
+                    !matches!(
+                        argument,
+                        HeaderGenericArgument::AssociatedTypeBinding { .. }
+                            | HeaderGenericArgument::AssociatedEffectBinding { .. }
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let relation = self.trait_ref_parts(&bound.relation.path, &positional);
+            for argument in &bound.relation.arguments {
+                let HeaderGenericArgument::AssociatedTypeBinding {
+                    name,
+                    item_arguments,
+                    value,
+                } = argument
+                else {
+                    continue;
+                };
+                let item_generic_kinds = self
+                    .index
+                    .associated_type_generic_kinds(relation.definition, name)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| {
+                        // An unresolved relation already carries the primary
+                        // diagnostic. Preserve the equality in the error
+                        // interface rather than inventing an item declaration.
+                        if relation.definition
+                            != DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait"))
+                        {
+                            self.error(
+                                "G4163",
+                                format!(
+                                    "trait `{}` has no associated type `{name}`",
+                                    bound.relation.path.join("::")
+                                ),
+                            );
+                        }
+                        vec![]
+                    });
+                let elaborated_item_arguments = if item_generic_kinds.is_empty()
+                    && relation.definition
+                        == DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait"))
+                {
+                    self.elaborate_unresolved_generic_arguments(item_arguments)
+                } else {
+                    self.elaborate_type_generic_arguments(name, item_arguments, &item_generic_kinds)
+                };
+                type_bindings.push(ElaboratedAssociatedTypeBinding {
+                    subject: subject.clone(),
+                    relation: relation.clone(),
+                    name: name.clone(),
+                    item_generic_kinds,
+                    item_arguments: elaborated_item_arguments,
+                    value: self.ty(value),
+                });
+            }
+            for argument in &bound.relation.arguments {
+                let HeaderGenericArgument::AssociatedEffectBinding {
+                    name,
+                    item_arguments,
+                    value,
+                } = argument
+                else {
+                    continue;
+                };
+                let item_generic_kinds = self
+                    .index
+                    .associated_type_generic_kinds(relation.definition, name)
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_default();
+                let elaborated_item_arguments = if item_generic_kinds.is_empty()
+                    && relation.definition
+                        == DefKey(crate::Digest::of_bytes(b"grandiose-stage0-error-trait"))
+                {
+                    self.elaborate_unresolved_generic_arguments(item_arguments)
+                } else {
+                    self.elaborate_type_generic_arguments(name, item_arguments, &item_generic_kinds)
+                };
+                effect_bindings.push(ElaboratedAssociatedEffectBinding {
+                    subject: subject.clone(),
+                    relation: relation.clone(),
+                    name: name.clone(),
+                    item_generic_kinds,
+                    item_arguments: elaborated_item_arguments,
+                    value: self.effect_row(value),
+                });
+            }
+            relations.push((subject, relation));
+        }
+        (relations, type_bindings, effect_bindings)
     }
 
     fn structural_const(
@@ -3243,6 +3626,14 @@ impl Elaborator<'_> {
                     self.structural_const(value, ConstKind::U32)
                 }
                 HeaderGenericArgument::Quantity(value) => GenericArgument::ConstQuantity(*value),
+                HeaderGenericArgument::AssociatedTypeBinding { .. }
+                | HeaderGenericArgument::AssociatedEffectBinding { .. } => {
+                    self.error(
+                        "G4162",
+                        "associated type equality is only valid on a callable where-bound".into(),
+                    );
+                    GenericArgument::Type(Type::Error)
+                }
             })
             .collect()
     }
@@ -3763,7 +4154,9 @@ impl Elaborator<'_> {
                 | (HeaderGenericArgument::StructuralConst(_), GenericKind::Type)
                 | (HeaderGenericArgument::Quantity(_), GenericKind::Type)
                 | (HeaderGenericArgument::Lifetime(_), GenericKind::Type)
-                | (HeaderGenericArgument::EffectRow(_), GenericKind::Type) => {
+                | (HeaderGenericArgument::EffectRow(_), GenericKind::Type)
+                | (HeaderGenericArgument::AssociatedTypeBinding { .. }, GenericKind::Type)
+                | (HeaderGenericArgument::AssociatedEffectBinding { .. }, GenericKind::Type) => {
                     self.error(
                         "G3318",
                         format!("type slot of `{name}` cannot receive a structural constant"),
@@ -4283,6 +4676,42 @@ fn substitute_alias_generic_identity_argument(
     }
 }
 
+fn substitute_alias_generic_identity_associated_type_binding(
+    binding: ElaboratedAssociatedTypeBinding,
+    arguments: &[GenericArgument],
+) -> ElaboratedAssociatedTypeBinding {
+    ElaboratedAssociatedTypeBinding {
+        subject: substitute_alias_generic_identity(binding.subject, arguments),
+        relation: substitute_trait_reference(&binding.relation, arguments),
+        name: binding.name,
+        item_generic_kinds: binding.item_generic_kinds,
+        item_arguments: binding
+            .item_arguments
+            .into_iter()
+            .map(|argument| substitute_alias_generic_identity_argument(argument, arguments))
+            .collect(),
+        value: substitute_alias_generic_identity(binding.value, arguments),
+    }
+}
+
+fn substitute_alias_generic_identity_associated_effect_binding(
+    binding: ElaboratedAssociatedEffectBinding,
+    arguments: &[GenericArgument],
+) -> ElaboratedAssociatedEffectBinding {
+    ElaboratedAssociatedEffectBinding {
+        subject: substitute_alias_generic_identity(binding.subject, arguments),
+        relation: substitute_trait_reference(&binding.relation, arguments),
+        name: binding.name,
+        item_generic_kinds: binding.item_generic_kinds,
+        item_arguments: binding
+            .item_arguments
+            .into_iter()
+            .map(|argument| substitute_alias_generic_identity_argument(argument, arguments))
+            .collect(),
+        value: substitute_alias_generic_identity_effect_row(binding.value, arguments),
+    }
+}
+
 fn substitute_alias_lifetime(value: Lifetime, arguments: &[GenericArgument]) -> Lifetime {
     match value {
         Lifetime::Generic(index) => arguments
@@ -4489,6 +4918,42 @@ fn substitute_alias_effect_generic_argument(
             })
             .unwrap_or(GenericArgument::ConstGeneric { index, kind }),
         argument => argument,
+    }
+}
+
+fn substitute_alias_generics_associated_type_binding(
+    binding: ElaboratedAssociatedTypeBinding,
+    arguments: &[Type],
+) -> ElaboratedAssociatedTypeBinding {
+    ElaboratedAssociatedTypeBinding {
+        subject: substitute_alias_generics(binding.subject, arguments),
+        relation: substitute_trait_reference_with_types(&binding.relation, arguments),
+        name: binding.name,
+        item_generic_kinds: binding.item_generic_kinds,
+        item_arguments: binding
+            .item_arguments
+            .into_iter()
+            .map(|argument| substitute_alias_effect_generic_argument(argument, arguments))
+            .collect(),
+        value: substitute_alias_generics(binding.value, arguments),
+    }
+}
+
+fn substitute_alias_generics_associated_effect_binding(
+    binding: ElaboratedAssociatedEffectBinding,
+    arguments: &[Type],
+) -> ElaboratedAssociatedEffectBinding {
+    ElaboratedAssociatedEffectBinding {
+        subject: substitute_alias_generics(binding.subject, arguments),
+        relation: substitute_trait_reference_with_types(&binding.relation, arguments),
+        name: binding.name,
+        item_generic_kinds: binding.item_generic_kinds,
+        item_arguments: binding
+            .item_arguments
+            .into_iter()
+            .map(|argument| substitute_alias_effect_generic_argument(argument, arguments))
+            .collect(),
+        value: substitute_effect_row(binding.value, arguments),
     }
 }
 

@@ -4495,6 +4495,18 @@ impl Elaborator<'_> {
                 (crate::header::HeaderGenericArgument::Quantity(value), _) => {
                     GenericArgument::ConstQuantity(*value)
                 }
+                (
+                    crate::header::HeaderGenericArgument::AssociatedTypeBinding { .. }
+                    | crate::header::HeaderGenericArgument::AssociatedEffectBinding { .. },
+                    _,
+                ) => {
+                    self.error(
+                        span,
+                        code,
+                        "associated type equality is only valid on a callable where-bound",
+                    );
+                    GenericArgument::Type(Type::Error)
+                }
             };
             elaborated.push(value);
         }

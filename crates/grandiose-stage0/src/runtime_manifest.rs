@@ -156,6 +156,8 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
                 effects: EffectRow::empty(),
                 invocation: Quantity::ONCE,
                 where_bounds: vec![],
+                where_associated_type_bindings: vec![],
+                where_associated_effect_bindings: vec![],
             }
         }
     }

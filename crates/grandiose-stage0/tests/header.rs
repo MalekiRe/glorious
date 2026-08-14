@@ -580,6 +580,55 @@ fn trait_headers_preserve_value_and_effect_row_associated_defaults() {
 }
 
 #[test]
+fn callable_where_bounds_preserve_named_type_and_effect_bindings() {
+    let package = PackageKey("header-named-associated-bindings@0.1.0".into());
+    let source = "pub fn apply<F>() where F: Fn<(), Output = i64, Effects = {| e}> { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(parsed.diagnostics.is_empty(), "{parsed:#?}");
+    let ParsedHeader::Function(header) = parsed.header else {
+        panic!("expected callable header");
+    };
+    assert!(matches!(
+        header.where_bounds[0].relation.arguments.as_slice(),
+        [
+            HeaderGenericArgument::Type(HeaderType::Tuple(values)),
+            HeaderGenericArgument::AssociatedTypeBinding { name, value, .. },
+            HeaderGenericArgument::AssociatedEffectBinding { name: effects, value: row, .. },
+        ] if values.is_empty()
+            && name == "Output"
+            && matches!(value.as_ref(), HeaderType::Path(path) if path == &["i64"])
+            && effects == "Effects"
+            && row.tail.as_deref() == Some("e")
+    ));
+}
+
+#[test]
+fn malformed_named_associated_binding_reports_the_type_frontier() {
+    let package = PackageKey("header-malformed-associated-binding@0.1.0".into());
+    let source = "pub fn apply<F>() where F: Fn<(), Output = > { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let parsed = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+    assert!(
+        parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3207")
+    );
+    assert!(
+        !parsed
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3208"),
+        "the named binding consumed its `=` and recovered at its value"
+    );
+}
+
+#[test]
 fn implementation_methods_retain_exact_body_ranges_for_later_elaboration() {
     let package = PackageKey("header-implementation-method-body@0.1.0".into());
     let source = "trait Convert { fn convert(value: i64) -> i64; } impl Convert for i64 { fn convert(value: i64) -> i64 { { let next = value + 1; next } } }";

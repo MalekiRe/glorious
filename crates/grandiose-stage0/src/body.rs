@@ -892,7 +892,28 @@ impl Parser<'_> {
         self.position += 1;
         let mut arguments = vec![];
         while !self.at_operator(">") && self.current().is_some() {
-            if self.at_punctuation('{') {
+            if self.associated_item_binding_ahead() {
+                let name = self.expect_identifier()?;
+                let item_arguments = self.parse_generic_arguments(code, missing_message)?;
+                if !self.at_operator("=") {
+                    self.error_current(code, "expected `=` after associated item binding name");
+                    return None;
+                }
+                self.position += 1;
+                if self.at_punctuation('{') {
+                    arguments.push(HeaderGenericArgument::AssociatedEffectBinding {
+                        name,
+                        item_arguments,
+                        value: self.closure_effect_row_literal(code)?,
+                    });
+                } else {
+                    arguments.push(HeaderGenericArgument::AssociatedTypeBinding {
+                        name,
+                        item_arguments,
+                        value: Box::new(self.closure_type()?),
+                    });
+                }
+            } else if self.at_punctuation('{') {
                 arguments.push(HeaderGenericArgument::EffectRow(
                     self.closure_effect_row_literal(code)?,
                 ));
@@ -918,6 +939,41 @@ impl Parser<'_> {
         }
         self.position += 1;
         Some(arguments)
+    }
+
+    fn associated_item_binding_ahead(&self) -> bool {
+        let Some(current) = self.current() else {
+            return false;
+        };
+        if self.lexed.tokens[current].kind != TokenKind::Identifier {
+            return false;
+        }
+        let mut offset = self.position + 1;
+        let is_operator = |position: usize, expected: &str| {
+            self.tokens.get(position).is_some_and(|index| {
+                self.lexed.tokens[*index].kind == TokenKind::Operator
+                    && self.text(*index) == expected
+            })
+        };
+        if is_operator(offset, "=") {
+            return true;
+        }
+        if !is_operator(offset, "<") {
+            return false;
+        }
+        let mut depth = 0_u32;
+        while self.tokens.get(offset).is_some() {
+            if is_operator(offset, "<") {
+                depth += 1;
+            } else if is_operator(offset, ">") {
+                depth -= 1;
+                if depth == 0 {
+                    return is_operator(offset + 1, "=");
+                }
+            }
+            offset += 1;
+        }
+        false
     }
 
     /// Body applications retain the same symbolic `u32` language as

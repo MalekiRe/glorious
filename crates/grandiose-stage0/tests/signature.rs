@@ -111,6 +111,47 @@ fn frozen_public_signatures_retain_symbolic_associated_const_projection_identity
 }
 
 #[test]
+fn frozen_callable_signatures_retain_named_associated_item_equalities() {
+    let package = PackageKey("signature-named-associated-bindings@0.1.0".into());
+    let source = "trait Callable { type Output<T>; type Effects: EffectRow; } pub fn apply<F>() -> i64 where F: Callable<Output<i64> = i64, Effects = {}> { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let callable = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("apply"))
+        .expect("apply definition");
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&callable.key).unwrap()
+    else {
+        panic!("expected callable signature")
+    };
+    assert_eq!(signature.where_associated_type_bindings.len(), 1);
+    assert_eq!(signature.where_associated_effect_bindings.len(), 1);
+    let output = &signature.where_associated_type_bindings[0];
+    assert_eq!(output.name, "Output");
+    assert_eq!(output.item_generic_kinds, vec![GenericKind::Type]);
+    assert_eq!(
+        output.item_arguments,
+        vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))]
+    );
+    assert_eq!(output.value, Type::Scalar(ScalarType::I64));
+    assert!(
+        signature.where_associated_effect_bindings[0]
+            .value
+            .effects
+            .is_empty()
+    );
+}
+
+#[test]
 fn generic_instantiation_preserves_all_source_kinds_before_runtime_lowering() {
     let package = PackageKey("signature-generic-instantiation-boundary@0.1.0".into());
     let source = "pub fn typed<T>(value: T) -> T { value } pub fn region<'a>() -> i64 { 0 } pub fn row<e: EffectRow>() -> i64 { 0 } pub fn count<n: u32>() -> i64 { 0 } pub fn quota<q: Quantity>() -> Budget<q> { panic } pub struct Budget<q: Quantity> {} pub struct region_record<'a> {}";

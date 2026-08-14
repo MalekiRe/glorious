@@ -2994,6 +2994,40 @@ fn substitute_callable_signature(
                 )
             })
             .collect(),
+        where_associated_type_bindings: value
+            .where_associated_type_bindings
+            .iter()
+            .cloned()
+            .map(|binding| crate::ElaboratedAssociatedTypeBinding {
+                subject: substitute_type(&binding.subject, substitution),
+                relation: substitute_relation(&binding.relation, substitution),
+                name: binding.name,
+                item_generic_kinds: binding.item_generic_kinds,
+                item_arguments: binding
+                    .item_arguments
+                    .iter()
+                    .map(|argument| substitute_generic_argument(argument, substitution))
+                    .collect(),
+                value: substitute_type(&binding.value, substitution),
+            })
+            .collect(),
+        where_associated_effect_bindings: value
+            .where_associated_effect_bindings
+            .iter()
+            .cloned()
+            .map(|binding| crate::ElaboratedAssociatedEffectBinding {
+                subject: substitute_type(&binding.subject, substitution),
+                relation: substitute_relation(&binding.relation, substitution),
+                name: binding.name,
+                item_generic_kinds: binding.item_generic_kinds,
+                item_arguments: binding
+                    .item_arguments
+                    .iter()
+                    .map(|argument| substitute_generic_argument(argument, substitution))
+                    .collect(),
+                value: substitute_effect_row(&binding.value, substitution),
+            })
+            .collect(),
     }
 }
 
