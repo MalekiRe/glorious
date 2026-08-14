@@ -55,6 +55,70 @@ fn tabled_solver_proves_generic_impls_after_where_obligations() {
 }
 
 #[test]
+fn supertrait_method_and_associated_items_follow_canonical_instantiated_edges() {
+    let (interface, signatures) = signatures(
+        "trait Parent<T> { type Item; type Effects: EffectRow; const Width: u32; fn id(value: T) -> T; } trait Child<U>: Parent<U> {} impl Parent<i64> for i64 { type Item = i64; type Effects = {}; const Width = 7; fn id(value: i64) -> i64 { value } } impl Child<i64> for i64 {}",
+    );
+    let child = key(&interface, "Child");
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: child,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+        subject: Type::Scalar(ScalarType::I64),
+    };
+    let mut solver = TraitSolver::new(&signatures);
+    assert_eq!(
+        solver.method_generic_kinds(&goal.relation, "id"),
+        Some(vec![])
+    );
+    assert!(matches!(
+        solver.select_method(goal.clone(), "id", &[]),
+        TraitMethodAnswer::Selected { .. }
+    ));
+    assert!(matches!(
+        solver.normalize_associated_type(goal.clone(), "Item"),
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Scalar(ScalarType::I64),
+            ..
+        }
+    ));
+    assert!(matches!(
+        solver.normalize_associated_effect_row_application(goal.clone(), "Effects", &[]),
+        TraitEffectRowProjectionAnswer::Normalized { ref row, .. } if row == &EffectRow::empty()
+    ));
+    assert!(matches!(
+        solver.normalize_associated_const(goal, "Width", ConstKind::U32),
+        TraitConstProjectionAnswer::Normalized {
+            value: GenericArgument::ConstU32(7),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn conflicting_inherited_items_remain_ambiguous() {
+    let (interface, signatures) = signatures(
+        "trait Left { type Item; } trait Right { type Item; } trait Child: Left + Right {} impl Left for i64 { type Item = i64; } impl Right for i64 { type Item = i64; } impl Child for i64 {}",
+    );
+    let child = key(&interface, "Child");
+    let answer = TraitSolver::new(&signatures).normalize_associated_type(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: child,
+                arguments: vec![],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        },
+        "Item",
+    );
+    assert!(
+        matches!(answer, TraitProjectionAnswer::Ambiguous),
+        "{answer:?}"
+    );
+}
+
+#[test]
 fn solver_matches_alpha_equivalent_hrtb_heads_but_rejects_outer_lifetime_leaks() {
     let (interface, signatures) = signatures(
         "trait CallableMarker {} impl CallableMarker for for<'a> (&'a i64) -> &'a i64 {}",

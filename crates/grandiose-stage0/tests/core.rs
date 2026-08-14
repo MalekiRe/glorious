@@ -199,6 +199,20 @@ fn typed_core_retains_explicit_trait_method_generic_arguments() {
 }
 
 #[test]
+fn typed_core_selects_methods_inherited_through_a_supertrait() {
+    let core = core_for(
+        "core-supertrait-method@0.1.0",
+        "trait Parent<T> { fn identity(value: T) -> T; } trait Child<U>: Parent<U> {} impl Parent<i64> for i64 { fn identity(value: i64) -> i64 { value } } impl Child<i64> for i64 {} pub fn main() -> i64 { Child<i64>::identity(42) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(
+        core.expressions
+            .iter()
+            .any(|expression| { matches!(expression.kind, CoreKind::TraitMethod { .. }) })
+    );
+}
+
+#[test]
 fn recovered_source_elaborates_to_core_error_and_is_rejected_before_mir() {
     let source = "pub fn main() -> i64 { let = ; }";
     let core = core_for("core-recovered-source@0.1.0", source);

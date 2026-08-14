@@ -305,6 +305,7 @@ impl ElaboratedInterface {
         }
         result.normalize_aliases();
         result.validate_associated_type_definitions();
+        result.validate_trait_supertrait_cycles();
         result.validate_implementation_supertraits();
         result
             .diagnostics
@@ -320,6 +321,7 @@ impl ElaboratedInterface {
         }
         merged.normalize_aliases();
         merged.validate_associated_type_definitions();
+        merged.validate_trait_supertrait_cycles();
         merged.validate_implementation_supertraits();
         merged
             .diagnostics
@@ -587,6 +589,37 @@ impl ElaboratedInterface {
                             .into(),
                     }),
                 }
+            }
+        }
+        self.diagnostics.extend(diagnostics);
+    }
+
+    /// Supertrait edges are a declaration-level entailment graph.  A cycle
+    /// has no finite inherited-item owner and must be rejected before a body
+    /// can turn it into an order-dependent method or projection lookup.
+    fn validate_trait_supertrait_cycles(&mut self) {
+        let edges = self
+            .definitions
+            .iter()
+            .filter_map(|(definition, header)| match header {
+                ElaboratedHeader::Trait(trait_header) => Some((
+                    *definition,
+                    trait_header
+                        .supertraits
+                        .iter()
+                        .map(|relation| relation.definition)
+                        .collect::<Vec<_>>(),
+                )),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut diagnostics = Vec::new();
+        for definition in edges.keys().copied() {
+            if trait_reaches(&edges, definition, definition, &mut Vec::new()) {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4175",
+                    message: format!("trait supertrait cycle includes `{definition:?}`"),
+                });
             }
         }
         self.diagnostics.extend(diagnostics);
@@ -1750,6 +1783,27 @@ struct Elaborator<'a> {
     self_type: Option<Type>,
     diagnostics: Vec<SignatureDiagnostic>,
 }
+
+fn trait_reaches(
+    edges: &BTreeMap<DefKey, Vec<DefKey>>,
+    start: DefKey,
+    current: DefKey,
+    active: &mut Vec<DefKey>,
+) -> bool {
+    if active.contains(&current) {
+        return current == start;
+    }
+    active.push(current);
+    let reaches = edges.get(&current).is_some_and(|parents| {
+        parents
+            .iter()
+            .copied()
+            .any(|parent| parent == start || trait_reaches(edges, start, parent, active))
+    });
+    active.pop();
+    reaches
+}
+
 impl Elaborator<'_> {
     fn generic_binder_count(&self) -> u32 {
         (self.generics.len()

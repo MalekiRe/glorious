@@ -263,6 +263,62 @@ pub struct TraitSolver {
     steps: u32,
 }
 
+#[derive(Clone, Copy)]
+enum AssociatedItemKind {
+    Type,
+    EffectRow,
+    Const,
+}
+
+enum SupertraitLookup<T> {
+    Found(T),
+    Missing,
+    Ambiguous,
+}
+
+fn trait_declares_associated_item(
+    trait_header: &ElaboratedTrait,
+    name: &str,
+    kind: AssociatedItemKind,
+) -> bool {
+    match kind {
+        AssociatedItemKind::Type => trait_header
+            .associated_types
+            .get(name)
+            .is_some_and(|item| !item.effect_row),
+        AssociatedItemKind::EffectRow => trait_header
+            .associated_types
+            .get(name)
+            .is_some_and(|item| item.effect_row),
+        AssociatedItemKind::Const => trait_header.associated_consts.contains_key(name),
+    }
+}
+
+fn merge_supertrait_lookups(
+    values: impl IntoIterator<Item = SupertraitLookup<TraitGoal>>,
+) -> SupertraitLookup<TraitGoal> {
+    let mut found = Vec::new();
+    let mut ambiguous = false;
+    for value in values {
+        match value {
+            SupertraitLookup::Found(goal) => {
+                if !found.iter().any(|candidate: &TraitGoal| candidate == &goal) {
+                    found.push(goal);
+                }
+            }
+            SupertraitLookup::Ambiguous => ambiguous = true,
+            SupertraitLookup::Missing => {}
+        }
+    }
+    if ambiguous || found.len() > 1 {
+        SupertraitLookup::Ambiguous
+    } else if let Some(goal) = found.pop() {
+        SupertraitLookup::Found(goal)
+    } else {
+        SupertraitLookup::Missing
+    }
+}
+
 impl TraitSolver {
     pub fn new(signatures: &ElaboratedInterface) -> Self {
         Self::with_limits(signatures, TraitSolverLimits::default())
@@ -313,6 +369,102 @@ impl TraitSolver {
                 .map(|rule| rule.definition)
                 .collect(),
         }
+    }
+
+    /// Method binders are declaration facts.  Looking them up through the
+    /// supertrait closure lets Core create operation inference variables
+    /// before it has selected the concrete parent implementation.
+    pub fn method_generic_kinds(
+        &self,
+        relation: &ElaboratedTraitReference,
+        name: &str,
+    ) -> Option<Vec<crate::GenericKind>> {
+        let goal = TraitGoal {
+            relation: relation.clone(),
+            subject: Type::Generic(TRAIT_SELF_GENERIC),
+        };
+        match self.find_method_goal(&goal, name, &mut Vec::new()) {
+            SupertraitLookup::Found(goal) => self
+                .traits
+                .get(&goal.relation.definition)
+                .and_then(|trait_header| trait_header.methods.get(name))
+                .map(|method| method.generic_kinds.clone()),
+            SupertraitLookup::Missing | SupertraitLookup::Ambiguous => None,
+        }
+    }
+
+    fn supertrait_goals(&self, goal: &TraitGoal) -> Vec<TraitGoal> {
+        let Some(trait_header) = self.traits.get(&goal.relation.definition) else {
+            return vec![];
+        };
+        let mut substitution = ImplementationSubstitution::default();
+        substitution
+            .types
+            .insert(TRAIT_SELF_GENERIC, goal.subject.clone());
+        for (index, argument) in goal.relation.arguments.iter().cloned().enumerate() {
+            install_item_argument(&mut substitution, index as u32, argument);
+        }
+        trait_header
+            .supertraits
+            .iter()
+            .map(|relation| TraitGoal {
+                relation: substitute_relation(relation, &substitution),
+                subject: goal.subject.clone(),
+            })
+            .collect()
+    }
+
+    fn find_method_goal(
+        &self,
+        goal: &TraitGoal,
+        name: &str,
+        active: &mut Vec<Digest>,
+    ) -> SupertraitLookup<TraitGoal> {
+        let key = goal_key(goal);
+        if active.contains(&key) {
+            return SupertraitLookup::Ambiguous;
+        }
+        let Some(trait_header) = self.traits.get(&goal.relation.definition) else {
+            return SupertraitLookup::Missing;
+        };
+        if trait_header.methods.contains_key(name) {
+            return SupertraitLookup::Found(goal.clone());
+        }
+        active.push(key);
+        let result = merge_supertrait_lookups(
+            self.supertrait_goals(goal)
+                .into_iter()
+                .map(|parent| self.find_method_goal(&parent, name, active)),
+        );
+        active.pop();
+        result
+    }
+
+    fn find_associated_item_goal(
+        &self,
+        goal: &TraitGoal,
+        name: &str,
+        kind: AssociatedItemKind,
+        active: &mut Vec<Digest>,
+    ) -> SupertraitLookup<TraitGoal> {
+        let key = goal_key(goal);
+        if active.contains(&key) {
+            return SupertraitLookup::Ambiguous;
+        }
+        let Some(trait_header) = self.traits.get(&goal.relation.definition) else {
+            return SupertraitLookup::Missing;
+        };
+        if trait_declares_associated_item(trait_header, name, kind) {
+            return SupertraitLookup::Found(goal.clone());
+        }
+        active.push(key);
+        let result = merge_supertrait_lookups(
+            self.supertrait_goals(goal)
+                .into_iter()
+                .map(|parent| self.find_associated_item_goal(&parent, name, kind, active)),
+        );
+        active.pop();
+        result
     }
 
     /// Inspect deterministic candidate shape alongside the ordinary tabled
@@ -452,6 +604,16 @@ impl TraitSolver {
         name: &str,
         arguments: &[GenericArgument],
     ) -> TraitProjectionAnswer {
+        let goal = match self.find_associated_item_goal(
+            &goal,
+            name,
+            AssociatedItemKind::Type,
+            &mut Vec::new(),
+        ) {
+            SupertraitLookup::Found(goal) => goal,
+            SupertraitLookup::Missing => goal,
+            SupertraitLookup::Ambiguous => return TraitProjectionAnswer::Ambiguous,
+        };
         match self.solve(goal.clone()) {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
@@ -664,6 +826,16 @@ impl TraitSolver {
         name: &str,
         expected: crate::ConstKind,
     ) -> TraitConstProjectionAnswer {
+        let goal = match self.find_associated_item_goal(
+            &goal,
+            name,
+            AssociatedItemKind::Const,
+            &mut Vec::new(),
+        ) {
+            SupertraitLookup::Found(goal) => goal,
+            SupertraitLookup::Missing => goal,
+            SupertraitLookup::Ambiguous => return TraitConstProjectionAnswer::Ambiguous,
+        };
         match self.solve(goal.clone()) {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
@@ -784,6 +956,16 @@ impl TraitSolver {
         name: &str,
         arguments: &[GenericArgument],
     ) -> TraitEffectRowProjectionAnswer {
+        let goal = match self.find_associated_item_goal(
+            &goal,
+            name,
+            AssociatedItemKind::EffectRow,
+            &mut Vec::new(),
+        ) {
+            SupertraitLookup::Found(goal) => goal,
+            SupertraitLookup::Missing => goal,
+            SupertraitLookup::Ambiguous => return TraitEffectRowProjectionAnswer::Ambiguous,
+        };
         match self.solve(goal.clone()) {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
@@ -997,6 +1179,11 @@ impl TraitSolver {
         name: &str,
         arguments: &[Type],
     ) -> TraitMethodAnswer {
+        let goal = match self.find_method_goal(&goal, name, &mut Vec::new()) {
+            SupertraitLookup::Found(goal) => goal,
+            SupertraitLookup::Missing => return TraitMethodAnswer::NoSolution,
+            SupertraitLookup::Ambiguous => return TraitMethodAnswer::Ambiguous,
+        };
         match self.solve(goal.clone()) {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {

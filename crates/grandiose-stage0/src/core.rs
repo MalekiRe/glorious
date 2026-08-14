@@ -4872,15 +4872,21 @@ impl Elaborator<'_> {
             "G4168",
             "trait method qualification generic arguments do not match its declaration",
         )?;
-        let Some(method_header) = trait_header.methods.get(name) else {
+        let Some(method_generic_kinds) = TraitSolver::new(self.signatures).method_generic_kinds(
+            &crate::ElaboratedTraitReference {
+                definition: trait_definition,
+                arguments: trait_arguments.clone(),
+            },
+            name,
+        ) else {
             return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
         };
         let method_arguments = if operation_arguments.is_empty() {
-            (0..method_header.generics)
+            (0..method_generic_kinds.len())
                 .map(|_| GenericArgument::Type(self.inference.fresh()))
                 .collect::<Vec<_>>()
         } else {
-            if operation_arguments.len() != method_header.generics as usize {
+            if operation_arguments.len() != method_generic_kinds.len() {
                 return Some(self.fail(
                     span,
                     "G4168",
@@ -4889,7 +4895,7 @@ impl Elaborator<'_> {
             }
             self.body_generic_arguments(
                 &operation_arguments,
-                &method_header.generic_kinds,
+                &method_generic_kinds,
                 span,
                 "G4168",
                 "trait method operation arguments do not match its declaration",
@@ -5031,7 +5037,13 @@ impl Elaborator<'_> {
             "G4168",
             "trait method qualification generic arguments do not match its declaration",
         )?;
-        let Some(method_header) = trait_header.methods.get(name) else {
+        let Some(method_generic_kinds) = TraitSolver::new(self.signatures).method_generic_kinds(
+            &crate::ElaboratedTraitReference {
+                definition: trait_definition,
+                arguments: trait_arguments.clone(),
+            },
+            name,
+        ) else {
             return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
         };
         let values = supplied
@@ -5047,11 +5059,11 @@ impl Elaborator<'_> {
         };
         let subject = self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
         let method_arguments = if operation_arguments.is_empty() {
-            (0..method_header.generics)
+            (0..method_generic_kinds.len())
                 .map(|_| GenericArgument::Type(self.inference.fresh()))
                 .collect::<Vec<_>>()
         } else {
-            if operation_arguments.len() != method_header.generics as usize {
+            if operation_arguments.len() != method_generic_kinds.len() {
                 return Some(self.fail(
                     span,
                     "G4168",
@@ -5060,7 +5072,7 @@ impl Elaborator<'_> {
             }
             self.body_generic_arguments(
                 &operation_arguments,
-                &method_header.generic_kinds,
+                &method_generic_kinds,
                 span,
                 "G4168",
                 "trait method operation arguments do not match its declaration",
