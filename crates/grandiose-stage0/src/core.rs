@@ -9230,6 +9230,25 @@ fn core_pattern_subsumes(left: &CorePattern, right: &CorePattern) -> bool {
                     .zip(right)
                     .all(|(left, right)| core_pattern_subsumes(left, right))
         }
+        // Arrays are dynamic-length and therefore do not belong to the
+        // finite-domain exhaustiveness proof below.  They nevertheless have
+        // exact structural matching semantics, so ordered reachability must
+        // still recognize that an earlier `[p0, .., pn]` covers an identical
+        // or more-specific later array row.  Without this branch duplicate
+        // array arms escaped the common decision-DAG proof merely because
+        // their element domain was unbounded.
+        (
+            CorePattern::Array { elements: left, .. },
+            CorePattern::Array {
+                elements: right, ..
+            },
+        ) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| core_pattern_subsumes(left, right))
+        }
         (
             CorePattern::Record {
                 definition: left_definition,
@@ -9296,6 +9315,17 @@ fn pattern_decision_subsumes(
         (PatternDecision::Any | PatternDecision::Bind(_), _) => true,
         (PatternDecision::Literal(left), PatternDecision::Literal(right)) => left == right,
         (PatternDecision::Tuple(left), PatternDecision::Tuple(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| pattern_decision_subsumes(left, right))
+        }
+        // Handler payload rows share the same exact array decision semantics
+        // as normal completion arms.  Keep their source-free proof in lock
+        // step with `core_pattern_subsumes` so an unreachable array handler
+        // arm cannot remain live merely because its payload type is open.
+        (PatternDecision::Array(left), PatternDecision::Array(right)) => {
             left.len() == right.len()
                 && left
                     .iter()

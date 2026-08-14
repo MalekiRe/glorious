@@ -8,7 +8,8 @@
 use crate::{
     BodySyntax, ConstKind, DefKey, DefinitionIndex, DefinitionNamespace, EffectInstance, EffectRow,
     EffectTail, ElaboratedInterface, GenericArgument, GenericKind, Lifetime, ModuleKey, Mutability,
-    PatternId, PatternKind, ResolutionState, ScalarType, Span, Type,
+    PatternId, PatternKind, ResolutionState, ScalarType, Span, TraitProjectionAnswer, TraitSolver,
+    Type,
 };
 
 /// Callable- or implementation-body generic binders visible while checking a
@@ -604,8 +605,155 @@ impl Elaborator<'_> {
                 effects: EffectRow::empty(),
                 invocation: crate::Quantity::AFFINE,
             }),
-            crate::HeaderType::Projection { .. } | crate::HeaderType::Recovered => {
+            crate::HeaderType::Projection {
+                subject,
+                trait_path,
+                trait_arguments,
+                name,
+                item_arguments,
+            } => self.source_projection(
+                span,
+                subject,
+                trait_path,
+                trait_arguments,
+                name,
+                item_arguments,
+            ),
+            crate::HeaderType::Recovered => {
                 self.error(span, "G4217", "unsupported nominal pattern type argument");
+                None
+            }
+        }
+    }
+
+    /// Elaborate a qualified associated type in a nominal pattern argument.
+    /// Pattern applications share the declaration source-slot grammar: a
+    /// `Box<<T as Trait>::Item>` pattern must retain exactly the same mixed
+    /// kind trait identity as a callable signature, and concrete selections
+    /// must normalize before they are compared to the subject's instantiated
+    /// nominal arguments.  Keeping this here avoids a second, pattern-only
+    /// interpretation of projections.
+    fn source_projection(
+        &mut self,
+        span: Span,
+        subject: &crate::HeaderType,
+        trait_path: &[String],
+        trait_arguments: &[crate::HeaderGenericArgument],
+        name: &str,
+        item_arguments: &[crate::HeaderGenericArgument],
+    ) -> Option<Type> {
+        let subject = self.source_type(span, subject)?;
+        let trait_definition =
+            match self
+                .index
+                .resolve_path(DefinitionNamespace::Trait, self.module, trait_path)
+            {
+                ResolutionState::Resolved(definition) => definition,
+                ResolutionState::Ambiguous(_) => {
+                    self.error(
+                        span,
+                        "G4146",
+                        "nominal pattern associated type projection has an ambiguous trait",
+                    );
+                    return None;
+                }
+                ResolutionState::Inaccessible(_)
+                | ResolutionState::Unresolved
+                | ResolutionState::Recovered => {
+                    self.error(
+                        span,
+                        "G4147",
+                        "nominal pattern associated type projection has an unresolved trait",
+                    );
+                    return None;
+                }
+            };
+        let trait_kinds = self
+            .index
+            .trait_generic_kinds(trait_definition)
+            .unwrap_or(&[]);
+        if trait_arguments.len() != trait_kinds.len() {
+            self.error(
+                span,
+                "G4215",
+                "nominal pattern associated type projection has the wrong trait generic arity",
+            );
+            return None;
+        }
+        let trait_arguments = trait_arguments
+            .iter()
+            .zip(trait_kinds)
+            .map(|(argument, kind)| self.generic_argument(span, argument, *kind))
+            .collect::<Option<Vec<_>>>()?;
+        let Some(item_kinds) = self
+            .index
+            .associated_type_generic_kinds(trait_definition, name)
+        else {
+            self.error(
+                span,
+                "G4150",
+                "nominal pattern projection does not select a declared associated type",
+            );
+            return None;
+        };
+        if item_arguments.len() != item_kinds.len() {
+            self.error(
+                span,
+                "G4215",
+                "nominal pattern associated type projection has the wrong item generic arity",
+            );
+            return None;
+        }
+        let item_arguments = item_arguments
+            .iter()
+            .zip(item_kinds)
+            .map(|(argument, kind)| self.generic_argument(span, argument, *kind))
+            .collect::<Option<Vec<_>>>()?;
+        let projection = Type::Projection {
+            subject: Box::new(subject),
+            trait_definition,
+            trait_arguments,
+            name: name.to_owned(),
+            item_generic_kinds: item_kinds.to_vec(),
+            item_arguments,
+        };
+        match TraitSolver::new(self.signatures).normalize_type(projection) {
+            Ok(value) => Some(value),
+            Err(answer) => {
+                let (code, message) = match *answer {
+                    TraitProjectionAnswer::Refuted { .. } => (
+                        "G4151",
+                        "nominal pattern associated type projection is refuted by a negative implementation",
+                    ),
+                    TraitProjectionAnswer::NoSolution => (
+                        "G4152",
+                        "no implementation can normalize a nominal pattern associated type projection",
+                    ),
+                    TraitProjectionAnswer::Ambiguous => (
+                        "G4153",
+                        "nominal pattern associated type projection is ambiguous",
+                    ),
+                    TraitProjectionAnswer::Overflow => (
+                        "G4154",
+                        "nominal pattern associated type projection exceeded the trait solver limit",
+                    ),
+                    TraitProjectionAnswer::MissingAssociatedType { .. } => (
+                        "G4155",
+                        "selected implementation does not define the nominal pattern associated type",
+                    ),
+                    TraitProjectionAnswer::AssociatedTypeArity { .. } => (
+                        "G4156",
+                        "nominal pattern associated type projection has the wrong arity",
+                    ),
+                    TraitProjectionAnswer::RecursiveProjection => (
+                        "G4157",
+                        "nominal pattern associated type projection has no finite normal form",
+                    ),
+                    TraitProjectionAnswer::Normalized { .. } => {
+                        unreachable!("normalization results are returned through Ok")
+                    }
+                };
+                self.error(span, code, message);
                 None
             }
         }

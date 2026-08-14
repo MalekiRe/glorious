@@ -1,8 +1,9 @@
 use grandiose_stage0::{
     BindingMode, BodySyntax, DeclarationScan, DefinitionIndex, ElaboratedInterface, ExprKind,
     FileKey, GenericArgument, InterfaceSet, LexedFile, LogicalPath, PackageKey, PatternDecision,
-    ScalarType, Type, elaborate_pattern,
+    PatternGenericScope, ScalarType, Type, elaborate_pattern, elaborate_pattern_with_scope,
 };
+use std::collections::BTreeMap;
 
 fn parsed(
     source: &str,
@@ -202,4 +203,106 @@ fn explicit_generic_nominal_pattern_identity_accepts_the_matching_application() 
         plan.plan.decision,
         PatternDecision::Enum { variant: 0, .. }
     ));
+}
+
+#[test]
+fn generic_nominal_pattern_arguments_preserve_symbolic_associated_type_identity() {
+    let source = "trait Element { type Item; } pub struct Boxed<T> { value: T } pub fn main<T>(value: Boxed<<T as Element>::Item>) -> Bool { value is Boxed<<T as Element>::Item> { value: _ } }";
+    let (interface, signatures, body) = parsed(source);
+    let boxed = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Boxed"))
+        .unwrap()
+        .key;
+    let element = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Element"))
+        .unwrap()
+        .key;
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected body block");
+    };
+    let ExprKind::Is { pattern, .. } = body.expression(values[0]).kind else {
+        panic!("expected structural test");
+    };
+    let projection = Type::Projection {
+        subject: Box::new(Type::Generic(0)),
+        trait_definition: element,
+        trait_arguments: vec![],
+        name: "Item".into(),
+        item_generic_kinds: vec![],
+        item_arguments: vec![],
+    };
+    let plan = elaborate_pattern_with_scope(
+        &body,
+        pattern,
+        Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::Type(projection)],
+        },
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+        &interface.module,
+        &PatternGenericScope {
+            types: BTreeMap::from([("T".into(), 0)]),
+            ..PatternGenericScope::default()
+        },
+    );
+    assert!(plan.diagnostics.is_empty(), "{:#?}", plan.diagnostics);
+    assert!(
+        matches!(plan.plan.decision, PatternDecision::Record { definition, .. } if definition == boxed)
+    );
+}
+
+#[test]
+fn generic_nominal_pattern_arguments_preserve_gat_item_arguments() {
+    let source = "trait Apply { type Output<U>; } pub struct Boxed<T> { value: T } pub fn main<T>(value: Boxed<<T as Apply>::Output<i64>>) -> Bool { value is Boxed<<T as Apply>::Output<i64>> { value: _ } }";
+    let (interface, signatures, body) = parsed(source);
+    let boxed = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Boxed"))
+        .unwrap()
+        .key;
+    let apply = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Apply"))
+        .unwrap()
+        .key;
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected body block");
+    };
+    let ExprKind::Is { pattern, .. } = body.expression(values[0]).kind else {
+        panic!("expected structural test");
+    };
+    let projection = Type::Projection {
+        subject: Box::new(Type::Generic(0)),
+        trait_definition: apply,
+        trait_arguments: vec![],
+        name: "Output".into(),
+        item_generic_kinds: vec![grandiose_stage0::GenericKind::Type],
+        item_arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+    };
+    let plan = elaborate_pattern_with_scope(
+        &body,
+        pattern,
+        Type::Nominal {
+            definition: boxed,
+            arguments: vec![GenericArgument::Type(projection)],
+        },
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+        &interface.module,
+        &PatternGenericScope {
+            types: BTreeMap::from([("T".into(), 0)]),
+            ..PatternGenericScope::default()
+        },
+    );
+    assert!(plan.diagnostics.is_empty(), "{:#?}", plan.diagnostics);
+    assert!(
+        matches!(plan.plan.decision, PatternDecision::Record { definition, .. } if definition == boxed)
+    );
 }

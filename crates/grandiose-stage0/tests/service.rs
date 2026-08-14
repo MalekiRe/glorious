@@ -2173,6 +2173,105 @@ fn service_requires_a_fallback_after_an_exact_array_completion_pattern() {
 }
 
 #[test]
+fn service_rejects_unreachable_nested_array_completion_arm() {
+    let source = "pub fn main() -> i64 { handle [[true, false]] { [[true, false]] => 41, [[true, false]] => 42, _ => 0 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("duplicate nested array completion arm unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4168"),
+        "duplicate exact array rows must be rejected by ordered completion reachability: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_exact_array_completion_arm_after_a_wildcard() {
+    let source = "pub fn main() -> i64 { handle [1] { _ => 0, [1] => 41 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("array arm after an irrefutable wildcard unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4168"),
+        "a wildcard must subsume every later exact array row: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_unreachable_nested_array_handler_arm() {
+    let source = "effect Ask { [0,1] ask(value: Array<Array<i64>>) -> i64; } pub fn main() -> i64 { handle Ask::ask([[1, 2]]) { Ask::ask([[1, 2]]) => 41, Ask::ask([[1, 2]]) => 42, Ask::ask(_) => 0 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("duplicate nested array handler arm unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4175"),
+        "duplicate exact array handler rows must be rejected by shared payload reachability: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_normalizes_concrete_associated_type_arguments_in_nominal_patterns() {
+    let source = "trait Element { type Item; } struct Boxed<T> { value: T } impl Element for i64 { type Item = i64; } pub fn main() -> Bool { Boxed { value: 42 } is Boxed<<i64 as Element>::Item> { value: _ } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert!(
+        outcome.artifact.unwrap().run_bool().unwrap(),
+        "concrete associated type arguments must normalize before nominal pattern identity comparison"
+    );
+}
+
+#[test]
+fn service_rejects_unknown_associated_type_arguments_in_nominal_patterns() {
+    let source = "trait Element { type Item; } struct Boxed<T> { value: T } pub fn main() -> Bool { Boxed { value: 42 } is Boxed<<i64 as Element>::Missing> { value: _ } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("unknown associated type in nominal pattern unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4150"),
+        "nominal patterns must reject a projection that is absent from the selected trait: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_reports_unsatisfied_associated_type_evidence_in_nominal_patterns() {
+    let source = "trait Element { type Item; } struct Boxed<T> { value: T } pub fn main() -> Bool { Boxed { value: 42 } is Boxed<<i64 as Element>::Item> { value: _ } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("nominal pattern with an unsatisfied associated type unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4152"),
+        "failed trait evidence must remain distinct from a missing associated item: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_dispatches_nested_array_handler_patterns_through_the_verified_vm() {
+    let source = "effect Stop { stop(value: Array<Array<i64>>) -> !; } pub fn main() -> i64 { handle Stop::stop([[1, 2]]) { Stop::stop([[1, 2]]) => 42, Stop::stop(_) => 0 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_checks_effect_operation_identity_and_declared_rows() {
     let accepted = "effect Console { read() -> i64; } pub fn helper() -> i64 / Console { Console::read() } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
