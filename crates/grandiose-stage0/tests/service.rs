@@ -589,6 +589,29 @@ fn reference_to_body_local_cannot_escape_as_a_return_value() {
 }
 
 #[test]
+fn active_unique_loan_rejects_move_of_its_referent() {
+    let diagnostics = match StageZeroCompiler::new().compile(request(
+        "pub fn main() -> i64 { let value = 1; let reference = &mut value; move value; *reference }",
+    )) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("move while uniquely borrowed unexpectedly compiled: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5004"),
+        "missing move-while-borrowed diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn unique_field_borrow_preserves_the_projected_place_identity() {
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let reference = &mut pair.left; *reference = 42; pair.left }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn assignment_reinitializes_a_local_after_a_whole_value_move() {
     let outcome = StageZeroCompiler::new()
         .compile(request(

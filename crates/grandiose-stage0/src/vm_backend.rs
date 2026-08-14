@@ -3196,15 +3196,17 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 dst, src, unique, ..
             } => {
                 read(&states, *src)?;
-                let referent = register_type(function, *src)?;
-                expect_type(
-                    function,
-                    *dst,
-                    VmType::Reference {
-                        unique: *unique,
-                        referent: Box::new(referent),
-                    },
-                )?;
+                let found = register_type(function, *dst)?;
+                if !matches!(found, VmType::Reference { unique: actual, .. } if actual == *unique) {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *dst,
+                        expected: VmType::Reference {
+                            unique: *unique,
+                            referent: Box::new(VmType::Unit),
+                        },
+                        found,
+                    });
+                }
                 write(&mut states, *dst)?
             }
             VmInstruction::DerefCopy { dst, reference } => {
@@ -3599,6 +3601,7 @@ fn same_type(function: &VmFunction, destination: u32, source: u32) -> Result<(),
         })
     }
 }
+
 fn write(states: &mut [Option<bool>], register: u32) -> Result<(), VmArtifactError> {
     let state = states
         .get_mut(register as usize)
