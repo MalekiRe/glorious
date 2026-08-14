@@ -3147,18 +3147,23 @@ fn service_compiles_callables_declared_in_inline_modules() {
 
 #[test]
 fn equivalent_module_source_enumeration_orders_emit_the_same_verified_program() {
-    let root = "mod math; pub fn main() -> i64 { math::add_two(40) }";
-    let child = "pub fn add_two(value: i64) -> i64 { value + 2 }";
+    let root = "mod math; mod util; pub fn main() -> i64 { math::add_two(util::forty()) }";
+    let modules = [
+        ("math", "pub fn add_two(value: i64) -> i64 { value + 2 }"),
+        ("util", "pub fn forty() -> i64 { 40 }"),
+    ];
     let first = StageZeroCompiler::new()
-        .compile(request_with_module(root, child))
+        .compile(request_with_modules(root, &modules))
         .unwrap();
-    let mut reversed = request_with_module(root, child);
+    let mut reversed = request_with_modules(root, &modules);
     reversed.sources.reverse();
     let second = StageZeroCompiler::new().compile(reversed).unwrap();
-    assert_eq!(
-        first.artifact.unwrap().fingerprint(),
-        second.artifact.unwrap().fingerprint()
-    );
+    assert_eq!(first.diagnostics, second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
 }
 
 #[test]
