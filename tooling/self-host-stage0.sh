@@ -98,6 +98,7 @@ runtime_manifest=(
     --runtime-leaf int-bit-or crate __g1_int_bit_or
     --runtime-leaf int-bit-xor crate __g1_int_bit_xor
     --runtime-leaf int-bit-not crate __g1_int_bit_not
+    --runtime-leaf int-shr crate __g1_int_shr
     --runtime-leaf int-convert-checked-to-i64 crate __g1_int_convert_checked_to_i64
     --runtime-leaf int-convert-wrapping-to-i64 crate __g1_int_convert_wrapping_to_i64
 )
