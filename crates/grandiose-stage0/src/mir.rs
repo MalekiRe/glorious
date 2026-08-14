@@ -1797,6 +1797,37 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // An inner one-shot handler may capture its continuation as a
+        // first-class snapshot even when the residual immediately performs
+        // a distinct outward effect.  Install the outer frame before the
+        // inner frame so resuming the snapshot re-enters the residual under
+        // the same deep handler stack.
+        if let Some(function) = lowerer
+            .lower_root_runtime_residual_outer_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_runtime_nested_one_shot_handler(body.root, parameters.clone())
         {
@@ -6774,6 +6805,232 @@ impl Lowerer<'_> {
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
+        })
+    }
+    /// Lower the smallest general deep-handler stack which cannot be reduced
+    /// to a single operation dispatch: an inner one-shot operation resumes
+    /// into a residual operation owned by an outer handler.  In particular,
+    /// an alias of the inner continuation is a callable with the outer
+    /// operation in its effect row.  The VM must therefore retain both frames
+    /// across `ResumeSnapshot`, then capture the inner frame above the outer
+    /// one while dispatching the residual operation.
+    fn lower_root_runtime_residual_outer_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let outer = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle { .. } => root,
+            CoreKind::Block(values) if values.len() == 1 => values[0],
+            _ => return None,
+        };
+        let CoreKind::Handle {
+            computation: outer_computation,
+            clauses: outer_clauses,
+        } = self.body.expression(outer).kind.clone()
+        else {
+            return None;
+        };
+        let inner = match self.body.expression(outer_computation).kind.clone() {
+            CoreKind::Handle { .. } => outer_computation,
+            CoreKind::Block(values) if values.len() == 1 => values[0],
+            _ => return None,
+        };
+        let CoreKind::Handle {
+            computation: inner_computation,
+            clauses: inner_clauses,
+        } = self.body.expression(inner).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Block(computation) = self.body.expression(inner_computation).kind.clone()
+        else {
+            return None;
+        };
+        let [binding, residual] = computation.as_slice() else {
+            return None;
+        };
+        let CoreKind::Let {
+            name: binding_name,
+            value: inner_operation,
+        } = self.body.expression(*binding).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect: inner_effect,
+            operation: inner_operation_index,
+            arguments: inner_arguments,
+            terminal: false,
+            ..
+        } = self.body.expression(inner_operation).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect: outer_effect,
+            operation: outer_operation_index,
+            arguments: outer_arguments,
+            terminal: false,
+            ..
+        } = self.body.expression(*residual).kind.clone()
+        else {
+            return None;
+        };
+        let outer_operation_clauses = outer_clauses
+            .iter()
+            .filter(|clause| !clause.terminal)
+            .collect::<Vec<_>>();
+        let inner_operation_clauses = inner_clauses
+            .iter()
+            .filter(|clause| !clause.terminal)
+            .collect::<Vec<_>>();
+        let [outer_clause] = outer_operation_clauses.as_slice() else {
+            return None;
+        };
+        let [inner_clause] = inner_operation_clauses.as_slice() else {
+            return None;
+        };
+        let is_once = |clause: &CoreHandlerClause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                } | CoreHandlerResumption::Tail {
+                    quantity: crate::quantity::Quantity::ONCE
+                }
+            )
+        };
+        if outer_clause.effect != outer_effect
+            || outer_clause.operation != outer_operation_index
+            || inner_clause.effect != inner_effect
+            || inner_clause.operation != inner_operation_index
+            || !is_once(outer_clause)
+            || !is_once(inner_clause)
+            || !outer_clause.patterns.iter().all(pattern_is_irrefutable)
+            || !inner_clause.patterns.iter().all(pattern_is_irrefutable)
+            || outer_clause.patterns.len() != outer_arguments.len()
+            || inner_clause.patterns.len() != inner_arguments.len()
+        {
+            return None;
+        }
+
+        let outer_payloads = outer_clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), *residual))
+            .collect::<Vec<_>>();
+        let inner_payloads = inner_clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), inner_operation))
+            .collect::<Vec<_>>();
+        let inner_result = self.alloc(
+            self.body.expression(inner_operation).ty.clone(),
+            inner_operation,
+        );
+        let outer_result = self.alloc(self.body.expression(*residual).ty.clone(), *residual);
+
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: outer_effect.definition,
+            effect_arguments: outer_effect.arguments.clone(),
+            operation: outer_operation_index,
+            payload_destinations: outer_payloads.clone(),
+            resume_type: self.body.expression(*residual).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(1),
+        });
+        entry.push(MirInstruction::InstallHandler {
+            effect: inner_effect.definition,
+            effect_arguments: inner_effect.arguments.clone(),
+            operation: inner_operation_index,
+            payload_destinations: inner_payloads.clone(),
+            resume_type: self.body.expression(inner_operation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(2),
+        });
+        let arguments = inner_arguments
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        entry.extend(std::mem::take(&mut self.instructions));
+        entry.push(MirInstruction::Perform {
+            dst: inner_result,
+            effect: inner_effect.definition,
+            effect_arguments: inner_effect.arguments,
+            operation: inner_operation_index,
+            arguments,
+        });
+        let previous_binding = self.named.insert(binding_name.clone(), inner_result);
+        let arguments = outer_arguments
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        entry.extend(std::mem::take(&mut self.instructions));
+        entry.push(MirInstruction::Perform {
+            dst: outer_result,
+            effect: outer_effect.definition,
+            effect_arguments: outer_effect.arguments,
+            operation: outer_operation_index,
+            arguments,
+        });
+        if let Some(previous) = previous_binding {
+            self.named.insert(binding_name, previous);
+        } else {
+            self.named.remove(&binding_name);
+        }
+        entry.push(MirInstruction::UninstallHandler);
+        entry.push(MirInstruction::UninstallHandler);
+
+        let base_named = self.named.clone();
+        let base_values = self.values.clone();
+        self.instructions = Vec::new();
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads)?;
+        let outer_value = self.direct_handler_clause_value(outer_clause)?;
+        self.instructions
+            .push(MirInstruction::Resume { value: outer_value });
+        let outer_instructions = std::mem::take(&mut self.instructions);
+
+        self.named = base_named.clone();
+        self.values = base_values.clone();
+        self.instructions = Vec::new();
+        self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads)?;
+        let inner_value = self.direct_handler_clause_value(inner_clause)?;
+        self.instructions
+            .push(MirInstruction::Resume { value: inner_value });
+        let inner_instructions = std::mem::take(&mut self.instructions);
+        self.named = base_named;
+        self.values = base_values;
+
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return {
+                        value: outer_result,
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: outer_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: inner_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
         })
     }
     /// Lower two lexically nested handlers around one direct operation. The

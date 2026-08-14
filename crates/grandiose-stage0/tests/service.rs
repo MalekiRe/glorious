@@ -2913,6 +2913,18 @@ fn service_preserves_residual_effects_through_an_aliased_resumption_snapshot() {
 }
 
 #[test]
+fn service_resumes_an_aliased_inner_snapshot_into_an_outer_effect_handler() {
+    // The inner `Ask` continuation retains `Log` as an outward effect. Its
+    // aliased snapshot must restore the inner frame before `Log` is
+    // dispatched to the enclosing handler; that outer resumption then
+    // restores the inner cleanup path before the result returns.
+    let source = "effect Ask { [1,1] ask() -> i64; } effect Log { [1,1] log(value: i64) -> i64; } pub fn main() -> i64 { handle { handle { let answer = Ask::ask(); Log::log(answer) } { Ask::ask() with k => { let saved = k; saved(41) } } } { Log::log(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_keeps_a_statement_handler_alias_closed_before_later_shadowing() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => { let saved = k; saved(41) } }; let saved = (value: i64) -> i64 { value + 1 }; saved(41) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

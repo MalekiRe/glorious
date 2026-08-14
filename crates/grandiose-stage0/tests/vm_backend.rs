@@ -2557,7 +2557,16 @@ fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
     let continuation = VmType::Callable {
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
-        effects: Box::<VmEffectRow>::default(),
+        // A residual effect row is legitimate for a captured continuation,
+        // but it is not a substitute for the verifier's frame provenance.
+        effects: Box::new(VmEffectRow {
+            effects: vec![grandiose_stage0::VmEffectInstance {
+                definition: effect,
+                arguments: vec![],
+            }],
+            projections: vec![],
+            tail: None,
+        }),
     };
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
