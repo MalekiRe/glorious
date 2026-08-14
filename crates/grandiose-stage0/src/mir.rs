@@ -9,7 +9,7 @@ use crate::{
     placeflow::PlaceFlow,
     types::Type,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MirLocal(pub u32);
@@ -468,18 +468,21 @@ pub struct MirOptimizationReport {
     pub constant_folds: u32,
     pub eliminated_branches: u32,
 }
-/// Deterministic local constant propagation over validated MIR.
+/// Deterministic sparse constant propagation over validated MIR.
 ///
 /// Arithmetic folds only use checked operations, so overflow and division by
-/// zero remain explicit VM traps. Transformations commit through `MirEditor`;
-/// failed validation restores the unmodified graph.
+/// zero remain explicit VM traps.  Facts cross only explicitly typed block
+/// arguments, and a join retains a fact only when every incoming edge proves
+/// the identical value. Transformations commit through `MirEditor`; failed
+/// validation restores the unmodified graph.
 pub fn optimize(function: MirFunction) -> Result<(MirFunction, MirOptimizationReport), String> {
     let mut editor = MirEditor::open(function)?;
     let mut report = MirOptimizationReport::default();
-    let block_count = editor.function.blocks.len();
-    for index in 0..block_count {
+    let entry_constants = block_entry_constants(&editor.function);
+    for (index, entry_constants) in entry_constants.into_iter().enumerate() {
         let block = editor.function.blocks[index].clone();
-        let (instructions, constants, folds) = fold_block(block.instructions);
+        let (instructions, constants, folds) =
+            fold_block(block.instructions, entry_constants.unwrap_or_default());
         report.constant_folds += folds;
         editor.replace_instructions(MirBlockId(index as u32), instructions)?;
         if let MirTerminator::SwitchBool {
@@ -509,15 +512,85 @@ pub fn optimize(function: MirFunction) -> Result<(MirFunction, MirOptimizationRe
     function.validate()?;
     Ok((function, report))
 }
-#[derive(Clone, Copy, Debug)]
+/// Compute the constants available at the entry to every reachable block.
+///
+/// MIR block parameters are the only phi representation. Consequently an
+/// edge contributes a fact solely when its argument is already constant; a
+/// merge is the intersection of those incoming facts. This deliberately
+/// avoids guessing through mutable storage, calls, effects, or handlers.
+fn block_entry_constants(function: &MirFunction) -> Vec<Option<BTreeMap<MirLocal, Constant>>> {
+    let mut entries = vec![None; function.blocks.len()];
+    let entry = function.entry.0 as usize;
+    entries[entry] = Some(BTreeMap::new());
+    let mut worklist = VecDeque::from([entry]);
+
+    while let Some(index) = worklist.pop_front() {
+        let Some(entry_facts) = entries[index].clone() else {
+            continue;
+        };
+        let block = &function.blocks[index];
+        let (_, exit_facts, _) = fold_block(block.instructions.clone(), entry_facts);
+        let mut propagate = |target: MirBlockId, arguments: &[MirLocal]| {
+            let target_index = target.0 as usize;
+            let incoming = function.blocks[target_index]
+                .parameters
+                .iter()
+                .zip(arguments)
+                .filter_map(|(&parameter, &argument)| {
+                    exit_facts
+                        .get(&argument)
+                        .copied()
+                        .map(|value| (parameter, value))
+                })
+                .collect::<BTreeMap<_, _>>();
+            if merge_constant_entry(&mut entries[target_index], incoming) {
+                worklist.push_back(target_index);
+            }
+        };
+        match &block.terminator {
+            MirTerminator::Goto { target, arguments } => propagate(*target, arguments),
+            MirTerminator::SwitchBool {
+                condition,
+                then_target,
+                then_arguments,
+                else_target,
+                else_arguments,
+            } => match exit_facts.get(condition) {
+                Some(Constant::Bool(true)) => propagate(*then_target, then_arguments),
+                Some(Constant::Bool(false)) => propagate(*else_target, else_arguments),
+                _ => {
+                    propagate(*then_target, then_arguments);
+                    propagate(*else_target, else_arguments);
+                }
+            },
+            MirTerminator::Return { .. } | MirTerminator::Unreachable => {}
+        }
+    }
+    entries
+}
+
+fn merge_constant_entry(
+    existing: &mut Option<BTreeMap<MirLocal, Constant>>,
+    incoming: BTreeMap<MirLocal, Constant>,
+) -> bool {
+    let Some(existing) = existing else {
+        *existing = Some(incoming);
+        return true;
+    };
+    let before = existing.clone();
+    existing.retain(|local, value| incoming.get(local) == Some(value));
+    *existing != before
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Constant {
     I64(i64),
     Bool(bool),
 }
 fn fold_block(
     instructions: Vec<MirInstruction>,
+    mut constants: BTreeMap<MirLocal, Constant>,
 ) -> (Vec<MirInstruction>, BTreeMap<MirLocal, Constant>, u32) {
-    let mut constants = BTreeMap::new();
     let mut output = Vec::with_capacity(instructions.len());
     let mut folds = 0;
     for original in instructions {

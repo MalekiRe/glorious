@@ -135,3 +135,134 @@ fn optimizer_folds_checked_scalar_constants_and_eliminates_known_branches() {
         MirInstruction::ConstI64 { value: 42, .. }
     ));
 }
+
+#[test]
+fn optimizer_propagates_constants_through_typed_block_arguments() {
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-cross-block-constants")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+        ],
+        result: i64_ty,
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 40,
+                }],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![MirLocal(0)],
+                },
+            },
+            MirBlock {
+                parameters: vec![MirLocal(1)],
+                instructions: vec![
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(2),
+                        value: 2,
+                    },
+                    MirInstruction::AddI64 {
+                        dst: MirLocal(3),
+                        left: MirLocal(1),
+                        right: MirLocal(2),
+                    },
+                ],
+                terminator: MirTerminator::Return { value: MirLocal(3) },
+            },
+        ],
+    };
+
+    let (optimized, report) = optimize_mir(function).unwrap();
+    assert_eq!(report.constant_folds, 1);
+    assert!(matches!(
+        optimized.blocks[1].instructions[1],
+        MirInstruction::ConstI64 { value: 42, .. }
+    ));
+}
+
+#[test]
+fn optimizer_requires_joined_block_arguments_to_agree() {
+    let bool_ty = Type::Scalar(ScalarType::Bool);
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        definition: DefKey(Digest::of_bytes(b"mir-constant-join")),
+        captures: 0,
+        parameters: vec![MirLocal(0)],
+        locals: vec![
+            local(bool_ty),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+        ],
+        result: i64_ty,
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::SwitchBool {
+                    condition: MirLocal(0),
+                    then_target: MirBlockId(1),
+                    then_arguments: vec![],
+                    else_target: MirBlockId(2),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(1),
+                    value: 40,
+                }],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(3),
+                    arguments: vec![MirLocal(1)],
+                },
+            },
+            MirBlock {
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(2),
+                    value: 41,
+                }],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(3),
+                    arguments: vec![MirLocal(2)],
+                },
+            },
+            MirBlock {
+                parameters: vec![MirLocal(3)],
+                instructions: vec![
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(4),
+                        value: 2,
+                    },
+                    MirInstruction::AddI64 {
+                        dst: MirLocal(5),
+                        left: MirLocal(3),
+                        right: MirLocal(4),
+                    },
+                ],
+                terminator: MirTerminator::Return { value: MirLocal(5) },
+            },
+        ],
+    };
+
+    let (optimized, report) = optimize_mir(function).unwrap();
+    assert_eq!(report.constant_folds, 0);
+    assert!(matches!(
+        optimized.blocks[3].instructions[1],
+        MirInstruction::AddI64 { .. }
+    ));
+}
