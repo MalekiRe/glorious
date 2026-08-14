@@ -64,7 +64,7 @@ fn typed_core_checks_a_function_body_against_its_declared_result() {
 #[test]
 fn typed_core_admits_calls_with_the_same_symbolic_effect_row_tail() {
     let package = PackageKey("core-symbolic-effect-tail@0.1.0".into());
-    let source = "pub fn forward<e: EffectRow>() -> i64 / { | e } { 0 } pub fn relay<e: EffectRow>() -> i64 / { | e } { forward() }";
+    let source = "pub fn forward<e: EffectRow>() -> i64 / { | e } { 0 } pub fn relay<T, e: EffectRow>(value: T) -> i64 / { | e } { forward() }";
     let file = FileKey::new(&package, "src/main.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);

@@ -3035,6 +3035,15 @@ impl Elaborator<'_> {
             }
         };
         let mut effects = effects;
+        // A callable's row binder is instantiated at this call site.  This
+        // compact frontend has no explicit row argument syntax, so the
+        // caller's declared residual is the contextual argument; a closed
+        // caller selects the empty residual.  This also keeps binder slot
+        // numbers local to their declarations rather than accidentally
+        // requiring a callee's `e` to share the caller's numeric index.
+        if matches!(effects.tail, Some(crate::EffectTail::Generic(_))) {
+            effects.tail = self.declared_effects.tail;
+        }
         if let Some(tail) = effects.tail
             && self.declared_effects.tail != Some(tail)
         {
