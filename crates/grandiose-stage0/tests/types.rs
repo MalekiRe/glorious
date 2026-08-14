@@ -119,6 +119,48 @@ fn effect_occurs_checks_follow_nested_callable_effect_rows() {
 }
 
 #[test]
+fn type_occurs_checks_follow_previously_bound_effect_tail_chains() {
+    let effect = DefKey(Digest::of_bytes(b"bound-effect-tail-occurs"));
+    let nominal = DefKey(Digest::of_bytes(b"bound-effect-tail-nominal"));
+    let mut inference = InferContext::default();
+    let type_variable = inference.fresh();
+    let Type::Infer(variable) = type_variable.clone() else {
+        unreachable!()
+    };
+    let open_effects = inference.fresh_effects();
+    let callable = |effects| Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![],
+        result: Box::new(Type::Unit),
+        effects,
+        invocation: Quantity::ONCE,
+    };
+
+    // First solve the row tail. The later type constraint can only discover
+    // its own variable by chasing this established effect-row binding.
+    let bound_row = EffectRow::closed_instances([EffectInstance {
+        definition: effect,
+        arguments: vec![GenericArgument::Type(Type::Infer(variable))],
+    }]);
+    inference
+        .unify(callable(open_effects.clone()), callable(bound_row))
+        .expect("the row tail may be bound before the type constraint arrives");
+
+    let type_that_reenters_the_bound_tail = Type::Nominal {
+        definition: nominal,
+        arguments: vec![GenericArgument::EffectRow(open_effects)],
+    };
+    assert!(matches!(
+        inference.unify(type_variable.clone(), type_that_reenters_the_bound_tail),
+        Err(TypeError::Occurs(_, _))
+    ));
+    assert!(matches!(
+        inference.zonk(type_variable),
+        Err(TypeError::Unresolved(_))
+    ));
+}
+
+#[test]
 fn callable_unification_requires_effect_and_invocation_agreement() {
     let callable = Type::Callable {
         lifetime_binders: 0,

@@ -1383,6 +1383,21 @@ impl InferContext {
     /// either.  Keep this traversal beside the ordinary occurs check so none
     /// of the mixed-kind generic slots becomes an unchecked back edge.
     fn effect_row_type_occurs(&mut self, variable: InferVar, effects: &EffectRow) -> bool {
+        let mut visited_tails = BTreeSet::new();
+        self.effect_row_type_occurs_in(variable, effects, &mut visited_tails)
+    }
+
+    /// Follow a solved row tail while checking a type occurrence.  A row
+    /// binding can itself contain a type argument, so treating a tail as an
+    /// opaque leaf would let `α = Nominal<{ | ε }>` escape after `ε` had
+    /// already been solved to a row containing `α`. The visited set makes
+    /// this defensive traversal total even for malformed imported state.
+    fn effect_row_type_occurs_in(
+        &mut self,
+        variable: InferVar,
+        effects: &EffectRow,
+        visited_tails: &mut BTreeSet<EffectVar>,
+    ) -> bool {
         effects.effects.iter().any(|effect| {
             effect
                 .arguments
@@ -1398,7 +1413,16 @@ impl InferContext {
                     .item_arguments
                     .iter()
                     .any(|argument| self.occurs(variable, argument))
-        })
+        }) || match effects.tail {
+            Some(EffectTail::Infer(tail)) if visited_tails.insert(tail) => self
+                .effect_bindings
+                .get(tail.0 as usize)
+                .and_then(|binding| binding.clone())
+                .is_some_and(|binding| {
+                    self.effect_row_type_occurs_in(variable, &binding, visited_tails)
+                }),
+            Some(EffectTail::Infer(_)) | Some(EffectTail::Generic(_)) | None => false,
+        }
     }
 }
 
