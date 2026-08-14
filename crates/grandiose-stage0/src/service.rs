@@ -14,11 +14,11 @@ use crate::{
     BodySyntax, BootstrapManifest, Budget, BudgetError, CancellationToken, CoherenceSet,
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
     DefinitionIndex, DependencyNode, DependencyTrace, DiagnosticClass, Digest, ElaboratedHeader,
-    ElaboratedInterface, EscapeFlow, FixityTable, InputError, InstanceGraph, InstanceKey,
-    InstanceLimits, InstanceRoot, MirFunction, MirLowering, MirProgram, ModuleGraph, ParsedHeader,
-    PlaceFlow, PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId,
-    Severity, SourceSpan, Span, TrustedRuntimeManifest, TypedBody, UseFlow, VerifiedVmProgram,
-    emit_vm_program, implementation_method_key, verify_vm_program,
+    ElaboratedInterface, EscapeFlow, FixityTable, GenericArgument, InputError, InstanceGraph,
+    InstanceKey, InstanceLimits, InstanceRoot, MirFunction, MirInstance, MirLowering, MirProgram,
+    ModuleGraph, ParsedHeader, PlaceFlow, PublicationGuard, RequestSession, RetentionReport,
+    RevisionError, RevisionId, Severity, SourceSpan, Span, TrustedRuntimeManifest, Type, TypedBody,
+    UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1181,6 +1181,14 @@ impl StageZeroCompiler {
                 }
             }
         }
+        let instances =
+            match materialize_concrete_instances(&mut functions, &instance_graph, &signatures) {
+                Ok(instances) => instances,
+                Err(message) => {
+                    diagnostics.push(CompileDiagnostic::invariant("G7032", message));
+                    BTreeMap::new()
+                }
+            };
         if !diagnostics.is_empty() {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         }
@@ -1213,9 +1221,15 @@ impl StageZeroCompiler {
                 instance_graph: Some(instance_graph),
             });
         }
+        let linked_functions = reachable_functions(&functions, entry);
+        let linked_instances = instances
+            .into_iter()
+            .filter(|(executable, _)| linked_functions.contains_key(executable))
+            .collect();
         let program = MirProgram {
             entry,
-            functions: reachable_functions(&functions, entry),
+            functions: linked_functions,
+            instances: linked_instances,
         };
         session.checkpoint(0)?;
         let mut candidate = emit_vm_program(&program).map_err(|error| {
@@ -1286,6 +1300,142 @@ impl StageZeroCompiler {
             bootstrap_manifest,
             instance_graph: Some(instance_graph),
         })
+    }
+}
+
+/// Materialize concrete direct-call instances into their own MIR products.
+/// The executable key is derived from the canonical `InstanceKey` digest, so
+/// `identity<i64>` and `identity<Text>` cannot alias merely because they
+/// share one source declaration key.
+fn materialize_concrete_instances(
+    functions: &mut BTreeMap<DefKey, MirFunction>,
+    graph: &InstanceGraph,
+    signatures: &ElaboratedInterface,
+) -> Result<BTreeMap<DefKey, MirInstance>, String> {
+    let mut instances = BTreeMap::new();
+    let mut targets = BTreeMap::new();
+    for key in graph
+        .ordered()
+        .into_iter()
+        .filter(|key| !key.arguments().is_empty())
+    {
+        let executable = DefKey(key.fingerprint());
+        if functions.contains_key(&executable) {
+            return Err(
+                "specialized instance identity collided with an existing MIR function".into(),
+            );
+        }
+        let base = functions
+            .get(&key.callable)
+            .cloned()
+            .ok_or_else(|| format!("instance body is unavailable for {:?}", key.callable))?;
+        let mut specialized = base;
+        specialized.definition = executable;
+        specialize_mir_local_types(&mut specialized, key.arguments());
+        targets.insert(key.clone(), executable);
+        instances.insert(executable, MirInstance { key, executable });
+        functions.insert(executable, specialized);
+    }
+    for function in functions.values_mut() {
+        for block in &mut function.blocks {
+            for instruction in &mut block.instructions {
+                let crate::MirInstruction::Call {
+                    callee,
+                    generic_arguments,
+                    ..
+                } = instruction
+                else {
+                    continue;
+                };
+                if generic_arguments.is_empty() {
+                    continue;
+                }
+                let Some(ElaboratedHeader::Callable(signature)) =
+                    signatures.definitions.get(callee)
+                else {
+                    return Err(format!(
+                        "generic direct call has no callable signature for {callee:?}"
+                    ));
+                };
+                let key = match InstanceKey::new(
+                    *callee,
+                    &signature.generic_kinds,
+                    generic_arguments.clone(),
+                ) {
+                    Ok(key) => key,
+                    Err(
+                        crate::InstanceKeyError::NonConcreteType { .. }
+                        | crate::InstanceKeyError::UnresolvedType { .. }
+                        | crate::InstanceKeyError::OpenEffectRow { .. }
+                        | crate::InstanceKeyError::NonConcreteLifetime { .. },
+                    ) => {
+                        // Generic templates keep the existing VM-generic
+                        // call path until an outer concrete instance fixes
+                        // their binders. This increment materializes only
+                        // closed direct-call substitutions.
+                        generic_arguments.clear();
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(format!("direct-call instance is not executable: {error:?}"));
+                    }
+                };
+                *callee = *targets.get(&key).ok_or_else(|| {
+                    format!("discovered direct-call instance was not materialized: {key:?}")
+                })?;
+                generic_arguments.clear();
+            }
+        }
+    }
+    Ok(instances)
+}
+
+/// Stage 0's first materializer specializes every local signature.  The
+/// general instruction-type substitution follows in the same product
+/// boundary; direct scalar calls already obtain fully concrete VM registers.
+fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericArgument]) {
+    for local in &mut function.locals {
+        local.ty = specialize_type(&local.ty, arguments);
+    }
+    function.result = specialize_type(&function.result, arguments);
+}
+
+fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
+    match value {
+        Type::Generic(slot) => arguments
+            .get(*slot as usize)
+            .and_then(|argument| match argument {
+                GenericArgument::Type(value) => Some(value.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| value.clone()),
+        Type::Tuple(fields) => Type::Tuple(
+            fields
+                .iter()
+                .map(|field| specialize_type(field, arguments))
+                .collect(),
+        ),
+        Type::Array(element) => Type::Array(Box::new(specialize_type(element, arguments))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability: *mutability,
+            lifetime: *lifetime,
+            referent: Box::new(specialize_type(referent, arguments)),
+        },
+        Type::Nominal {
+            definition,
+            arguments: fields,
+        } => Type::Nominal {
+            definition: *definition,
+            arguments: fields
+                .iter()
+                .map(|field| specialize_type(field, arguments))
+                .collect(),
+        },
+        value => value.clone(),
     }
 }
 

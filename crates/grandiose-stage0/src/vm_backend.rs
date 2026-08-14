@@ -3019,6 +3019,7 @@ fn lower_instruction(
             dst,
             callee,
             arguments,
+            ..
         } => VmInstruction::Call {
             dst: dst.0,
             callee: *callee,

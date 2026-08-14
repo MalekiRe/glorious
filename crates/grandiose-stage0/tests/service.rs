@@ -149,6 +149,25 @@ fn service_discovers_concrete_generic_direct_call_instances() {
 }
 
 #[test]
+fn service_executes_a_concrete_generic_mir_instance_through_vm_linking() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request(
+            "pub fn identity<T>(value: T) -> T { value } pub fn main() -> i64 { identity(42) }",
+        ))
+        .unwrap();
+    let artifact = outcome.artifact.expect("build must publish a VM program");
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert!(
+        outcome
+            .instance_graph
+            .expect("instance graph")
+            .ordered()
+            .iter()
+            .any(|instance| !instance.arguments().is_empty())
+    );
+}
+
+#[test]
 fn service_finalizes_main_as_a_closed_zero_argument_effect_boundary() {
     for (source, message) in [
         (

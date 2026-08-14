@@ -953,6 +953,7 @@ fn verified_stage_zero_vm_artifact_executes_lowered_mir() {
     let program = MirProgram {
         entry: definition.key,
         functions: BTreeMap::from([(definition.key, mir)]),
+        instances: BTreeMap::new(),
     };
     let candidate = emit_vm_program(&program).unwrap();
     let encoded = encode_program(&candidate);

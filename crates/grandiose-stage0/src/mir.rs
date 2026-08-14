@@ -7,8 +7,9 @@ use crate::{
         EnvironmentBrand, ResumptionId, TypedBody,
     },
     identity::{DefKey, Digest},
+    instance::InstanceKey,
     placeflow::PlaceFlow,
-    types::Type,
+    types::{GenericArgument, Type},
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -390,6 +391,9 @@ pub enum MirInstruction {
     Call {
         dst: MirLocal,
         callee: DefKey,
+        /// Preserved from Typed Core until the instance materializer replaces
+        /// the declaration key with a concrete executable identity.
+        generic_arguments: Vec<GenericArgument>,
         arguments: Vec<MirLocal>,
     },
     /// Materialize a lifted callable together with its ordered environment.
@@ -980,6 +984,16 @@ pub struct MirFunction {
 pub struct MirProgram {
     pub entry: DefKey,
     pub functions: BTreeMap<DefKey, MirFunction>,
+    /// Every generated key is traceable back to its canonical substitution.
+    /// Ordinary non-generic functions intentionally have no entry here.
+    pub instances: BTreeMap<DefKey, MirInstance>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirInstance {
+    pub key: InstanceKey,
+    /// VM-callable identity derived from `key`, never merely its declaration.
+    pub executable: DefKey,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirDiagnostic {
@@ -2121,10 +2135,25 @@ impl MirProgram {
         if !self.functions.contains_key(&self.entry) {
             return Err("MIR program entry is absent".into());
         }
+        for (executable, instance) in &self.instances {
+            if executable != &instance.executable || !self.functions.contains_key(executable) {
+                return Err("MIR instance product has no matching executable body".into());
+            }
+        }
         for function in self.functions.values() {
             function.validate()?;
             for block in &function.blocks {
                 for instruction in &block.instructions {
+                    if let MirInstruction::Call {
+                        generic_arguments, ..
+                    } = instruction
+                        && !generic_arguments.is_empty()
+                    {
+                        return Err(
+                            "MIR direct call retained an unmaterialized generic substitution"
+                                .into(),
+                        );
+                    }
                     if let MirInstruction::Call { callee, .. }
                     | MirInstruction::MakeCallable { callee, .. } = instruction
                         && !self.functions.contains_key(callee)
@@ -7792,6 +7821,7 @@ impl Lowerer<'_> {
                 self.instructions.push(MirInstruction::Call {
                     dst,
                     callee,
+                    generic_arguments: vec![],
                     arguments: vec![],
                 });
             }
@@ -8204,12 +8234,19 @@ impl Lowerer<'_> {
                     .collect::<Option<Vec<_>>>()?;
                 match self.body.expression(callee).kind.clone() {
                     CoreKind::Function {
-                        definition: callee, ..
-                    }
-                    | CoreKind::TraitMethod { method: callee, .. } => {
+                        definition: callee,
+                        arguments: generic_arguments,
+                    } => self.instructions.push(MirInstruction::Call {
+                        dst,
+                        callee,
+                        generic_arguments,
+                        arguments,
+                    }),
+                    CoreKind::TraitMethod { method: callee, .. } => {
                         self.instructions.push(MirInstruction::Call {
                             dst,
                             callee,
+                            generic_arguments: vec![],
                             arguments,
                         })
                     }
