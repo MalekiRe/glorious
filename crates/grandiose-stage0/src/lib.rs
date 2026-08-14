@@ -74,7 +74,7 @@ pub use pattern::{
     BinderKey, BindingMode, PatternBinding, PatternDecision, PatternDiagnostic, PatternElaboration,
     PatternPlan, elaborate_pattern,
 };
-pub use placeflow::{FlowDiagnostic, FlowEvent, FlowEventKind, LocalState, PlaceFlow};
+pub use placeflow::{FlowDiagnostic, FlowEvent, FlowEventKind, LoanFact, LocalState, PlaceFlow};
 pub use quantity::{Quantity, QuantityError};
 pub use request::{
     BootstrapLimits, BootstrapStage, CompilationMode, CompilationRequest, CompilerBuildIdentity,

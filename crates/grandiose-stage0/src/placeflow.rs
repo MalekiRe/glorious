@@ -4,7 +4,7 @@ use crate::{
     core::{CaptureMode, CoreId, CoreKind, CorePlace, TypedBody},
     source::Span,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A statically-selected subplace of one local.  PlaceFlow deliberately keeps
 /// dereferences out of this representation: their aliasing is not yet proven
@@ -27,6 +27,21 @@ impl Projection {
 struct ProjectionLoan {
     place: Projection,
     unique: bool,
+    /// The lexical reference binding that keeps this loan live. `None` is a
+    /// conservative temporary/capture loan whose lifetime has not yet been
+    /// made explicit in Typed Core.
+    owner: Option<String>,
+}
+
+/// A frozen ownership fact for a loan that is still live at the body exit.
+/// Unlike the compact [`LocalState`] summary this retains the exact projected
+/// place and, when available, the reference local that owns its region.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct LoanFact {
+    pub owner: Option<String>,
+    pub root: String,
+    pub fields: Vec<u32>,
+    pub unique: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -43,6 +58,7 @@ pub enum FlowEventKind {
     Move(String),
     BorrowShared(String),
     BorrowUnique(String),
+    EndBorrow(String),
     Assign(String),
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -59,6 +75,7 @@ pub struct FlowDiagnostic {
 #[derive(Clone, Debug, Default)]
 pub struct PlaceFlow {
     pub final_states: BTreeMap<String, LocalState>,
+    pub active_loans: Vec<LoanFact>,
     pub events: Vec<FlowEvent>,
     pub diagnostics: Vec<FlowDiagnostic>,
 }
@@ -74,10 +91,21 @@ impl PlaceFlow {
         for (name, _) in &body.parameters {
             a.states.insert(name.clone(), LocalState::Initialized);
         }
-        a.visit(body.root);
+        a.visit_with_live_after(body.root, &BTreeSet::new());
         a.diagnostics.sort_by_key(|d| d.span.start);
+        let active_loans = a
+            .projection_loans
+            .iter()
+            .map(|loan| LoanFact {
+                owner: loan.owner.clone(),
+                root: loan.place.root.clone(),
+                fields: loan.place.fields.clone(),
+                unique: loan.unique,
+            })
+            .collect();
         Self {
             final_states: a.states,
+            active_loans,
             events: a.events,
             diagnostics: a.diagnostics,
         }
@@ -86,14 +114,19 @@ impl PlaceFlow {
 struct Analyzer<'a> {
     body: &'a TypedBody,
     states: BTreeMap<String, LocalState>,
-    /// Loans of proper field projections.  Whole-local loans continue to use
-    /// `LocalState`, preserving the compact public final-state summary.
+    /// Every precise source loan, including a whole-local loan.  Whole-local
+    /// entries are mirrored in `states` for the legacy compact summary.
     projection_loans: Vec<ProjectionLoan>,
     events: Vec<FlowEvent>,
     diagnostics: Vec<FlowDiagnostic>,
 }
 impl Analyzer<'_> {
-    fn visit(&mut self, id: CoreId) {
+    /// Visit an expression while retaining only loans whose owner may be used
+    /// by the continuation.  This is the first NLL region domain: a `let r =
+    /// &place` loan lasts to the last value use of `r`, rather than to body
+    /// exit.  Dynamic handler exits receive the same continuation set and are
+    /// joined conservatively below.
+    fn visit_with_live_after(&mut self, id: CoreId, live_after: &BTreeSet<String>) {
         let e = self.body.expression(id).clone();
         match e.kind {
             CoreKind::Literal(_)
@@ -112,16 +145,25 @@ impl Analyzer<'_> {
             }
             CoreKind::Local(_) => self.read_place(id, e.span),
             CoreKind::Let { name, value } => {
-                self.visit(value);
+                if let CoreKind::Borrow { unique, value } = self.body.expression(value).kind.clone()
+                {
+                    // `name` owns the region instead of creating a forever
+                    // live temporary loan. Evaluate the borrowed place first;
+                    // its read remains subject to all pre-existing loans.
+                    self.visit_with_live_after(value, live_after);
+                    self.borrow_place(value, unique, e.span, Some(name.clone()));
+                } else {
+                    self.visit_with_live_after(value, live_after);
+                }
                 self.states.insert(name.clone(), LocalState::Initialized);
                 self.event(FlowEventKind::Initialize(name), e.span)
             }
             CoreKind::Assign { place, value } => {
-                self.visit(value);
+                self.visit_with_live_after(value, live_after);
                 self.assign_place(&place, e.span);
             }
             CoreKind::Move(v) => {
-                self.visit(v);
+                self.visit_with_live_after(v, live_after);
                 // A field is a place projection into its root local.  The
                 // current flow domain does not retain per-field move paths,
                 // so consuming a projection must conservatively consume the
@@ -129,33 +171,34 @@ impl Analyzer<'_> {
                 // invariant until partial-move states are represented.
                 self.move_place(v, e.span)
             }
-            CoreKind::Unary { value, .. } => self.visit(value),
+            CoreKind::Unary { value, .. } => self.visit_with_live_after(value, live_after),
             CoreKind::Borrow { unique, value } => {
-                self.visit(value);
+                self.visit_with_live_after(value, live_after);
                 // A field projection is still a borrow of storage owned by
                 // its root local.  Until PlaceFlow has projection-disjoint
                 // loans, retain a loan on that root rather than silently
                 // treating `&record.field` as a borrow of a temporary value.
                 // This is conservative, but prevents moving or overwriting
                 // the enclosing record while a reference into it is live.
-                self.borrow_place(value, unique, e.span)
+                self.borrow_place(value, unique, e.span, None)
             }
             CoreKind::Call { callee, arguments } => {
-                self.visit(callee);
-                for v in arguments {
-                    self.visit(v)
-                }
+                let mut values = vec![callee];
+                values.extend(arguments);
+                self.visit_sequence(&values, live_after);
             }
             CoreKind::Perform { arguments, .. } => {
-                for value in arguments {
-                    self.visit(value)
-                }
+                self.visit_sequence(&arguments, live_after);
             }
             CoreKind::Handle {
                 computation,
                 clauses,
             } => {
-                self.visit(computation);
+                let mut inside_handler = live_after.clone();
+                for clause in &clauses {
+                    self.collect_local_uses(clause.body, &mut inside_handler);
+                }
+                self.visit_with_live_after(computation, &inside_handler);
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
@@ -170,7 +213,7 @@ impl Analyzer<'_> {
                     {
                         self.states.insert(name, LocalState::Initialized);
                     }
-                    self.visit(clause.body);
+                    self.visit_with_live_after(clause.body, live_after);
                     exits.push((self.states.clone(), self.projection_loans.clone()));
                 }
                 if !exits.is_empty() {
@@ -187,7 +230,11 @@ impl Analyzer<'_> {
                 computation,
                 clauses,
             } => {
-                self.visit(computation);
+                let mut inside_completion = live_after.clone();
+                for clause in &clauses {
+                    self.collect_local_uses(clause.body, &mut inside_completion);
+                }
+                self.visit_with_live_after(computation, &inside_completion);
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
@@ -197,7 +244,7 @@ impl Analyzer<'_> {
                     for (name, _) in clause.bindings {
                         self.states.insert(name, LocalState::Initialized);
                     }
-                    self.visit(clause.body);
+                    self.visit_with_live_after(clause.body, live_after);
                     exits.push((self.states.clone(), self.projection_loans.clone()));
                 }
                 if !exits.is_empty() {
@@ -211,32 +258,162 @@ impl Analyzer<'_> {
                 }
             }
             CoreKind::Tuple(values) | CoreKind::Array(values) => {
-                for value in values {
-                    self.visit(value)
-                }
+                self.visit_sequence(&values, live_after);
             }
             CoreKind::Record { fields, .. } => {
-                for field in fields {
-                    self.visit(field)
-                }
+                self.visit_sequence(&fields, live_after);
             }
             CoreKind::Enum { fields, .. } => {
-                for field in fields {
-                    self.visit(field)
-                }
+                self.visit_sequence(&fields, live_after);
             }
             CoreKind::Field { .. } => self.read_place(id, e.span),
-            CoreKind::PatternTest { subject, .. } => self.visit(subject),
-            CoreKind::Binary { left, right, .. } => {
-                self.visit(left);
-                self.visit(right)
+            CoreKind::PatternTest { subject, .. } => {
+                self.visit_with_live_after(subject, live_after)
             }
-            CoreKind::Block(v) => {
-                for x in v {
-                    self.visit(x)
+            CoreKind::Binary { left, right, .. } => {
+                self.visit_sequence(&[left, right], live_after);
+            }
+            CoreKind::Block(values) => self.visit_sequence(&values, live_after),
+        }
+        self.release_dead_loans(live_after, e.span);
+    }
+
+    fn visit_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) {
+        let mut suffixes = vec![live_after.clone(); values.len()];
+        let mut future = live_after.clone();
+        for (index, value) in values.iter().enumerate().rev() {
+            suffixes[index] = future.clone();
+            self.collect_local_uses(*value, &mut future);
+        }
+        for (value, future) in values.iter().zip(suffixes) {
+            self.visit_with_live_after(*value, &future);
+        }
+    }
+
+    /// Source-free local-use collection over Typed Core. Names are deliberately
+    /// collected conservatively across shadowing: retaining a loan too long is
+    /// safe, whereas releasing it before a shadow-sensitive use would not be.
+    fn collect_local_uses(&self, id: CoreId, uses: &mut BTreeSet<String>) {
+        match &self.body.expression(id).kind {
+            CoreKind::Local(name) => {
+                uses.insert(name.clone());
+            }
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
+                for value in values {
+                    self.collect_local_uses(*value, uses);
                 }
             }
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+                for field in fields {
+                    self.collect_local_uses(*field, uses);
+                }
+            }
+            CoreKind::Field { base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Move(base)
+            | CoreKind::Unary { value: base, .. }
+            | CoreKind::PatternTest { subject: base, .. } => self.collect_local_uses(*base, uses),
+            CoreKind::Let { value, .. } => self.collect_local_uses(*value, uses),
+            CoreKind::Assign { value, .. } => self.collect_local_uses(*value, uses),
+            CoreKind::Call { callee, arguments } => {
+                self.collect_local_uses(*callee, uses);
+                for argument in arguments {
+                    self.collect_local_uses(*argument, uses);
+                }
+            }
+            CoreKind::Perform { arguments, .. } => {
+                for argument in arguments {
+                    self.collect_local_uses(*argument, uses);
+                }
+            }
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => {
+                self.collect_local_uses(*computation, uses);
+                for clause in clauses {
+                    self.collect_local_uses(clause.body, uses);
+                }
+            }
+            CoreKind::Completion {
+                computation,
+                clauses,
+            } => {
+                self.collect_local_uses(*computation, uses);
+                for clause in clauses {
+                    self.collect_local_uses(clause.body, uses);
+                }
+            }
+            CoreKind::Binary { left, right, .. } => {
+                self.collect_local_uses(*left, uses);
+                self.collect_local_uses(*right, uses);
+            }
+            CoreKind::Closure { .. }
+            | CoreKind::Literal(_)
+            | CoreKind::Function(_)
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant(_)
+            | CoreKind::Error => {}
         }
+    }
+
+    fn release_dead_loans(&mut self, live_after: &BTreeSet<String>, span: Span) {
+        let dead = self
+            .projection_loans
+            .iter()
+            .filter_map(|loan| loan.owner.as_ref())
+            .filter(|owner| !live_after.contains(*owner))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for owner in dead {
+            self.release_owner_loans(&owner, span);
+        }
+    }
+
+    fn release_owner_loans(&mut self, owner: &str, span: Span) {
+        let removed = self
+            .projection_loans
+            .iter()
+            .filter(|loan| loan.owner.as_deref() == Some(owner))
+            .cloned()
+            .collect::<Vec<_>>();
+        if removed.is_empty() {
+            return;
+        }
+        self.projection_loans
+            .retain(|loan| loan.owner.as_deref() != Some(owner));
+        for loan in removed.iter().filter(|loan| loan.place.fields.is_empty()) {
+            let remaining_shared = self
+                .projection_loans
+                .iter()
+                .filter(|other| other.place == loan.place && !other.unique)
+                .count() as u32;
+            let remaining_unique = self
+                .projection_loans
+                .iter()
+                .any(|other| other.place == loan.place && other.unique);
+            let state = self.states.get(&loan.place.root).copied();
+            match (state, loan.unique, remaining_unique) {
+                (Some(LocalState::UniquelyBorrowed), true, false) => {
+                    self.states
+                        .insert(loan.place.root.clone(), LocalState::Initialized);
+                }
+                (Some(LocalState::SharedBorrowed(count)), false, false) => {
+                    let retained_untracked = count.saturating_sub(1 + remaining_shared);
+                    let total = retained_untracked + remaining_shared;
+                    self.states.insert(
+                        loan.place.root.clone(),
+                        if total == 0 {
+                            LocalState::Initialized
+                        } else {
+                            LocalState::SharedBorrowed(total)
+                        },
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.event(FlowEventKind::EndBorrow(owner.into()), span);
     }
     fn read(&mut self, n: &str, s: Span) {
         match self.states.get(n) {
@@ -368,7 +545,7 @@ impl Analyzer<'_> {
         self.move_(&place.root, span);
     }
 
-    fn borrow_place(&mut self, id: CoreId, unique: bool, span: Span) {
+    fn borrow_place(&mut self, id: CoreId, unique: bool, span: Span, owner: Option<String>) {
         let Some(place) = self.projection(id) else {
             return;
         };
@@ -386,6 +563,16 @@ impl Analyzer<'_> {
         }
         if place.fields.is_empty() {
             self.borrow(&place.root, unique, span);
+            // Keep a precise whole-place fact only for a lexical reference
+            // loan. Legacy temporary/capture loans remain represented solely
+            // by LocalState until their Core lifetime is explicit.
+            if owner.is_some() {
+                self.projection_loans.push(ProjectionLoan {
+                    place,
+                    unique,
+                    owner,
+                });
+            }
             return;
         }
         match self.states.get(&place.root) {
@@ -415,7 +602,11 @@ impl Analyzer<'_> {
                 return;
             }
         }
-        self.projection_loans.push(ProjectionLoan { place, unique });
+        self.projection_loans.push(ProjectionLoan {
+            place,
+            unique,
+            owner,
+        });
         self.event(
             if unique {
                 FlowEventKind::BorrowUnique(self.root_name(id))

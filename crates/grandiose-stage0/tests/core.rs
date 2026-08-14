@@ -321,7 +321,7 @@ fn placeflow_rejects_use_after_move_from_typed_core() {
 #[test]
 fn placeflow_rejects_read_while_a_unique_borrow_is_live() {
     let package = PackageKey("core-unique-borrow-read@0.1.0".into());
-    let source = "pub fn main() -> i64 { let value = 1; let loan = &mut value; value }";
+    let source = "pub fn main() -> i64 { let value = 1; let loan = &mut value; value; loan; 0 }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -350,9 +350,9 @@ fn placeflow_rejects_read_while_a_unique_borrow_is_live() {
 }
 
 #[test]
-fn placeflow_tracks_a_field_borrow_back_to_its_root_local() {
+fn placeflow_tracks_a_live_field_borrow_back_to_its_root_local() {
     let package = PackageKey("core-projection-borrow@0.1.0".into());
-    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; move pair; 0 }";
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; move pair; loan; 0 }";
     let file = FileKey::new(
         &package,
         LogicalPath::parse("src/main.glorious").unwrap().as_str(),
@@ -386,14 +386,14 @@ fn placeflow_tracks_a_field_borrow_back_to_its_root_local() {
 
 #[test]
 fn placeflow_allows_disjoint_field_access_while_a_projection_loan_is_live() {
-    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.right = 3; pair.right }";
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.right = 3; loan; pair.right }";
     let flow = flow_for("core-projection-disjoint@0.1.0", source);
     assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
 }
 
 #[test]
 fn placeflow_rejects_accesses_that_overlap_a_projection_loan() {
-    let unique_read = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.left }";
+    let unique_read = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &mut pair.left; pair.left; loan; 0 }";
     let flow = flow_for("core-projection-unique-read@0.1.0", unique_read);
     assert!(
         flow.diagnostics
@@ -403,7 +403,7 @@ fn placeflow_rejects_accesses_that_overlap_a_projection_loan() {
         flow.diagnostics
     );
 
-    let shared_write = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; pair.left = 3; pair.right }";
+    let shared_write = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; pair.left = 3; loan; pair.right }";
     let flow = flow_for("core-projection-shared-write@0.1.0", shared_write);
     assert!(
         flow.diagnostics
@@ -413,7 +413,7 @@ fn placeflow_rejects_accesses_that_overlap_a_projection_loan() {
         flow.diagnostics
     );
 
-    let whole_unique = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; let whole = &mut pair; 0 }";
+    let whole_unique = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; let whole = &mut pair; loan; 0 }";
     let flow = flow_for("core-projection-whole-conflict@0.1.0", whole_unique);
     assert!(
         flow.diagnostics
@@ -422,6 +422,52 @@ fn placeflow_rejects_accesses_that_overlap_a_projection_loan() {
         "a whole unique loan must conflict with a live field loan: {:#?}",
         flow.diagnostics
     );
+}
+
+#[test]
+fn placeflow_ends_a_named_loan_after_its_last_use() {
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.left; move pair; 0 }";
+    let flow = flow_for("core-nll-last-use@0.1.0", source);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert!(flow.active_loans.is_empty(), "{:#?}", flow.active_loans);
+    assert!(flow.events.iter().any(|event| matches!(
+        event.kind,
+        grandiose_stage0::FlowEventKind::EndBorrow(ref owner) if owner == "loan"
+    )));
+}
+
+#[test]
+fn placeflow_keeps_a_named_unique_loan_live_through_handler_control_flow() {
+    let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let value = 1; let loan = &mut value; handle Tick::tick() { Tick::tick() => { value; loan; 0 } }; 0 }";
+    let flow = flow_for("core-nll-handler-live@0.1.0", source);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5008"),
+        "a handler arm must observe an outer loan that remains live through its final reference: {:#?}",
+        flow.diagnostics
+    );
+}
+
+#[test]
+fn placeflow_propagates_live_loans_across_dynamic_handler_exits() {
+    let source = "effect Tick { tick() -> i64; } pub fn main() -> i64 { let value = 1; let loan = &mut value; handle Tick::tick() { Tick::tick() => 0 }; value; loan; 0 }";
+    let flow = flow_for("core-nll-handler-exit@0.1.0", source);
+    assert!(
+        flow.diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5008"),
+        "a loan live after a dynamically selected handler must still exclude the root: {:#?}",
+        flow.diagnostics
+    );
+}
+
+#[test]
+fn placeflow_releases_a_named_loan_after_a_nested_block_last_use() {
+    let source =
+        "pub fn main() -> i64 { let value = 1; let loan = &mut value; { loan; 0 }; value }";
+    let flow = flow_for("core-nll-nested-last-use@0.1.0", source);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
 }
 
 #[test]
