@@ -2,10 +2,9 @@ use grandiose_stage0::{
     BodySyntax, CallableBrand, CallableId, CaptureEnvironment, CaptureMode, CapturePostState,
     ClosureCapture, CoreExpr, CoreHandlerResumption, CoreId, CoreKind, CorePlace, DeclarationScan,
     DefKey, DefinitionIndex, Digest, EffectRow, ElaboratedInterface, EnvironmentBrand, EscapeFlow,
-    FileKey,
-    FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime, LogicalPath,
-    MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity, ScalarType, Span,
-    Type, TypedBody, implementation_method_key,
+    FileKey, FlowEventKind, GenericArgument, InferVar, InterfaceSet, LexedFile, Lifetime,
+    LogicalPath, MirInstruction, MirLowering, MirPattern, PackageKey, PlaceFlow, Quantity,
+    ScalarType, Span, Type, TypedBody, implementation_method_key,
 };
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
