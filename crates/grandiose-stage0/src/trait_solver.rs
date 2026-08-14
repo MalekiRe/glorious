@@ -31,6 +31,23 @@ pub enum TraitAnswer {
     Overflow,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TraitCandidateExplanation {
+    Applicable {
+        implementation: DefKey,
+        negative: bool,
+    },
+    Rejected {
+        implementation: DefKey,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraitSelectionExplanation {
+    pub answer: TraitAnswer,
+    pub candidates: Vec<TraitCandidateExplanation>,
+}
+
 /// The result of normalizing a zero-arity associated type through selected
 /// trait evidence.  This deliberately mirrors [`TraitAnswer`] rather than
 /// hiding failed selection behind an error type: callers need to distinguish a
@@ -215,6 +232,30 @@ impl TraitSolver {
 
     pub fn solve(&mut self, goal: TraitGoal) -> TraitAnswer {
         self.solve_at(goal, 0).into()
+    }
+
+    /// Inspect deterministic candidate shape alongside the ordinary tabled
+    /// answer. This is diagnostic evidence only and never influences tables.
+    pub fn explain(&mut self, goal: TraitGoal) -> TraitSelectionExplanation {
+        let candidates = self
+            .rules
+            .iter()
+            .filter(|rule| rule.implementation.relation.definition == goal.relation.definition)
+            .map(|rule| {
+                if match_rule(&rule.implementation, &goal).is_some() {
+                    TraitCandidateExplanation::Applicable {
+                        implementation: rule.definition,
+                        negative: rule.implementation.negative,
+                    }
+                } else {
+                    TraitCandidateExplanation::Rejected {
+                        implementation: rule.definition,
+                    }
+                }
+            })
+            .collect();
+        let answer = self.solve(goal);
+        TraitSelectionExplanation { answer, candidates }
     }
 
     /// Select an implementation for `goal` and normalize one of its
