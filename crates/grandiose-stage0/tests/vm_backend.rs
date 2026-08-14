@@ -2588,3 +2588,48 @@ fn leave_from_a_handler_clause_abandons_its_suspended_continuation() {
     program.fingerprint = program.computed_fingerprint();
     assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 42);
 }
+
+#[test]
+fn cleanup_leave_program_artifacts_are_insertion_order_deterministic() {
+    let entry = DefKey(Digest::of_bytes(b"deterministic-leave-entry"));
+    let helper = DefKey(Digest::of_bytes(b"deterministic-leave-helper"));
+    let leave = cleanup_carrying_leave_entry(entry, VmInstruction::ConstI64 { dst: 0, value: 42 });
+    let helper = VmFunction {
+        definition: helper,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 1 },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut first_functions = BTreeMap::new();
+    first_functions.insert(entry, leave.clone());
+    first_functions.insert(helper.definition, helper.clone());
+    let mut second_functions = BTreeMap::new();
+    second_functions.insert(helper.definition, helper);
+    second_functions.insert(entry, leave);
+    let build = |functions| {
+        let mut program = CandidateVmProgram {
+            schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+            runtime_manifest: None,
+            entry,
+            functions,
+            fingerprint: Digest::of_bytes(b"deterministic-leave-seed"),
+        };
+        program.fingerprint = program.computed_fingerprint();
+        program
+    };
+    let first = build(first_functions);
+    let second = build(second_functions);
+    assert_eq!(first.fingerprint, second.fingerprint);
+    assert_eq!(encode_program(&first), encode_program(&second));
+    assert_eq!(
+        decode_and_verify_program(&encode_program(&first))
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
