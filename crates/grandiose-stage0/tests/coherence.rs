@@ -112,6 +112,42 @@ fn coherence_counts_lifetime_binders_used_by_negative_impl_heads() {
 }
 
 #[test]
+fn coherence_rejects_overlapping_generic_higher_ranked_callable_heads() {
+    // The source headers look distinct after alpha-canonicalization, but
+    // both implementations accept the `i64` HRTB callable witness.  This
+    // reaches the second (frozen-signature) coherence pass, where callable
+    // fields and their De Bruijn lifetimes must be unified structurally.
+    let coherence = collect(
+        "trait Marker {} impl<T> Marker for for<'a> (&'a T) -> &'a T {} impl Marker for for<'b> (&'b i64) -> &'b i64 {}",
+    );
+    assert!(
+        coherence
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3404"),
+        "generic higher-ranked heads must not bypass frozen coherence: {coherence:#?}"
+    );
+}
+
+#[test]
+fn coherence_rejects_higher_ranked_heads_with_associated_type_arguments() {
+    // This also exercises structural projection arguments under the HRTB
+    // binder.  A forged/erased callable comparison would miss the `T = i64`
+    // witness even though the trait projection carries the same frozen item
+    // generic-kind ABI in both heads.
+    let coherence = collect(
+        "trait Apply { type Output<T>; } trait Marker {} impl<T> Marker for for<'a> (&'a <i64 as Apply>::Output<T>) -> &'a <i64 as Apply>::Output<T> {} impl Marker for for<'b> (&'b <i64 as Apply>::Output<i64>) -> &'b <i64 as Apply>::Output<i64> {}",
+    );
+    assert!(
+        coherence
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3404"),
+        "associated item arguments under HRTB must retain overlap identity: {coherence:#?}"
+    );
+}
+
+#[test]
 fn coherence_uses_solver_satisfiability_for_where_bound_overlap() {
     let disjoint = collect(
         "trait Left {} trait Right {} trait Render {} impl Left for i64 {} impl Right for Text {} impl<T> Render for T where T: Left {} impl<T> Render for T where T: Right {}",

@@ -389,38 +389,6 @@ fn collect_generic_argument_names(
     }
 }
 
-fn heads_may_unify(left: &ImplHead, right: &ImplHead) -> bool {
-    if left.trait_arguments.len() != right.trait_arguments.len() {
-        return false;
-    }
-    let left_generics = left.generics.clone();
-    let right_generics = right.generics.clone();
-    let left_effect_row_generics = left.effect_row_generics.clone();
-    let right_effect_row_generics = right.effect_row_generics.clone();
-    let mut bindings = Bindings::default();
-    unify_type(
-        &left.self_ty,
-        &right.self_ty,
-        &left_generics,
-        &right_generics,
-        &mut bindings,
-    ) && left
-        .trait_arguments
-        .iter()
-        .zip(&right.trait_arguments)
-        .all(|(left, right)| {
-            unify_generic_argument(
-                left,
-                right,
-                &left_generics,
-                &right_generics,
-                &left_effect_row_generics,
-                &right_effect_row_generics,
-                &mut bindings,
-            )
-        })
-}
-
 /// Decide overlap from a canonical common head and the satisfiability of the
 /// two implementations' combined bounds.  Head unification alone is too
 /// coarse: `impl<T> Display for T where T: Left` and the corresponding
@@ -432,9 +400,6 @@ fn implementations_may_overlap(
     right_head: &ImplHead,
     signatures: &ElaboratedInterface,
 ) -> bool {
-    if !heads_may_unify(left_head, right_head) {
-        return false;
-    }
     let Some(ElaboratedHeader::Implementation(left)) =
         signatures.definitions.get(&left_head.definition)
     else {
@@ -495,7 +460,7 @@ fn implementations_may_overlap(
         && witness.relation.definition == left.relation.definition
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct OverlapBindings {
     types: BTreeMap<u32, Type>,
     lifetimes: BTreeMap<u32, crate::Lifetime>,
@@ -574,7 +539,131 @@ fn unify_overlap_effect_row(
     if let Some(index) = pure_generic_effect_row(right) {
         return bind_overlap_effect_row(index, left, bindings);
     }
-    (left == right).then(|| left.clone())
+    if left.effects.len() != right.effects.len()
+        || left.projections.len() != right.projections.len()
+    {
+        return None;
+    }
+    // A failed match must not leak its partial bindings into another type or
+    // projection candidate.  Publish this row's bindings only as one unit.
+    let mut row_bindings = bindings.clone();
+
+    // Effect rows are sets, so their canonical ordering must not turn a
+    // generic argument in one implementation head into accidental evidence
+    // that two otherwise equal rows are disjoint.  Keep the matching
+    // transactional: a failed candidate must not publish any of its generic
+    // bindings into the next candidate.
+    let mut unmatched = right.effects.iter().cloned().collect::<Vec<_>>();
+    let mut effects = BTreeSet::new();
+    for left_effect in &left.effects {
+        let mut selected = None;
+        for (index, right_effect) in unmatched.iter().enumerate() {
+            if left_effect.definition != right_effect.definition
+                || left_effect.arguments.len() != right_effect.arguments.len()
+            {
+                continue;
+            }
+            let mut trial = row_bindings.clone();
+            let Some(arguments) = left_effect
+                .arguments
+                .iter()
+                .zip(&right_effect.arguments)
+                .map(|(left, right)| unify_overlap_argument(left, right, &mut trial))
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            selected = Some((index, trial, arguments));
+            break;
+        }
+        let (index, trial, arguments) = selected?;
+        row_bindings = trial;
+        unmatched.remove(index);
+        effects.insert(crate::EffectInstance {
+            definition: left_effect.definition,
+            arguments,
+        });
+    }
+
+    let mut projections = Vec::with_capacity(left.projections.len());
+    for (left_projection, right_projection) in left.projections.iter().zip(&right.projections) {
+        if left_projection.trait_definition != right_projection.trait_definition
+            || left_projection.name != right_projection.name
+            || left_projection.item_generic_kinds != right_projection.item_generic_kinds
+            || left_projection.trait_arguments.len() != right_projection.trait_arguments.len()
+            || left_projection.item_arguments.len() != right_projection.item_arguments.len()
+        {
+            return None;
+        }
+        projections.push(crate::EffectRowProjection {
+            subject: Box::new(unify_overlap_type(
+                &left_projection.subject,
+                &right_projection.subject,
+                &mut row_bindings,
+            )?),
+            trait_definition: left_projection.trait_definition,
+            trait_arguments: left_projection
+                .trait_arguments
+                .iter()
+                .zip(&right_projection.trait_arguments)
+                .map(|(left, right)| unify_overlap_argument(left, right, &mut row_bindings))
+                .collect::<Option<Vec<_>>>()?,
+            name: left_projection.name.clone(),
+            item_generic_kinds: left_projection.item_generic_kinds.clone(),
+            item_arguments: left_projection
+                .item_arguments
+                .iter()
+                .zip(&right_projection.item_arguments)
+                .map(|(left, right)| unify_overlap_argument(left, right, &mut row_bindings))
+                .collect::<Option<Vec<_>>>()?,
+        });
+    }
+    let tail = unify_overlap_effect_tail(left.tail, right.tail, &mut row_bindings)?;
+    let result = crate::EffectRow {
+        effects,
+        projections,
+        tail,
+    }
+    .canonicalized();
+    *bindings = row_bindings;
+    Some(result)
+}
+
+/// Unify the residual of two already-aligned effect rows.  A declaration row
+/// variable denotes an arbitrary residual, so `{Trace | e}` and
+/// `{Trace | f}` overlap even when `e` and `f` occupy distinct implementation
+/// binder slots.  Record the smallest witness (`e = f`), represented as a
+/// pure row, rather than treating slot identity as semantic evidence of
+/// disjointness.
+fn unify_overlap_effect_tail(
+    left: Option<crate::EffectTail>,
+    right: Option<crate::EffectTail>,
+    bindings: &mut OverlapBindings,
+) -> Option<Option<crate::EffectTail>> {
+    match (left, right) {
+        (left, right) if left == right => Some(left),
+        (Some(crate::EffectTail::Generic(left)), Some(crate::EffectTail::Generic(right))) => {
+            let row = crate::EffectRow {
+                effects: BTreeSet::new(),
+                projections: vec![],
+                tail: Some(crate::EffectTail::Generic(right)),
+            };
+            bind_overlap_effect_row(left, &row, bindings)?;
+            Some(Some(crate::EffectTail::Generic(right)))
+        }
+        (Some(crate::EffectTail::Generic(index)), None) => {
+            bind_overlap_effect_row(index, &crate::EffectRow::empty(), bindings)?;
+            Some(None)
+        }
+        (None, Some(crate::EffectTail::Generic(index))) => {
+            bind_overlap_effect_row(index, &crate::EffectRow::empty(), bindings)?;
+            Some(None)
+        }
+        // Body-local inference tails cannot appear in a frozen interface;
+        // retaining this conservative arm prevents malformed fixtures from
+        // manufacturing an overlap proof.
+        _ => None,
+    }
 }
 
 fn pure_generic_effect_row(value: &crate::EffectRow) -> Option<u32> {
@@ -651,13 +740,48 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
                 lifetime: right_lifetime,
                 referent: right_referent,
             },
-        ) if left_mutability == right_mutability && left_lifetime == right_lifetime => {
+        ) if left_mutability == right_mutability => {
+            let lifetime = unify_overlap_lifetime(*left_lifetime, *right_lifetime, bindings)?;
             unify_overlap_type(left_referent, right_referent, bindings).map(|referent| {
                 Type::Reference {
                     mutability: *left_mutability,
-                    lifetime: *left_lifetime,
+                    lifetime,
                     referent: Box::new(referent),
                 }
+            })
+        }
+        (
+            Type::Callable {
+                lifetime_binders: left_binders,
+                parameters: left_parameters,
+                result: left_result,
+                effects: left_effects,
+                invocation: left_invocation,
+            },
+            Type::Callable {
+                lifetime_binders: right_binders,
+                parameters: right_parameters,
+                result: right_result,
+                effects: right_effects,
+                invocation: right_invocation,
+            },
+        ) if left_binders == right_binders
+            && left_parameters.len() == right_parameters.len()
+            && left_invocation == right_invocation =>
+        {
+            let parameters = left_parameters
+                .iter()
+                .zip(right_parameters)
+                .map(|(left, right)| unify_overlap_type(left, right, bindings))
+                .collect::<Option<Vec<_>>>()?;
+            let result = unify_overlap_type(left_result, right_result, bindings)?;
+            let effects = unify_overlap_effect_row(left_effects, right_effects, bindings)?;
+            Some(Type::Callable {
+                lifetime_binders: *left_binders,
+                parameters,
+                result: Box::new(result),
+                effects,
+                invocation: *left_invocation,
             })
         }
         (
@@ -705,6 +829,45 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
         }
         (left, right) if left == right => Some(left.clone()),
         _ => None,
+    }
+}
+
+/// Bound lifetimes are already alpha-canonical (De Bruijn depth/index), so
+/// they are rigid while comparing two HRTB heads.  Declaration-generic
+/// lifetimes, in contrast, are existential variables of an implementation
+/// head and must participate in the same overlap witness as generic types.
+fn unify_overlap_lifetime(
+    left: crate::Lifetime,
+    right: crate::Lifetime,
+    bindings: &mut OverlapBindings,
+) -> Option<crate::Lifetime> {
+    match (left, right) {
+        (crate::Lifetime::Generic(left), crate::Lifetime::Generic(right)) if left == right => {
+            Some(crate::Lifetime::Generic(left))
+        }
+        (crate::Lifetime::Generic(index), value) => {
+            bind_overlap_lifetime_value(index, value, bindings)
+        }
+        (value, crate::Lifetime::Generic(index)) => {
+            bind_overlap_lifetime_value(index, value, bindings)
+        }
+        (left, right) if left == right => Some(left),
+        _ => None,
+    }
+}
+
+fn bind_overlap_lifetime_value(
+    index: u32,
+    value: crate::Lifetime,
+    bindings: &mut OverlapBindings,
+) -> Option<crate::Lifetime> {
+    match bindings.lifetimes.get(&index) {
+        Some(previous) if *previous != value => None,
+        Some(previous) => Some(*previous),
+        None => {
+            bindings.lifetimes.insert(index, value);
+            Some(value)
+        }
     }
 }
 
@@ -1115,204 +1278,92 @@ fn rebase_overlap_effect_row(value: &crate::EffectRow, offset: u32) -> crate::Ef
     .canonicalized()
 }
 
-fn unify_generic_argument(
-    left: &HeaderGenericArgument,
-    right: &HeaderGenericArgument,
-    left_generics: &BTreeSet<String>,
-    right_generics: &BTreeSet<String>,
-    left_effect_row_generics: &BTreeSet<String>,
-    right_effect_row_generics: &BTreeSet<String>,
-    bindings: &mut Bindings,
-) -> bool {
-    match (left, right) {
-        (HeaderGenericArgument::Type(left), HeaderGenericArgument::Type(right)) => {
-            unify_type(left, right, left_generics, right_generics, bindings)
-        }
-        (HeaderGenericArgument::Lifetime(left), HeaderGenericArgument::Lifetime(right)) => {
-            left == right || left_generics.contains(left) || right_generics.contains(right)
-        }
-        (HeaderGenericArgument::EffectRow(left), HeaderGenericArgument::EffectRow(right)) => {
-            left == right
-        }
-        (
-            HeaderGenericArgument::Type(HeaderType::Path(path)),
-            HeaderGenericArgument::EffectRow(_),
-        ) if path.len() == 1 && left_effect_row_generics.contains(&path[0]) => true,
-        (
-            HeaderGenericArgument::EffectRow(_),
-            HeaderGenericArgument::Type(HeaderType::Path(path)),
-        ) if path.len() == 1 && right_effect_row_generics.contains(&path[0]) => true,
-        (HeaderGenericArgument::U32(left), HeaderGenericArgument::U32(right)) => left == right,
-        (HeaderGenericArgument::Quantity(left), HeaderGenericArgument::Quantity(right)) => {
-            left == right
-        }
-        _ => false,
+#[cfg(test)]
+mod frozen_overlap_tests {
+    use std::collections::BTreeSet;
+
+    use super::{OverlapBindings, unify_overlap_type};
+    use crate::{
+        EffectInstance, EffectRow, EffectTail, GenericArgument, Lifetime, Mutability, Quantity,
+        ScalarType, Type,
+        identity::{DefKey, Digest},
+    };
+
+    fn trace() -> DefKey {
+        DefKey(Digest::of_bytes(b"coherence-frozen-hrtb-trace"))
     }
-}
 
-#[derive(Default)]
-struct Bindings {
-    left: BTreeMap<String, HeaderType>,
-    right: BTreeMap<String, HeaderType>,
-}
+    fn higher_ranked(referent: Type, tail: u32) -> Type {
+        Type::Callable {
+            lifetime_binders: 1,
+            parameters: vec![Type::Reference {
+                mutability: Mutability::Shared,
+                lifetime: Lifetime::Bound { depth: 0, index: 0 },
+                referent: Box::new(referent.clone()),
+            }],
+            result: Box::new(Type::Reference {
+                mutability: Mutability::Shared,
+                lifetime: Lifetime::Bound { depth: 0, index: 0 },
+                referent: Box::new(referent),
+            }),
+            effects: EffectRow {
+                effects: BTreeSet::from([EffectInstance {
+                    definition: trace(),
+                    arguments: vec![GenericArgument::Type(Type::Generic(0))],
+                }]),
+                projections: vec![],
+                tail: Some(EffectTail::Generic(tail)),
+            },
+            invocation: Quantity::ONCE,
+        }
+    }
 
-fn unify_type(
-    left: &HeaderType,
-    right: &HeaderType,
-    left_generics: &BTreeSet<String>,
-    right_generics: &BTreeSet<String>,
-    bindings: &mut Bindings,
-) -> bool {
-    if let Some(name) = generic_name(left, left_generics) {
-        return bind(
-            bindings,
-            BindingSide::Left,
-            name,
-            right,
-            left_generics,
-            right_generics,
+    #[test]
+    fn frozen_hrtb_overlap_unifies_reference_binders_and_open_effect_tails() {
+        let mut bindings = OverlapBindings::default();
+        let left = higher_ranked(Type::Generic(0), 1);
+        let right = higher_ranked(Type::Scalar(ScalarType::I64), 2);
+        assert!(
+            unify_overlap_type(&left, &right, &mut bindings).is_some(),
+            "distinct generic residual slots describe one common HRTB witness"
         );
     }
-    if let Some(name) = generic_name(right, right_generics) {
-        return bind(
-            bindings,
-            BindingSide::Right,
-            name,
-            left,
-            right_generics,
-            left_generics,
+
+    #[test]
+    fn failed_effect_matching_does_not_publish_partial_overlap_bindings() {
+        let mut bindings = OverlapBindings::default();
+        let left = EffectRow {
+            effects: BTreeSet::from([
+                EffectInstance {
+                    definition: DefKey(Digest::of_bytes(b"coherence-a")),
+                    arguments: vec![GenericArgument::Type(Type::Generic(9))],
+                },
+                EffectInstance {
+                    definition: DefKey(Digest::of_bytes(b"coherence-b")),
+                    arguments: vec![GenericArgument::Type(Type::Generic(9))],
+                },
+            ]),
+            projections: vec![],
+            tail: None,
+        };
+        let right = EffectRow {
+            effects: BTreeSet::from([
+                EffectInstance {
+                    definition: DefKey(Digest::of_bytes(b"coherence-a")),
+                    arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+                },
+                EffectInstance {
+                    definition: DefKey(Digest::of_bytes(b"coherence-b")),
+                    arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::Bool))],
+                },
+            ]),
+            projections: vec![],
+            tail: None,
+        };
+        assert!(super::unify_overlap_effect_row(&left, &right, &mut bindings).is_none());
+        assert!(
+            bindings.types.is_empty(),
+            "failed candidate leaked a type binding"
         );
     }
-    match (left, right) {
-        (HeaderType::Path(left), HeaderType::Path(right)) => left == right,
-        (
-            HeaderType::Application(left_base, left_arguments),
-            HeaderType::Application(right_base, right_arguments),
-        ) => {
-            left_arguments.len() == right_arguments.len()
-                && unify_type(
-                    left_base,
-                    right_base,
-                    left_generics,
-                    right_generics,
-                    bindings,
-                )
-                && left_arguments
-                    .iter()
-                    .zip(right_arguments)
-                    .all(|(left, right)| match (left, right) {
-                        (
-                            crate::header::HeaderGenericArgument::Type(left),
-                            crate::header::HeaderGenericArgument::Type(right),
-                        ) => unify_type(left, right, left_generics, right_generics, bindings),
-                        (
-                            crate::header::HeaderGenericArgument::U32(left),
-                            crate::header::HeaderGenericArgument::U32(right),
-                        ) => left == right,
-                        (
-                            crate::header::HeaderGenericArgument::Quantity(left),
-                            crate::header::HeaderGenericArgument::Quantity(right),
-                        ) => left == right,
-                        _ => false,
-                    })
-        }
-        (HeaderType::Tuple(left), HeaderType::Tuple(right)) => {
-            left.len() == right.len()
-                && left.iter().zip(right).all(|(left, right)| {
-                    unify_type(left, right, left_generics, right_generics, bindings)
-                })
-        }
-        (
-            HeaderType::Callable {
-                lifetime_binders: left_binders,
-                parameters: left_parameters,
-                result: left_result,
-            },
-            HeaderType::Callable {
-                lifetime_binders: right_binders,
-                parameters: right_parameters,
-                result: right_result,
-            },
-        ) => {
-            left_binders.len() == right_binders.len()
-                && left_parameters.len() == right_parameters.len()
-                && left_parameters
-                    .iter()
-                    .zip(right_parameters)
-                    .all(|(left, right)| {
-                        unify_type(left, right, left_generics, right_generics, bindings)
-                    })
-                && unify_type(
-                    left_result,
-                    right_result,
-                    left_generics,
-                    right_generics,
-                    bindings,
-                )
-        }
-        (
-            HeaderType::Reference {
-                unique: left_unique,
-                referent: left_referent,
-                ..
-            },
-            HeaderType::Reference {
-                unique: right_unique,
-                referent: right_referent,
-                ..
-            },
-        ) => {
-            left_unique == right_unique
-                && unify_type(
-                    left_referent,
-                    right_referent,
-                    left_generics,
-                    right_generics,
-                    bindings,
-                )
-        }
-        (HeaderType::Never, HeaderType::Never)
-        | (HeaderType::Recovered, _)
-        | (_, HeaderType::Recovered) => true,
-        _ => false,
-    }
-}
-
-fn generic_name<'a>(value: &'a HeaderType, names: &'a BTreeSet<String>) -> Option<&'a String> {
-    match value {
-        HeaderType::Path(path) if path.len() == 1 => names.get(&path[0]),
-        _ => None,
-    }
-}
-
-#[derive(Clone, Copy)]
-enum BindingSide {
-    Left,
-    Right,
-}
-
-fn bind(
-    bindings: &mut Bindings,
-    side: BindingSide,
-    name: &String,
-    value: &HeaderType,
-    own_generics: &BTreeSet<String>,
-    other_generics: &BTreeSet<String>,
-) -> bool {
-    let existing = match side {
-        BindingSide::Left => bindings.left.get(name).cloned(),
-        BindingSide::Right => bindings.right.get(name).cloned(),
-    };
-    let Some(existing) = existing else {
-        match side {
-            BindingSide::Left => {
-                bindings.left.insert(name.clone(), value.clone());
-            }
-            BindingSide::Right => {
-                bindings.right.insert(name.clone(), value.clone());
-            }
-        }
-        return true;
-    };
-    unify_type(&existing, value, own_generics, other_generics, bindings)
 }
