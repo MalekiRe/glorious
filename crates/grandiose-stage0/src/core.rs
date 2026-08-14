@@ -722,6 +722,13 @@ impl TypedBody {
                     message,
                 });
             }
+            if let Some(message) = completion_refinement_error(self, &expression.kind) {
+                diagnostics.push(CoreDiagnostic {
+                    code: "G4183",
+                    span: expression.span,
+                    message,
+                });
+            }
             if let Some(message) = perform_payload_contract_error(self, &expression.kind) {
                 diagnostics.push(CoreDiagnostic {
                     code: "G4183",
@@ -1338,6 +1345,155 @@ fn core_structural_error(kind: &CoreKind) -> Option<String> {
             })
         }),
         _ => None,
+    }
+}
+
+/// Validate the proof edge between an `is` decision and the completion arm
+/// which opens its positive binders.  A refinement environment is not merely
+/// a convenient projection recipe: it is branded evidence that one exact
+/// `PatternTest` evaluated true.  In particular, a persisted or otherwise
+/// forged Core graph must not be able to attach a copied environment to an
+/// unrelated completion arm and thereby introduce its binders into PlaceFlow
+/// or MIR without the deciding boolean edge.
+fn completion_refinement_error(body: &TypedBody, kind: &CoreKind) -> Option<String> {
+    let CoreKind::Completion {
+        computation,
+        clauses,
+    } = kind
+    else {
+        return None;
+    };
+    if !clauses.iter().any(|clause| clause.refinement.is_some()) {
+        return None;
+    }
+    let Some(computation) = body.expressions.get(computation.0 as usize) else {
+        // The ordinary child-edge check reports the missing expression with
+        // its exact owner.  Do not manufacture a second, less precise error.
+        return None;
+    };
+    let CoreKind::PatternTest {
+        subject,
+        pattern,
+        refinement: environment,
+    } = &computation.kind
+    else {
+        return Some(
+            "Typed Core completion refinement is not produced by its completion computation's pattern test"
+                .into(),
+        );
+    };
+    let subject_expression = body.expressions.get(subject.0 as usize)?;
+    let mut expected_bindings = Vec::new();
+    if collect_pattern_binding_types(pattern, &subject_expression.ty, &mut expected_bindings)
+        .is_none()
+    {
+        return Some(
+            "Typed Core completion refinement cannot derive binders from the originating pattern-test layout"
+                .into(),
+        );
+    }
+    for clause in clauses {
+        let Some(branch) = &clause.refinement else {
+            continue;
+        };
+        if !core_pattern_is_true(&clause.pattern) {
+            return Some(
+                "Typed Core completion refinement is attached to an arm that does not prove the test result true"
+                    .into(),
+            );
+        }
+        if branch.subject != *subject
+            || branch.pattern != *pattern
+            || branch.environment != *environment
+        {
+            return Some(
+                "Typed Core completion refinement does not preserve the exact originating pattern-test evidence"
+                    .into(),
+            );
+        }
+        if branch.environment.binding_types != expected_bindings {
+            return Some(
+                "Typed Core completion refinement binding types do not match the originating structural pattern"
+                    .into(),
+            );
+        }
+    }
+    None
+}
+
+/// Recover the exact type of every structural binder from the frozen pattern
+/// layout.  This duplicates no source lookup: `CorePattern` already owns the
+/// instantiated tuple, array, and nominal field types that MIR will project.
+/// Returning `None` delegates malformed layout reporting to the existing
+/// structural validator, keeping diagnostics deterministic.
+fn collect_pattern_binding_types(
+    pattern: &CorePattern,
+    subject: &Type,
+    bindings: &mut Vec<(String, Type)>,
+) -> Option<()> {
+    match pattern {
+        CorePattern::Any | CorePattern::Literal(_) => Some(()),
+        CorePattern::Bind { name } => {
+            bindings.push((name.clone(), subject.clone()));
+            Some(())
+        }
+        CorePattern::Tuple(patterns) => {
+            let Type::Tuple(types) = subject else {
+                return None;
+            };
+            if patterns.len() != types.len() {
+                return None;
+            }
+            for (pattern, ty) in patterns.iter().zip(types) {
+                collect_pattern_binding_types(pattern, ty, bindings)?;
+            }
+            Some(())
+        }
+        CorePattern::Array { element, elements } => {
+            let Type::Array(subject_element) = subject else {
+                return None;
+            };
+            if **subject_element != *element {
+                return None;
+            }
+            for pattern in elements {
+                collect_pattern_binding_types(pattern, element, bindings)?;
+            }
+            Some(())
+        }
+        CorePattern::Record {
+            definition,
+            field_types,
+            field_count,
+            fields,
+        }
+        | CorePattern::Enum {
+            definition,
+            field_types,
+            field_count,
+            fields,
+            ..
+        } => {
+            let Type::Nominal {
+                definition: subject_definition,
+                ..
+            } = subject
+            else {
+                return None;
+            };
+            if subject_definition != definition || *field_count != field_types.len() as u32 {
+                return None;
+            }
+            for field in fields {
+                let field_ty = field_types.get(field.index as usize)?;
+                if &field.ty != field_ty {
+                    return None;
+                }
+                collect_pattern_binding_types(&field.pattern, field_ty, bindings)?;
+            }
+            Some(())
+        }
+        CorePattern::Error => None,
     }
 }
 

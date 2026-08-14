@@ -1407,7 +1407,7 @@ fn handler_payload_shadowing_keeps_the_outer_loan_across_the_dynamic_join() {
 }
 
 #[test]
-fn forged_completion_refinement_shadowing_cannot_retarget_outer_place_facts() {
+fn forged_completion_refinement_shadowing_is_rejected_before_placeflow_or_mir() {
     let mut core = core_for(
         "core-forged-completion-refinement-place-shadow@0.1.0",
         "pub enum Result { Ok(i64), Err } pub fn main(value: i64, result: Result) -> i64 { let loan = &mut value; handle result is Result::Ok(found) { true => { let branch = &mut found; branch; 0 }; false => 0 }; value; loan; 0 }",
@@ -1434,19 +1434,132 @@ fn forged_completion_refinement_shadowing_cannot_retarget_outer_place_facts() {
             expression.kind = CoreKind::Local("value".into());
         }
     }
-    assert!(core.validate().is_empty(), "{:#?}", core.validate());
+    assert!(
+        core.validate()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4183"),
+        "forged completion refinement escaped Typed Core provenance validation: {:#?}",
+        core.validate()
+    );
+    let valid_flow = PlaceFlow::analyze(&core);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-completion-refinement-shadowing")),
+        &core,
+        &valid_flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR accepted completion refinement with forged provenance: {lowered:#?}"
+    );
     let flow = PlaceFlow::analyze(&core);
     assert!(
         flow.diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "G5008"),
-        "forged refinement spelling erased an outer unique loan: {flow:#?}"
+        "defensive PlaceFlow analysis must still retain the outer loan: {flow:#?}"
     );
     assert!(
         flow.active_loans
             .iter()
             .all(|loan| loan.owner.as_deref() != Some("branch")),
         "a completion-arm reborrow escaped through the join: {flow:#?}"
+    );
+}
+
+#[test]
+fn typed_core_validation_rejects_completion_refinement_on_a_negative_boolean_arm() {
+    let mut core = core_for(
+        "core-forged-negative-refinement@0.1.0",
+        "pub enum Result { Ok(i64), Err } pub fn main(value: Result) -> i64 { handle value is Result::Ok(found) { true => found; false => 0 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let positive = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Completion { clauses, .. } => clauses[0].refinement.clone(),
+            _ => None,
+        })
+        .expect("positive arm must carry refinement evidence");
+    let negative = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Completion { clauses, .. } => Some(&mut clauses[1]),
+            _ => None,
+        })
+        .expect("negative completion arm");
+    negative.refinement = Some(positive);
+
+    assert!(
+        core.validate().iter().any(|diagnostic| {
+            diagnostic.code == "G4183"
+                && diagnostic
+                    .message
+                    .contains("does not prove the test result true")
+        }),
+        "false branch forged a positive refinement pack: {:#?}",
+        core.validate()
+    );
+    let flow = PlaceFlow::analyze(&core);
+    let lowered = MirLowering::lower(
+        DefKey(Digest::of_bytes(b"forged-negative-completion-refinement")),
+        &core,
+        &flow,
+    );
+    assert!(
+        lowered.function.is_none()
+            && lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6000"),
+        "MIR lowered a false arm with forged refinement evidence: {lowered:#?}"
+    );
+}
+
+#[test]
+fn typed_core_validation_rederives_refinement_binding_types_from_pattern_layout() {
+    let mut core = core_for(
+        "core-forged-refinement-binding-type@0.1.0",
+        "pub struct Pair { value: i64 } pub fn main(value: Pair) -> i64 { handle value is Pair { value: found } { true => found; false => 0 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let pattern_test = core
+        .expressions
+        .iter()
+        .position(|expression| matches!(expression.kind, CoreKind::PatternTest { .. }))
+        .expect("pattern test");
+    let mut forged_environment = match &core.expressions[pattern_test].kind {
+        CoreKind::PatternTest { refinement, .. } => refinement.clone(),
+        _ => unreachable!(),
+    };
+    forged_environment.binding_types[0].1 = Type::Scalar(ScalarType::Bool);
+    if let CoreKind::PatternTest { refinement, .. } = &mut core.expressions[pattern_test].kind {
+        *refinement = forged_environment.clone();
+    }
+    let branch = core
+        .expressions
+        .iter_mut()
+        .find_map(|expression| match &mut expression.kind {
+            CoreKind::Completion { clauses, .. } => clauses[0].refinement.as_mut(),
+            _ => None,
+        })
+        .expect("positive completion refinement");
+    branch.environment = forged_environment;
+
+    assert!(
+        core.validate().iter().any(|diagnostic| {
+            diagnostic.code == "G4183"
+                && diagnostic
+                    .message
+                    .contains("binding types do not match the originating structural pattern")
+        }),
+        "forged refinement binder type escaped the frozen structural layout: {:#?}",
+        core.validate()
     );
 }
 
