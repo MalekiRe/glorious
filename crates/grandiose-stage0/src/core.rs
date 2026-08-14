@@ -114,6 +114,16 @@ pub enum CoreHandlerResumption {
     },
     Terminal,
 }
+
+/// The lexical identity of a generated handler continuation.  A spelling is
+/// insufficient here: an ordinary local is allowed to shadow a continuation
+/// in a nested scope.  `binding_generation` comes from the journaled local
+/// environment and identifies the exact currently visible binding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ActiveResumption {
+    name: String,
+    binding_generation: usize,
+}
 /// A write destination frozen by Typed Core.  A place denotes stable storage,
 /// unlike an ordinary value expression which may be copied or moved.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -749,13 +759,13 @@ struct Elaborator<'a> {
     /// the VM, nested closure capture would let that identity escape its
     /// frame. Keep the restriction at Typed Core, where capture facts are
     /// explicit and source recovery cannot manufacture an executable escape.
-    active_resumptions: Vec<String>,
+    active_resumptions: Vec<ActiveResumption>,
     /// A frame-bound resumption is not yet a first-class closure value in the
     /// runtime representation.  This short-lived authorization is installed
     /// only while elaborating the callee of `k(value)` (or migration spelling
     /// `resume(k, value)`).  Every other value use fails at Typed Core rather
     /// than leaking to a later MIR-only failure.
-    direct_resumption_callee: Option<String>,
+    direct_resumption_callee: Option<ActiveResumption>,
 }
 impl Elaborator<'_> {
     fn expression(&mut self, id: ExprId) -> CoreId {
@@ -1838,7 +1848,7 @@ impl Elaborator<'_> {
         if let Some(capture) = captures.iter().find(|capture| {
             self.active_resumptions
                 .iter()
-                .any(|resumption| resumption == &capture.name)
+                .any(|resumption| self.resumption_is_visible(resumption, &capture.name))
         }) {
             self.error(
                 span,
@@ -2215,9 +2225,8 @@ impl Elaborator<'_> {
         if path.len() == 1
             && let Some(ty) = self.locals.lookup(&path[0]).cloned()
         {
-            if self.active_resumptions.iter().any(|name| name == &path[0])
-                && self.direct_resumption_callee.as_deref() != Some(path[0].as_str())
-            {
+            let active = self.active_resumption(&path[0]);
+            if active.is_some() && self.direct_resumption_callee.as_ref() != active.as_ref() {
                 self.error(
                     span,
                     "G4175",
@@ -2282,14 +2291,26 @@ impl Elaborator<'_> {
     /// immediate callee position of a call.  Keeping the authorization scoped
     /// to this expression rejects aliases, stores, borrows, and returns while
     /// preserving direct calls and the migration `resume(k, value)` spelling.
+    fn active_resumption(&self, name: &str) -> Option<ActiveResumption> {
+        let generation = self.locals.binding_generation(&name.to_owned())?;
+        self.active_resumptions
+            .iter()
+            .rev()
+            .find(|resumption| {
+                resumption.name == name && resumption.binding_generation == generation
+            })
+            .cloned()
+    }
+    fn resumption_is_visible(&self, resumption: &ActiveResumption, name: &str) -> bool {
+        resumption.name == name
+            && self
+                .locals
+                .binding_generation(&name.to_owned())
+                .is_some_and(|generation| generation == resumption.binding_generation)
+    }
     fn direct_resumption_callee(&mut self, id: ExprId) -> CoreId {
         let authorization = match &self.body.expression(id).kind {
-            ExprKind::Path(path)
-                if path.len() == 1
-                    && self.active_resumptions.iter().any(|name| name == &path[0]) =>
-            {
-                Some(path[0].clone())
-            }
+            ExprKind::Path(path) if path.len() == 1 => self.active_resumption(&path[0]),
             _ => None,
         };
         let previous = std::mem::replace(&mut self.direct_resumption_callee, authorization);
@@ -3130,7 +3151,20 @@ impl Elaborator<'_> {
                 | CoreHandlerResumption::Terminal => None,
             };
             if let Some(name) = &active_resumption {
-                self.active_resumptions.push(name.clone());
+                match self.locals.binding_generation(name) {
+                    Some(binding_generation) => self.active_resumptions.push(ActiveResumption {
+                        name: name.clone(),
+                        binding_generation,
+                    }),
+                    None => {
+                        self.error(
+                            clause.source.span,
+                            "G4160",
+                            "handler continuation binder lost its lexical identity",
+                        );
+                        self.recovered = true;
+                    }
+                }
             }
             let body = self.expression(clause.source.body);
             if active_resumption.is_some() {

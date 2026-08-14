@@ -462,6 +462,16 @@ where
         self.values.get(key).and_then(|values| values.last())
     }
 
+    /// Return the lexical generation of the currently visible binding for a
+    /// key.  A generation is stable while that exact binding remains in
+    /// scope, and changes when a nested scope shadows it.  Consumers that
+    /// attach non-value facts to a local (for example a frame-bound handler
+    /// resumption) can therefore retain the local's identity without making
+    /// `ScopeMap` impose an identifier representation on every value.
+    pub fn binding_generation(&self, key: &K) -> Option<usize> {
+        self.values.get(key).map(Vec::len)
+    }
+
     pub fn leave(&mut self) -> bool {
         let Some(marker) = self.markers.pop() else {
             return false;
