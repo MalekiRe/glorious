@@ -318,6 +318,69 @@ fn typed_core_validation_rejects_dangling_expression_edges() {
 }
 
 #[test]
+fn typed_core_projection_validation_rechecks_frozen_trait_evidence() {
+    let package = PackageKey("core-projection-obligation-validation@0.1.0".into());
+    let source = "trait Marker { type Item; } pub fn main() -> i64 { 0 }";
+    let file = FileKey::new(&package, "src/main.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface =
+        InterfaceSet::collect(package.clone(), "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let marker = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Marker"))
+        .expect("Marker definition")
+        .key;
+    let span = Span {
+        file,
+        start: 0,
+        end: 1,
+    };
+    let projection = Type::Projection {
+        subject: Box::new(Type::Generic(0)),
+        trait_definition: marker,
+        trait_arguments: vec![],
+        name: "Item".into(),
+        item_generic_kinds: vec![],
+        item_arguments: vec![],
+    };
+    let body = TypedBody {
+        parameters: vec![("value".into(), Type::Generic(0))],
+        expressions: vec![CoreExpr {
+            kind: CoreKind::Local("value".into()),
+            ty: projection,
+            span,
+        }],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+    assert!(body.validate().is_empty());
+    assert!(
+        body.validate_projection_obligations(&signatures, &[])
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4190"),
+        "forged symbolic Core must not bypass the frozen trait obligation"
+    );
+    assert!(
+        body.validate_projection_obligations(
+            &signatures,
+            &[(
+                Type::Generic(0),
+                grandiose_stage0::ElaboratedTraitReference {
+                    definition: marker,
+                    arguments: vec![],
+                },
+            )],
+        )
+        .is_empty(),
+        "the lexical where evidence must remain available after Core freezes"
+    );
+}
+
+#[test]
 fn typed_core_validation_rejects_impossible_structural_projection() {
     let package = PackageKey("core-structural-validation@0.1.0".into());
     let body = TypedBody {

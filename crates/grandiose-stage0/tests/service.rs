@@ -1889,7 +1889,7 @@ fn service_rejects_unselected_concrete_associated_const_signature_projection() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G4152"),
+            .any(|diagnostic| matches!(diagnostic.code, "G4152" | "G4190")),
         "missing concrete associated-const selection diagnostic: {diagnostics:#?}"
     );
 }

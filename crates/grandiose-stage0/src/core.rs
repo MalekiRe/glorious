@@ -729,6 +729,44 @@ impl TypedBody {
         diagnostics
     }
 
+    /// Recheck projection evidence at the frozen Core boundary.  Source
+    /// declaration validation establishes the public contract first, while
+    /// this entry point makes imported or forged Core fail closed under the
+    /// same lexical `where` evidence before ownership and MIR consumers run.
+    pub fn validate_projection_obligations(
+        &self,
+        signatures: &ElaboratedInterface,
+        ambient: &[(Type, crate::ElaboratedTraitReference)],
+    ) -> Vec<CoreDiagnostic> {
+        let types = self
+            .parameters
+            .iter()
+            .map(|(_, ty)| ty.clone())
+            .chain(
+                self.expressions
+                    .iter()
+                    .map(|expression| expression.ty.clone()),
+            )
+            .collect::<Vec<_>>();
+        let span = self
+            .expressions
+            .get(self.root.0 as usize)
+            .map(|expression| expression.span)
+            .unwrap_or_else(invalid_typed_core_span);
+        signatures
+            .projection_obligation_diagnostics(&types, ambient)
+            .into_iter()
+            .map(|diagnostic| CoreDiagnostic {
+                code: diagnostic.code,
+                span,
+                message: format!(
+                    "Typed Core contains a projection without valid frozen evidence: {}",
+                    diagnostic.message
+                ),
+            })
+            .collect()
+    }
+
     fn contains(&self, id: CoreId) -> bool {
         (id.0 as usize) < self.expressions.len()
     }

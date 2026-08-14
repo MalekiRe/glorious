@@ -54,6 +54,20 @@ fn public_fingerprint_changes_for_header_but_not_private_definition_changes() {
 }
 
 #[test]
+fn public_projection_obligations_participate_in_interface_fingerprints() {
+    let unconstrained = collect(
+        "pub trait Source { type Item; } pub fn project<T>(value: T) -> <T as Source>::Item { ignored }",
+    );
+    let constrained = collect(
+        "pub trait Source { type Item; } pub fn project<T>(value: T) -> <T as Source>::Item where T: Source { ignored }",
+    );
+    assert_ne!(
+        unconstrained.interface.public_fingerprint, constrained.interface.public_fingerprint,
+        "adding the evidence that licenses a public associated projection must invalidate dependents"
+    );
+}
+
+#[test]
 fn exported_import_edges_participate_in_frozen_interface_identity() {
     let first = collect("pub use crate::api::answer;");
     let changed = collect("pub use crate::api::other;");

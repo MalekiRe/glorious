@@ -46,7 +46,7 @@ fn callable_signatures_preserve_const_binder_kinds_and_reject_type_misuse() {
 #[test]
 fn frozen_public_signatures_retain_symbolic_associated_const_projection_identity() {
     let package = PackageKey("signature-associated-const-projection@0.1.0".into());
-    let source = "trait Width { const Value: u32; } pub struct Chosen<n: u32> {} impl Width for i64 { const Value = 7; } pub fn retain<T>(value: Chosen<<T as Width>::Value>) -> Chosen<<T as Width>::Value> { value }";
+    let source = "trait Width { const Value: u32; } pub struct Chosen<n: u32> {} impl Width for i64 { const Value = 7; } pub fn retain<T>(value: Chosen<<T as Width>::Value>) -> Chosen<<T as Width>::Value> where T: Width { value }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -664,7 +664,7 @@ fn trait_references_elaborate_structural_const_arguments_by_declared_kind() {
 #[test]
 fn associated_type_projections_preserve_structural_const_item_arguments() {
     let package = PackageKey("signature-associated-const-projection@0.1.0".into());
-    let source = "pub trait Family { type Out<n: u32>; } pub struct Tag {} pub type Pick = <Tag as Family>::Out<7>;";
+    let source = "pub trait Family { type Out<n: u32>; } pub struct Tag {} pub impl Family for Tag { type Out<n: u32> = i64; } pub type Pick = <Tag as Family>::Out<7>;";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -1455,7 +1455,7 @@ fn negative_implementations_cannot_define_callable_or_associated_item_evidence()
 #[test]
 fn generic_associated_type_projections_are_preserved_in_frozen_signatures() {
     let package = PackageKey("signature-associated-projection@0.1.0".into());
-    let source = "trait Iterator { type Item; } pub fn collect<T>(value: T) -> <T as Iterator>::Item { ignored }";
+    let source = "trait Iterator { type Item; } pub fn collect<T>(value: T) -> <T as Iterator>::Item where T: Iterator { ignored }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -1501,9 +1501,105 @@ fn generic_associated_type_projections_are_preserved_in_frozen_signatures() {
 }
 
 #[test]
+fn symbolic_associated_projections_require_explicit_or_inherited_trait_evidence() {
+    let package = PackageKey("signature-projection-obligation@0.1.0".into());
+    let source = r#"
+        trait Parent { type Item; }
+        trait Child: Parent {}
+        pub fn inherited<T>(value: T) -> <T as Parent>::Item where T: Child { ignored }
+        pub fn missing<T>(value: T) -> <T as Parent>::Item { ignored }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "G4190"
+                && diagnostic
+                    .message
+                    .contains("associated type projection `Item`")
+        }),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    assert_eq!(
+        signatures
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "G4190")
+            .count(),
+        1,
+        "the inherited Parent obligation must prove the other projection: {:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
+fn type_effect_and_const_projection_contracts_share_the_same_required_evidence() {
+    let package = PackageKey("signature-all-projection-obligations@0.1.0".into());
+    let source = r#"
+        trait Family {
+            type Item;
+            type Effects: EffectRow;
+            const Width: u32;
+        }
+        pub struct Sized<n: u32> {}
+        pub fn missing<T>(value: Sized<<T as Family>::Width>) -> <T as Family>::Item / { <T as Family>::Effects } { ignored }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let missing = signatures
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "G4190")
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        missing
+            .iter()
+            .any(|message| message.contains("associated type projection `Item`"))
+            && missing
+                .iter()
+                .any(|message| message.contains("associated effect-row projection `Effects`"))
+            && missing
+                .iter()
+                .any(|message| message.contains("associated const projection `Width`")),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
+fn concrete_associated_projections_report_refuted_evidence_deterministically() {
+    let package = PackageKey("signature-refuted-projection-obligation@0.1.0".into());
+    let source = r#"
+        trait Marker { type Item; }
+        impl !Marker for i64 {}
+        pub fn rejected(value: i64) -> <i64 as Marker>::Item { value }
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "G4191" && diagnostic.message.contains("negative implementation")
+        }),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn mixed_kind_trait_heads_are_preserved_in_associated_type_projections() {
     let package = PackageKey("signature-mixed-trait-projection@0.1.0".into());
-    let source = "trait Select<'a, e: EffectRow, n: u32> { type Output; } pub fn project<'b, row: EffectRow, m: u32, T>(value: T) -> <T as Select<'b, row, m>>::Output { ignored }";
+    let source = "trait Select<'a, e: EffectRow, n: u32> { type Output; } pub fn project<'b, row: EffectRow, m: u32, T>(value: T) -> <T as Select<'b, row, m>>::Output where T: Select<'b, row, m> { ignored }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -1550,7 +1646,7 @@ fn mixed_kind_trait_heads_are_preserved_in_associated_type_projections() {
 #[test]
 fn generic_associated_item_arguments_are_preserved_in_frozen_signatures() {
     let package = PackageKey("signature-gat-projection@0.1.0".into());
-    let source = "trait Apply { type Output<T>; } pub fn project<S, T>(value: S) -> <S as Apply>::Output<T> { ignored }";
+    let source = "trait Apply { type Output<T>; } pub fn project<S, T>(value: S) -> <S as Apply>::Output<T> where S: Apply { ignored }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -1632,7 +1728,7 @@ fn generic_associated_items_preserve_binder_kinds_and_reject_mismatched_impls() 
 #[test]
 fn generic_associated_type_applications_preserve_lifetime_type_and_const_arguments() {
     let package = PackageKey("signature-gat-application-kinds@0.1.0".into());
-    let source = "trait Borrow { type View<'a, T, n: u32>; } pub fn view<S, T>(value: S) -> <S as Borrow>::View<'static, T, 7> { ignored }";
+    let source = "trait Borrow { type View<'a, T, n: u32>; } pub fn view<S, T>(value: S) -> <S as Borrow>::View<'static, T, 7> where S: Borrow { ignored }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -1671,7 +1767,7 @@ fn generic_associated_type_applications_preserve_lifetime_type_and_const_argumen
 #[test]
 fn associated_effect_row_projections_are_preserved_in_frozen_signatures() {
     let package = PackageKey("signature-associated-effect-row@0.1.0".into());
-    let source = "trait Capability { type Effects: EffectRow; } pub fn consume<T>(value: T) -> i64 / { <T as Capability>::Effects } { 0 }";
+    let source = "trait Capability { type Effects: EffectRow; } pub fn consume<T>(value: T) -> i64 / { <T as Capability>::Effects } where T: Capability { 0 }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -1720,7 +1816,7 @@ fn associated_effect_row_projections_are_preserved_in_frozen_signatures() {
 #[test]
 fn frozen_associated_effect_rows_are_canonical_sets() {
     let package = PackageKey("signature-associated-effect-row-canonical@0.1.0".into());
-    let source = "trait First { type Effects: EffectRow; } trait Second { type Effects: EffectRow; } pub fn consume<T>(value: T) -> i64 / { <T as Second>::Effects, <T as First>::Effects, <T as First>::Effects } { 0 }";
+    let source = "trait First { type Effects: EffectRow; } trait Second { type Effects: EffectRow; } pub fn consume<T>(value: T) -> i64 / { <T as Second>::Effects, <T as First>::Effects, <T as First>::Effects } where T: First, T: Second { 0 }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);

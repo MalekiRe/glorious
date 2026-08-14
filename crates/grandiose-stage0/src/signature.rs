@@ -383,7 +383,15 @@ fn owned_nominal_layout_cycle(
 impl ElaboratedInterface {
     pub fn elaborate(interface: &PackageInterface) -> Self {
         let index = DefinitionIndex::from_interface(interface);
-        Self::elaborate_with_index(interface, &index)
+        let mut result = Self::elaborate_with_index(interface, &index);
+        result.validate_projection_obligations();
+        result
+            .diagnostics
+            .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));
+        result
+            .diagnostics
+            .dedup_by(|left, right| left.code == right.code && left.message == right.message);
+        result
     }
 
     pub fn elaborate_with_index(interface: &PackageInterface, index: &DefinitionIndex) -> Self {
@@ -443,6 +451,7 @@ impl ElaboratedInterface {
         merged.validate_associated_type_definitions();
         merged.validate_trait_supertrait_cycles();
         merged.validate_implementation_supertraits();
+        merged.validate_projection_obligations();
         merged
             .diagnostics
             .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));
@@ -752,6 +761,494 @@ impl ElaboratedInterface {
             }
         }
         self.diagnostics.extend(diagnostics);
+    }
+
+    /// Every symbolic associated selection published in an interface carries
+    /// a trait obligation.  Keeping `<T as Trait>::Item` as a symbolic term
+    /// is sound only when the declaration contract establishes `T: Trait`;
+    /// otherwise downstream callers could instantiate an API that never had
+    /// evidence for the selected item.  Concrete heads use the same frozen
+    /// solver so negative impls and ambiguities remain distinct from a
+    /// missing generic bound.
+    ///
+    /// This validation intentionally runs on the merged interface as well as
+    /// single-package interfaces.  Candidate discovery is global: validating
+    /// a module fragment before imported implementations are available would
+    /// turn a valid concrete projection into a module-order-dependent error.
+    pub fn validate_projection_obligations(&mut self) {
+        let definitions = self.definitions.clone();
+        let mut diagnostics = Vec::new();
+
+        for (definition, header) in &definitions {
+            match header {
+                ElaboratedHeader::Callable(signature) => {
+                    self.validate_callable_projection_obligations(
+                        signature,
+                        vec![],
+                        &mut diagnostics,
+                    );
+                }
+                ElaboratedHeader::Alias { target, .. } => {
+                    self.validate_type_projection_obligations(target, &[], &mut diagnostics);
+                }
+                ElaboratedHeader::Constant(Some(ty)) => {
+                    self.validate_type_projection_obligations(ty, &[], &mut diagnostics);
+                }
+                ElaboratedHeader::Nominal { layout, .. } => match layout {
+                    ElaboratedNominalLayout::Struct(fields) => {
+                        for field in fields {
+                            self.validate_type_projection_obligations(
+                                &field.ty,
+                                &[],
+                                &mut diagnostics,
+                            );
+                        }
+                    }
+                    ElaboratedNominalLayout::Enum(variants) => {
+                        for variant in variants {
+                            let fields = match &variant.payload {
+                                ElaboratedEnumVariantPayload::Unit => &[][..],
+                                ElaboratedEnumVariantPayload::Tuple(fields) => fields.as_slice(),
+                                ElaboratedEnumVariantPayload::Struct(fields) => {
+                                    // Named fields need a borrowed type view without changing
+                                    // their declaration-owned order.
+                                    for field in fields {
+                                        self.validate_type_projection_obligations(
+                                            &field.ty,
+                                            &[],
+                                            &mut diagnostics,
+                                        );
+                                    }
+                                    continue;
+                                }
+                            };
+                            for field in fields {
+                                self.validate_type_projection_obligations(
+                                    field,
+                                    &[],
+                                    &mut diagnostics,
+                                );
+                            }
+                        }
+                    }
+                    ElaboratedNominalLayout::Opaque => {}
+                },
+                ElaboratedHeader::Trait(trait_header) => {
+                    let self_relation = ElaboratedTraitReference {
+                        definition: *definition,
+                        arguments: nominal_identity_arguments(&trait_header.generic_kinds),
+                    };
+                    let ambient = vec![(Type::Generic(TRAIT_SELF_GENERIC), self_relation)];
+                    for supertrait in &trait_header.supertraits {
+                        self.validate_trait_reference_projection_obligations(
+                            supertrait,
+                            &ambient,
+                            &mut diagnostics,
+                        );
+                    }
+                    for item in trait_header.associated_types.values() {
+                        if let Some(default) = &item.default {
+                            self.validate_type_projection_obligations(
+                                default,
+                                &ambient,
+                                &mut diagnostics,
+                            );
+                        }
+                        if let Some(default) = &item.effect_row_default {
+                            self.validate_effect_row_projection_obligations(
+                                default,
+                                &ambient,
+                                &mut diagnostics,
+                            );
+                        }
+                    }
+                    for item in trait_header.associated_consts.values() {
+                        if let Some(default) = &item.default {
+                            self.validate_generic_argument_projection_obligations(
+                                default,
+                                &ambient,
+                                &mut diagnostics,
+                            );
+                        }
+                    }
+                    for method in trait_header.methods.values() {
+                        self.validate_callable_projection_obligations(
+                            method,
+                            ambient.clone(),
+                            &mut diagnostics,
+                        );
+                    }
+                }
+                ElaboratedHeader::Implementation(implementation) => {
+                    let mut ambient = implementation.where_bounds.clone();
+                    ambient.push((
+                        implementation.self_ty.clone(),
+                        implementation.relation.clone(),
+                    ));
+                    self.validate_trait_reference_projection_obligations(
+                        &implementation.relation,
+                        &ambient,
+                        &mut diagnostics,
+                    );
+                    self.validate_type_projection_obligations(
+                        &implementation.self_ty,
+                        &ambient,
+                        &mut diagnostics,
+                    );
+                    for (subject, relation) in &implementation.where_bounds {
+                        self.validate_type_projection_obligations(
+                            subject,
+                            &ambient,
+                            &mut diagnostics,
+                        );
+                        self.validate_trait_reference_projection_obligations(
+                            relation,
+                            &ambient,
+                            &mut diagnostics,
+                        );
+                    }
+                    for item in implementation.associated_types.values() {
+                        self.validate_type_projection_obligations(
+                            &item.value,
+                            &ambient,
+                            &mut diagnostics,
+                        );
+                    }
+                    for item in implementation.associated_effect_rows.values() {
+                        self.validate_effect_row_projection_obligations(
+                            &item.value,
+                            &ambient,
+                            &mut diagnostics,
+                        );
+                    }
+                    for item in implementation.associated_consts.values() {
+                        self.validate_generic_argument_projection_obligations(
+                            &item.value,
+                            &ambient,
+                            &mut diagnostics,
+                        );
+                    }
+                    for method in implementation.methods.values() {
+                        self.validate_callable_projection_obligations(
+                            method,
+                            ambient.clone(),
+                            &mut diagnostics,
+                        );
+                    }
+                }
+                ElaboratedHeader::Effect(effect) => {
+                    for operation in &effect.operations {
+                        for parameter in &operation.parameters {
+                            self.validate_type_projection_obligations(
+                                parameter,
+                                &[],
+                                &mut diagnostics,
+                            );
+                        }
+                        self.validate_type_projection_obligations(
+                            &operation.result,
+                            &[],
+                            &mut diagnostics,
+                        );
+                    }
+                }
+                ElaboratedHeader::Constant(None) | ElaboratedHeader::Opaque => {}
+            }
+        }
+        self.diagnostics.extend(diagnostics);
+        self.diagnostics
+            .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));
+        self.diagnostics
+            .dedup_by(|left, right| left.code == right.code && left.message == right.message);
+    }
+
+    /// Validate type terms crossing a later frozen boundary (Typed Core,
+    /// persisted instance metadata, or a hand-built test fixture) against the
+    /// declaration's lexical trait evidence.  Interface validation calls the
+    /// same kernel above; this public read-only entry point prevents Core
+    /// consumers from recreating a weaker, type-only projection rule.
+    pub fn projection_obligation_diagnostics(
+        &self,
+        types: &[Type],
+        ambient: &[(Type, ElaboratedTraitReference)],
+    ) -> Vec<SignatureDiagnostic> {
+        let mut diagnostics = Vec::new();
+        for ty in types {
+            self.validate_type_projection_obligations(ty, ambient, &mut diagnostics);
+        }
+        diagnostics
+            .sort_by(|left, right| (left.code, &left.message).cmp(&(right.code, &right.message)));
+        diagnostics
+            .dedup_by(|left, right| left.code == right.code && left.message == right.message);
+        diagnostics
+    }
+
+    fn validate_callable_projection_obligations(
+        &self,
+        signature: &CallableSignature,
+        mut ambient: Vec<(Type, ElaboratedTraitReference)>,
+        diagnostics: &mut Vec<SignatureDiagnostic>,
+    ) {
+        ambient.extend(signature.where_bounds.clone());
+        for parameter in &signature.parameters {
+            self.validate_type_projection_obligations(parameter, &ambient, diagnostics);
+        }
+        self.validate_type_projection_obligations(&signature.result, &ambient, diagnostics);
+        self.validate_effect_row_projection_obligations(&signature.effects, &ambient, diagnostics);
+        for (subject, relation) in &signature.where_bounds {
+            self.validate_type_projection_obligations(subject, &ambient, diagnostics);
+            self.validate_trait_reference_projection_obligations(relation, &ambient, diagnostics);
+        }
+    }
+
+    fn validate_type_projection_obligations(
+        &self,
+        value: &Type,
+        ambient: &[(Type, ElaboratedTraitReference)],
+        diagnostics: &mut Vec<SignatureDiagnostic>,
+    ) {
+        match value {
+            Type::Nominal { arguments, .. } => {
+                for argument in arguments {
+                    self.validate_generic_argument_projection_obligations(
+                        argument,
+                        ambient,
+                        diagnostics,
+                    );
+                }
+            }
+            Type::Projection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                item_arguments,
+                ..
+            } => {
+                self.validate_type_projection_obligations(subject, ambient, diagnostics);
+                for argument in trait_arguments.iter().chain(item_arguments) {
+                    self.validate_generic_argument_projection_obligations(
+                        argument,
+                        ambient,
+                        diagnostics,
+                    );
+                }
+                self.validate_projection_goal(
+                    "type",
+                    subject,
+                    &ElaboratedTraitReference {
+                        definition: *trait_definition,
+                        arguments: trait_arguments.clone(),
+                    },
+                    name,
+                    ambient,
+                    diagnostics,
+                );
+            }
+            Type::Tuple(values) => {
+                for value in values {
+                    self.validate_type_projection_obligations(value, ambient, diagnostics);
+                }
+            }
+            Type::Array(value) => {
+                self.validate_type_projection_obligations(value, ambient, diagnostics)
+            }
+            Type::Reference { referent, .. } => {
+                self.validate_type_projection_obligations(referent, ambient, diagnostics);
+            }
+            Type::Callable {
+                parameters,
+                result,
+                effects,
+                ..
+            } => {
+                for parameter in parameters {
+                    self.validate_type_projection_obligations(parameter, ambient, diagnostics);
+                }
+                self.validate_type_projection_obligations(result, ambient, diagnostics);
+                self.validate_effect_row_projection_obligations(effects, ambient, diagnostics);
+            }
+            Type::Unit
+            | Type::Never
+            | Type::Scalar(_)
+            | Type::ConstU32(_)
+            | Type::ConstQuantity(_)
+            | Type::ConstGeneric { .. }
+            | Type::Generic(_)
+            | Type::Infer(_)
+            | Type::Error => {}
+        }
+    }
+
+    fn validate_effect_row_projection_obligations(
+        &self,
+        row: &EffectRow,
+        ambient: &[(Type, ElaboratedTraitReference)],
+        diagnostics: &mut Vec<SignatureDiagnostic>,
+    ) {
+        for effect in &row.effects {
+            for argument in &effect.arguments {
+                self.validate_generic_argument_projection_obligations(
+                    argument,
+                    ambient,
+                    diagnostics,
+                );
+            }
+        }
+        for projection in &row.projections {
+            self.validate_type_projection_obligations(&projection.subject, ambient, diagnostics);
+            for argument in projection
+                .trait_arguments
+                .iter()
+                .chain(&projection.item_arguments)
+            {
+                self.validate_generic_argument_projection_obligations(
+                    argument,
+                    ambient,
+                    diagnostics,
+                );
+            }
+            self.validate_projection_goal(
+                "effect-row",
+                &projection.subject,
+                &ElaboratedTraitReference {
+                    definition: projection.trait_definition,
+                    arguments: projection.trait_arguments.clone(),
+                },
+                &projection.name,
+                ambient,
+                diagnostics,
+            );
+        }
+    }
+
+    fn validate_trait_reference_projection_obligations(
+        &self,
+        relation: &ElaboratedTraitReference,
+        ambient: &[(Type, ElaboratedTraitReference)],
+        diagnostics: &mut Vec<SignatureDiagnostic>,
+    ) {
+        for argument in &relation.arguments {
+            self.validate_generic_argument_projection_obligations(argument, ambient, diagnostics);
+        }
+    }
+
+    fn validate_generic_argument_projection_obligations(
+        &self,
+        argument: &GenericArgument,
+        ambient: &[(Type, ElaboratedTraitReference)],
+        diagnostics: &mut Vec<SignatureDiagnostic>,
+    ) {
+        match argument {
+            GenericArgument::Type(value) => {
+                self.validate_type_projection_obligations(value, ambient, diagnostics);
+            }
+            GenericArgument::EffectRow(row) => {
+                self.validate_effect_row_projection_obligations(row, ambient, diagnostics);
+            }
+            GenericArgument::ConstProjection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                ..
+            } => {
+                self.validate_type_projection_obligations(subject, ambient, diagnostics);
+                for argument in trait_arguments {
+                    self.validate_generic_argument_projection_obligations(
+                        argument,
+                        ambient,
+                        diagnostics,
+                    );
+                }
+                self.validate_projection_goal(
+                    "const",
+                    subject,
+                    &ElaboratedTraitReference {
+                        definition: *trait_definition,
+                        arguments: trait_arguments.clone(),
+                    },
+                    name,
+                    ambient,
+                    diagnostics,
+                );
+            }
+            GenericArgument::Lifetime(_)
+            | GenericArgument::ConstU32(_)
+            | GenericArgument::ConstU32Expr(_)
+            | GenericArgument::ConstQuantity(_)
+            | GenericArgument::ConstGeneric { .. } => {}
+        }
+    }
+
+    fn validate_projection_goal(
+        &self,
+        kind: &str,
+        subject: &Type,
+        relation: &ElaboratedTraitReference,
+        name: &str,
+        ambient: &[(Type, ElaboratedTraitReference)],
+        diagnostics: &mut Vec<SignatureDiagnostic>,
+    ) {
+        let goal = crate::TraitGoal {
+            relation: relation.clone(),
+            subject: subject.clone(),
+        };
+        if self.ambient_projection_goal_proves(&goal, ambient) {
+            return;
+        }
+        let outcome = crate::TraitSolver::new(self).solve(goal);
+        let (code, reason) = match outcome {
+            crate::TraitAnswer::Proven { .. } => return,
+            crate::TraitAnswer::Refuted { .. } => {
+                ("G4191", "is refuted by a negative implementation")
+            }
+            crate::TraitAnswer::NoSolution => (
+                "G4190",
+                "has no trait obligation or implementation evidence",
+            ),
+            crate::TraitAnswer::Ambiguous => ("G4192", "has ambiguous trait evidence"),
+            crate::TraitAnswer::Overflow => ("G4193", "exceeded the trait solver limit"),
+        };
+        diagnostics.push(SignatureDiagnostic {
+            code,
+            message: format!(
+                "associated {kind} projection `{name}` {reason} (trait {:?})",
+                relation.definition
+            ),
+        });
+    }
+
+    fn ambient_projection_goal_proves(
+        &self,
+        goal: &crate::TraitGoal,
+        ambient: &[(Type, ElaboratedTraitReference)],
+    ) -> bool {
+        let mut pending = ambient.to_vec();
+        let mut seen = Vec::<(Type, ElaboratedTraitReference)>::new();
+        while let Some((subject, relation)) = pending.pop() {
+            if seen.iter().any(|(known_subject, known_relation)| {
+                known_subject == &subject && known_relation == &relation
+            }) {
+                continue;
+            }
+            if subject == goal.subject && relation == goal.relation {
+                return true;
+            }
+            seen.push((subject.clone(), relation.clone()));
+            let Some(ElaboratedHeader::Trait(trait_header)) =
+                self.definitions.get(&relation.definition)
+            else {
+                continue;
+            };
+            for supertrait in &trait_header.supertraits {
+                pending.push((
+                    subject.clone(),
+                    substitute_trait_reference(supertrait, &relation.arguments),
+                ));
+            }
+        }
+        false
     }
 
     /// Supertrait edges are a declaration-level entailment graph.  A cycle

@@ -1060,7 +1060,20 @@ impl StageZeroCompiler {
                         Some(declaration.span),
                     ));
                 }
-                let core_validation = core.validate();
+                let mut core_validation = core.validate();
+                let ambient_projection_bounds = signatures
+                    .definitions
+                    .get(&declaration.key)
+                    .and_then(|header| match header {
+                        ElaboratedHeader::Callable(signature) => {
+                            Some(signature.where_bounds.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                core_validation.extend(
+                    core.validate_projection_obligations(&signatures, &ambient_projection_bounds),
+                );
                 diagnostics.extend(core_validation.iter().map(|diagnostic| {
                     CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
                 }));
@@ -1198,7 +1211,20 @@ impl StageZeroCompiler {
                             Some(method.span),
                         ));
                     }
-                    let core_validation = core.validate();
+                    let mut core_validation = core.validate();
+                    let mut ambient_projection_bounds =
+                        implementation_signature.where_bounds.clone();
+                    ambient_projection_bounds.push((
+                        implementation_signature.self_ty.clone(),
+                        implementation_signature.relation.clone(),
+                    ));
+                    ambient_projection_bounds.extend(method_signature.where_bounds.clone());
+                    core_validation.extend(
+                        core.validate_projection_obligations(
+                            &signatures,
+                            &ambient_projection_bounds,
+                        ),
+                    );
                     diagnostics.extend(core_validation.iter().map(|diagnostic| {
                         CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
                     }));
