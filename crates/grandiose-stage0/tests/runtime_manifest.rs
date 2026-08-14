@@ -772,3 +772,43 @@ fn text_byte_len_requires_its_exact_monomorphic_abi() {
         })
     ));
 }
+
+#[test]
+fn implemented_generic_integer_roles_have_stable_selector_round_trips() {
+    use PrimitiveRole::*;
+    let roles = [
+        IntCheckedAdd,
+        IntWrappingAdd,
+        IntWrappingSub,
+        IntWrappingMul,
+        IntEqual,
+        IntLess,
+        IntGreater,
+        IntBitAnd,
+        IntBitOr,
+        IntBitXor,
+        IntBitNot,
+        IntShl,
+        IntShr,
+        IntConvertCheckedToI64,
+        IntConvertWrappingToI64,
+        IntConvertCheckedToU32,
+        IntConvertWrappingToU32,
+        IntConvertCheckedToUsize,
+        IntConvertWrappingToUsize,
+        IntConvertCheckedToU8,
+        IntConvertWrappingToU8,
+        IntConvertCheckedToU16,
+        IntConvertWrappingToU16,
+        IntConvertCheckedToI16,
+        IntConvertWrappingToI16,
+        IntConvertCheckedToI32,
+        IntConvertWrappingToI32,
+    ];
+    for role in roles {
+        assert_eq!(
+            PrimitiveRole::parse_selector_name(role.selector_name()),
+            Some(role)
+        );
+    }
+}
