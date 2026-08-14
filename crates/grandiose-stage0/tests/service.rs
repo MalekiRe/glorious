@@ -1599,6 +1599,14 @@ fn service_cancels_an_affine_statement_handler_before_outer_suffix() {
 }
 
 #[test]
+fn service_cancels_a_nested_affine_handler_without_reentering_the_outer_frame() {
+    let source = "effect Ask { [0,1] ask() -> i64; } pub fn main() -> i64 { handle { handle Ask::ask() { Ask::ask(_) => 40 } } { Ask::ask(_) => 41 }; 42 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_forwards_nested_statement_handler_before_outer_suffix() {
     let source = "effect Ask { [1,1] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { handle Ask::ask(40) { Ask::ask(0) with k => k(0) } } { Ask::ask(value) with k => k(value + 2) }; 42 }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

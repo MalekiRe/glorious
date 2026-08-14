@@ -6278,12 +6278,39 @@ impl Lowerer<'_> {
             return None;
         }
         let CoreKind::Handle {
-            computation,
-            clauses,
+            computation: outer_computation,
+            clauses: outer_clauses,
         } = self.body.expression(values[handler_index]).kind.clone()
         else {
             return None;
         };
+        // The innermost direct operation is statically selected by the
+        // irrefutable discarded arm below. Its cancellation body and payload
+        // evaluation must be effect-free before outer operation frames can be
+        // erased; otherwise an enclosing handler could be observable.
+        let mut computation = outer_computation;
+        let mut clauses = outer_clauses;
+        let mut nested = false;
+        loop {
+            match self.body.expression(computation).kind.clone() {
+                CoreKind::Handle {
+                    computation: inner_computation,
+                    clauses: inner_clauses,
+                } => {
+                    nested = true;
+                    computation = inner_computation;
+                    clauses = inner_clauses;
+                }
+                // Braced handler computations elaborate to a block even when
+                // they contain exactly one nested handler. There is no setup
+                // work to preserve in this case, so keep following the
+                // syntactic wrapper to the protected direct performance.
+                CoreKind::Block(values) if values.len() == 1 => {
+                    computation = values[0];
+                }
+                _ => break,
+            }
+        }
         let CoreKind::Perform {
             effect,
             operation,
@@ -6308,6 +6335,11 @@ impl Lowerer<'_> {
         if quantity.requires_positive_use()
             || !clause.patterns.iter().all(pattern_is_irrefutable)
             || clause.patterns.len() != arguments.len()
+            || (nested
+                && (!self.core_is_effect_free(clause.body)
+                    || arguments
+                        .iter()
+                        .any(|argument| !self.core_is_effect_free(*argument))))
         {
             return None;
         }
