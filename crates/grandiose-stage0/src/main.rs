@@ -284,6 +284,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
                             PrimitiveRole::IntWrappingAdd,
                             PrimitiveRole::IntWrappingSub,
                             PrimitiveRole::IntWrappingMul,
+                            PrimitiveRole::IntWrappingNeg,
                             PrimitiveRole::IntEqual,
                             PrimitiveRole::IntLess,
                             PrimitiveRole::IntGreater,

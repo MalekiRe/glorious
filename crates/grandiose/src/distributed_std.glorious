@@ -308,7 +308,9 @@ wrapping_sub<T>(left: T, right: T) -> T { __g1_int_wrapping_sub(move left, move 
 
 wrapping_mul<T>(left: T, right: T) -> T { __g1_int_wrapping_mul(move left, move right) }
 
-wrapping_neg<T>(value: T) -> T { wrapping_add(bit_not(move value), 1) }
+__g1_int_wrapping_neg<T>(value: T) -> T { () }
+
+wrapping_neg<T>(value: T) -> T { __g1_int_wrapping_neg(move value) }
 
 bit_and<T>(left: T, right: T) -> T { __g1_int_bit_and(move left, move right) }
 

@@ -781,6 +781,7 @@ fn implemented_generic_integer_roles_have_stable_selector_round_trips() {
         IntWrappingAdd,
         IntWrappingSub,
         IntWrappingMul,
+        IntWrappingNeg,
         IntEqual,
         IntLess,
         IntGreater,

@@ -453,6 +453,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_wrapping_mul<T>` in distributed
     /// std. Its i64 specialization has wrapping, not checked, overflow.
     IntWrappingMul,
+    /// Exact generic declaration `__g1_int_wrapping_neg<T>` in distributed
+    /// std. Its i64 specialization wraps two's-complement negation.
+    IntWrappingNeg,
     /// Exact generic declaration `__g1_int_equal<T>` in distributed std.
     /// Its i64 specialization returns the canonical 0-or-1 u32 predicate.
     IntEqual,
@@ -550,6 +553,7 @@ impl PrimitiveRole {
             Self::ArrayCapacity => return 158,
             Self::ArrayReserve => return 159,
             Self::ArrayFinishDrained => return 160,
+            Self::IntWrappingNeg => return 161,
             _ => {}
         }
         const LEGACY: [&str; 69] = [
@@ -680,6 +684,7 @@ impl PrimitiveRole {
             Self::IntConvertWrappingToI16 => "int-convert-wrapping-to-i16",
             Self::IntWrappingSub => "int-wrapping-sub",
             Self::IntWrappingMul => "int-wrapping-mul",
+            Self::IntWrappingNeg => "int-wrapping-neg",
             Self::IntEqual => "int-equal",
             Self::IntLess => "int-less",
             Self::IntGreater => "int-greater",
@@ -775,6 +780,7 @@ impl PrimitiveRole {
             "int-convert-wrapping-to-i16" => Self::IntConvertWrappingToI16,
             "int-wrapping-sub" => Self::IntWrappingSub,
             "int-wrapping-mul" => Self::IntWrappingMul,
+            "int-wrapping-neg" => Self::IntWrappingNeg,
             "int-equal" => Self::IntEqual,
             "int-less" => Self::IntLess,
             "int-greater" => Self::IntGreater,
@@ -1198,6 +1204,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             generics: 1,
             generic_kinds: vec![crate::GenericKind::Type],
             parameters: vec![Type::Generic(0), Type::Generic(0)],
+            result: Type::Generic(0),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::IntWrappingNeg => crate::CallableSignature {
+            generics: 1,
+            generic_kinds: vec![crate::GenericKind::Type],
+            parameters: vec![Type::Generic(0)],
             result: Type::Generic(0),
             effects: EffectRow::empty(),
             invocation: Quantity::ONCE,

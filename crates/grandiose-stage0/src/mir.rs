@@ -14305,6 +14305,41 @@ impl Lowerer<'_> {
                                 self.instructions
                                     .push(MirInstruction::BitNotI64 { dst, value: *value });
                             }
+                            Some(PrimitiveRole::IntWrappingNeg) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "generic int wrapping-neg requires one operand",
+                                    );
+                                    return None;
+                                };
+                                if generic_arguments.as_slice()
+                                    != [GenericArgument::Type(Type::Scalar(
+                                        crate::types::ScalarType::I64,
+                                    ))]
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "generic int wrapping-neg is only VM-specialized for frozen i64",
+                                    );
+                                    return None;
+                                }
+                                let zero =
+                                    self.alloc(Type::Scalar(crate::types::ScalarType::I64), id);
+                                self.instructions.push(MirInstruction::ConstI64 {
+                                    dst: zero,
+                                    value: 0,
+                                });
+                                self.instructions.push(MirInstruction::WrappingSubI64 {
+                                    dst,
+                                    left: zero,
+                                    right: *value,
+                                });
+                            }
                             Some(PrimitiveRole::IntShr) => {
                                 let [left, right] = arguments.as_slice() else {
                                     self.error(
