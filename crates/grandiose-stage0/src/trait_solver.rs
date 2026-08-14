@@ -1740,7 +1740,7 @@ fn projection_failure_answer(answer: TraitProjectionAnswer) -> TraitAnswerIndex 
 /// One implementation match has separate substitution domains for types and
 /// regions.  A source binder slot is shared for stable identity, but a
 /// lifetime may never leak into the type map as a fabricated `Type::Generic`.
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ImplementationSubstitution {
     types: BTreeMap<u32, Type>,
     lifetimes: BTreeMap<u32, crate::Lifetime>,
@@ -1881,6 +1881,13 @@ fn match_generic_argument_at(
         (GenericArgument::Type(template), GenericArgument::Type(actual)) => {
             match_type_at(template, actual, substitution, binder_depth)
         }
+        (
+            GenericArgument::Lifetime(crate::Lifetime::Generic(index)),
+            GenericArgument::Lifetime(actual),
+        ) => match_lifetime(*index, *actual, substitution, binder_depth),
+        (GenericArgument::EffectRow(template), GenericArgument::EffectRow(actual)) => {
+            match_effect_row_at(template, actual, substitution, binder_depth)
+        }
         (GenericArgument::ConstGeneric { index, kind }, actual)
             if generic_argument_is_const_kind(actual, *kind) =>
         {
@@ -1896,6 +1903,128 @@ fn match_generic_argument_at(
             }
         }
         _ => (template == actual).then_some(()),
+    }
+}
+
+/// Match an effect-row argument just as structurally as a type argument.  A
+/// row binder is an open tail: after the implementation's fixed prefix has
+/// matched, it receives the caller's residual row. This is what makes
+/// `impl<e: EffectRow> Trait<e>` applicable to a concrete row and to a row
+/// carrying delayed associated-effect projections.
+fn match_effect_row_at(
+    template: &EffectRow,
+    actual: &EffectRow,
+    substitution: &mut ImplementationSubstitution,
+    binder_depth: u32,
+) -> Option<()> {
+    let mut unmatched_effects = actual.effects.iter().cloned().collect::<Vec<_>>();
+    for expected in &template.effects {
+        let mut matched = false;
+        for index in 0..unmatched_effects.len() {
+            let found = &unmatched_effects[index];
+            if expected.definition != found.definition || expected.arguments.len() != found.arguments.len() {
+                continue;
+            }
+            let mut candidate = substitution.clone();
+            if expected
+                .arguments
+                .iter()
+                .zip(&found.arguments)
+                .try_for_each(|(expected, found)| {
+                    match_generic_argument_at(expected, found, &mut candidate, binder_depth)
+                })
+                .is_some()
+            {
+                *substitution = candidate;
+                unmatched_effects.remove(index);
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return None;
+        }
+    }
+
+    let mut unmatched_projections = actual.projections.clone();
+    for expected in &template.projections {
+        let mut matched = false;
+        for index in 0..unmatched_projections.len() {
+            let found = &unmatched_projections[index];
+            if expected.trait_definition != found.trait_definition
+                || expected.name != found.name
+                || expected.item_generic_kinds != found.item_generic_kinds
+                || expected.trait_arguments.len() != found.trait_arguments.len()
+                || expected.item_arguments.len() != found.item_arguments.len()
+            {
+                continue;
+            }
+            let mut candidate = substitution.clone();
+            if match_type_at(
+                &expected.subject,
+                &found.subject,
+                &mut candidate,
+                binder_depth,
+            )
+            .and_then(|()| {
+                expected
+                    .trait_arguments
+                    .iter()
+                    .zip(&found.trait_arguments)
+                    .try_for_each(|(expected, found)| {
+                        match_type_at(expected, found, &mut candidate, binder_depth)
+                    })
+            })
+            .and_then(|()| {
+                expected
+                    .item_arguments
+                    .iter()
+                    .zip(&found.item_arguments)
+                    .try_for_each(|(expected, found)| {
+                        match_generic_argument_at(expected, found, &mut candidate, binder_depth)
+                    })
+            })
+            .is_some()
+            {
+                *substitution = candidate;
+                unmatched_projections.remove(index);
+                matched = true;
+                break;
+            }
+        }
+        if !matched {
+            return None;
+        }
+    }
+
+    match template.tail {
+        None if unmatched_effects.is_empty() && unmatched_projections.is_empty() && actual.tail.is_none() => {
+            Some(())
+        }
+        Some(crate::EffectTail::Generic(index)) => {
+            let residual = EffectRow {
+                effects: unmatched_effects.into_iter().collect(),
+                projections: unmatched_projections,
+                tail: actual.tail,
+            }
+            .canonicalized();
+            if binder_depth > 0 && effect_row_contains_free_hrtb_placeholder(&residual, 0) {
+                return None;
+            }
+            match substitution.effect_rows.get(&index) {
+                Some(previous) if previous != &residual => None,
+                Some(_) => Some(()),
+                None => {
+                    substitution.effect_rows.insert(index, residual.clone());
+                    substitution
+                        .generic_arguments
+                        .insert(index, GenericArgument::EffectRow(residual));
+                    Some(())
+                }
+            }
+        }
+        Some(crate::EffectTail::Infer(_)) => None,
+        _ => None,
     }
 }
 
@@ -2061,7 +2190,13 @@ fn match_type_at(
                 lifetime: actual_lifetime,
                 referent: actual_referent,
             } if mutability == actual_mutability => {
-                match_lifetime(*lifetime, *actual_lifetime, substitution)?;
+                match lifetime {
+                    crate::Lifetime::Generic(index) => {
+                        match_lifetime(*index, *actual_lifetime, substitution, binder_depth)?;
+                    }
+                    expected if expected == actual_lifetime => {}
+                    _ => return None,
+                }
                 match_type_at(referent, actual_referent, substitution, binder_depth)
             }
             _ => None,
@@ -2211,21 +2346,23 @@ fn effect_row_contains_free_hrtb_placeholder(value: &EffectRow, callable_nesting
 }
 
 fn match_lifetime(
-    template: crate::Lifetime,
+    index: u32,
     actual: crate::Lifetime,
     substitution: &mut ImplementationSubstitution,
+    binder_depth: u32,
 ) -> Option<()> {
-    match template {
-        crate::Lifetime::Generic(index) => match substitution.lifetimes.get(&index) {
-            Some(previous) if *previous != actual => None,
-            Some(_) => Some(()),
-            None => {
-                substitution.lifetimes.insert(index, actual);
-                Some(())
-            }
-        },
-        crate::Lifetime::Bound { .. } | crate::Lifetime::Static | crate::Lifetime::Elided => {
-            (template == actual).then_some(())
+    // An implementation lifetime cannot be bound to a placeholder introduced
+    // by an inner `for<'a>` callable: the implementation substitution outlives
+    // that callable and would otherwise capture its local universe.
+    if binder_depth > 0 && matches!(actual, crate::Lifetime::Bound { .. }) {
+        return None;
+    }
+    match substitution.lifetimes.get(&index) {
+        Some(previous) if *previous != actual => None,
+        Some(_) => Some(()),
+        None => {
+            substitution.lifetimes.insert(index, actual);
+            Some(())
         }
     }
 }

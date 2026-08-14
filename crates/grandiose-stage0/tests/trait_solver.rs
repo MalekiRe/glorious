@@ -1127,6 +1127,47 @@ fn associated_item_applications_preserve_mixed_generic_kinds() {
 }
 
 #[test]
+fn generic_trait_heads_normalize_gats_for_lifetime_and_effect_row_arguments() {
+    let (interface, signatures) = signatures(
+        "effect Trace { note(); } trait Select<'a, e: EffectRow> { type Output<'b, row: EffectRow>; } impl<'a, e: EffectRow> Select<'a, e> for i64 { type Output<'b, row: EffectRow> = i64; }",
+    );
+    let trace = key(&interface, "Trace");
+    let select = key(&interface, "Select");
+    let row = EffectRow {
+        effects: std::collections::BTreeSet::from([grandiose_stage0::EffectInstance {
+            definition: trace,
+            arguments: vec![],
+        }]),
+        projections: vec![],
+        tail: None,
+    };
+    let answer = TraitSolver::new(&signatures).normalize_associated_type_application(
+        TraitGoal {
+            relation: ElaboratedTraitReference {
+                definition: select,
+                arguments: vec![
+                    GenericArgument::Lifetime(Lifetime::Static),
+                    GenericArgument::EffectRow(row.clone()),
+                ],
+            },
+            subject: Type::Scalar(ScalarType::I64),
+        },
+        "Output",
+        &[
+            GenericArgument::Lifetime(Lifetime::Static),
+            GenericArgument::EffectRow(row),
+        ],
+    );
+    assert!(matches!(
+        answer,
+        TraitProjectionAnswer::Normalized {
+            ty: Type::Scalar(ScalarType::I64),
+            ..
+        }
+    ));
+}
+
+#[test]
 fn associated_type_normalization_recurses_through_selected_projections() {
     let (interface, signatures) = signatures(
         "trait Source { type Item; } trait Wrapper { type Item; } struct Value {} impl Source for Value { type Item = Text; } impl Wrapper for Value { type Item = <Value as Source>::Item; }",

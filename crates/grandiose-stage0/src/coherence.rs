@@ -32,6 +32,7 @@ pub struct ImplHead {
     pub self_ty: HeaderType,
     pub trait_arguments: Vec<HeaderGenericArgument>,
     pub generics: BTreeSet<String>,
+    pub effect_row_generics: BTreeSet<String>,
     pub span: Span,
 }
 
@@ -118,6 +119,12 @@ impl CoherenceSet {
                 self_ty: header.self_ty.clone(),
                 trait_arguments: header.relation.arguments.clone(),
                 generics: header.generics.iter().cloned().collect(),
+                effect_row_generics: header
+                    .generics
+                    .iter()
+                    .filter(|name| header.generics.is_effect_row(name))
+                    .cloned()
+                    .collect(),
                 span,
             };
             result.implementations.insert(definition, head);
@@ -388,6 +395,8 @@ fn heads_may_unify(left: &ImplHead, right: &ImplHead) -> bool {
     }
     let left_generics = left.generics.clone();
     let right_generics = right.generics.clone();
+    let left_effect_row_generics = left.effect_row_generics.clone();
+    let right_effect_row_generics = right.effect_row_generics.clone();
     let mut bindings = Bindings::default();
     unify_type(
         &left.self_ty,
@@ -400,7 +409,15 @@ fn heads_may_unify(left: &ImplHead, right: &ImplHead) -> bool {
         .iter()
         .zip(&right.trait_arguments)
         .all(|(left, right)| {
-            unify_generic_argument(left, right, &left_generics, &right_generics, &mut bindings)
+            unify_generic_argument(
+                left,
+                right,
+                &left_generics,
+                &right_generics,
+                &left_effect_row_generics,
+                &right_effect_row_generics,
+                &mut bindings,
+            )
         })
 }
 
@@ -481,6 +498,8 @@ fn implementations_may_overlap(
 #[derive(Default)]
 struct OverlapBindings {
     types: BTreeMap<u32, Type>,
+    lifetimes: BTreeMap<u32, crate::Lifetime>,
+    effect_rows: BTreeMap<u32, crate::EffectRow>,
 }
 
 fn unify_overlap_argument(
@@ -492,8 +511,14 @@ fn unify_overlap_argument(
         (GenericArgument::Type(left), GenericArgument::Type(right)) => {
             unify_overlap_type(left, right, bindings).map(GenericArgument::Type)
         }
-        (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) if left == right => {
-            Some(GenericArgument::EffectRow(left.clone()))
+        (GenericArgument::Lifetime(crate::Lifetime::Generic(index)), right) => {
+            bind_overlap_lifetime(*index, right, bindings)
+        }
+        (left, GenericArgument::Lifetime(crate::Lifetime::Generic(index))) => {
+            bind_overlap_lifetime(*index, left, bindings)
+        }
+        (GenericArgument::EffectRow(left), GenericArgument::EffectRow(right)) => {
+            unify_overlap_effect_row(left, right, bindings).map(GenericArgument::EffectRow)
         }
         (GenericArgument::Lifetime(left), GenericArgument::Lifetime(right)) if left == right => {
             Some(GenericArgument::Lifetime(*left))
@@ -517,6 +542,63 @@ fn unify_overlap_argument(
             },
         ) if left_index == right_index && left_kind == right_kind => Some(left.clone()),
         _ => None,
+    }
+}
+
+fn bind_overlap_lifetime(
+    index: u32,
+    value: &GenericArgument,
+    bindings: &mut OverlapBindings,
+) -> Option<GenericArgument> {
+    let GenericArgument::Lifetime(value) = value else {
+        return None;
+    };
+    match bindings.lifetimes.get(&index) {
+        Some(previous) if previous != value => None,
+        Some(previous) => Some(GenericArgument::Lifetime(*previous)),
+        None => {
+            bindings.lifetimes.insert(index, *value);
+            Some(GenericArgument::Lifetime(*value))
+        }
+    }
+}
+
+fn unify_overlap_effect_row(
+    left: &crate::EffectRow,
+    right: &crate::EffectRow,
+    bindings: &mut OverlapBindings,
+) -> Option<crate::EffectRow> {
+    if let Some(index) = pure_generic_effect_row(left) {
+        return bind_overlap_effect_row(index, right, bindings);
+    }
+    if let Some(index) = pure_generic_effect_row(right) {
+        return bind_overlap_effect_row(index, left, bindings);
+    }
+    (left == right).then(|| left.clone())
+}
+
+fn pure_generic_effect_row(value: &crate::EffectRow) -> Option<u32> {
+    (value.effects.is_empty() && value.projections.is_empty())
+        .then_some(value.tail)
+        .flatten()
+        .and_then(|tail| match tail {
+            crate::EffectTail::Generic(index) => Some(index),
+            crate::EffectTail::Infer(_) => None,
+        })
+}
+
+fn bind_overlap_effect_row(
+    index: u32,
+    value: &crate::EffectRow,
+    bindings: &mut OverlapBindings,
+) -> Option<crate::EffectRow> {
+    match bindings.effect_rows.get(&index) {
+        Some(previous) if previous != value => None,
+        Some(previous) => Some(previous.clone()),
+        None => {
+            bindings.effect_rows.insert(index, value.clone());
+            Some(value.clone())
+        }
     }
 }
 
@@ -719,6 +801,20 @@ fn resolve_overlap_argument(
         GenericArgument::Type(value) => {
             GenericArgument::Type(resolve_overlap_type(value, bindings))
         }
+        GenericArgument::Lifetime(crate::Lifetime::Generic(index)) => bindings
+            .lifetimes
+            .get(index)
+            .copied()
+            .map(GenericArgument::Lifetime)
+            .unwrap_or_else(|| argument.clone()),
+        GenericArgument::EffectRow(value) => {
+            if let Some(index) = pure_generic_effect_row(value)
+                && let Some(row) = bindings.effect_rows.get(&index)
+            {
+                return GenericArgument::EffectRow(row.clone());
+            }
+            argument.clone()
+        }
         argument => argument.clone(),
     }
 }
@@ -753,7 +849,12 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
             referent,
         } => Type::Reference {
             mutability: *mutability,
-            lifetime: *lifetime,
+            lifetime: match lifetime {
+                crate::Lifetime::Generic(index) => {
+                    bindings.lifetimes.get(index).copied().unwrap_or(*lifetime)
+                }
+                lifetime => *lifetime,
+            },
             referent: Box::new(resolve_overlap_type(referent, bindings)),
         },
         Type::Projection {
@@ -790,11 +891,58 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
                 .map(|parameter| resolve_overlap_type(parameter, bindings))
                 .collect(),
             result: Box::new(resolve_overlap_type(result, bindings)),
-            effects: effects.clone(),
+            effects: resolve_overlap_effect_row(effects, bindings),
             invocation: *invocation,
         },
         value => value.clone(),
     }
+}
+
+fn resolve_overlap_effect_row(
+    value: &crate::EffectRow,
+    bindings: &OverlapBindings,
+) -> crate::EffectRow {
+    if let Some(index) = pure_generic_effect_row(value)
+        && let Some(row) = bindings.effect_rows.get(&index)
+    {
+        return row.clone();
+    }
+    crate::EffectRow {
+        effects: value
+            .effects
+            .iter()
+            .map(|effect| crate::EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .iter()
+                    .map(|argument| resolve_overlap_argument(argument, bindings))
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .iter()
+            .map(|projection| crate::EffectRowProjection {
+                subject: Box::new(resolve_overlap_type(&projection.subject, bindings)),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .iter()
+                    .map(|argument| resolve_overlap_type(argument, bindings))
+                    .collect(),
+                name: projection.name.clone(),
+                item_generic_kinds: projection.item_generic_kinds.clone(),
+                item_arguments: projection
+                    .item_arguments
+                    .iter()
+                    .map(|argument| resolve_overlap_argument(argument, bindings))
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    }
+    .canonicalized()
 }
 
 fn rebase_implementation_generics(
@@ -826,12 +974,7 @@ fn rebase_overlap_relation(
         arguments: relation
             .arguments
             .iter()
-            .map(|argument| match argument {
-                GenericArgument::Type(value) => {
-                    GenericArgument::Type(rebase_overlap_type(value, offset))
-                }
-                argument => argument.clone(),
-            })
+            .map(|argument| rebase_overlap_argument(argument, offset))
             .collect(),
     }
 }
@@ -862,7 +1005,12 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
             referent,
         } => Type::Reference {
             mutability: *mutability,
-            lifetime: *lifetime,
+            lifetime: match lifetime {
+                crate::Lifetime::Generic(index) => {
+                    crate::Lifetime::Generic(index.saturating_add(offset))
+                }
+                lifetime => *lifetime,
+            },
             referent: Box::new(rebase_overlap_type(referent, offset)),
         },
         Type::Projection {
@@ -899,7 +1047,7 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
                 .map(|parameter| rebase_overlap_type(parameter, offset))
                 .collect(),
             result: Box::new(rebase_overlap_type(result, offset)),
-            effects: effects.clone(),
+            effects: rebase_overlap_effect_row(effects, offset),
             invocation: *invocation,
         },
         value => value.clone(),
@@ -913,8 +1061,56 @@ fn rebase_overlap_argument(argument: &GenericArgument, offset: u32) -> GenericAr
             index: index.saturating_add(offset),
             kind: *kind,
         },
+        GenericArgument::Lifetime(crate::Lifetime::Generic(index)) => {
+            GenericArgument::Lifetime(crate::Lifetime::Generic(index.saturating_add(offset)))
+        }
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(rebase_overlap_effect_row(value, offset))
+        }
         argument => argument.clone(),
     }
+}
+
+fn rebase_overlap_effect_row(value: &crate::EffectRow, offset: u32) -> crate::EffectRow {
+    crate::EffectRow {
+        effects: value
+            .effects
+            .iter()
+            .map(|effect| crate::EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .iter()
+                    .map(|argument| rebase_overlap_argument(argument, offset))
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .iter()
+            .map(|projection| crate::EffectRowProjection {
+                subject: Box::new(rebase_overlap_type(&projection.subject, offset)),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .iter()
+                    .map(|argument| rebase_overlap_type(argument, offset))
+                    .collect(),
+                name: projection.name.clone(),
+                item_generic_kinds: projection.item_generic_kinds.clone(),
+                item_arguments: projection
+                    .item_arguments
+                    .iter()
+                    .map(|argument| rebase_overlap_argument(argument, offset))
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail.map(|tail| match tail {
+            crate::EffectTail::Generic(index) => crate::EffectTail::Generic(index.saturating_add(offset)),
+            crate::EffectTail::Infer(index) => crate::EffectTail::Infer(index),
+        }),
+    }
+    .canonicalized()
 }
 
 fn unify_generic_argument(
@@ -922,6 +1118,8 @@ fn unify_generic_argument(
     right: &HeaderGenericArgument,
     left_generics: &BTreeSet<String>,
     right_generics: &BTreeSet<String>,
+    left_effect_row_generics: &BTreeSet<String>,
+    right_effect_row_generics: &BTreeSet<String>,
     bindings: &mut Bindings,
 ) -> bool {
     match (left, right) {
@@ -934,6 +1132,14 @@ fn unify_generic_argument(
         (HeaderGenericArgument::EffectRow(left), HeaderGenericArgument::EffectRow(right)) => {
             left == right
         }
+        (
+            HeaderGenericArgument::Type(HeaderType::Path(path)),
+            HeaderGenericArgument::EffectRow(_),
+        ) if path.len() == 1 && left_effect_row_generics.contains(&path[0]) => true,
+        (
+            HeaderGenericArgument::EffectRow(_),
+            HeaderGenericArgument::Type(HeaderType::Path(path)),
+        ) if path.len() == 1 && right_effect_row_generics.contains(&path[0]) => true,
         (HeaderGenericArgument::U32(left), HeaderGenericArgument::U32(right)) => left == right,
         (HeaderGenericArgument::Quantity(left), HeaderGenericArgument::Quantity(right)) => {
             left == right

@@ -633,6 +633,35 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         "Core must reject an associated-item argument whose kind does not match the frozen declaration contract"
     );
 
+    let hrtb_gat_with_row = body(Type::Callable {
+        lifetime_binders: 1,
+        parameters: vec![],
+        result: Box::new(Type::Projection {
+            subject: Box::new(Type::Scalar(ScalarType::I64)),
+            trait_definition: DefKey(Digest::of_bytes(b"core-hrtb-gat-row")),
+            trait_arguments: vec![],
+            name: "Output".into(),
+            item_generic_kinds: vec![
+                grandiose_stage0::GenericKind::Lifetime,
+                grandiose_stage0::GenericKind::EffectRow,
+            ],
+            item_arguments: vec![
+                GenericArgument::Lifetime(Lifetime::Bound { depth: 0, index: 0 }),
+                GenericArgument::EffectRow(EffectRow {
+                    effects: BTreeSet::new(),
+                    projections: vec![],
+                    tail: Some(grandiose_stage0::EffectTail::Generic(7)),
+                }),
+            ],
+        }),
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+    });
+    assert!(
+        hrtb_gat_with_row.validate().is_empty(),
+        "Core must retain a scoped HRTB lifetime and open effect-row GAT arguments"
+    );
+
     let malformed_const = TypedBody {
         parameters: vec![],
         expressions: vec![CoreExpr {

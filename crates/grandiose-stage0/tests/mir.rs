@@ -126,6 +126,37 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
         "MIR must reject a forged associated-item argument whose identity kind disagrees with its declaration"
     );
 
+    let mut scoped_hrtb_gat = graph();
+    scoped_hrtb_gat.locals[1].ty = Type::Callable {
+        lifetime_binders: 1,
+        parameters: vec![],
+        result: Box::new(Type::Projection {
+            subject: Box::new(Type::Scalar(ScalarType::I64)),
+            trait_definition: DefKey(Digest::of_bytes(b"mir-hrtb-gat-row")),
+            trait_arguments: vec![],
+            name: "Output".into(),
+            item_generic_kinds: vec![
+                grandiose_stage0::GenericKind::Lifetime,
+                grandiose_stage0::GenericKind::EffectRow,
+            ],
+            item_arguments: vec![
+                GenericArgument::Lifetime(Lifetime::Bound { depth: 0, index: 0 }),
+                GenericArgument::EffectRow(EffectRow {
+                    effects: BTreeSet::new(),
+                    projections: vec![],
+                    tail: Some(grandiose_stage0::EffectTail::Generic(5)),
+                }),
+            ],
+        }),
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+    };
+    assert!(
+        scoped_hrtb_gat.validate().is_ok(),
+        "MIR must retain scoped HRTB lifetimes and open effect rows in GAT arguments: {:#?}",
+        scoped_hrtb_gat.validate()
+    );
+
     let mut generic_metadata = graph();
     generic_metadata.blocks[0]
         .instructions

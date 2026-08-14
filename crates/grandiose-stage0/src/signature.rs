@@ -2147,7 +2147,6 @@ impl Elaborator<'_> {
                 .associated_types
                 .iter()
                 .map(|item| {
-                    self.require_type_generics(&item.generics, "associated type declarations");
                     // Defaults may mention both the trait declaration's
                     // binders and this item's binders.  Give the latter the
                     // same slot assignment used by implementation-side item
@@ -2207,7 +2206,6 @@ impl Elaborator<'_> {
         result
     }
     fn implementation(&mut self, header: &ImplementationHeader) -> ElaboratedImplementation {
-        self.require_type_generics(&header.generics, "implementation declarations");
         self.bind_generics(&header.generics);
         let relation = self.trait_ref(&header.relation);
         let self_ty = self.ty(&header.self_ty);
@@ -2222,7 +2220,6 @@ impl Elaborator<'_> {
             .iter()
             .filter(|item| item.effect_row_value.is_none())
             .map(|item| {
-                self.require_type_generics(&item.generics, "associated type definitions");
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
                 let outer_lifetime_generics = self.lifetime_generics.clone();
@@ -2254,7 +2251,6 @@ impl Elaborator<'_> {
             .iter()
             .filter_map(|item| {
                 let row = item.effect_row_value.as_ref()?;
-                self.require_type_generics(&item.generics, "associated effect-row definitions");
                 let outer_generics = self.generics.clone();
                 let outer_effect_row_generics = self.effect_row_generics.clone();
                 let outer_lifetime_generics = self.lifetime_generics.clone();
@@ -2799,17 +2795,6 @@ impl Elaborator<'_> {
             } else {
                 self.generics.insert(name.clone(), index as u32);
             }
-        }
-    }
-    fn require_type_generics(&mut self, parameters: &GenericParameters, context: &str) {
-        for name in parameters
-            .iter()
-            .filter(|name| parameters.is_effect_row(name))
-        {
-            self.error(
-                "G3314",
-                format!("effect-row binder `{name}` is only valid on a callable, not {context}"),
-            );
         }
     }
     fn extend_generics(

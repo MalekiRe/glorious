@@ -60,6 +60,20 @@ fn coherence_rejects_unifiable_positive_and_negative_heads() {
 }
 
 #[test]
+fn coherence_rejects_effect_row_generic_heads_that_overlap_a_concrete_row() {
+    let coherence = collect(
+        "effect Trace { note(); } trait Marker<e: EffectRow> {} impl<e: EffectRow> Marker<e> for i64 {} impl Marker<{Trace}> for i64 {}",
+    );
+    assert!(
+        coherence
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3404"),
+        "an open effect-row implementation head overlaps every concrete row: {coherence:#?}"
+    );
+}
+
+#[test]
 fn coherence_accepts_disjoint_heads_and_rejects_unconstrained_negative_generics() {
     let disjoint = collect(
         "trait Marker {} struct Left {} struct Right {} impl Marker for Left {} impl Marker for Right {}",
