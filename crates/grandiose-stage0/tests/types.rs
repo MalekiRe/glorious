@@ -335,6 +335,7 @@ fn callable_fingerprints_include_associated_effect_row_projections() {
                 trait_definition: capability,
                 trait_arguments: vec![],
                 name: name.into(),
+                item_generic_kinds: vec![],
                 item_arguments: vec![],
             }],
             tail: None,
@@ -356,6 +357,7 @@ fn symbolic_effect_row_projections_are_sorted_deduplicated_and_fingerprinted_can
         trait_definition,
         trait_arguments: vec![],
         name: name.into(),
+        item_generic_kinds: vec![],
         item_arguments: vec![],
     };
     let row = |projections| EffectRow {
@@ -411,6 +413,7 @@ fn matching_associated_effect_row_projections_unify_without_erasure() {
             trait_definition: capability,
             trait_arguments: vec![],
             name: "Effects".into(),
+            item_generic_kinds: vec![],
             item_arguments: vec![],
         }],
         tail: None,
@@ -439,7 +442,8 @@ fn associated_effect_row_projections_unify_their_subject_and_type_arguments() {
             trait_definition: capability,
             trait_arguments: vec![inference.fresh()],
             name: "Effects".into(),
-            item_arguments: vec![inference.fresh()],
+            item_generic_kinds: vec![grandiose_stage0::GenericKind::Type],
+            item_arguments: vec![GenericArgument::Type(inference.fresh())],
         }],
         tail: None,
     };
@@ -450,7 +454,8 @@ fn associated_effect_row_projections_unify_their_subject_and_type_arguments() {
             trait_definition: capability,
             trait_arguments: vec![Type::Scalar(ScalarType::Text)],
             name: "Effects".into(),
-            item_arguments: vec![Type::Scalar(ScalarType::U8)],
+            item_generic_kinds: vec![grandiose_stage0::GenericKind::Type],
+            item_arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::U8))],
         }],
         tail: None,
     };
@@ -477,6 +482,7 @@ fn associated_effect_row_projection_sets_unify_independently_of_source_order() {
         trait_definition,
         trait_arguments: vec![],
         name: name.into(),
+        item_generic_kinds: vec![],
         item_arguments: vec![],
     };
     let left = EffectRow {
@@ -515,6 +521,7 @@ fn distinct_associated_effect_row_projections_do_not_unify() {
             trait_definition: capability,
             trait_arguments: vec![],
             name: name.into(),
+            item_generic_kinds: vec![],
             item_arguments: vec![],
         }],
         tail: None,

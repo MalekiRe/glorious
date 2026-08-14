@@ -11,6 +11,7 @@ use crate::{
     placeflow::PlaceFlow,
     types::{
         GenericArgument, Type, is_canonical_generic_argument_identity, is_canonical_type_identity,
+        projection_item_arguments_match_kinds,
     },
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -2101,16 +2102,20 @@ fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), S
         Type::Projection {
             subject,
             trait_arguments,
+            item_generic_kinds,
             item_arguments,
             ..
         } => {
+            if !projection_item_arguments_match_kinds(item_generic_kinds, item_arguments) {
+                return Err("MIR associated type projection has invalid item generic arguments".into());
+            }
             validate_mir_type(subject, lifetime_binders)?;
             trait_arguments
                 .iter()
                 .try_for_each(|argument| validate_mir_type(argument, lifetime_binders))?;
             item_arguments
                 .iter()
-                .try_for_each(|argument| validate_mir_type(argument, lifetime_binders))
+                .try_for_each(|argument| validate_mir_generic_argument(argument, lifetime_binders))
         }
         Type::Tuple(elements) => elements
             .iter()
@@ -2187,7 +2192,7 @@ fn validate_mir_effect_row(
             validate_mir_type(argument, lifetime_binders)?;
         }
         for argument in &projection.item_arguments {
-            validate_mir_type(argument, lifetime_binders)?;
+            validate_mir_generic_argument(argument, lifetime_binders)?;
         }
     }
     Ok(())
@@ -11236,6 +11241,7 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
             trait_definition,
             trait_arguments,
             name,
+            item_generic_kinds,
             item_arguments,
         } => Some(Type::Projection {
             subject: Box::new(substitute_generic_type(*subject, substitutions)?),
@@ -11245,9 +11251,10 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
                 .map(|argument| substitute_generic_type(argument, substitutions))
                 .collect::<Option<_>>()?,
             name,
+            item_generic_kinds,
             item_arguments: item_arguments
                 .into_iter()
-                .map(|argument| substitute_generic_type(argument, substitutions))
+                .map(|argument| substitute_generic_argument(argument, substitutions))
                 .collect::<Option<_>>()?,
         }),
         Type::Tuple(values) => Some(Type::Tuple(
@@ -11364,10 +11371,11 @@ fn substitute_generic_effect_row(
                         .map(|argument| substitute_generic_type(argument, substitutions))
                         .collect::<Option<_>>()?,
                     name: projection.name,
+                    item_generic_kinds: projection.item_generic_kinds,
                     item_arguments: projection
                         .item_arguments
                         .into_iter()
-                        .map(|argument| substitute_generic_type(argument, substitutions))
+                        .map(|argument| substitute_generic_argument(argument, substitutions))
                         .collect::<Option<_>>()?,
                 })
             })

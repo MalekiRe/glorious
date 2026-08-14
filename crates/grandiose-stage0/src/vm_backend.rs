@@ -87,7 +87,9 @@ pub struct VmEffectRowProjection {
     pub trait_definition: DefKey,
     pub trait_arguments: Vec<VmType>,
     pub name: String,
-    pub item_arguments: Vec<VmType>,
+    /// Associated item arguments retain their source kind in bytecode
+    /// metadata, even though this row never becomes a VM value.
+    pub item_arguments: Vec<VmGenericArgument>,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmCompare {
@@ -1409,12 +1411,7 @@ fn vm_effect_argument(
                                 .item_arguments
                                 .iter()
                                 .map(|argument| {
-                                    vm_type(argument).map_err(|ty| {
-                                        VmArtifactError::UnsupportedEffectArgumentType {
-                                            effect,
-                                            ty: Box::new(ty),
-                                        }
-                                    })
+                                    vm_effect_argument(effect, argument)
                                 })
                                 .collect::<Result<_, _>>()?,
                         })
@@ -1510,7 +1507,7 @@ fn encode_vm_generic_argument(value: &VmGenericArgument, output: &mut Vec<u8>) {
                 encode_vm_types(&projection.trait_arguments, output);
                 output.extend_from_slice(&(projection.name.len() as u64).to_le_bytes());
                 output.extend_from_slice(projection.name.as_bytes());
-                encode_vm_types(&projection.item_arguments, output);
+                encode_vm_generic_arguments(&projection.item_arguments, output);
             }
             match value.tail {
                 Some(EffectTail::Infer(variable)) => {
@@ -1593,7 +1590,7 @@ fn vm_effect_row_projection_key(value: &VmEffectRowProjection) -> Vec<u8> {
     encode_vm_types(&value.trait_arguments, &mut output);
     output.extend_from_slice(&(value.name.len() as u64).to_le_bytes());
     output.extend_from_slice(value.name.as_bytes());
-    encode_vm_types(&value.item_arguments, &mut output);
+    encode_vm_generic_arguments(&value.item_arguments, &mut output);
     output
 }
 
@@ -1817,12 +1814,7 @@ impl<'a> Decoder<'a> {
                         trait_arguments.push(self.vm_type_at_depth(depth + 1)?);
                     }
                     let name = self.text()?;
-                    let item_argument_count =
-                        self.count("effect projection item arguments", MAX_DECODE_REGISTERS)?;
-                    let mut item_arguments = Vec::with_capacity(item_argument_count);
-                    for _ in 0..item_argument_count {
-                        item_arguments.push(self.vm_type_at_depth(depth + 1)?);
-                    }
+                    let item_arguments = self.vm_generic_arguments_at_depth(depth + 1)?;
                     projections.push(VmEffectRowProjection {
                         subject,
                         trait_definition,

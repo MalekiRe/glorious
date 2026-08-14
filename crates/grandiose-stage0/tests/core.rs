@@ -563,6 +563,7 @@ fn typed_core_canonicalizes_type_fingerprints_and_rejects_forged_row_order() {
         trait_definition: DefKey(Digest::of_bytes(b"core-canonical-row-trait")),
         trait_arguments: vec![],
         name: name.into(),
+        item_generic_kinds: vec![],
         item_arguments: vec![],
     };
     let callable = |projections| Type::Callable {

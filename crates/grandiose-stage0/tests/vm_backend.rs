@@ -375,7 +375,7 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
                 trait_definition,
                 trait_arguments: vec![VmType::Text],
                 name: "Associated".into(),
-                item_arguments: vec![VmType::I64],
+                item_arguments: vec![VmGenericArgument::Type(VmType::I64)],
             }],
             tail: Some(EffectTail::Generic(2)),
         }),

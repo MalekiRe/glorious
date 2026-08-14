@@ -584,6 +584,7 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
                 trait_definition: left_trait,
                 trait_arguments: left_trait_arguments,
                 name: left_name,
+                item_generic_kinds: left_item_kinds,
                 item_arguments: left_item_arguments,
             },
             Type::Projection {
@@ -591,10 +592,12 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
                 trait_definition: right_trait,
                 trait_arguments: right_trait_arguments,
                 name: right_name,
+                item_generic_kinds: right_item_kinds,
                 item_arguments: right_item_arguments,
             },
         ) if left_trait == right_trait
             && left_name == right_name
+            && left_item_kinds == right_item_kinds
             && left_trait_arguments.len() == right_trait_arguments.len()
             && left_item_arguments.len() == right_item_arguments.len() =>
         {
@@ -607,13 +610,14 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
             let item_arguments = left_item_arguments
                 .iter()
                 .zip(right_item_arguments)
-                .map(|(left, right)| unify_overlap_type(left, right, bindings))
+                .map(|(left, right)| unify_overlap_argument(left, right, bindings))
                 .collect::<Option<Vec<_>>>()?;
             Some(Type::Projection {
                 subject: Box::new(subject),
                 trait_definition: *left_trait,
                 trait_arguments,
                 name: left_name.clone(),
+                item_generic_kinds: left_item_kinds.clone(),
                 item_arguments,
             })
         }
@@ -653,8 +657,10 @@ fn contains_overlap_generic(value: &Type, index: u32, bindings: &OverlapBindings
             contains_overlap_generic(&subject, index, bindings)
                 || trait_arguments
                     .iter()
-                    .chain(&item_arguments)
                     .any(|argument| contains_overlap_generic(argument, index, bindings))
+                || item_arguments
+                    .iter()
+                    .any(|argument| contains_overlap_argument_generic(argument, index, bindings))
         }
         Type::Callable {
             parameters, result, ..
@@ -755,6 +761,7 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
             trait_definition,
             trait_arguments,
             name,
+            item_generic_kinds,
             item_arguments,
         } => Type::Projection {
             subject: Box::new(resolve_overlap_type(subject, bindings)),
@@ -764,9 +771,10 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
                 .map(|argument| resolve_overlap_type(argument, bindings))
                 .collect(),
             name: name.clone(),
+            item_generic_kinds: item_generic_kinds.clone(),
             item_arguments: item_arguments
                 .iter()
-                .map(|argument| resolve_overlap_type(argument, bindings))
+                .map(|argument| resolve_overlap_argument(argument, bindings))
                 .collect(),
         },
         Type::Callable {
@@ -862,6 +870,7 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
             trait_definition,
             trait_arguments,
             name,
+            item_generic_kinds,
             item_arguments,
         } => Type::Projection {
             subject: Box::new(rebase_overlap_type(subject, offset)),
@@ -871,9 +880,10 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
                 .map(|argument| rebase_overlap_type(argument, offset))
                 .collect(),
             name: name.clone(),
+            item_generic_kinds: item_generic_kinds.clone(),
             item_arguments: item_arguments
                 .iter()
-                .map(|argument| rebase_overlap_type(argument, offset))
+                .map(|argument| rebase_overlap_argument(argument, offset))
                 .collect(),
         },
         Type::Callable {

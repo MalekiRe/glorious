@@ -940,6 +940,7 @@ impl TraitSolver {
                 trait_definition,
                 trait_arguments,
                 name,
+                item_generic_kinds,
                 item_arguments,
             } => {
                 let subject = self.normalize_type_projections(*subject, active)?;
@@ -949,13 +950,14 @@ impl TraitSolver {
                     .collect::<Result<Vec<_>, _>>()?;
                 let item_arguments = item_arguments
                     .into_iter()
-                    .map(|argument| self.normalize_type_projections(argument, active))
+                    .map(|argument| self.normalize_trait_argument(argument, active))
                     .collect::<Result<Vec<_>, _>>()?;
                 let projection = Type::Projection {
                     subject: Box::new(subject),
                     trait_definition,
                     trait_arguments,
                     name,
+                    item_generic_kinds,
                     item_arguments,
                 };
                 if !projection_is_concrete(&projection) {
@@ -966,6 +968,7 @@ impl TraitSolver {
                     trait_definition,
                     trait_arguments,
                     name,
+                    item_generic_kinds,
                     item_arguments,
                 } = projection
                 else {
@@ -981,7 +984,9 @@ impl TraitSolver {
                     },
                     subject: *subject,
                 };
-                let item_arguments = type_only_item_arguments(item_arguments);
+                if !generic_arguments_match_kinds(&item_arguments, &item_generic_kinds) {
+                    return Err(Box::new(TraitProjectionAnswer::NoSolution));
+                }
                 let key = associated_projection_key(&goal, &name, &item_arguments);
                 if active.contains(&key) {
                     return Err(Box::new(TraitProjectionAnswer::RecursiveProjection));
@@ -1324,7 +1329,7 @@ impl TraitSolver {
             let item_arguments = projection
                 .item_arguments
                 .into_iter()
-                .map(|argument| self.normalize_type_projections(argument, &mut vec![]))
+                .map(|argument| self.normalize_trait_argument(argument, &mut vec![]))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|answer| {
                     Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
@@ -1334,6 +1339,7 @@ impl TraitSolver {
                 trait_definition: projection.trait_definition,
                 trait_arguments,
                 name: projection.name,
+                item_generic_kinds: projection.item_generic_kinds,
                 item_arguments,
             };
             if !projection_is_concrete(&projection.subject)
@@ -1341,7 +1347,10 @@ impl TraitSolver {
                     .trait_arguments
                     .iter()
                     .all(projection_is_concrete)
-                || !projection.item_arguments.iter().all(projection_is_concrete)
+                || !projection
+                    .item_arguments
+                    .iter()
+                    .all(generic_argument_is_concrete)
             {
                 result.projections.push(projection);
                 continue;
@@ -1357,7 +1366,10 @@ impl TraitSolver {
                 },
                 subject: *projection.subject,
             };
-            let item_arguments = type_only_item_arguments(projection.item_arguments);
+            let item_arguments = projection.item_arguments;
+            if !generic_arguments_match_kinds(&item_arguments, &projection.item_generic_kinds) {
+                return Err(Box::new(TraitEffectRowProjectionAnswer::NoSolution));
+            }
             let key =
                 associated_effect_row_projection_key(&goal, &projection.name, &item_arguments);
             if active.contains(&key) {
@@ -1782,6 +1794,10 @@ fn generic_argument_matches_kind(argument: &GenericArgument, kind: crate::Generi
                 crate::GenericKind::Const(crate::ConstKind::U32)
             )
             | (
+                GenericArgument::ConstU32Expr(_),
+                crate::GenericKind::Const(crate::ConstKind::U32)
+            )
+            | (
                 GenericArgument::ConstQuantity(_),
                 crate::GenericKind::Const(crate::ConstKind::Quantity)
             )
@@ -1825,13 +1841,6 @@ fn install_item_argument(
             substitution.generic_arguments.insert(index, argument);
         }
     }
-}
-
-/// `Type::Projection` and `EffectRowProjection` are legacy type-carriers.
-/// Their stored arguments are therefore explicitly lifted at this boundary;
-/// public associated-item application APIs retain every generic kind.
-fn type_only_item_arguments(arguments: Vec<Type>) -> Vec<GenericArgument> {
-    arguments.into_iter().map(GenericArgument::Type).collect()
 }
 
 fn match_rule(
@@ -1995,6 +2004,7 @@ fn match_type_at(
             trait_definition,
             trait_arguments,
             name,
+            item_generic_kinds,
             item_arguments,
         } => match actual {
             Type::Projection {
@@ -2002,9 +2012,11 @@ fn match_type_at(
                 trait_definition: actual_trait_definition,
                 trait_arguments: actual_trait_arguments,
                 name: actual_name,
+                item_generic_kinds: actual_item_generic_kinds,
                 item_arguments: actual_item_arguments,
             } if trait_definition == actual_trait_definition
                 && name == actual_name
+                && item_generic_kinds == actual_item_generic_kinds
                 && trait_arguments.len() == actual_trait_arguments.len()
                 && item_arguments.len() == actual_item_arguments.len() =>
             {
@@ -2012,9 +2024,14 @@ fn match_type_at(
                 trait_arguments
                     .iter()
                     .zip(actual_trait_arguments)
-                    .chain(item_arguments.iter().zip(actual_item_arguments))
                     .try_for_each(|(template, actual)| {
                         match_type_at(template, actual, substitution, binder_depth)
+                    })?;
+                item_arguments
+                    .iter()
+                    .zip(actual_item_arguments)
+                    .try_for_each(|(template, actual)| {
+                        match_generic_argument_at(template, actual, substitution, binder_depth)
                     })
             }
             _ => None,
@@ -2135,7 +2152,9 @@ fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
                     .any(|value| has_free_hrtb_placeholder(value, callable_nesting))
                 || item_arguments
                     .iter()
-                    .any(|value| has_free_hrtb_placeholder(value, callable_nesting))
+                    .any(|value| {
+                        generic_argument_contains_free_hrtb_placeholder(value, callable_nesting)
+                    })
         }
         Type::Tuple(values) => values
             .iter()
@@ -2190,7 +2209,9 @@ fn effect_row_contains_free_hrtb_placeholder(value: &EffectRow, callable_nesting
             || projection
                 .item_arguments
                 .iter()
-                .any(|argument| has_free_hrtb_placeholder(argument, callable_nesting))
+                .any(|argument| {
+                    generic_argument_contains_free_hrtb_placeholder(argument, callable_nesting)
+                })
     })
 }
 
@@ -2375,6 +2396,7 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
             trait_definition,
             trait_arguments,
             name,
+            item_generic_kinds,
             item_arguments,
         } => Type::Projection {
             subject: Box::new(substitute_type(subject, substitution)),
@@ -2384,9 +2406,10 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
                 .map(|value| substitute_type(value, substitution))
                 .collect(),
             name: name.clone(),
+            item_generic_kinds: item_generic_kinds.clone(),
             item_arguments: item_arguments
                 .iter()
-                .map(|value| substitute_type(value, substitution))
+                .map(|value| substitute_generic_argument(value, substitution))
                 .collect(),
         },
         Type::Tuple(values) => Type::Tuple(
@@ -2472,10 +2495,11 @@ fn substitute_effect_row(
                     .map(|value| substitute_type(value, substitution))
                     .collect(),
                 name: projection.name.clone(),
+                item_generic_kinds: projection.item_generic_kinds.clone(),
                 item_arguments: projection
                     .item_arguments
                     .iter()
-                    .map(|value| substitute_type(value, substitution))
+                    .map(|value| substitute_generic_argument(value, substitution))
                     .collect(),
             })
             .collect(),
@@ -2576,7 +2600,7 @@ fn projection_is_concrete(value: &Type) -> bool {
         } => {
             projection_is_concrete(subject)
                 && trait_arguments.iter().all(projection_is_concrete)
-                && item_arguments.iter().all(projection_is_concrete)
+                && item_arguments.iter().all(generic_argument_is_concrete)
         }
         Type::Array(element) => projection_is_concrete(element),
         Type::Reference { referent, .. } => projection_is_concrete(referent),

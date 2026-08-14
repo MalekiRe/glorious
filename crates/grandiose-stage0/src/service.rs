@@ -1618,6 +1618,7 @@ fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
             trait_definition,
             trait_arguments,
             name,
+            item_generic_kinds,
             item_arguments,
         } => Type::Projection {
             subject: Box::new(specialize_type(subject, arguments)),
@@ -1627,9 +1628,10 @@ fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
                 .map(|argument| specialize_type(argument, arguments))
                 .collect(),
             name: name.clone(),
+            item_generic_kinds: item_generic_kinds.clone(),
             item_arguments: item_arguments
                 .iter()
-                .map(|argument| specialize_type(argument, arguments))
+                .map(|argument| specialize_generic_argument(argument, arguments))
                 .collect(),
         },
         Type::Nominal {
@@ -1730,10 +1732,11 @@ fn specialize_effect_row(
                     .map(|argument| specialize_type(argument, arguments))
                     .collect(),
                 name: projection.name.clone(),
+                item_generic_kinds: projection.item_generic_kinds.clone(),
                 item_arguments: projection
                     .item_arguments
                     .iter()
-                    .map(|argument| specialize_type(argument, arguments))
+                    .map(|argument| specialize_generic_argument(argument, arguments))
                     .collect(),
             })
             .collect(),
@@ -1990,7 +1993,8 @@ mod tests {
                     trait_definition: trait_key,
                     trait_arguments: vec![Type::Generic(0)],
                     name: "Effects".into(),
-                    item_arguments: vec![Type::ConstGeneric {
+                    item_generic_kinds: vec![crate::GenericKind::Const(crate::ConstKind::U32)],
+                    item_arguments: vec![GenericArgument::ConstGeneric {
                         index: 2,
                         kind: crate::ConstKind::U32,
                     }],
@@ -2050,7 +2054,7 @@ mod tests {
                 ..
             }] if **subject == Type::Scalar(ScalarType::Text)
                 && trait_arguments == &vec![Type::Scalar(ScalarType::Text)]
-                && item_arguments == &vec![Type::ConstU32(17)]
+                && item_arguments == &vec![GenericArgument::ConstU32(17)]
         ));
     }
 }

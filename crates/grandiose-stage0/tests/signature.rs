@@ -622,7 +622,8 @@ fn associated_type_projections_preserve_structural_const_item_arguments() {
     };
     assert!(matches!(
         target,
-        Type::Projection { item_arguments, .. } if item_arguments == &vec![Type::ConstU32(7)]
+        Type::Projection { item_arguments, .. }
+            if item_arguments == &vec![GenericArgument::ConstU32(7)]
     ));
 }
 
@@ -1421,11 +1422,13 @@ fn generic_associated_type_projections_are_preserved_in_frozen_signatures() {
             trait_definition,
             trait_arguments,
             name,
+            item_generic_kinds,
             item_arguments,
         } if **subject == Type::Generic(0)
             && *trait_definition == iterator
             && trait_arguments.is_empty()
             && name == "Item"
+            && item_generic_kinds.is_empty()
             && item_arguments.is_empty()
     ));
 }
@@ -1467,12 +1470,14 @@ fn generic_associated_item_arguments_are_preserved_in_frozen_signatures() {
             trait_definition,
             trait_arguments,
             name,
+            item_generic_kinds,
             item_arguments,
         } if **subject == Type::Generic(0)
             && *trait_definition == apply
             && trait_arguments.is_empty()
             && name == "Output"
-            && item_arguments == &[Type::Generic(1)]
+            && item_generic_kinds == &[GenericKind::Type]
+            && item_arguments == &[GenericArgument::Type(Type::Generic(1))]
     ));
 }
 
@@ -1508,6 +1513,41 @@ fn generic_associated_items_preserve_binder_kinds_and_reject_mismatched_impls() 
         "{:#?}",
         signatures.diagnostics
     );
+}
+
+#[test]
+fn generic_associated_type_applications_preserve_lifetime_type_and_const_arguments() {
+    let package = PackageKey("signature-gat-application-kinds@0.1.0".into());
+    let source = "trait Borrow { type View<'a, T, n: u32>; } pub fn view<S, T>(value: S) -> <S as Borrow>::View<'static, T, 7> { ignored }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(signatures.diagnostics.is_empty(), "{:#?}", signatures.diagnostics);
+    let view = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("view"))
+        .expect("view definition");
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&view.key).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert!(matches!(
+        &signature.result,
+        Type::Projection { item_generic_kinds, item_arguments, .. }
+            if item_generic_kinds == &[
+                GenericKind::Lifetime,
+                GenericKind::Type,
+                GenericKind::Const(ConstKind::U32),
+            ]
+                && item_arguments == &[
+                    GenericArgument::Lifetime(Lifetime::Static),
+                    GenericArgument::Type(Type::Generic(1)),
+                    GenericArgument::ConstU32(7),
+                ]
+    ));
 }
 
 #[test]
@@ -1548,11 +1588,13 @@ fn associated_effect_row_projections_are_preserved_in_frozen_signatures() {
             trait_definition,
             trait_arguments,
             name,
+            item_generic_kinds,
             item_arguments,
         }] if **subject == Type::Generic(0)
             && *trait_definition == capability
             && trait_arguments.is_empty()
             && name == "Effects"
+            && item_generic_kinds.is_empty()
             && item_arguments.is_empty()
     ));
 }

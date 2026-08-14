@@ -94,11 +94,12 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
         trait_definition: DefKey(Digest::of_bytes(b"mir-forged-gat-trait")),
         trait_arguments: vec![],
         name: "Output".into(),
-        item_arguments: vec![Type::Reference {
+        item_generic_kinds: vec![grandiose_stage0::GenericKind::Type],
+        item_arguments: vec![GenericArgument::Type(Type::Reference {
             mutability: grandiose_stage0::Mutability::Shared,
             lifetime: Lifetime::Bound { depth: 0, index: 0 },
             referent: Box::new(Type::Scalar(ScalarType::I64)),
-        }],
+        })],
     };
     assert!(
         gat_item_argument
@@ -141,6 +142,7 @@ fn mir_validation_rejects_noncanonical_nested_effect_row_identity() {
         trait_definition: DefKey(Digest::of_bytes(b"mir-canonical-row-trait")),
         trait_arguments: vec![],
         name: name.into(),
+        item_generic_kinds: vec![],
         item_arguments: vec![],
     };
     let mut function = graph();
