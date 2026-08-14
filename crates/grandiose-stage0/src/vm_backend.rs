@@ -20,6 +20,7 @@ use crate::{
         MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f64_bits,
         lifted_callable_definition, parse_char_literal, parse_f64_literal, parse_text_literal,
     },
+    runtime_manifest::{FloatBinaryOp, FloatCompareOp, FloatPrimitive, FloatWidth},
     source::{TokenKind, exact_scalar_literal_kind},
     types::{
         ConstKind, EffectTail, GenericArgument, Lifetime, ScalarType, StructuralU32Expr, Type,
@@ -44,6 +45,7 @@ pub enum VmType {
     Isize,
     U128,
     I128,
+    F32,
     F64,
     Bool,
     Char,
@@ -256,6 +258,14 @@ pub enum VmInstruction {
     ConstF64 {
         dst: u32,
         bits: u64,
+    },
+    /// Sealed float leaf selected by the trusted runtime manifest.  It uses a
+    /// selector-shaped payload only as an artifact opcode operand; no source
+    /// lookup remains possible after MIR lowering.
+    FloatIntrinsic {
+        dst: u32,
+        primitive: FloatPrimitive,
+        arguments: Vec<u32>,
     },
     ConstBool {
         dst: u32,
@@ -1294,7 +1304,9 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// whose public ABI returns a canonical u32 predicate. Schema 47 adds opcode
 /// 109 for the manifest-bound generic i64 less-than leaf, whose public ABI
 /// returns a canonical u32 predicate. Schema 46 adds opcode 105 for the
-/// Schema 79 adds sealed generic Array storage opcodes 138 through 149.
+/// Schema 80 resolves the independently introduced runtime families into one
+/// canonical layout: floating intrinsics use opcode 138 and generic Array
+/// storage uses opcodes 139 through 150.
 /// Schema 78 adds manifest-bound generic i64 equality leaf, whose public ABI returns a
 /// canonical u32 predicate. Schema 45 adds opcode 104 for manifest-bound
 /// wrapping i64 addition. Schema
@@ -1315,7 +1327,10 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// immediates, preventing host/payload-dependent artifact identities. Schema
 /// 37 makes canonical outward effect rows part of every callable VM type, so
 /// effect-distinct function values cannot collapse across a frozen boundary.
-pub const STAGE0_VM_SCHEMA: u32 = 79;
+/// Schema 80 also adds the sealed f32/f64 runtime intrinsic opcode and
+/// first-class f32 VM layout. Older artifacts cannot be decoded under the
+/// merged runtime contract.
+pub const STAGE0_VM_SCHEMA: u32 = 80;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -1553,6 +1568,9 @@ impl VerifiedVmArtifact {
     }
     pub fn run_f64(&self) -> Result<f64, VmArtifactError> {
         expect_f64(self.execute_with_limits(VmExecutionLimits::default())?)
+    }
+    pub fn run_f32(&self) -> Result<f32, VmArtifactError> {
+        expect_f32(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_bool(&self) -> Result<bool, VmArtifactError> {
         expect_bool(self.execute_with_limits(VmExecutionLimits::default())?)
@@ -2222,6 +2240,7 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
         Type::Scalar(ScalarType::Isize) => Ok(VmType::Isize),
         Type::Scalar(ScalarType::U128) => Ok(VmType::U128),
         Type::Scalar(ScalarType::I128) => Ok(VmType::I128),
+        Type::Scalar(ScalarType::F32) => Ok(VmType::F32),
         Type::Scalar(ScalarType::F64) => Ok(VmType::F64),
         Type::Scalar(ScalarType::Bool) => Ok(VmType::Bool),
         Type::Scalar(ScalarType::Char) => Ok(VmType::Char),
@@ -2274,6 +2293,11 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
         }),
         value => Err(Box::new(value.clone())),
     }
+}
+
+fn vm_scalar_type(value: ScalarType) -> VmType {
+    vm_type(&Type::Scalar(value))
+        .expect("all runtime float ABI scalars are representable in the VM")
 }
 
 /// Lower a Core effect row into its source-free, canonical VM identity.  The
@@ -2460,6 +2484,7 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::Isize => 25,
         VmType::U128 => 26,
         VmType::I128 => 27,
+        VmType::F32 => 28,
         VmType::F64 => 2,
         VmType::Bool => 3,
         VmType::Char => 4,
@@ -2897,6 +2922,7 @@ impl<'a> Decoder<'a> {
             25 => Ok(VmType::Isize),
             26 => Ok(VmType::U128),
             27 => Ok(VmType::I128),
+            28 => Ok(VmType::F32),
             2 => Ok(VmType::F64),
             3 => Ok(VmType::Bool),
             4 => Ok(VmType::Char),
@@ -3626,6 +3652,27 @@ impl<'a> Decoder<'a> {
                 }
                 Ok(VmInstruction::ConstF64 { dst, bits })
             }
+            138 => {
+                let dst = self.u32()?;
+                let selector = self.text()?;
+                let Some(crate::PrimitiveRole::Float(primitive)) =
+                    crate::PrimitiveRole::parse_selector_name(&selector)
+                else {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "invalid floating runtime opcode selector",
+                    });
+                };
+                let count = self.count("floating runtime arguments", MAX_DECODE_REGISTERS)?;
+                let mut arguments = Vec::with_capacity(count);
+                for _ in 0..count {
+                    arguments.push(self.u32()?);
+                }
+                Ok(VmInstruction::FloatIntrinsic {
+                    dst,
+                    primitive,
+                    arguments,
+                })
+            }
             8 => self.i64_arithmetic(|dst, left, right| VmInstruction::DivI64 { dst, left, right }),
             9 => self.i64_arithmetic(|dst, left, right| VmInstruction::RemI64 { dst, left, right }),
             10 => {
@@ -3744,67 +3791,67 @@ impl<'a> Decoder<'a> {
                 dst: self.u32()?,
                 value: self.u32()?,
             }),
-            138 => Ok(VmInstruction::ArrayNew {
+            139 => Ok(VmInstruction::ArrayNew {
                 dst: self.u32()?,
                 length: self.u32()?,
                 fill: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            139 => Ok(VmInstruction::ArrayLen {
+            140 => Ok(VmInstruction::ArrayLen {
                 dst: self.u32()?,
                 value: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            140 => Ok(VmInstruction::ArrayGetCopy {
-                dst: self.u32()?,
-                value: self.u32()?,
-                index: self.u32()?,
-                element_type: self.vm_type_at_depth(0)?,
-            }),
-            141 => Ok(VmInstruction::ArrayGetMove {
+            141 => Ok(VmInstruction::ArrayGetCopy {
                 dst: self.u32()?,
                 value: self.u32()?,
                 index: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            142 => Ok(VmInstruction::ArrayGetBorrow {
+            142 => Ok(VmInstruction::ArrayGetMove {
+                dst: self.u32()?,
+                value: self.u32()?,
+                index: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
+            }),
+            143 => Ok(VmInstruction::ArrayGetBorrow {
                 dst: self.u32()?,
                 value: self.u32()?,
                 index: self.u32()?,
                 unique: self.byte()? != 0,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            143 => Ok(VmInstruction::ArraySetMove {
+            144 => Ok(VmInstruction::ArraySetMove {
                 value: self.u32()?,
                 index: self.u32()?,
                 item: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            144 => Ok(VmInstruction::ArrayEmpty {
+            145 => Ok(VmInstruction::ArrayEmpty {
                 dst: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            145 => Ok(VmInstruction::ArrayPushMove {
+            146 => Ok(VmInstruction::ArrayPushMove {
                 value: self.u32()?,
                 item: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            146 => Ok(VmInstruction::ArrayPopMove {
+            147 => Ok(VmInstruction::ArrayPopMove {
                 dst: self.u32()?,
                 value: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            147 => Ok(VmInstruction::ArrayCapacity {
+            148 => Ok(VmInstruction::ArrayCapacity {
                 dst: self.u32()?,
                 value: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            148 => Ok(VmInstruction::ArrayReserve {
+            149 => Ok(VmInstruction::ArrayReserve {
                 value: self.u32()?,
                 additional: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
-            149 => Ok(VmInstruction::ArrayFinishDrained {
+            150 => Ok(VmInstruction::ArrayFinishDrained {
                 value: self.u32()?,
                 element_type: self.vm_type_at_depth(0)?,
             }),
@@ -4695,6 +4742,15 @@ fn lower_instruction(
         MirInstruction::ConstF64 { dst, bits } => VmInstruction::ConstF64 {
             dst: dst.0,
             bits: *bits,
+        },
+        MirInstruction::FloatIntrinsic {
+            dst,
+            primitive,
+            arguments,
+        } => VmInstruction::FloatIntrinsic {
+            dst: dst.0,
+            primitive: *primitive,
+            arguments: arguments.iter().map(|argument| argument.0).collect(),
         },
         MirInstruction::ConstBool { dst, value } => VmInstruction::ConstBool {
             dst: dst.0,
@@ -5942,6 +5998,24 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::NonCanonicalFloat { bits: *bits });
                 }
                 expect_type(function, *dst, VmType::F64)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::FloatIntrinsic {
+                dst,
+                primitive,
+                arguments,
+            } => {
+                let (parameters, result) = primitive.scalar_signature();
+                if arguments.len() != parameters.len() {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "floating runtime primitive has the wrong arity",
+                    });
+                }
+                expect_type(function, *dst, vm_scalar_type(result))?;
+                for (&argument, parameter) in arguments.iter().zip(parameters) {
+                    expect_type(function, argument, vm_scalar_type(parameter))?;
+                    read(&states, argument)?;
+                }
                 write(&mut states, *dst)?
             }
             VmInstruction::ConstBool { dst, .. } => {
@@ -7650,6 +7724,7 @@ fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
         | VmType::Isize
         | VmType::U128
         | VmType::I128
+        | VmType::F32
         | VmType::F64
         | VmType::Bool
         | VmType::Char
@@ -8042,6 +8117,7 @@ enum VmValue {
     Isize(i64),
     U128(u128),
     I128(i128),
+    F32(f32),
     F64(f64),
     Bool(bool),
     Char(char),
@@ -8175,6 +8251,7 @@ impl VmValue {
             Self::Isize(_) => VmType::Isize,
             Self::U128(_) => VmType::U128,
             Self::I128(_) => VmType::I128,
+            Self::F32(_) => VmType::F32,
             Self::F64(_) => VmType::F64,
             Self::Bool(_) => VmType::Bool,
             Self::Char(_) => VmType::Char,
@@ -8710,6 +8787,7 @@ fn format_vm_value(value: &VmValue) -> String {
         VmValue::Isize(value) => value.to_string(),
         VmValue::U128(value) => value.to_string(),
         VmValue::I128(value) => value.to_string(),
+        VmValue::F32(value) => value.to_string(),
         VmValue::F64(value) => value.to_string(),
         VmValue::Bool(value) => value.to_string(),
         VmValue::Char(value) => format!("{value:?}"),
@@ -8957,6 +9035,15 @@ fn expect_f64(value: impl Borrow<VmValue>) -> Result<f64, VmArtifactError> {
         }),
     }
 }
+fn expect_f32(value: impl Borrow<VmValue>) -> Result<f32, VmArtifactError> {
+    match value.borrow() {
+        VmValue::F32(value) => Ok(*value),
+        value => Err(VmArtifactError::ResultType {
+            expected: VmType::F32,
+            found: value.ty(),
+        }),
+    }
+}
 
 /// Keep the VM's observable IEEE-754 representation independent of the host
 /// NaN payload selected by an arithmetic instruction.  The numerical
@@ -8964,6 +9051,212 @@ fn expect_f64(value: impl Borrow<VmValue>) -> Result<f64, VmArtifactError> {
 /// encoding is collapsed.
 fn canonical_vm_f64(value: f64) -> f64 {
     f64::from_bits(canonical_f64_bits(value.to_bits()))
+}
+
+fn canonical_vm_f32(value: f32) -> f32 {
+    if value.is_nan() {
+        f32::from_bits(0x7fc0_0000)
+    } else {
+        value
+    }
+}
+
+fn float_argument<'a>(
+    arguments: &[u32],
+    index: usize,
+    registers: &'a [Option<VmValue>],
+) -> Result<&'a VmValue, VmArtifactError> {
+    let register = *arguments
+        .get(index)
+        .ok_or(VmArtifactError::MalformedEncoding {
+            message: "floating runtime primitive has the wrong arity",
+        })?;
+    registers
+        .get(register as usize)
+        .and_then(Option::as_ref)
+        .ok_or(VmArtifactError::ReadBeforeWrite { register })
+}
+
+fn execute_float_intrinsic(
+    primitive: FloatPrimitive,
+    arguments: &[u32],
+    registers: &[Option<VmValue>],
+) -> Result<VmValue, VmArtifactError> {
+    let (parameters, _) = primitive.scalar_signature();
+    if arguments.len() != parameters.len() {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "floating runtime primitive has the wrong arity",
+        });
+    }
+    match primitive {
+        FloatPrimitive::Binary { width, operation } => match width {
+            FloatWidth::F32 => {
+                let left = expect_f32(float_argument(arguments, 0, registers)?)?;
+                let right = expect_f32(float_argument(arguments, 1, registers)?)?;
+                let value = match operation {
+                    FloatBinaryOp::Add => left + right,
+                    FloatBinaryOp::Sub => left - right,
+                    FloatBinaryOp::Mul => left * right,
+                    FloatBinaryOp::Div => left / right,
+                    FloatBinaryOp::Rem => left % right,
+                };
+                Ok(VmValue::F32(canonical_vm_f32(value)))
+            }
+            FloatWidth::F64 => {
+                let left = expect_f64(float_argument(arguments, 0, registers)?)?;
+                let right = expect_f64(float_argument(arguments, 1, registers)?)?;
+                let value = match operation {
+                    FloatBinaryOp::Add => left + right,
+                    FloatBinaryOp::Sub => left - right,
+                    FloatBinaryOp::Mul => left * right,
+                    FloatBinaryOp::Div => left / right,
+                    FloatBinaryOp::Rem => left % right,
+                };
+                Ok(VmValue::F64(canonical_vm_f64(value)))
+            }
+        },
+        FloatPrimitive::Neg { width } => match width {
+            FloatWidth::F32 => Ok(VmValue::F32(canonical_vm_f32(-expect_f32(
+                float_argument(arguments, 0, registers)?,
+            )?))),
+            FloatWidth::F64 => Ok(VmValue::F64(canonical_vm_f64(-expect_f64(
+                float_argument(arguments, 0, registers)?,
+            )?))),
+        },
+        FloatPrimitive::Compare { width, operation } => {
+            let result = match width {
+                FloatWidth::F32 => compare_f32_values(
+                    expect_f32(float_argument(arguments, 0, registers)?)?,
+                    expect_f32(float_argument(arguments, 1, registers)?)?,
+                    operation,
+                ),
+                FloatWidth::F64 => compare_f64_values(
+                    expect_f64(float_argument(arguments, 0, registers)?)?,
+                    expect_f64(float_argument(arguments, 1, registers)?)?,
+                    float_compare(operation),
+                ),
+            };
+            Ok(VmValue::U32(u32::from(result)))
+        }
+        FloatPrimitive::Convert { from, to, checked } => {
+            let value = float_argument(arguments, 0, registers)?;
+            if matches!(to, ScalarType::F32 | ScalarType::F64) {
+                let source = scalar_to_f64(value, from)?;
+                return Ok(match to {
+                    ScalarType::F32 => VmValue::F32(canonical_vm_f32(source as f32)),
+                    ScalarType::F64 => VmValue::F64(canonical_vm_f64(source)),
+                    _ => unreachable!(),
+                });
+            }
+            debug_assert!(checked);
+            scalar_from_checked_float(scalar_to_f64(value, from)?, to)
+        }
+        FloatPrimitive::ToBits { width } => match width {
+            FloatWidth::F32 => Ok(VmValue::U32(
+                expect_f32(float_argument(arguments, 0, registers)?)?.to_bits(),
+            )),
+            FloatWidth::F64 => Ok(VmValue::U64(
+                expect_f64(float_argument(arguments, 0, registers)?)?.to_bits(),
+            )),
+        },
+        FloatPrimitive::FromBits { width } => match width {
+            FloatWidth::F32 => Ok(VmValue::F32(canonical_vm_f32(f32::from_bits(expect_u32(
+                float_argument(arguments, 0, registers)?,
+            )?)))),
+            FloatWidth::F64 => Ok(VmValue::F64(canonical_vm_f64(f64::from_bits(expect_u64(
+                float_argument(arguments, 0, registers)?,
+            )?)))),
+        },
+    }
+}
+
+fn float_compare(operation: FloatCompareOp) -> VmCompare {
+    match operation {
+        FloatCompareOp::Eq => VmCompare::Equal,
+        FloatCompareOp::Ne => VmCompare::NotEqual,
+        FloatCompareOp::Lt => VmCompare::Less,
+        FloatCompareOp::Le => VmCompare::LessEqual,
+        FloatCompareOp::Gt => VmCompare::Greater,
+        FloatCompareOp::Ge => VmCompare::GreaterEqual,
+    }
+}
+
+fn compare_f32_values(left: f32, right: f32, operation: FloatCompareOp) -> bool {
+    match operation {
+        FloatCompareOp::Eq => left == right,
+        FloatCompareOp::Ne => left != right,
+        FloatCompareOp::Lt => left < right,
+        FloatCompareOp::Le => left <= right,
+        FloatCompareOp::Gt => left > right,
+        FloatCompareOp::Ge => left >= right,
+    }
+}
+
+fn scalar_to_f64(value: &VmValue, scalar: ScalarType) -> Result<f64, VmArtifactError> {
+    Ok(match scalar {
+        ScalarType::F32 => expect_f32(value)? as f64,
+        ScalarType::F64 => expect_f64(value)?,
+        ScalarType::U8 => expect_u8(value)? as f64,
+        ScalarType::U16 => expect_u16(value)? as f64,
+        ScalarType::U32 => expect_u32(value)? as f64,
+        ScalarType::U64 => expect_u64(value)? as f64,
+        ScalarType::U128 => expect_u128(value)? as f64,
+        ScalarType::Usize => expect_usize(value)? as f64,
+        ScalarType::I8 => expect_i8(value)? as f64,
+        ScalarType::I16 => expect_i16(value)? as f64,
+        ScalarType::I32 => expect_i32(value)? as f64,
+        ScalarType::I64 => expect_i64(value)? as f64,
+        ScalarType::I128 => expect_i128(value)? as f64,
+        ScalarType::Isize => expect_isize(value)? as f64,
+        _ => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "non-numeric floating conversion",
+            });
+        }
+    })
+}
+
+fn scalar_from_checked_float(value: f64, target: ScalarType) -> Result<VmValue, VmArtifactError> {
+    let (lower, upper) = match target {
+        ScalarType::U8 => (0.0, 256.0),
+        ScalarType::U16 => (0.0, 65536.0),
+        ScalarType::U32 => (0.0, 4_294_967_296.0),
+        ScalarType::U64 | ScalarType::Usize => (0.0, 18_446_744_073_709_551_616.0),
+        ScalarType::U128 => (0.0, 340_282_366_920_938_463_463_374_607_431_768_211_456.0),
+        ScalarType::I8 => (-128.0, 128.0),
+        ScalarType::I16 => (-32768.0, 32768.0),
+        ScalarType::I32 => (-2_147_483_648.0, 2_147_483_648.0),
+        ScalarType::I64 | ScalarType::Isize => {
+            (-9_223_372_036_854_775_808.0, 9_223_372_036_854_775_808.0)
+        }
+        ScalarType::I128 => (
+            -170_141_183_460_469_231_731_687_303_715_884_105_728.0,
+            170_141_183_460_469_231_731_687_303_715_884_105_728.0,
+        ),
+        _ => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "invalid checked float conversion target",
+            });
+        }
+    };
+    if !value.is_finite() || value < lower || value >= upper {
+        return Err(VmArtifactError::Trap);
+    }
+    Ok(match target {
+        ScalarType::U8 => VmValue::U8(value as u8),
+        ScalarType::U16 => VmValue::U16(value as u16),
+        ScalarType::U32 => VmValue::U32(value as u32),
+        ScalarType::U64 => VmValue::U64(value as u64),
+        ScalarType::U128 => VmValue::U128(value as u128),
+        ScalarType::Usize => VmValue::Usize(value as u64),
+        ScalarType::I8 => VmValue::I8(value as i8),
+        ScalarType::I16 => VmValue::I16(value as i16),
+        ScalarType::I32 => VmValue::I32(value as i32),
+        ScalarType::I64 => VmValue::I64(value as i64),
+        ScalarType::I128 => VmValue::I128(value as i128),
+        ScalarType::Isize => VmValue::Isize(value as i64),
+        _ => unreachable!(),
+    })
 }
 
 fn expect_bool(value: impl Borrow<VmValue>) -> Result<bool, VmArtifactError> {
@@ -9132,6 +9425,7 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         VmType::Isize => matches!(value, VmValue::Isize(_)),
         VmType::U128 => matches!(value, VmValue::U128(_)),
         VmType::I128 => matches!(value, VmValue::I128(_)),
+        VmType::F32 => matches!(value, VmValue::F32(_)),
         VmType::F64 => matches!(value, VmValue::F64(_)),
         VmType::Bool => matches!(value, VmValue::Bool(_)),
         VmType::Char => matches!(value, VmValue::Char(_)),
@@ -9247,6 +9541,9 @@ fn literal_matches(value: &VmValue, literal: &str) -> bool {
         VmValue::Bool(value) => matches!((literal, value), ("true", true) | ("false", false)),
         VmValue::I64(value) => parse_pattern_i64(literal).is_some_and(|literal| literal == *value),
         VmValue::F64(value) => parse_pattern_f64(literal).is_some_and(|literal| literal == *value),
+        VmValue::F32(value) => {
+            parse_pattern_f64(literal).is_some_and(|literal| literal as f32 == *value)
+        }
         VmValue::Char(value) => {
             parse_pattern_char(literal).is_some_and(|literal| literal == *value)
         }
@@ -9406,6 +9703,14 @@ fn execute(
             }
             VmInstruction::ConstF64 { dst, bits } => {
                 registers[dst as usize] = Some(VmValue::F64(canonical_vm_f64(f64::from_bits(bits))))
+            }
+            VmInstruction::FloatIntrinsic {
+                dst,
+                primitive,
+                arguments,
+            } => {
+                registers[dst as usize] =
+                    Some(execute_float_intrinsic(primitive, &arguments, &registers)?)
             }
             VmInstruction::ConstBool { dst, value } => {
                 registers[dst as usize] = Some(VmValue::Bool(value))
@@ -11050,6 +11355,21 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&bits.to_le_bytes())
         }
+        VmInstruction::FloatIntrinsic {
+            dst,
+            primitive,
+            arguments,
+        } => {
+            output.push(138);
+            output.extend_from_slice(&dst.to_le_bytes());
+            let selector = primitive.selector_name();
+            output.extend_from_slice(&(selector.len() as u64).to_le_bytes());
+            output.extend_from_slice(selector.as_bytes());
+            output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+            for argument in arguments {
+                output.extend_from_slice(&argument.to_le_bytes());
+            }
+        }
         VmInstruction::ConstBool { dst, value } => {
             output.push(16);
             output.extend_from_slice(&dst.to_le_bytes());
@@ -11529,7 +11849,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             fill,
             element_type,
         } => {
-            output.push(138);
+            output.push(139);
             for register in [dst, length, fill] {
                 output.extend_from_slice(&register.to_le_bytes());
             }
@@ -11540,7 +11860,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             value,
             element_type,
         } => {
-            output.push(139);
+            output.push(140);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
             encode_type(element_type, output);
@@ -11551,7 +11871,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             index,
             element_type,
         } => {
-            output.push(140);
+            output.push(141);
             for register in [dst, value, index] {
                 output.extend_from_slice(&register.to_le_bytes());
             }
@@ -11563,7 +11883,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             index,
             element_type,
         } => {
-            output.push(141);
+            output.push(142);
             for register in [dst, value, index] {
                 output.extend_from_slice(&register.to_le_bytes());
             }
@@ -11576,7 +11896,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             unique,
             element_type,
         } => {
-            output.push(142);
+            output.push(143);
             for register in [dst, value, index] {
                 output.extend_from_slice(&register.to_le_bytes());
             }
@@ -11589,14 +11909,14 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             item,
             element_type,
         } => {
-            output.push(143);
+            output.push(144);
             for register in [value, index, item] {
                 output.extend_from_slice(&register.to_le_bytes());
             }
             encode_type(element_type, output);
         }
         VmInstruction::ArrayEmpty { dst, element_type } => {
-            output.push(144);
+            output.push(145);
             output.extend_from_slice(&dst.to_le_bytes());
             encode_type(element_type, output);
         }
@@ -11605,7 +11925,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             item,
             element_type,
         } => {
-            output.push(145);
+            output.push(146);
             output.extend_from_slice(&value.to_le_bytes());
             output.extend_from_slice(&item.to_le_bytes());
             encode_type(element_type, output);
@@ -11615,7 +11935,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             value,
             element_type,
         } => {
-            output.push(146);
+            output.push(147);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
             encode_type(element_type, output);
@@ -11625,7 +11945,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             value,
             element_type,
         } => {
-            output.push(147);
+            output.push(148);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
             encode_type(element_type, output);
@@ -11635,7 +11955,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             additional,
             element_type,
         } => {
-            output.push(148);
+            output.push(149);
             output.extend_from_slice(&value.to_le_bytes());
             output.extend_from_slice(&additional.to_le_bytes());
             encode_type(element_type, output);
@@ -11644,7 +11964,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             value,
             element_type,
         } => {
-            output.push(149);
+            output.push(150);
             output.extend_from_slice(&value.to_le_bytes());
             encode_type(element_type, output);
         }
@@ -12036,6 +12356,14 @@ fn execute_with_arguments(
             VmInstruction::ConstF64 { dst, bits } => {
                 registers[*dst as usize] =
                     Some(VmValue::F64(canonical_vm_f64(f64::from_bits(*bits))))
+            }
+            VmInstruction::FloatIntrinsic {
+                dst,
+                primitive,
+                arguments,
+            } => {
+                registers[*dst as usize] =
+                    Some(execute_float_intrinsic(*primitive, arguments, &registers)?)
             }
             VmInstruction::ConstBool { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::Bool(*value))
@@ -13863,5 +14191,157 @@ impl ExecutionBudget {
             });
         }
         self.reserve_allocation(count as usize)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PrimitiveRole;
+
+    fn artifact(registers: Vec<VmType>, instructions: Vec<VmInstruction>) -> CandidateVmArtifact {
+        let mut artifact = CandidateVmArtifact {
+            schema: STAGE0_VM_SCHEMA,
+            runtime_manifest: None,
+            function: VmFunction {
+                definition: DefKey(Digest::of_bytes(b"float-intrinsic-test")),
+                nominal_copy_descriptors: vec![],
+                captures: 0,
+                parameters: 0,
+                registers,
+                instructions,
+            },
+            fingerprint: Digest::of_bytes(b"uninitialized"),
+        };
+        artifact.fingerprint = artifact.computed_fingerprint();
+        artifact
+    }
+
+    #[test]
+    fn float_intrinsics_round_trip_f32_bits_and_checked_conversion() {
+        let f64_to_f32 = PrimitiveRole::parse_selector_name("f64-to-f32").unwrap();
+        let f32_bits = PrimitiveRole::parse_selector_name("f32-to-bits").unwrap();
+        let f32_to_i32 = PrimitiveRole::parse_selector_name("f32-to-i32-checked").unwrap();
+        let PrimitiveRole::Float(f64_to_f32) = f64_to_f32 else {
+            panic!("float role")
+        };
+        let PrimitiveRole::Float(f32_bits) = f32_bits else {
+            panic!("float role")
+        };
+        let PrimitiveRole::Float(f32_to_i32) = f32_to_i32 else {
+            panic!("float role")
+        };
+        let artifact = artifact(
+            vec![VmType::F64, VmType::F32, VmType::U32, VmType::I32],
+            vec![
+                VmInstruction::ConstF64 {
+                    dst: 0,
+                    bits: 3.5f64.to_bits(),
+                },
+                VmInstruction::FloatIntrinsic {
+                    dst: 1,
+                    primitive: f64_to_f32,
+                    arguments: vec![0],
+                },
+                VmInstruction::FloatIntrinsic {
+                    dst: 2,
+                    primitive: f32_bits,
+                    arguments: vec![1],
+                },
+                VmInstruction::FloatIntrinsic {
+                    dst: 3,
+                    primitive: f32_to_i32,
+                    arguments: vec![1],
+                },
+                VmInstruction::Return { value: 3 },
+            ],
+        );
+        let bytes = encode_artifact(&artifact);
+        assert_eq!(
+            decode_and_verify_artifact(&bytes)
+                .unwrap()
+                .run_i32()
+                .unwrap(),
+            3
+        );
+        assert_eq!(decode_artifact(&bytes).unwrap(), artifact);
+    }
+
+    #[test]
+    fn checked_float_conversion_rejects_nan_and_out_of_range_values() {
+        let PrimitiveRole::Float(primitive) =
+            PrimitiveRole::parse_selector_name("f64-to-u8-checked").unwrap()
+        else {
+            panic!("float role")
+        };
+        let artifact = artifact(
+            vec![VmType::F64, VmType::U8],
+            vec![
+                VmInstruction::ConstF64 {
+                    dst: 0,
+                    bits: f64::NAN.to_bits(),
+                },
+                VmInstruction::FloatIntrinsic {
+                    dst: 1,
+                    primitive,
+                    arguments: vec![0],
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        );
+        assert_eq!(
+            verify(artifact).unwrap().run_u8(),
+            Err(VmArtifactError::Trap)
+        );
+    }
+
+    #[test]
+    fn float_intrinsics_cover_arithmetic_comparison_and_integer_to_float() {
+        let PrimitiveRole::Float(i64_to_f64) =
+            PrimitiveRole::parse_selector_name("i64-to-f64").unwrap()
+        else {
+            panic!("float role")
+        };
+        let PrimitiveRole::Float(add) = PrimitiveRole::parse_selector_name("f64-add").unwrap()
+        else {
+            panic!("float role")
+        };
+        let PrimitiveRole::Float(compare) = PrimitiveRole::parse_selector_name("f64-gt").unwrap()
+        else {
+            panic!("float role")
+        };
+        let artifact = artifact(
+            vec![
+                VmType::I64,
+                VmType::F64,
+                VmType::F64,
+                VmType::F64,
+                VmType::U32,
+            ],
+            vec![
+                VmInstruction::ConstI64 { dst: 0, value: 40 },
+                VmInstruction::FloatIntrinsic {
+                    dst: 1,
+                    primitive: i64_to_f64,
+                    arguments: vec![0],
+                },
+                VmInstruction::ConstF64 {
+                    dst: 2,
+                    bits: 2.0f64.to_bits(),
+                },
+                VmInstruction::FloatIntrinsic {
+                    dst: 3,
+                    primitive: add,
+                    arguments: vec![1, 2],
+                },
+                VmInstruction::FloatIntrinsic {
+                    dst: 4,
+                    primitive: compare,
+                    arguments: vec![3, 1],
+                },
+                VmInstruction::Return { value: 4 },
+            ],
+        );
+        assert_eq!(verify(artifact).unwrap().run_u32().unwrap(), 1);
     }
 }

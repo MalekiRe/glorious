@@ -1220,6 +1220,9 @@ impl StageZeroCompiler {
                     ]
                     .iter()
                     .any(|role| manifest.primitives.get(role) == Some(&declaration.key))
+                        || manifest.primitives.iter().any(|(role, definition)| {
+                            role.is_float() && definition == &declaration.key
+                        })
                 }) {
                     // This exact manifest-bound runtime leaf has an opaque
                     // source body. Do not parse or elaborate it as `Unit`:

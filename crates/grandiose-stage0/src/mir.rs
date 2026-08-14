@@ -9,7 +9,7 @@ use crate::{
     identity::{DefKey, Digest},
     instance::InstanceKey,
     placeflow::PlaceFlow,
-    runtime_manifest::PrimitiveRole,
+    runtime_manifest::{FloatPrimitive, PrimitiveRole},
     signature::{
         ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedInterface,
         ElaboratedNominalLayout,
@@ -103,6 +103,15 @@ pub enum MirInstruction {
     ConstF64 {
         dst: MirLocal,
         bits: u64,
+    },
+    /// A finite manifest-authorized IEEE-754 operation.  The primitive
+    /// selector is retained as sealed semantic data (not a callable name),
+    /// so every f32/f64 conversion and bit cast remains explicit through VM
+    /// serialization and independent verification.
+    FloatIntrinsic {
+        dst: MirLocal,
+        primitive: FloatPrimitive,
+        arguments: Vec<MirLocal>,
     },
     ConstBool {
         dst: MirLocal,
@@ -1482,6 +1491,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         MirInstruction::ConstUnit { dst }
         | MirInstruction::ConstI64 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
+        | MirInstruction::FloatIntrinsic { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
         | MirInstruction::ConstText { dst, .. }
@@ -3491,7 +3501,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
                 .try_for_each(|ty| validate_mir_type(ty, &mut lifetime_binders))?;
             validate_mir_type(result, &mut lifetime_binders)
         }
-        MirInstruction::Abort => Ok(()),
+        MirInstruction::Abort | MirInstruction::FloatIntrinsic { .. } => Ok(()),
         MirInstruction::TextByteLen { .. } => Ok(()),
         MirInstruction::TextConcat { .. }
         | MirInstruction::TextEq { .. }
@@ -4251,6 +4261,9 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
         | MirInstruction::ConstText { dst, .. } => vec![*dst],
+        MirInstruction::FloatIntrinsic { dst, arguments, .. } => std::iter::once(*dst)
+            .chain(arguments.iter().copied())
+            .collect(),
         MirInstruction::TextByteLen { dst, value } => vec![*dst, *value],
         MirInstruction::TextConcat { dst, left, right }
         | MirInstruction::TextEq { dst, left, right } => vec![*dst, *left, *right],
@@ -15031,6 +15044,20 @@ impl Lowerer<'_> {
                                     }
                                     _ => unreachable!("Array role was narrowed above"),
                                 }
+                            }
+                            Some(PrimitiveRole::Float(primitive)) => {
+                                if !generic_arguments.is_empty() {
+                                    self.error(
+                                        "G6005",
+                                        "floating runtime primitive may not carry generic arguments",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::FloatIntrinsic {
+                                    dst,
+                                    primitive,
+                                    arguments,
+                                });
                             }
                             None => match host_import {
                                 Some(import) => self.instructions.push(MirInstruction::HostCall {

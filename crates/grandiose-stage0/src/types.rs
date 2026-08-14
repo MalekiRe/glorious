@@ -292,7 +292,7 @@ pub enum Mutability {
     Unique,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ScalarType {
     Bool,
     U8,

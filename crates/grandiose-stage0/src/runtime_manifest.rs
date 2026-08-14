@@ -14,11 +14,372 @@ use crate::{
     types::{Lifetime, Mutability},
 };
 
+/// The two IEEE-754 formats exposed by the distributed runtime.  The format
+/// is part of the primitive identity; a source declaration cannot obtain
+/// f32 authority merely by having an f32-shaped signature.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum FloatWidth {
+    F32,
+    F64,
+}
+
+impl FloatWidth {
+    const fn scalar(self) -> ScalarType {
+        match self {
+            Self::F32 => ScalarType::F32,
+            Self::F64 => ScalarType::F64,
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum FloatBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Rem,
+}
+
+impl FloatBinaryOp {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Sub => "sub",
+            Self::Mul => "mul",
+            Self::Div => "div",
+            Self::Rem => "rem",
+        }
+    }
+    const fn ordinal(self) -> u8 {
+        match self {
+            Self::Add => 0,
+            Self::Sub => 1,
+            Self::Mul => 2,
+            Self::Div => 3,
+            Self::Rem => 4,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum FloatCompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl FloatCompareOp {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Eq => "eq",
+            Self::Ne => "ne",
+            Self::Lt => "lt",
+            Self::Le => "le",
+            Self::Gt => "gt",
+            Self::Ge => "ge",
+        }
+    }
+    const fn ordinal(self) -> u8 {
+        match self {
+            Self::Eq => 0,
+            Self::Ne => 1,
+            Self::Lt => 2,
+            Self::Le => 3,
+            Self::Gt => 4,
+            Self::Ge => 5,
+        }
+    }
+}
+
+/// One finite, manifest-addressed floating leaf.  Keeping conversion source
+/// and target types in the authority key prevents an ABI-compatible integer
+/// conversion from being silently substituted at the runtime boundary.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum FloatPrimitive {
+    Binary {
+        width: FloatWidth,
+        operation: FloatBinaryOp,
+    },
+    Neg {
+        width: FloatWidth,
+    },
+    Compare {
+        width: FloatWidth,
+        operation: FloatCompareOp,
+    },
+    Convert {
+        from: ScalarType,
+        to: ScalarType,
+        checked: bool,
+    },
+    ToBits {
+        width: FloatWidth,
+    },
+    FromBits {
+        width: FloatWidth,
+    },
+}
+
+impl FloatPrimitive {
+    pub(crate) fn scalar_signature(self) -> (Vec<ScalarType>, ScalarType) {
+        match self {
+            Self::Binary { width, .. } => {
+                let ty = width.scalar();
+                (vec![ty, ty], ty)
+            }
+            Self::Neg { width } => {
+                let ty = width.scalar();
+                (vec![ty], ty)
+            }
+            Self::Compare { width, .. } => {
+                let ty = width.scalar();
+                (vec![ty, ty], ScalarType::U32)
+            }
+            Self::Convert { from, to, .. } => (vec![from], to),
+            Self::ToBits { width } => (
+                vec![width.scalar()],
+                match width {
+                    FloatWidth::F32 => ScalarType::U32,
+                    FloatWidth::F64 => ScalarType::U64,
+                },
+            ),
+            Self::FromBits { width } => (
+                vec![match width {
+                    FloatWidth::F32 => ScalarType::U32,
+                    FloatWidth::F64 => ScalarType::U64,
+                }],
+                width.scalar(),
+            ),
+        }
+    }
+
+    pub(crate) fn selector_name(self) -> String {
+        match self {
+            Self::Binary { width, operation } => format!("{}-{}", width.name(), operation.name()),
+            Self::Neg { width } => format!("{}-neg", width.name()),
+            Self::Compare { width, operation } => format!("{}-{}", width.name(), operation.name()),
+            Self::Convert { from, to, checked } => format!(
+                "{}-to-{}{}",
+                scalar_name(from),
+                scalar_name(to),
+                if checked { "-checked" } else { "" }
+            ),
+            Self::ToBits { width } => format!("{}-to-bits", width.name()),
+            Self::FromBits { width } => format!("{}-from-bits", width.name()),
+        }
+    }
+
+    fn ordinal(self) -> u8 {
+        match self {
+            Self::Binary { width, operation } => width_ordinal(width) * 5 + operation.ordinal(),
+            Self::Neg { width } => 10 + width_ordinal(width),
+            Self::Compare { width, operation } => {
+                12 + width_ordinal(width) * 6 + operation.ordinal()
+            }
+            Self::Convert {
+                from: ScalarType::F32,
+                to: ScalarType::F64,
+                checked: false,
+            } => 24,
+            Self::Convert {
+                from: ScalarType::F64,
+                to: ScalarType::F32,
+                checked: false,
+            } => 25,
+            Self::Convert {
+                from,
+                to: to @ (ScalarType::F32 | ScalarType::F64),
+                checked: false,
+            } => {
+                26 + runtime_integer_ordinal(from).expect("validated float selector") * 2
+                    + width_ordinal(if to == ScalarType::F32 {
+                        FloatWidth::F32
+                    } else {
+                        FloatWidth::F64
+                    })
+            }
+            Self::Convert {
+                from: from @ (ScalarType::F32 | ScalarType::F64),
+                to,
+                checked: true,
+            } => {
+                50 + width_ordinal(if from == ScalarType::F32 {
+                    FloatWidth::F32
+                } else {
+                    FloatWidth::F64
+                }) * 12
+                    + runtime_integer_ordinal(to).expect("validated float selector")
+            }
+            // `parse_selector_name` and manifest construction admit only the
+            // four conversion forms above.
+            Self::Convert { .. } => unreachable!("invalid floating runtime conversion"),
+            Self::ToBits { width } => 74 + width_ordinal(width),
+            Self::FromBits { width } => 76 + width_ordinal(width),
+        }
+    }
+
+    fn parse_selector_name(value: &str) -> Option<Self> {
+        let (head, checked) = value
+            .strip_suffix("-checked")
+            .map_or((value, false), |head| (head, true));
+        if !checked {
+            if let Some(width) = head.strip_suffix("-to-bits").and_then(parse_float_width) {
+                return Some(Self::ToBits { width });
+            }
+            if let Some(width) = head.strip_suffix("-from-bits").and_then(parse_float_width) {
+                return Some(Self::FromBits { width });
+            }
+        }
+        if let Some((from, to)) = head.split_once("-to-") {
+            let from = parse_scalar_name(from)?;
+            let to = parse_scalar_name(to)?;
+            let float_from = matches!(from, ScalarType::F32 | ScalarType::F64);
+            let float_to = matches!(to, ScalarType::F32 | ScalarType::F64);
+            let integer_from = is_runtime_integer(from);
+            let integer_to = is_runtime_integer(to);
+            if ((float_from || integer_from) && float_to && !checked)
+                || (float_from && integer_to && checked)
+            {
+                return Some(Self::Convert { from, to, checked });
+            }
+            return None;
+        }
+        for (suffix, operation) in [
+            ("-add", FloatBinaryOp::Add),
+            ("-sub", FloatBinaryOp::Sub),
+            ("-mul", FloatBinaryOp::Mul),
+            ("-div", FloatBinaryOp::Div),
+            ("-rem", FloatBinaryOp::Rem),
+        ] {
+            if let Some(width) = head.strip_suffix(suffix).and_then(parse_float_width) {
+                return Some(Self::Binary { width, operation });
+            }
+        }
+        if let Some(width) = head.strip_suffix("-neg").and_then(parse_float_width) {
+            return Some(Self::Neg { width });
+        }
+        for (suffix, operation) in [
+            ("-eq", FloatCompareOp::Eq),
+            ("-ne", FloatCompareOp::Ne),
+            ("-lt", FloatCompareOp::Lt),
+            ("-le", FloatCompareOp::Le),
+            ("-gt", FloatCompareOp::Gt),
+            ("-ge", FloatCompareOp::Ge),
+        ] {
+            if let Some(width) = head.strip_suffix(suffix).and_then(parse_float_width) {
+                return Some(Self::Compare { width, operation });
+            }
+        }
+        None
+    }
+}
+
+const fn width_ordinal(width: FloatWidth) -> u8 {
+    match width {
+        FloatWidth::F32 => 0,
+        FloatWidth::F64 => 1,
+    }
+}
+const fn scalar_name(scalar: ScalarType) -> &'static str {
+    match scalar {
+        ScalarType::U8 => "u8",
+        ScalarType::U16 => "u16",
+        ScalarType::U32 => "u32",
+        ScalarType::U64 => "u64",
+        ScalarType::U128 => "u128",
+        ScalarType::Usize => "usize",
+        ScalarType::I8 => "i8",
+        ScalarType::I16 => "i16",
+        ScalarType::I32 => "i32",
+        ScalarType::I64 => "i64",
+        ScalarType::I128 => "i128",
+        ScalarType::Isize => "isize",
+        ScalarType::F32 => "f32",
+        ScalarType::F64 => "f64",
+        _ => "non-runtime-scalar",
+    }
+}
+const fn runtime_integer_ordinal(scalar: ScalarType) -> Option<u8> {
+    Some(match scalar {
+        ScalarType::U8 => 0,
+        ScalarType::U16 => 1,
+        ScalarType::U32 => 2,
+        ScalarType::U64 => 3,
+        ScalarType::U128 => 4,
+        ScalarType::Usize => 5,
+        ScalarType::I8 => 6,
+        ScalarType::I16 => 7,
+        ScalarType::I32 => 8,
+        ScalarType::I64 => 9,
+        ScalarType::I128 => 10,
+        ScalarType::Isize => 11,
+        _ => return None,
+    })
+}
+const fn is_runtime_integer(scalar: ScalarType) -> bool {
+    matches!(
+        scalar,
+        ScalarType::U8
+            | ScalarType::U16
+            | ScalarType::U32
+            | ScalarType::U64
+            | ScalarType::U128
+            | ScalarType::Usize
+            | ScalarType::I8
+            | ScalarType::I16
+            | ScalarType::I32
+            | ScalarType::I64
+            | ScalarType::I128
+            | ScalarType::Isize
+    )
+}
+fn parse_float_width(value: &str) -> Option<FloatWidth> {
+    match value {
+        "f32" => Some(FloatWidth::F32),
+        "f64" => Some(FloatWidth::F64),
+        _ => None,
+    }
+}
+fn parse_scalar_name(value: &str) -> Option<ScalarType> {
+    Some(match value {
+        "u8" => ScalarType::U8,
+        "u16" => ScalarType::U16,
+        "u32" => ScalarType::U32,
+        "u64" => ScalarType::U64,
+        "u128" => ScalarType::U128,
+        "usize" => ScalarType::Usize,
+        "i8" => ScalarType::I8,
+        "i16" => ScalarType::I16,
+        "i32" => ScalarType::I32,
+        "i64" => ScalarType::I64,
+        "i128" => ScalarType::I128,
+        "isize" => ScalarType::Isize,
+        "f32" => ScalarType::F32,
+        "f64" => ScalarType::F64,
+        _ => return None,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PrimitiveRole {
     /// The trusted terminal leaf. Only its exact manifest-bound declaration
     /// identity may lower to the VM's non-fallthrough `Trap` instruction.
     Abort,
+    /// One of the finite IEEE-754 leaves declared in the canonical runtime.
+    /// It is structurally parameterized solely to keep the manifest protocol
+    /// auditable; each selector still binds one exact declaration identity.
+    Float(FloatPrimitive),
     /// The finite control leaf used by the standard library's conventional
     /// conditional combinator. It is polymorphic in its result and receives
     /// two zero-argument callables, so source spelling alone cannot become a
@@ -167,9 +528,115 @@ pub enum PrimitiveRole {
 }
 
 impl PrimitiveRole {
-    pub const fn selector_name(self) -> &'static str {
+    /// Stable protocol tag used by request and manifest fingerprints.  Legacy
+    /// tags remain byte-for-byte unchanged; the newly introduced finite float
+    /// family occupies the following contiguous range.
+    pub(crate) fn stable_tag(self) -> u8 {
+        if let Self::Float(primitive) = self {
+            return 69 + primitive.ordinal();
+        }
         match self {
-            Self::Abort => "abort",
+            Self::Abort => return 147,
+            Self::ArrayNew => return 148,
+            Self::ArrayLen => return 149,
+            Self::ArrayGetCopy => return 150,
+            Self::ArrayGetMove => return 151,
+            Self::ArrayGetBorrowShared => return 152,
+            Self::ArrayGetBorrowUnique => return 153,
+            Self::ArraySetMove => return 154,
+            Self::ArrayEmpty => return 155,
+            Self::ArrayPushMove => return 156,
+            Self::ArrayPopMove => return 157,
+            Self::ArrayCapacity => return 158,
+            Self::ArrayReserve => return 159,
+            Self::ArrayFinishDrained => return 160,
+            _ => {}
+        }
+        const LEGACY: [&str; 69] = [
+            "branch-bool",
+            "text-byte-len",
+            "text-concat",
+            "text-eq",
+            "text-from-utf8-checked",
+            "text-as-bytes",
+            "char-from-u32-checked",
+            "char-to-u32",
+            "bytes-len",
+            "bytes-concat",
+            "bytes-get",
+            "bytes-slice",
+            "bytes-from-array-move",
+            "bytes-to-array",
+            "bytes-utf8-valid-up-to",
+            "u32-checked-add",
+            "u32-checked-sub",
+            "u32-checked-mul",
+            "u32-checked-div",
+            "u32-checked-rem",
+            "u32-wrapping-add",
+            "u32-wrapping-sub",
+            "u32-wrapping-mul",
+            "u32-wrapping-shl",
+            "u32-wrapping-shr",
+            "u32-checked-shl",
+            "u32-checked-shr",
+            "u32-eq",
+            "u32-lt",
+            "u32-le",
+            "u32-to-usize",
+            "usize-to-u32-checked",
+            "int-checked-add",
+            "int-wrapping-add",
+            "int-equal",
+            "int-wrapping-sub",
+            "int-wrapping-mul",
+            "int-bit-and",
+            "int-less",
+            "int-greater",
+            "int-bit-or",
+            "int-bit-xor",
+            "int-bit-not",
+            "int-shl",
+            "int-shr",
+            "int-convert-checked-to-i64",
+            "int-convert-wrapping-to-i64",
+            "int-convert-checked-to-u32",
+            "int-convert-wrapping-to-u32",
+            "int-convert-checked-to-usize",
+            "int-convert-wrapping-to-usize",
+            "int-convert-checked-to-u8",
+            "int-convert-wrapping-to-u8",
+            "int-convert-checked-to-u16",
+            "int-convert-wrapping-to-u16",
+            "int-convert-checked-to-i16",
+            "int-convert-wrapping-to-i16",
+            "int-convert-checked-to-i32",
+            "int-convert-wrapping-to-i32",
+            "int-convert-checked-to-i8",
+            "int-convert-wrapping-to-i8",
+            "int-convert-checked-to-u64",
+            "int-convert-wrapping-to-u64",
+            "int-convert-checked-to-isize",
+            "int-convert-wrapping-to-isize",
+            "int-convert-checked-to-u128",
+            "int-convert-wrapping-to-u128",
+            "int-convert-checked-to-i128",
+            "int-convert-wrapping-to-i128",
+        ];
+        LEGACY
+            .iter()
+            .position(|name| *name == self.selector_name())
+            .expect("every legacy primitive has a stable tag") as u8
+    }
+
+    pub(crate) const fn is_float(self) -> bool {
+        matches!(self, Self::Float(_))
+    }
+    pub fn selector_name(self) -> String {
+        if let Self::Float(primitive) = self {
+            return primitive.selector_name();
+        }
+        (match self {
             Self::BranchBool => "branch-bool",
             Self::TextByteLen => "text-byte-len",
             Self::TextConcat => "text-concat",
@@ -239,6 +706,7 @@ impl PrimitiveRole {
             Self::IntConvertWrappingToU128 => "int-convert-wrapping-to-u128",
             Self::IntConvertCheckedToI128 => "int-convert-checked-to-i128",
             Self::IntConvertWrappingToI128 => "int-convert-wrapping-to-i128",
+            Self::Abort => "abort",
             Self::ArrayNew => "array-new",
             Self::ArrayLen => "array-len",
             Self::ArrayGetCopy => "array-get-copy",
@@ -252,10 +720,16 @@ impl PrimitiveRole {
             Self::ArrayCapacity => "array-capacity",
             Self::ArrayReserve => "array-reserve",
             Self::ArrayFinishDrained => "array-finish-drained",
-        }
+            Self::Float(_) => unreachable!("handled before the static selector table"),
+        })
+        .to_owned()
     }
 
-    pub fn parse_selector_name(value: &str) -> Option<Self> {
+    pub fn parse_selector_name(value: impl AsRef<str>) -> Option<Self> {
+        let value = value.as_ref();
+        if let Some(primitive) = FloatPrimitive::parse_selector_name(value) {
+            return Some(Self::Float(primitive));
+        }
         Some(match value {
             "abort" => Self::Abort,
             "branch-bool" => Self::BranchBool,
@@ -462,6 +936,9 @@ impl RuntimeManifestInput {
     }
 }
 fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
+    if let PrimitiveRole::Float(primitive) = role {
+        return expected_float_signature(primitive);
+    }
     match role {
         PrimitiveRole::Abort => crate::CallableSignature {
             generics: 0,
@@ -1112,6 +1589,22 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         PrimitiveRole::ArrayFinishDrained => {
             array_signature(vec![Type::Array(Box::new(Type::Generic(0)))], Type::Unit)
         }
+        PrimitiveRole::Float(_) => unreachable!("handled before the legacy signature table"),
+    }
+}
+
+fn expected_float_signature(primitive: FloatPrimitive) -> crate::CallableSignature {
+    let (parameters, result) = primitive.scalar_signature();
+    crate::CallableSignature {
+        generics: 0,
+        generic_kinds: vec![],
+        parameters: parameters.into_iter().map(Type::Scalar).collect(),
+        result: Type::Scalar(result),
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+        where_bounds: vec![],
+        where_associated_type_bindings: vec![],
+        where_associated_effect_bindings: vec![],
     }
 }
 
@@ -1172,92 +1665,79 @@ fn manifest_digest(
     bytes.extend_from_slice(&(standard_library.0.len() as u64).to_le_bytes());
     bytes.extend_from_slice(standard_library.0.as_bytes());
     for (role, definition) in primitives {
-        bytes.push(match role {
-            PrimitiveRole::Abort => 69,
-            PrimitiveRole::BranchBool => 0,
-            PrimitiveRole::TextByteLen => 1,
-            PrimitiveRole::TextConcat => 2,
-            PrimitiveRole::TextEq => 3,
-            PrimitiveRole::TextFromUtf8Checked => 4,
-            PrimitiveRole::TextAsBytes => 5,
-            PrimitiveRole::CharFromU32Checked => 6,
-            PrimitiveRole::CharToU32 => 7,
-            PrimitiveRole::BytesLen => 8,
-            PrimitiveRole::BytesConcat => 9,
-            PrimitiveRole::BytesGet => 10,
-            PrimitiveRole::BytesSlice => 11,
-            PrimitiveRole::BytesFromArrayMove => 12,
-            PrimitiveRole::BytesToArray => 13,
-            PrimitiveRole::BytesUtf8ValidUpTo => 14,
-            PrimitiveRole::ArrayNew => 78,
-            PrimitiveRole::ArrayLen => 79,
-            PrimitiveRole::ArrayGetCopy => 80,
-            PrimitiveRole::ArrayGetMove => 81,
-            PrimitiveRole::ArrayGetBorrowShared => 82,
-            PrimitiveRole::ArrayGetBorrowUnique => 83,
-            PrimitiveRole::ArraySetMove => 84,
-            PrimitiveRole::ArrayEmpty => 85,
-            PrimitiveRole::ArrayPushMove => 86,
-            PrimitiveRole::ArrayPopMove => 87,
-            PrimitiveRole::ArrayCapacity => 88,
-            PrimitiveRole::ArrayReserve => 89,
-            PrimitiveRole::ArrayFinishDrained => 90,
-            PrimitiveRole::U32CheckedAdd => 15,
-            PrimitiveRole::U32CheckedSub => 16,
-            PrimitiveRole::U32CheckedMul => 17,
-            PrimitiveRole::U32CheckedDiv => 18,
-            PrimitiveRole::U32CheckedRem => 19,
-            PrimitiveRole::U32WrappingAdd => 20,
-            PrimitiveRole::U32WrappingSub => 21,
-            PrimitiveRole::U32WrappingMul => 22,
-            PrimitiveRole::U32WrappingShl => 23,
-            PrimitiveRole::U32WrappingShr => 24,
-            PrimitiveRole::U32CheckedShl => 25,
-            PrimitiveRole::U32CheckedShr => 26,
-            PrimitiveRole::U32Eq => 27,
-            PrimitiveRole::U32Lt => 28,
-            PrimitiveRole::U32Le => 29,
-            PrimitiveRole::U32ToUsize => 30,
-            PrimitiveRole::UsizeToU32Checked => 31,
-            PrimitiveRole::IntCheckedAdd => 32,
-            PrimitiveRole::IntWrappingAdd => 33,
-            PrimitiveRole::IntConvertCheckedToI64 => 45,
-            PrimitiveRole::IntConvertWrappingToI64 => 46,
-            PrimitiveRole::IntConvertWrappingToU32 => 48,
-            PrimitiveRole::IntConvertWrappingToUsize => 50,
-            PrimitiveRole::IntConvertWrappingToU8 => 52,
-            PrimitiveRole::IntConvertWrappingToU16 => 54,
-            PrimitiveRole::IntConvertWrappingToI16 => 56,
-            PrimitiveRole::IntWrappingSub => 35,
-            PrimitiveRole::IntWrappingMul => 36,
-            PrimitiveRole::IntEqual => 34,
-            PrimitiveRole::IntLess => 38,
-            PrimitiveRole::IntGreater => 39,
-            PrimitiveRole::IntBitAnd => 37,
-            PrimitiveRole::IntBitOr => 40,
-            PrimitiveRole::IntBitXor => 41,
-            PrimitiveRole::IntBitNot => 42,
-            PrimitiveRole::IntShr => 44,
-            PrimitiveRole::IntShl => 43,
-            PrimitiveRole::IntConvertCheckedToU32 => 47,
-            PrimitiveRole::IntConvertCheckedToUsize => 49,
-            PrimitiveRole::IntConvertCheckedToU8 => 51,
-            PrimitiveRole::IntConvertCheckedToU16 => 53,
-            PrimitiveRole::IntConvertCheckedToI16 => 55,
-            PrimitiveRole::IntConvertCheckedToI32 => 57,
-            PrimitiveRole::IntConvertWrappingToI32 => 58,
-            PrimitiveRole::IntConvertCheckedToI8 => 59,
-            PrimitiveRole::IntConvertWrappingToI8 => 60,
-            PrimitiveRole::IntConvertCheckedToU64 => 61,
-            PrimitiveRole::IntConvertWrappingToU64 => 62,
-            PrimitiveRole::IntConvertCheckedToIsize => 63,
-            PrimitiveRole::IntConvertWrappingToIsize => 64,
-            PrimitiveRole::IntConvertCheckedToU128 => 65,
-            PrimitiveRole::IntConvertWrappingToU128 => 66,
-            PrimitiveRole::IntConvertCheckedToI128 => 67,
-            PrimitiveRole::IntConvertWrappingToI128 => 68,
-        });
+        bytes.push(role.stable_tag());
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
     Digest::of_bytes(&bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn canonical_float_leaf_selectors_are_finite_unique_and_round_trip() {
+        let mut selectors = Vec::new();
+        for width in ["f32", "f64"] {
+            for operation in [
+                "add", "sub", "mul", "div", "rem", "neg", "eq", "ne", "lt", "le", "gt", "ge",
+            ] {
+                selectors.push(format!("{width}-{operation}"));
+            }
+            selectors.push(format!("{width}-to-bits"));
+            selectors.push(format!("{width}-from-bits"));
+        }
+        selectors.extend(["f32-to-f64".to_owned(), "f64-to-f32".to_owned()]);
+        for integer in [
+            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+        ] {
+            for width in ["f32", "f64"] {
+                selectors.push(format!("{integer}-to-{width}"));
+                selectors.push(format!("{width}-to-{integer}-checked"));
+            }
+        }
+        assert_eq!(selectors.len(), 78);
+        let roles = selectors
+            .iter()
+            .map(|selector| {
+                PrimitiveRole::parse_selector_name(selector).expect("canonical float role")
+            })
+            .collect::<Vec<_>>();
+        assert!(roles.iter().all(|role| role.is_float()));
+        assert_eq!(roles.iter().collect::<BTreeSet<_>>().len(), selectors.len());
+        assert_eq!(
+            roles
+                .iter()
+                .map(|role| role.stable_tag())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            selectors.len()
+        );
+        for (selector, role) in selectors.iter().zip(roles) {
+            assert_eq!(role.selector_name(), *selector);
+            let PrimitiveRole::Float(primitive) = role else {
+                unreachable!()
+            };
+            let (parameters, result) = primitive.scalar_signature();
+            assert!(!parameters.is_empty());
+            assert!(matches!(
+                result,
+                ScalarType::F32
+                    | ScalarType::F64
+                    | ScalarType::U8
+                    | ScalarType::U16
+                    | ScalarType::U32
+                    | ScalarType::U64
+                    | ScalarType::U128
+                    | ScalarType::Usize
+                    | ScalarType::I8
+                    | ScalarType::I16
+                    | ScalarType::I32
+                    | ScalarType::I64
+                    | ScalarType::I128
+                    | ScalarType::Isize
+            ));
+        }
+    }
 }

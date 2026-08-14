@@ -353,7 +353,7 @@ fn source_semantics_fingerprint(world: &NormalizedInputWorld) -> Digest {
         append(&mut bytes, b"runtime-manifest");
         append(&mut bytes, runtime.standard_library.0.as_bytes());
         for selector in &runtime.selectors {
-            append(&mut bytes, &[selector.role as u8]);
+            append(&mut bytes, &[selector.role.stable_tag()]);
             append(&mut bytes, selector.module_path.as_bytes());
             append(&mut bytes, selector.name.as_bytes());
         }

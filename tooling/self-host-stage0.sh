@@ -154,6 +154,34 @@ runtime_manifest=(
     --runtime-leaf int-convert-wrapping-to-i128 crate __g1_int_convert_wrapping_to_i128
 )
 
+# The canonical runtime's floating leaves are all trusted opaque boundaries.
+# Construct this finite table rather than hand-maintaining nearly eighty
+# repeated entries; the selector parser validates every generated role and
+# each still binds one exact declaration identity.
+for float_width in f32 f64; do
+    for float_op in add sub mul div rem neg eq ne lt le gt ge; do
+        runtime_manifest+=(
+            "--runtime-leaf" "${float_width}-${float_op}" crate "__g1_${float_width}_${float_op}"
+        )
+    done
+    runtime_manifest+=(
+        "--runtime-leaf" "${float_width}-to-bits" crate "__g1_${float_width}_to_bits"
+        "--runtime-leaf" "${float_width}-from-bits" crate "__g1_${float_width}_from_bits"
+    )
+done
+runtime_manifest+=(
+    "--runtime-leaf" f32-to-f64 crate __g1_f32_to_f64
+    "--runtime-leaf" f64-to-f32 crate __g1_f64_to_f32
+)
+for integer_width in u8 u16 u32 u64 u128 usize i8 i16 i32 i64 i128 isize; do
+    for float_width in f32 f64; do
+        runtime_manifest+=(
+            "--runtime-leaf" "${integer_width}-to-${float_width}" crate "__g1_${integer_width}_to_${float_width}"
+            "--runtime-leaf" "${float_width}-to-${integer_width}-checked" crate "__g1_${float_width}_to_${integer_width}_checked"
+        )
+    done
+done
+
 case "$mode" in
     check)
         "$stage0" "${runtime_manifest[@]}" check "$canonical_source"
