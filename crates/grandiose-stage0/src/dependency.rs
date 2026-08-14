@@ -45,6 +45,9 @@ pub enum DependencyStatus {
         parent: RevisionId,
         member: DependencyNode,
     },
+    /// A product refers to a dependency which this transaction did not stage.
+    /// This is incomplete producer evidence, never a reusable cache result.
+    Incomplete { missing: DependencyNode },
 }
 
 /// Tooling-safe explanation for one published semantic product.
@@ -187,15 +190,26 @@ fn validate(
     if let Some(status) = statuses.get(node) {
         return status.clone();
     }
+    let Some(fact) = facts.get(node) else {
+        return DependencyStatus::Incomplete {
+            missing: node.clone(),
+        };
+    };
     let Some(parent_id) = parent_id else {
+        if let Some(missing) = fact
+            .dependencies
+            .iter()
+            .find(|dependency| !facts.contains_key(*dependency))
+        {
+            return DependencyStatus::Incomplete {
+                missing: missing.clone(),
+            };
+        }
         return DependencyStatus::Cold;
     };
     let Some(parent_fact) = parent.and_then(|ledger| ledger.traces.get(node)) else {
         return DependencyStatus::Cold;
     };
-    let fact = facts
-        .get(node)
-        .expect("validation only visits staged facts");
     // Dependency edges are normally produced by the acyclic phase pipeline,
     // but the ledger is an internal trust boundary: a malformed or future
     // cyclic query graph must never turn validation into unbounded recursion.
@@ -214,6 +228,7 @@ fn validate(
     // keeps a private body edit from invalidating an unchanged public
     // interface (or an unrelated fixity table).
     let mut cycle_member = None;
+    let mut incomplete = None;
     let first_changed = fact.dependencies.iter().find_map(|dependency| {
         let dependency_status = validate(
             dependency,
@@ -230,10 +245,16 @@ fn validate(
                 cycle_member.get_or_insert(member.clone());
                 Some(member)
             }
+            DependencyStatus::Incomplete { missing } => {
+                incomplete.get_or_insert(missing.clone());
+                Some(missing)
+            }
             DependencyStatus::Cold => Some(dependency.clone()),
         }
     });
-    let status = if let Some(member) = cycle_member {
+    let status = if let Some(missing) = incomplete {
+        DependencyStatus::Incomplete { missing }
+    } else if let Some(member) = cycle_member {
         DependencyStatus::Cycle {
             parent: parent_id,
             member,
@@ -366,6 +387,34 @@ mod tests {
         assert!(matches!(
             ledger.trace(revision(1), &right).unwrap().status,
             DependencyStatus::Cycle { .. }
+        ));
+    }
+
+    #[test]
+    fn omitted_staged_dependency_fails_closed_without_a_panic() {
+        let ledger = DependencyLedger::default();
+        let core = DependencyNode::Core(DefKey(Digest::of_bytes(b"main")));
+        let missing = DependencyNode::Body(DefKey(Digest::of_bytes(b"main")));
+
+        let mut first = ledger.transaction(revision(0), None);
+        first.record(
+            core.clone(),
+            Digest::of_bytes(b"core"),
+            vec![missing.clone()],
+        );
+        first.commit();
+
+        let mut second = ledger.transaction(revision(1), Some(revision(0)));
+        second.record(
+            core.clone(),
+            Digest::of_bytes(b"core"),
+            vec![missing.clone()],
+        );
+        second.commit();
+
+        assert!(matches!(
+            ledger.trace(revision(1), &core).unwrap().status,
+            DependencyStatus::Incomplete { missing: found } if found == missing
         ));
     }
 }
