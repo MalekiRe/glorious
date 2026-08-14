@@ -340,7 +340,14 @@ fn manifest_bound_float_finiteness_predicates_execute_through_unsigned_vm_paths(
             function.instructions.iter().any(|instruction| {
                 matches!(
                     instruction,
-                    VmInstruction::BitAndU32 { .. } | VmInstruction::BitAndU64 { .. }
+                    VmInstruction::BitAndU32 { .. }
+                        | VmInstruction::BitAndU64 { .. }
+                        | VmInstruction::IntIntrinsic {
+                            primitive: PrimitiveRole::IntBitAnd,
+                            scalar: grandiose_stage0::ScalarType::U32
+                                | grandiose_stage0::ScalarType::U64,
+                            ..
+                        }
                 )
             })
         }));
