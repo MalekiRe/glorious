@@ -719,7 +719,7 @@ impl ElaboratedInterface {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut solver = TraitSolver::new(self);
+        let solver = TraitSolver::new(self);
         let mut diagnostics = Vec::new();
         for implementation in implementations {
             let Some(ElaboratedHeader::Trait(trait_header)) =
@@ -727,6 +727,19 @@ impl ElaboratedInterface {
             else {
                 continue;
             };
+            // The implementation's where clause is lexical evidence for its
+            // own supertrait contract. Do not add the implementation relation
+            // itself here: doing so would assume the very `Child` fact this
+            // validation is responsible for proving. The solver keeps these
+            // facts scoped, so they cannot turn into ambient global impls.
+            let assumptions = implementation
+                .where_bounds
+                .iter()
+                .map(|(subject, relation)| TraitGoal {
+                    relation: relation.clone(),
+                    subject: subject.clone(),
+                })
+                .collect::<Vec<_>>();
             for supertrait in &trait_header.supertraits {
                 let relation = replace_trait_self_trait_reference(
                     substitute_trait_reference(supertrait, &implementation.relation.arguments),
@@ -736,7 +749,7 @@ impl ElaboratedInterface {
                     relation: relation.clone(),
                     subject: implementation.self_ty.clone(),
                 };
-                match solver.solve(goal) {
+                match solver.solve_with_assumptions(goal, &assumptions) {
                     TraitAnswer::Proven { .. } => {}
                     TraitAnswer::Refuted { .. } => diagnostics.push(SignatureDiagnostic {
                         code: "G4148",

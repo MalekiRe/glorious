@@ -256,6 +256,20 @@ fn typed_core_selects_methods_inherited_through_a_supertrait() {
 }
 
 #[test]
+fn typed_core_accepts_generic_subtrait_impls_proven_by_their_where_contract() {
+    let core = core_for(
+        "core-generic-supertrait-where@0.1.0",
+        "trait Gate {} trait Parent<T> { fn identity(value: T) -> T; } trait Child<T>: Parent<T> {} impl Gate for i64 {} impl<T> Parent<T> for T where T: Gate { fn identity(value: T) -> T { value } } impl<T> Child<T> for T where T: Gate {} pub fn main() -> i64 { Child<i64>::identity(42) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(
+        core.expressions
+            .iter()
+            .any(|expression| matches!(expression.kind, CoreKind::TraitMethod { .. }))
+    );
+}
+
+#[test]
 fn recovered_source_elaborates_to_core_error_and_is_rejected_before_mir() {
     let source = "pub fn main() -> i64 { let = ; }";
     let core = core_for("core-recovered-source@0.1.0", source);

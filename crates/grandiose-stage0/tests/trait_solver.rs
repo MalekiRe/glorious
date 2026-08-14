@@ -81,6 +81,40 @@ fn tabled_solver_proves_generic_impls_after_where_obligations() {
 }
 
 #[test]
+fn scoped_where_evidence_is_transitive_over_supertraits_without_leaking_globally() {
+    let (interface, signatures) =
+        signatures("trait Root {} trait Parent: Root {} struct Box<T> {}");
+    let root = key(&interface, "Root");
+    let parent = key(&interface, "Parent");
+    let boxed = key(&interface, "Box");
+    let subject = Type::Nominal {
+        definition: boxed,
+        arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+    };
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: root,
+            arguments: vec![],
+        },
+        subject: subject.clone(),
+    };
+    let assumption = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: parent,
+            arguments: vec![],
+        },
+        subject,
+    };
+    let mut ordinary = TraitSolver::new(&signatures);
+    assert!(matches!(
+        ordinary.solve(goal.clone()),
+        TraitAnswer::NoSolution
+    ));
+    let scoped = TraitSolver::new(&signatures).solve_with_assumptions(goal, &[assumption]);
+    assert!(matches!(scoped, TraitAnswer::Proven { .. }), "{scoped:#?}");
+}
+
+#[test]
 fn supertrait_method_and_associated_items_follow_canonical_instantiated_edges() {
     let (interface, signatures) = signatures(
         "trait Parent<T> { type Item; type Effects: EffectRow; const Width: u32; fn id(value: T) -> T; } trait Child<U>: Parent<U> {} impl Parent<i64> for i64 { type Item = i64; type Effects = {}; const Width = 7; fn id(value: i64) -> i64 { value } } impl Child<i64> for i64 {}",

@@ -1396,6 +1396,57 @@ fn positive_implementations_must_prove_instantiated_supertraits() {
 }
 
 #[test]
+fn generic_subtrait_implementations_use_where_evidence_for_supertrait_implication() {
+    // The parent candidate itself has a generic where-obligation. The child
+    // implementation must be checked in the lexical `T: Gate` environment,
+    // rather than as a global query for the unconstrained type parameter.
+    let package = PackageKey("signature-generic-supertrait-where@0.1.0".into());
+    let source = r#"
+        trait Gate {}
+        trait Parent {}
+        trait Child: Parent {}
+        struct Box<T> {}
+        impl<T> Parent for Box<T> where T: Gate {}
+        impl<T> Child for Box<T> where T: Gate {}
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
+fn generic_subtrait_implementations_do_not_override_negative_parent_evidence() {
+    let package = PackageKey("signature-generic-negative-supertrait@0.1.0".into());
+    let source = r#"
+        trait Gate {}
+        trait Parent {}
+        trait Child: Parent {}
+        struct Box<T> {}
+        impl<T> !Parent for Box<T> where T: Gate {}
+        impl<T> Child for Box<T> where T: Gate {}
+    "#;
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "G4148" && diagnostic.message.contains("refuted")
+        }),
+        "{:#?}",
+        signatures.diagnostics
+    );
+}
+
+#[test]
 fn positive_implementations_reject_missing_or_negative_supertrait_evidence() {
     let package = PackageKey("signature-missing-supertrait@0.1.0".into());
     let source = r#"

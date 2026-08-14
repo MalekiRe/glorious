@@ -316,6 +316,7 @@ fn select_answer(
 
 /// A per-body solver cache.  It can be discarded with the caller's body
 /// scratch; every entry is keyed by a span-free canonical goal digest.
+#[derive(Clone)]
 pub struct TraitSolver {
     rules: Vec<Rule>,
     /// Trait declarations carry associated-item defaults.  The solver owns a
@@ -433,6 +434,48 @@ impl TraitSolver {
             return TraitAnswer::NoSolution;
         }
         self.solve_at(goal, 0, false).into()
+    }
+
+    /// Solve a trait goal under declaration-owned assumptions.
+    ///
+    /// This is deliberately separate from [`Self::solve`]: a callable or
+    /// implementation `where` clause is lexical evidence, not a new global
+    /// implementation rule.  In particular, caching an answer obtained from
+    /// `T: Parent` as an ordinary answer for `T: Parent` would let one
+    /// declaration's generic contract leak into an unrelated body.  The
+    /// scoped probe owns a fresh table while still using the same frozen
+    /// implementation and supertrait rules as ordinary selection.
+    ///
+    /// An assumption also entails the transitive supertraits declared by its
+    /// relation.  This is necessary for the ordinary implementation rule
+    /// `impl<T> Child for Box<T> where Box<T>: Parent` to establish
+    /// `Child: Parent`, including when the selected parent implementation has
+    /// further where-obligations that must be discharged by the same clause.
+    pub fn solve_with_assumptions(
+        &self,
+        goal: TraitGoal,
+        assumptions: &[TraitGoal],
+    ) -> TraitAnswer {
+        let mut solver = self.clone();
+        // A `TraitSolver` cache is intentionally local to one lexical
+        // environment. Cloning also resets neither the cache nor the budget,
+        // so do both explicitly before entering the scoped fixed point.
+        solver.tables.clear();
+        solver.steps = 0;
+        let assumptions = assumptions
+            .iter()
+            .cloned()
+            .filter_map(|assumption| solver.normalize_goal(assumption).ok())
+            .filter(|assumption| !trait_goal_contains_escaping_hrtb(assumption))
+            .collect::<Vec<_>>();
+        // Normalizing a concrete projection can consult ordinary rules. Those
+        // intermediate answers are valid for normalization, but are not
+        // entries in this lexical proof environment.
+        solver.tables.clear();
+        solver.steps = 0;
+        solver
+            .solve_at_with_assumptions(goal, 0, false, &assumptions)
+            .into()
     }
 
     pub fn query(&self, goal: &TraitGoal) -> TraitGoalQuery {
@@ -1483,6 +1526,20 @@ impl TraitSolver {
         depth: u32,
         coinductive_edge: bool,
     ) -> TraitAnswerIndex {
+        self.solve_at_with_assumptions(goal, depth, coinductive_edge, &[])
+    }
+
+    /// The tabled kernel for one fixed lexical assumption environment. The
+    /// caller either supplies no assumptions (`solve`) or uses a private,
+    /// fresh clone (`solve_with_assumptions`), so the existing goal-keyed
+    /// table cannot cross an environment boundary.
+    fn solve_at_with_assumptions(
+        &mut self,
+        goal: TraitGoal,
+        depth: u32,
+        coinductive_edge: bool,
+        assumptions: &[TraitGoal],
+    ) -> TraitAnswerIndex {
         if depth >= self.limits.max_depth || self.steps >= self.limits.max_steps {
             return TraitAnswerIndex::Overflow;
         }
@@ -1498,6 +1555,9 @@ impl TraitSolver {
         };
         if trait_goal_contains_escaping_hrtb(&goal) {
             return TraitAnswerIndex::NoSolution;
+        }
+        if self.assumption_proves(&goal, assumptions) {
+            return TraitAnswerIndex::Proven(assumption_evidence(&goal));
         }
         self.steps += 1;
         let key = goal_key(&goal);
@@ -1534,7 +1594,7 @@ impl TraitSolver {
                     relation: substitute_relation(relation, &substitution),
                     subject: substitute_type(subject, &substitution),
                 };
-                match self.solve_at(obligation, depth + 1, false) {
+                match self.solve_at_with_assumptions(obligation, depth + 1, false, assumptions) {
                     TraitAnswerIndex::Proven(_) => {}
                     TraitAnswerIndex::Ambiguous => {
                         viable = false;
@@ -1562,7 +1622,7 @@ impl TraitSolver {
         }
         let mut answer = select_answer(&positives, &negatives, saw_cycle, saw_overflow);
         if matches!(answer, TraitAnswerIndex::NoSolution) {
-            answer = self.solve_structural_auto_goal(&goal, depth);
+            answer = self.solve_structural_auto_goal_with_assumptions(&goal, depth, assumptions);
         }
         self.tables.insert(key, TableState::Complete(answer));
         answer
@@ -1578,7 +1638,12 @@ impl TraitSolver {
     /// explicitly declared the relation `auto`. An explicit positive or
     /// negative implementation is selected before this fallback, so a
     /// negative impl reliably opts a type out of otherwise structural proof.
-    fn solve_structural_auto_goal(&mut self, goal: &TraitGoal, depth: u32) -> TraitAnswerIndex {
+    fn solve_structural_auto_goal_with_assumptions(
+        &mut self,
+        goal: &TraitGoal,
+        depth: u32,
+        assumptions: &[TraitGoal],
+    ) -> TraitAnswerIndex {
         if !self.is_auto_trait(goal) {
             return TraitAnswerIndex::NoSolution;
         }
@@ -1586,7 +1651,7 @@ impl TraitSolver {
             return TraitAnswerIndex::NoSolution;
         };
         for obligation in obligations {
-            match self.solve_at(obligation, depth + 1, true) {
+            match self.solve_at_with_assumptions(obligation, depth + 1, true, assumptions) {
                 TraitAnswerIndex::Proven(_) => {}
                 TraitAnswerIndex::Overflow => return TraitAnswerIndex::Overflow,
                 TraitAnswerIndex::Ambiguous => return TraitAnswerIndex::Ambiguous,
@@ -1596,6 +1661,27 @@ impl TraitSolver {
             }
         }
         TraitAnswerIndex::Proven(self.structural_evidence(goal))
+    }
+
+    /// Return whether a lexical assumption establishes a goal directly or
+    /// through the declaration-level supertrait closure. This is exact frozen
+    /// goal identity rather than unification: assumptions quantify only the
+    /// source binders already present in their owner, and must never become
+    /// ambient blanket implementations for arbitrary callers.
+    fn assumption_proves(&self, goal: &TraitGoal, assumptions: &[TraitGoal]) -> bool {
+        let mut pending = assumptions.to_vec();
+        let mut seen = Vec::<TraitGoal>::new();
+        while let Some(candidate) = pending.pop() {
+            if seen.iter().any(|known| known == &candidate) {
+                continue;
+            }
+            if candidate == *goal {
+                return true;
+            }
+            seen.push(candidate.clone());
+            pending.extend(self.supertrait_goals(&candidate));
+        }
+        false
     }
 
     fn structural_evidence(&self, goal: &TraitGoal) -> DefKey {
@@ -2897,6 +2983,17 @@ fn goal_key(goal: &TraitGoal) -> Digest {
         relation_arguments.as_slice(),
         subject.as_slice(),
     ])
+}
+
+/// Lexical where-clause evidence has no declaration key of its own. Derive a
+/// stable proof identity from the frozen goal instead of borrowing an
+/// implementation identity (which would falsely suggest global selection).
+fn assumption_evidence(goal: &TraitGoal) -> DefKey {
+    let key = goal_key(goal);
+    DefKey(Digest::of_parts([
+        b"grandiose-stage0-trait-assumption-evidence-v1".as_slice(),
+        key.as_bytes().as_slice(),
+    ]))
 }
 
 fn associated_projection_key(
