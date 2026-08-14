@@ -100,6 +100,19 @@ runtime_manifest=(
     --runtime-leaf bytes-from-array-move crate __g1_bytes_from_array_move
     --runtime-leaf bytes-to-array crate __g1_bytes_to_array
     --runtime-leaf bytes-utf8-valid-up-to crate __g1_bytes_utf8_valid_up_to
+    --runtime-leaf array-new crate __g1_array_new
+    --runtime-leaf array-len crate __g1_array_len
+    --runtime-leaf array-get-copy crate __g1_array_get_copy
+    --runtime-leaf array-get-move crate __g1_array_get_move
+    --runtime-leaf array-get-borrow-shared crate __g1_array_get_borrow_shared
+    --runtime-leaf array-get-borrow-unique crate __g1_array_get_borrow_unique
+    --runtime-leaf array-set-move crate __g1_array_set_move
+    --runtime-leaf array-empty crate __g1_array_empty
+    --runtime-leaf array-push-move crate __g1_array_push_move
+    --runtime-leaf array-pop-move crate __g1_array_pop_move
+    --runtime-leaf array-capacity crate __g1_array_capacity
+    --runtime-leaf array-reserve crate __g1_array_reserve
+    --runtime-leaf array-finish-drained crate __g1_array_finish_drained
     --runtime-leaf char-from-u32-checked crate __g1_char_from_u32_checked
     --runtime-leaf char-to-u32 crate __g1_char_to_u32
     --runtime-leaf int-checked-add crate __g1_int_checked_add

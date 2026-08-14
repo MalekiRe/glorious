@@ -181,6 +181,70 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    ArrayNew {
+        dst: MirLocal,
+        length: MirLocal,
+        fill: MirLocal,
+        element_type: Type,
+    },
+    ArrayLen {
+        dst: MirLocal,
+        value: MirLocal,
+        element_type: Type,
+    },
+    ArrayGetCopy {
+        dst: MirLocal,
+        value: MirLocal,
+        index: MirLocal,
+        element_type: Type,
+    },
+    ArrayGetMove {
+        dst: MirLocal,
+        value: MirLocal,
+        index: MirLocal,
+        element_type: Type,
+    },
+    ArrayGetBorrow {
+        dst: MirLocal,
+        value: MirLocal,
+        index: MirLocal,
+        unique: bool,
+        element_type: Type,
+    },
+    ArraySetMove {
+        value: MirLocal,
+        index: MirLocal,
+        item: MirLocal,
+        element_type: Type,
+    },
+    ArrayEmpty {
+        dst: MirLocal,
+        element_type: Type,
+    },
+    ArrayPushMove {
+        value: MirLocal,
+        item: MirLocal,
+        element_type: Type,
+    },
+    ArrayPopMove {
+        dst: MirLocal,
+        value: MirLocal,
+        element_type: Type,
+    },
+    ArrayCapacity {
+        dst: MirLocal,
+        value: MirLocal,
+        element_type: Type,
+    },
+    ArrayReserve {
+        value: MirLocal,
+        additional: MirLocal,
+        element_type: Type,
+    },
+    ArrayFinishDrained {
+        value: MirLocal,
+        element_type: Type,
+    },
     U32CheckedAdd {
         dst: MirLocal,
         left: MirLocal,
@@ -1498,6 +1562,14 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::BytesFromArrayMove { dst, .. }
         | MirInstruction::BytesToArray { dst, .. }
         | MirInstruction::BytesUtf8ValidUpTo { dst, .. }
+        | MirInstruction::ArrayNew { dst, .. }
+        | MirInstruction::ArrayLen { dst, .. }
+        | MirInstruction::ArrayGetCopy { dst, .. }
+        | MirInstruction::ArrayGetMove { dst, .. }
+        | MirInstruction::ArrayGetBorrow { dst, .. }
+        | MirInstruction::ArrayEmpty { dst, .. }
+        | MirInstruction::ArrayPopMove { dst, .. }
+        | MirInstruction::ArrayCapacity { dst, .. }
         | MirInstruction::U32CheckedAdd { dst, .. }
         | MirInstruction::U32CheckedSub { dst, .. }
         | MirInstruction::U32CheckedMul { dst, .. }
@@ -1549,6 +1621,10 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::Forward
         | MirInstruction::Cancel
         | MirInstruction::DerefStore { .. } => None,
+        MirInstruction::ArraySetMove { .. }
+        | MirInstruction::ArrayPushMove { .. }
+        | MirInstruction::ArrayReserve { .. }
+        | MirInstruction::ArrayFinishDrained { .. } => None,
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3429,6 +3505,20 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::BytesFromArrayMove { .. }
         | MirInstruction::BytesToArray { .. }
         | MirInstruction::BytesUtf8ValidUpTo { .. } => Ok(()),
+        MirInstruction::ArrayNew { element_type, .. }
+        | MirInstruction::ArrayLen { element_type, .. }
+        | MirInstruction::ArrayGetCopy { element_type, .. }
+        | MirInstruction::ArrayGetMove { element_type, .. }
+        | MirInstruction::ArrayGetBorrow { element_type, .. }
+        | MirInstruction::ArraySetMove { element_type, .. }
+        | MirInstruction::ArrayEmpty { element_type, .. }
+        | MirInstruction::ArrayPushMove { element_type, .. }
+        | MirInstruction::ArrayPopMove { element_type, .. }
+        | MirInstruction::ArrayCapacity { element_type, .. }
+        | MirInstruction::ArrayReserve { element_type, .. }
+        | MirInstruction::ArrayFinishDrained { element_type, .. } => {
+            validate_mir_type(element_type, &mut lifetime_binders)
+        }
         MirInstruction::U32CheckedAdd { .. }
         | MirInstruction::U32CheckedSub { .. }
         | MirInstruction::U32CheckedMul { .. }
@@ -4180,6 +4270,30 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
             start,
             end,
         } => vec![*dst, *bytes, *start, *end],
+        MirInstruction::ArrayNew {
+            dst, length, fill, ..
+        } => vec![*dst, *length, *fill],
+        MirInstruction::ArrayLen { dst, value, .. }
+        | MirInstruction::ArrayCapacity { dst, value, .. }
+        | MirInstruction::ArrayPopMove { dst, value, .. } => vec![*dst, *value],
+        MirInstruction::ArrayGetCopy {
+            dst, value, index, ..
+        }
+        | MirInstruction::ArrayGetMove {
+            dst, value, index, ..
+        }
+        | MirInstruction::ArrayGetBorrow {
+            dst, value, index, ..
+        } => vec![*dst, *value, *index],
+        MirInstruction::ArraySetMove {
+            value, index, item, ..
+        } => vec![*value, *index, *item],
+        MirInstruction::ArrayEmpty { dst, .. } => vec![*dst],
+        MirInstruction::ArrayPushMove { value, item, .. } => vec![*value, *item],
+        MirInstruction::ArrayReserve {
+            value, additional, ..
+        } => vec![*value, *additional],
+        MirInstruction::ArrayFinishDrained { value, .. } => vec![*value],
         MirInstruction::U32CheckedAdd { dst, left, right }
         | MirInstruction::U32CheckedSub { dst, left, right }
         | MirInstruction::U32CheckedMul { dst, left, right }
@@ -14652,6 +14766,271 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::I64ToI128Checked { dst, value: *value });
+                            }
+                            Some(
+                                role @ (PrimitiveRole::ArrayNew
+                                | PrimitiveRole::ArrayLen
+                                | PrimitiveRole::ArrayGetCopy
+                                | PrimitiveRole::ArrayGetMove
+                                | PrimitiveRole::ArrayGetBorrowShared
+                                | PrimitiveRole::ArrayGetBorrowUnique
+                                | PrimitiveRole::ArraySetMove
+                                | PrimitiveRole::ArrayEmpty
+                                | PrimitiveRole::ArrayPushMove
+                                | PrimitiveRole::ArrayPopMove
+                                | PrimitiveRole::ArrayCapacity
+                                | PrimitiveRole::ArrayReserve
+                                | PrimitiveRole::ArrayFinishDrained),
+                            ) => {
+                                let [GenericArgument::Type(element_type)] =
+                                    generic_arguments.as_slice()
+                                else {
+                                    self.error(
+                                        "G6005",
+                                        "Array primitive requires one frozen type argument",
+                                    );
+                                    return None;
+                                };
+                                let array = Type::Array(Box::new(element_type.clone()));
+                                let shared_array = |ty: &Type| {
+                                    matches!(ty, Type::Reference {
+                                    mutability: crate::types::Mutability::Shared,
+                                    referent,
+                                    ..
+                                } if referent.as_ref() == &array)
+                                };
+                                let unique_array = |ty: &Type| {
+                                    matches!(ty, Type::Reference {
+                                    mutability: crate::types::Mutability::Unique,
+                                    referent,
+                                    ..
+                                } if referent.as_ref() == &array)
+                                };
+                                let usize = Type::Scalar(crate::types::ScalarType::Usize);
+                                let unit = Type::Unit;
+                                let result = &self.body.expression(id).ty;
+                                match role {
+                                    PrimitiveRole::ArrayNew => {
+                                        let [length, fill] = arguments.as_slice() else {
+                                            self.error(
+                                                "G6005",
+                                                "ArrayNew requires length and fill operands",
+                                            );
+                                            return None;
+                                        };
+                                        if self.locals[length.0 as usize].ty != usize
+                                            || self.locals[fill.0 as usize].ty != *element_type
+                                            || *result != array
+                                        {
+                                            self.error("G6005", "ArrayNew primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayNew {
+                                            dst,
+                                            length: *length,
+                                            fill: *fill,
+                                            element_type: element_type.clone(),
+                                        });
+                                    }
+                                    PrimitiveRole::ArrayLen | PrimitiveRole::ArrayCapacity => {
+                                        let [value] = arguments.as_slice() else {
+                                            self.error("G6005", "Array length primitive requires one borrowed Array operand");
+                                            return None;
+                                        };
+                                        if !shared_array(&self.locals[value.0 as usize].ty)
+                                            || *result != usize
+                                        {
+                                            self.error("G6005", "Array length primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(
+                                            if role == PrimitiveRole::ArrayLen {
+                                                MirInstruction::ArrayLen {
+                                                    dst,
+                                                    value: *value,
+                                                    element_type: element_type.clone(),
+                                                }
+                                            } else {
+                                                MirInstruction::ArrayCapacity {
+                                                    dst,
+                                                    value: *value,
+                                                    element_type: element_type.clone(),
+                                                }
+                                            },
+                                        );
+                                    }
+                                    PrimitiveRole::ArrayGetCopy => {
+                                        let [value, index] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayGetCopy requires borrowed Array and index operands");
+                                            return None;
+                                        };
+                                        if !shared_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[index.0 as usize].ty != usize
+                                            || *result != *element_type
+                                        {
+                                            self.error("G6005", "ArrayGetCopy primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayGetCopy {
+                                            dst,
+                                            value: *value,
+                                            index: *index,
+                                            element_type: element_type.clone(),
+                                        });
+                                    }
+                                    PrimitiveRole::ArrayGetMove => {
+                                        let [value, index] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayGetMove requires uniquely borrowed Array and index operands");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[index.0 as usize].ty != usize
+                                            || *result != *element_type
+                                        {
+                                            self.error("G6005", "ArrayGetMove primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayGetMove {
+                                            dst,
+                                            value: *value,
+                                            index: *index,
+                                            element_type: element_type.clone(),
+                                        });
+                                    }
+                                    PrimitiveRole::ArrayGetBorrowShared
+                                    | PrimitiveRole::ArrayGetBorrowUnique => {
+                                        let [value, index] = arguments.as_slice() else {
+                                            self.error("G6005", "Array borrow primitive requires borrowed Array and index operands");
+                                            return None;
+                                        };
+                                        let unique = role == PrimitiveRole::ArrayGetBorrowUnique;
+                                        if !(if unique {
+                                            unique_array(&self.locals[value.0 as usize].ty)
+                                        } else {
+                                            shared_array(&self.locals[value.0 as usize].ty)
+                                        }) || self.locals[index.0 as usize].ty != usize
+                                        {
+                                            self.error("G6005", "Array borrow primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayGetBorrow {
+                                            dst,
+                                            value: *value,
+                                            index: *index,
+                                            unique,
+                                            element_type: element_type.clone(),
+                                        });
+                                    }
+                                    PrimitiveRole::ArraySetMove => {
+                                        let [value, index, item] = arguments.as_slice() else {
+                                            self.error("G6005", "ArraySetMove requires uniquely borrowed Array, index, and item operands");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[index.0 as usize].ty != usize
+                                            || self.locals[item.0 as usize].ty != *element_type
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArraySetMove primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArraySetMove {
+                                            value: *value,
+                                            index: *index,
+                                            item: *item,
+                                            element_type: element_type.clone(),
+                                        });
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    PrimitiveRole::ArrayEmpty => {
+                                        if !arguments.is_empty() || *result != array {
+                                            self.error("G6005", "ArrayEmpty primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayEmpty {
+                                            dst,
+                                            element_type: element_type.clone(),
+                                        });
+                                    }
+                                    PrimitiveRole::ArrayPushMove => {
+                                        let [value, item] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayPushMove requires uniquely borrowed Array and item operands");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[item.0 as usize].ty != *element_type
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArrayPushMove primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayPushMove {
+                                            value: *value,
+                                            item: *item,
+                                            element_type: element_type.clone(),
+                                        });
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    PrimitiveRole::ArrayPopMove => {
+                                        let [value] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayPopMove requires uniquely borrowed Array operand");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || *result != *element_type
+                                        {
+                                            self.error("G6005", "ArrayPopMove primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayPopMove {
+                                            dst,
+                                            value: *value,
+                                            element_type: element_type.clone(),
+                                        });
+                                    }
+                                    PrimitiveRole::ArrayReserve => {
+                                        let [value, additional] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayReserve requires uniquely borrowed Array and additional operands");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[additional.0 as usize].ty != usize
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArrayReserve primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayReserve {
+                                            value: *value,
+                                            additional: *additional,
+                                            element_type: element_type.clone(),
+                                        });
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    PrimitiveRole::ArrayFinishDrained => {
+                                        let [value] = arguments.as_slice() else {
+                                            self.error(
+                                                "G6005",
+                                                "ArrayFinishDrained requires owned Array operand",
+                                            );
+                                            return None;
+                                        };
+                                        if self.locals[value.0 as usize].ty != array
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArrayFinishDrained primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(
+                                            MirInstruction::ArrayFinishDrained {
+                                                value: *value,
+                                                element_type: element_type.clone(),
+                                            },
+                                        );
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    _ => unreachable!("Array role was narrowed above"),
+                                }
                             }
                             None => match host_import {
                                 Some(import) => self.instructions.push(MirInstruction::HostCall {

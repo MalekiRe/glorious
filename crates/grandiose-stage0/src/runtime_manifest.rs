@@ -11,6 +11,7 @@ use crate::{
     Type,
     identity::{DefKey, Digest},
     types::EffectRow,
+    types::{Lifetime, Mutability},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -147,6 +148,22 @@ pub enum PrimitiveRole {
     IntConvertWrappingToU128,
     IntConvertCheckedToI128,
     IntConvertWrappingToI128,
+    /// Declaration-owned generic Array runtime leaves. These are deliberately
+    /// separate from syntactic array literals: the manifest binds the storage
+    /// operations to the trusted distributed standard library identity.
+    ArrayNew,
+    ArrayLen,
+    ArrayGetCopy,
+    ArrayGetMove,
+    ArrayGetBorrowShared,
+    ArrayGetBorrowUnique,
+    ArraySetMove,
+    ArrayEmpty,
+    ArrayPushMove,
+    ArrayPopMove,
+    ArrayCapacity,
+    ArrayReserve,
+    ArrayFinishDrained,
 }
 
 impl PrimitiveRole {
@@ -222,6 +239,19 @@ impl PrimitiveRole {
             Self::IntConvertWrappingToU128 => "int-convert-wrapping-to-u128",
             Self::IntConvertCheckedToI128 => "int-convert-checked-to-i128",
             Self::IntConvertWrappingToI128 => "int-convert-wrapping-to-i128",
+            Self::ArrayNew => "array-new",
+            Self::ArrayLen => "array-len",
+            Self::ArrayGetCopy => "array-get-copy",
+            Self::ArrayGetMove => "array-get-move",
+            Self::ArrayGetBorrowShared => "array-get-borrow-shared",
+            Self::ArrayGetBorrowUnique => "array-get-borrow-unique",
+            Self::ArraySetMove => "array-set-move",
+            Self::ArrayEmpty => "array-empty",
+            Self::ArrayPushMove => "array-push-move",
+            Self::ArrayPopMove => "array-pop-move",
+            Self::ArrayCapacity => "array-capacity",
+            Self::ArrayReserve => "array-reserve",
+            Self::ArrayFinishDrained => "array-finish-drained",
         }
     }
 
@@ -297,6 +327,19 @@ impl PrimitiveRole {
             "int-convert-wrapping-to-u128" => Self::IntConvertWrappingToU128,
             "int-convert-checked-to-i128" => Self::IntConvertCheckedToI128,
             "int-convert-wrapping-to-i128" => Self::IntConvertWrappingToI128,
+            "array-new" => Self::ArrayNew,
+            "array-len" => Self::ArrayLen,
+            "array-get-copy" => Self::ArrayGetCopy,
+            "array-get-move" => Self::ArrayGetMove,
+            "array-get-borrow-shared" => Self::ArrayGetBorrowShared,
+            "array-get-borrow-unique" => Self::ArrayGetBorrowUnique,
+            "array-set-move" => Self::ArraySetMove,
+            "array-empty" => Self::ArrayEmpty,
+            "array-push-move" => Self::ArrayPushMove,
+            "array-pop-move" => Self::ArrayPopMove,
+            "array-capacity" => Self::ArrayCapacity,
+            "array-reserve" => Self::ArrayReserve,
+            "array-finish-drained" => Self::ArrayFinishDrained,
             _ => return None,
         })
     }
@@ -995,6 +1038,130 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::ArrayNew => array_signature(
+            vec![Type::Scalar(ScalarType::Usize), Type::Generic(0)],
+            Type::Array(Box::new(Type::Generic(0))),
+        )
+        .with_where_bounds(array_use_bound()),
+        PrimitiveRole::ArrayLen | PrimitiveRole::ArrayCapacity => array_signature(
+            vec![array_reference(Mutability::Shared)],
+            Type::Scalar(ScalarType::Usize),
+        ),
+        PrimitiveRole::ArrayGetCopy => array_signature(
+            vec![
+                array_reference(Mutability::Shared),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Generic(0),
+        )
+        .with_where_bounds(array_use_bound()),
+        PrimitiveRole::ArrayGetMove => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Generic(0),
+        ),
+        PrimitiveRole::ArrayPopMove => {
+            array_signature(vec![array_reference(Mutability::Unique)], Type::Generic(0))
+        }
+        PrimitiveRole::ArrayGetBorrowShared => array_signature(
+            vec![
+                array_reference(Mutability::Shared),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Reference {
+                mutability: Mutability::Shared,
+                lifetime: Lifetime::Elided,
+                referent: Box::new(Type::Generic(0)),
+            },
+        ),
+        PrimitiveRole::ArrayGetBorrowUnique => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Reference {
+                mutability: Mutability::Unique,
+                lifetime: Lifetime::Elided,
+                referent: Box::new(Type::Generic(0)),
+            },
+        ),
+        PrimitiveRole::ArraySetMove => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+                Type::Generic(0),
+            ],
+            Type::Unit,
+        ),
+        PrimitiveRole::ArrayPushMove => array_signature(
+            vec![array_reference(Mutability::Unique), Type::Generic(0)],
+            Type::Unit,
+        ),
+        PrimitiveRole::ArrayEmpty => {
+            array_signature(vec![], Type::Array(Box::new(Type::Generic(0))))
+        }
+        PrimitiveRole::ArrayReserve => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Unit,
+        ),
+        PrimitiveRole::ArrayFinishDrained => {
+            array_signature(vec![Type::Array(Box::new(Type::Generic(0)))], Type::Unit)
+        }
+    }
+}
+
+fn array_reference(mutability: Mutability) -> Type {
+    Type::Reference {
+        mutability,
+        lifetime: Lifetime::Elided,
+        referent: Box::new(Type::Array(Box::new(Type::Generic(0)))),
+    }
+}
+
+fn array_signature(parameters: Vec<Type>, result: Type) -> crate::CallableSignature {
+    crate::CallableSignature {
+        generics: 1,
+        generic_kinds: vec![crate::GenericKind::Type],
+        parameters,
+        result,
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+        where_bounds: vec![],
+        where_associated_type_bindings: vec![],
+        where_associated_effect_bindings: vec![],
+    }
+}
+
+fn array_use_bound() -> Vec<(Type, crate::ElaboratedTraitReference)> {
+    vec![(
+        Type::Generic(0),
+        crate::ElaboratedTraitReference {
+            definition: DefKey(Digest::of_bytes(
+                b"grandiose-stage0-language-prelude-use-v1",
+            )),
+            arguments: vec![crate::GenericArgument::ConstQuantity(
+                Quantity::UNRESTRICTED,
+            )],
+        },
+    )]
+}
+
+trait CallableSignatureExt {
+    fn with_where_bounds(self, where_bounds: Vec<(Type, crate::ElaboratedTraitReference)>) -> Self;
+}
+
+impl CallableSignatureExt for crate::CallableSignature {
+    fn with_where_bounds(
+        mut self,
+        where_bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+    ) -> Self {
+        self.where_bounds = where_bounds;
+        self
     }
 }
 fn manifest_digest(
@@ -1022,6 +1189,19 @@ fn manifest_digest(
             PrimitiveRole::BytesFromArrayMove => 12,
             PrimitiveRole::BytesToArray => 13,
             PrimitiveRole::BytesUtf8ValidUpTo => 14,
+            PrimitiveRole::ArrayNew => 78,
+            PrimitiveRole::ArrayLen => 79,
+            PrimitiveRole::ArrayGetCopy => 80,
+            PrimitiveRole::ArrayGetMove => 81,
+            PrimitiveRole::ArrayGetBorrowShared => 82,
+            PrimitiveRole::ArrayGetBorrowUnique => 83,
+            PrimitiveRole::ArraySetMove => 84,
+            PrimitiveRole::ArrayEmpty => 85,
+            PrimitiveRole::ArrayPushMove => 86,
+            PrimitiveRole::ArrayPopMove => 87,
+            PrimitiveRole::ArrayCapacity => 88,
+            PrimitiveRole::ArrayReserve => 89,
+            PrimitiveRole::ArrayFinishDrained => 90,
             PrimitiveRole::U32CheckedAdd => 15,
             PrimitiveRole::U32CheckedSub => 16,
             PrimitiveRole::U32CheckedMul => 17,

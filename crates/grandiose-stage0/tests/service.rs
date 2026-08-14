@@ -1010,6 +1010,69 @@ const PRIVATE_TEXT_RUNTIME_LEAVES: &str = "fn branch_bool<T>(condition: Bool, on
 
 const BYTES_RUNTIME_LEAVES: &str = "pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_bytes_len(value: Bytes) -> usize { () } pub fn __g1_bytes_concat(left: Bytes, right: Bytes) -> Bytes { () } pub fn __g1_bytes_get(bytes: Bytes, index: usize) -> u8 { () } pub fn __g1_bytes_slice(bytes: Bytes, start: usize, end: usize) -> Bytes { () } pub fn __g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () } pub fn __g1_bytes_to_array(value: Bytes) -> Array<u8> { () } pub fn __g1_bytes_utf8_valid_up_to(value: Bytes) -> usize { () } ";
 
+const ARRAY_RUNTIME_LEAVES: &str = "pub fn __g1_array_new<T>(length: usize, fill: T) -> Array<T> where T: Use<[0, *]> { () } pub fn __g1_array_len<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_get_copy<T>(value: &Array<T>, index: usize) -> T where T: Use<[0, *]> { () } pub fn __g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T { () } pub fn __g1_array_get_borrow_shared<T>(value: &Array<T>, index: usize) -> &T { () } pub fn __g1_array_get_borrow_unique<T>(value: &mut Array<T>, index: usize) -> &mut T { () } pub fn __g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) { () } pub fn __g1_array_empty<T>() -> Array<T> { () } pub fn __g1_array_push_move<T>(value: &mut Array<T>, item: T) { () } pub fn __g1_array_pop_move<T>(value: &mut Array<T>) -> T { () } pub fn __g1_array_capacity<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_reserve<T>(value: &mut Array<T>, additional: usize) { () } pub fn __g1_array_finish_drained<T>(value: Array<T>) { () } ";
+
+fn array_runtime_manifest() -> RuntimeManifestInput {
+    RuntimeManifestInput {
+        standard_library: PackageKey("app@0.1.0".into()),
+        selectors: [
+            (PrimitiveRole::ArrayNew, "__g1_array_new"),
+            (PrimitiveRole::ArrayLen, "__g1_array_len"),
+            (PrimitiveRole::ArrayGetCopy, "__g1_array_get_copy"),
+            (PrimitiveRole::ArrayGetMove, "__g1_array_get_move"),
+            (
+                PrimitiveRole::ArrayGetBorrowShared,
+                "__g1_array_get_borrow_shared",
+            ),
+            (
+                PrimitiveRole::ArrayGetBorrowUnique,
+                "__g1_array_get_borrow_unique",
+            ),
+            (PrimitiveRole::ArraySetMove, "__g1_array_set_move"),
+            (PrimitiveRole::ArrayEmpty, "__g1_array_empty"),
+            (PrimitiveRole::ArrayPushMove, "__g1_array_push_move"),
+            (PrimitiveRole::ArrayPopMove, "__g1_array_pop_move"),
+            (PrimitiveRole::ArrayCapacity, "__g1_array_capacity"),
+            (PrimitiveRole::ArrayReserve, "__g1_array_reserve"),
+            (
+                PrimitiveRole::ArrayFinishDrained,
+                "__g1_array_finish_drained",
+            ),
+        ]
+        .into_iter()
+        .map(|(role, name)| PrimitiveSelector {
+            role,
+            module_path: "crate".into(),
+            name: name.into(),
+        })
+        .collect(),
+    }
+}
+
+#[test]
+fn manifest_bound_array_storage_leaves_lower_and_execute() {
+    let mut input = request(&format!(
+        "{ARRAY_RUNTIME_LEAVES} pub fn main() -> usize {{ let value = __g1_array_empty<i64>(); __g1_array_len(&value) }}"
+    ));
+    input.runtime_manifest = Some(array_runtime_manifest());
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("trusted Array leaves must bind")
+        .artifact
+        .expect("VM artifact");
+    assert_eq!(artifact.run_usize().unwrap(), 0);
+    assert!(
+        decode_program(&artifact.canonical_bytes())
+            .unwrap()
+            .functions
+            .values()
+            .any(|function| function
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::ArrayEmpty { .. })))
+    );
+}
+
 const U32_RUNTIME_LEAVES: &str = "pub fn __g1_char_to_u32(value: char) -> u32 { () } pub fn __g1_u32_checked_add(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_sub(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_mul(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_div(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_rem(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_add(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_sub(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_mul(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_shl(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_wrapping_shr(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_shl(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_checked_shr(left: u32, right: u32) -> u32 { () } pub fn __g1_u32_eq(left: u32, right: u32) -> Bool { () } pub fn __g1_u32_lt(left: u32, right: u32) -> Bool { () } pub fn __g1_u32_le(left: u32, right: u32) -> Bool { () } pub fn __g1_u32_to_usize(value: u32) -> usize { () } pub fn __g1_usize_to_u32_checked(value: usize) -> u32 { () } ";
 
 #[test]
