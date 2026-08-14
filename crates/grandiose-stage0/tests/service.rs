@@ -2579,6 +2579,30 @@ fn service_checks_projected_parameter_callable_at_handler_branch_join() {
 }
 
 #[test]
+fn service_rejects_callable_only_reachable_after_a_discarded_handler_operation() {
+    let source = "effect Ask { [0,1] ask() -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn discard(function: (i64) -> i64) -> i64 { handle { let value = Ask::ask(); function(41) } { Ask::ask() with _ => 0 } } pub fn main() -> i64 { discard(add_one) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("callback after discarded operation unexpectedly satisfied its use obligation");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing discarded-handler callable-use diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_counts_callable_prefix_before_a_discarded_handler_operation() {
+    let source = "effect Ask { [0,1] ask() -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn consume(function: (i64) -> i64) -> i64 { handle { function(41); Ask::ask() } { Ask::ask() with _ => 0 } } pub fn main() -> i64 { consume(add_one) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 0);
+}
+
+#[test]
 fn service_materializes_a_concretely_instantiated_generic_function_value() {
     let source = "pub fn identity<T>(value: T) -> T { value } pub fn apply(function: (i64) -> i64) -> i64 { function(42) } pub fn main() -> i64 { apply(identity) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

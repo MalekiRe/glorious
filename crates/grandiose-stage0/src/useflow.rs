@@ -8,7 +8,10 @@
 //! compose at one semantic boundary before MIR.
 
 use crate::{
-    core::{CallableId, CoreHandlerResumption, CoreId, CoreKind, CorePlace, TypedBody},
+    core::{
+        CallableId, CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
+        CorePlace, TypedBody,
+    },
     placeflow::{FlowEventKind, MoveFact, PlaceFlow},
     quantity::{Quantity, QuantityError},
     source::Span,
@@ -173,6 +176,38 @@ impl Summary {
             *quantity = quantity.multiply(repetitions)?;
         }
         Ok(self)
+    }
+}
+
+/// A direct perform may end the handled computation only when every matching
+/// operation clause is a full-control discard with an irrefutable payload
+/// pattern. Pattern-sensitive and resumptive dispatch remain on the ordinary
+/// conservative path: this predicate is a proof of suffix abandonment, never
+/// a heuristic about likely runtime values.
+fn handler_definitely_discards(
+    clauses: &[CoreHandlerClause],
+    effect: &crate::EffectInstance,
+    operation: u32,
+) -> bool {
+    let matching = clauses
+        .iter()
+        .filter(|clause| clause.effect == *effect && clause.operation == operation)
+        .collect::<Vec<_>>();
+    !matching.is_empty()
+        && matching.iter().all(|clause| {
+            matches!(clause.resumption, CoreHandlerResumption::Discard { .. })
+                && clause.patterns.iter().all(core_pattern_is_irrefutable)
+        })
+}
+
+fn core_pattern_is_irrefutable(pattern: &CorePattern) -> bool {
+    match pattern {
+        CorePattern::Any | CorePattern::Bind { .. } => true,
+        CorePattern::Tuple(values) => values.iter().all(core_pattern_is_irrefutable),
+        CorePattern::Record { fields, .. } => fields
+            .iter()
+            .all(|field| core_pattern_is_irrefutable(&field.pattern)),
+        CorePattern::Literal(_) | CorePattern::Enum { .. } | CorePattern::Error => false,
     }
 }
 
@@ -431,8 +466,25 @@ impl Analyzer<'_> {
                 computation,
                 clauses,
             } => {
-                let computation = self.expression(computation, environment);
-                let incoming = environment.clone();
+                // A full-control `_` arm abandons the suspended suffix. The
+                // ordinary expression walker is intentionally sequencing
+                // oriented, so using its whole computation summary here
+                // would incorrectly count a callback *after* a discarded
+                // operation as though it ran before the arm. For a direct,
+                // statically total discard dispatch, retain exactly the
+                // evaluated prefix and then branch into the arm summaries.
+                // Resumptive or pattern-uncertain handlers keep the existing
+                // conservative summary path until their residual CFG is
+                // represented explicitly in Core.
+                let before_computation = environment.clone();
+                let (computation, incoming) =
+                    match self.discarded_prefix(computation, &clauses, environment) {
+                        Some(prefix) => (prefix, before_computation),
+                        None => (
+                            self.expression(computation, environment),
+                            environment.clone(),
+                        ),
+                    };
                 let mut arms = None::<Summary>;
                 for clause in clauses {
                     let mut arm_environment = incoming.clone();
@@ -537,6 +589,53 @@ impl Analyzer<'_> {
                 let next = self.expression(value, environment);
                 self.compose(span, summary, next)
             })
+    }
+
+    /// Evaluate the prefix of a straight-line Core fragment through its first
+    /// definitely intercepted discarded operation. `None` means the fragment
+    /// has no such total direct operation, so callers must use ordinary
+    /// summary evaluation. This deliberately does not guess through nested
+    /// handler/closure/control constructs: retaining the old conservative
+    /// behavior there is safer than treating an uncertain suffix as dead.
+    fn discarded_prefix(
+        &mut self,
+        id: CoreId,
+        clauses: &[CoreHandlerClause],
+        environment: &mut Environment,
+    ) -> Option<Summary> {
+        let expression = self.body.expression(id).clone();
+        match expression.kind {
+            CoreKind::Perform {
+                effect,
+                operation,
+                arguments,
+                ..
+            } if handler_definitely_discards(clauses, &effect, operation) => {
+                Some(self.sequence(arguments, environment, expression.span))
+            }
+            CoreKind::Block(values) => {
+                let mut prefix = Summary::default();
+                for value in values {
+                    if let Some(through_discard) =
+                        self.discarded_prefix(value, clauses, environment)
+                    {
+                        return Some(self.compose(expression.span, prefix, through_discard));
+                    }
+                    let next = self.expression(value, environment);
+                    prefix = self.compose(expression.span, prefix, next);
+                }
+                None
+            }
+            // `let value = perform()` does not initialize `value` when the
+            // intercepted operation selects a discard arm, so only its RHS
+            // prefix may contribute. A normal `let` remains on the ordinary
+            // walker path above.
+            CoreKind::Let { value, .. } => self.discarded_prefix(value, clauses, environment),
+            CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
+                self.discarded_prefix(body, clauses, environment)
+            }
+            _ => None,
+        }
     }
 
     fn call(
