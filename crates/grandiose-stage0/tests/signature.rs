@@ -436,6 +436,53 @@ fn generic_associated_item_arguments_are_preserved_in_frozen_signatures() {
 }
 
 #[test]
+fn associated_effect_row_projections_are_preserved_in_frozen_signatures() {
+    let package = PackageKey("signature-associated-effect-row@0.1.0".into());
+    let source = "trait Capability { type Effects: EffectRow; } pub fn consume<T>(value: T) -> i64 / { <T as Capability>::Effects } { 0 }";
+    let file = FileKey::new(&package, "src/lib.glorious");
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    assert!(
+        signatures.diagnostics.is_empty(),
+        "{:#?}",
+        signatures.diagnostics
+    );
+    let capability = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Capability"))
+        .unwrap()
+        .key;
+    let consume = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("consume"))
+        .unwrap()
+        .key;
+    let ElaboratedHeader::Callable(signature) = signatures.definitions.get(&consume).unwrap()
+    else {
+        panic!("expected callable")
+    };
+    assert!(signature.effects.effects.is_empty());
+    assert!(matches!(
+        signature.effects.projections.as_slice(),
+        [grandiose_stage0::EffectRowProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_arguments,
+        }] if **subject == Type::Generic(0)
+            && *trait_definition == capability
+            && trait_arguments.is_empty()
+            && name == "Effects"
+            && item_arguments.is_empty()
+    ));
+}
+
+#[test]
 fn callable_effect_rows_resolve_effect_declaration_identities() {
     let package = PackageKey("signature-effect-row@0.1.0".into());
     let source = "effect Console { write() } effect Trace { note() } pub fn run() -> i64 / { Trace, Console } { 42 }";

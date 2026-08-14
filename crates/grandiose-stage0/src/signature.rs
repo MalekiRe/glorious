@@ -11,7 +11,7 @@ use crate::{
     interface::{Definition, DefinitionNamespace, PackageInterface},
     quantity::Quantity,
     resolution::{DefinitionIndex, ResolutionState},
-    types::{EffectInstance, EffectRow, Mutability, Type},
+    types::{EffectInstance, EffectRow, EffectRowProjection, Mutability, Type},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -696,6 +696,34 @@ fn normalize_effect_row(
                     .collect(),
             })
             .collect(),
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| EffectRowProjection {
+                subject: Box::new(normalize_alias_type(
+                    *projection.subject,
+                    definitions,
+                    &mut vec![],
+                    diagnostics,
+                )),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(|argument| {
+                        normalize_alias_type(argument, definitions, &mut vec![], diagnostics)
+                    })
+                    .collect(),
+                name: projection.name,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(|argument| {
+                        normalize_alias_type(argument, definitions, &mut vec![], diagnostics)
+                    })
+                    .collect(),
+            })
+            .collect(),
         tail: value.tail,
     }
 }
@@ -1033,6 +1061,7 @@ impl Elaborator<'_> {
             );
         }
         let mut effects = vec![];
+        let mut projections = vec![];
         for effect in &value.effects {
             let (path, arguments) = match effect {
                 HeaderType::Path(path) => (path, vec![]),
@@ -1045,6 +1074,27 @@ impl Elaborator<'_> {
                         continue;
                     }
                 },
+                HeaderType::Projection {
+                    subject,
+                    trait_path,
+                    trait_arguments,
+                    name,
+                    item_arguments,
+                } => {
+                    let subject = self.ty(subject);
+                    let relation = self.trait_ref_parts(trait_path, trait_arguments);
+                    projections.push(EffectRowProjection {
+                        subject: Box::new(subject),
+                        trait_definition: relation.definition,
+                        trait_arguments: relation.arguments,
+                        name: name.clone(),
+                        item_arguments: item_arguments
+                            .iter()
+                            .map(|argument| self.ty(argument))
+                            .collect(),
+                    });
+                    continue;
+                }
                 _ => {
                     self.error("G3312", "effect row member is not a nominal path".into());
                     continue;
@@ -1082,7 +1132,11 @@ impl Elaborator<'_> {
                 _ => self.error("G3315", format!("unresolved effect `{}`", path.join("::"))),
             }
         }
-        EffectRow::closed_instances(effects)
+        EffectRow {
+            effects: effects.into_iter().collect(),
+            projections,
+            tail: None,
+        }
     }
     fn nominal_layout(&mut self, layout: &NominalLayoutHeader) -> ElaboratedNominalLayout {
         match layout {
@@ -1530,6 +1584,25 @@ fn substitute_effect_row(value: EffectRow, arguments: &[Type]) -> EffectRow {
                     .arguments
                     .into_iter()
                     .map(|argument| substitute_alias_generics(argument, arguments))
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| EffectRowProjection {
+                subject: Box::new(substitute_alias_generics(*projection.subject, arguments)),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(|value| substitute_alias_generics(value, arguments))
+                    .collect(),
+                name: projection.name,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(|value| substitute_alias_generics(value, arguments))
                     .collect(),
             })
             .collect(),

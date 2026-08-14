@@ -6241,6 +6241,27 @@ fn substitute_generic_effect_row(
                 })
             })
             .collect::<Option<BTreeSet<_>>>()?,
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| {
+                Some(crate::EffectRowProjection {
+                    subject: Box::new(substitute_generic_type(*projection.subject, substitutions)?),
+                    trait_definition: projection.trait_definition,
+                    trait_arguments: projection
+                        .trait_arguments
+                        .into_iter()
+                        .map(|argument| substitute_generic_type(argument, substitutions))
+                        .collect::<Option<_>>()?,
+                    name: projection.name,
+                    item_arguments: projection
+                        .item_arguments
+                        .into_iter()
+                        .map(|argument| substitute_generic_type(argument, substitutions))
+                        .collect::<Option<_>>()?,
+                })
+            })
+            .collect::<Option<_>>()?,
         tail: value.tail,
     })
 }

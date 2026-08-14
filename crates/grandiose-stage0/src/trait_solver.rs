@@ -577,6 +577,25 @@ fn substitute_effect_row(value: &EffectRow, substitution: &BTreeMap<u32, Type>) 
                     .collect(),
             })
             .collect(),
+        projections: value
+            .projections
+            .iter()
+            .map(|projection| crate::EffectRowProjection {
+                subject: Box::new(substitute_type(&projection.subject, substitution)),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .iter()
+                    .map(|value| substitute_type(value, substitution))
+                    .collect(),
+                name: projection.name.clone(),
+                item_arguments: projection
+                    .item_arguments
+                    .iter()
+                    .map(|value| substitute_type(value, substitution))
+                    .collect(),
+            })
+            .collect(),
         tail: value.tail,
     }
 }

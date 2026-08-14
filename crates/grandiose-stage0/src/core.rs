@@ -3023,6 +3023,15 @@ impl Elaborator<'_> {
                 return;
             }
         };
+        if !effects.projections.is_empty() {
+            self.error(
+                span,
+                "G4155",
+                "call has an associated effect-row projection that has not been normalized",
+            );
+            self.recovered = true;
+            return;
+        }
         for effect in &effects.effects {
             self.check_effect_instance(effect, span);
         }

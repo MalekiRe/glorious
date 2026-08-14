@@ -55,6 +55,18 @@ pub struct EffectInstance {
     pub arguments: Vec<Type>,
 }
 
+/// A delayed associated effect-row normalization. This is deliberately a row
+/// term rather than a [`Type`] so effect declarations cannot be confused with
+/// values or accidentally sent to a runtime backend.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectRowProjection {
+    pub subject: Box<Type>,
+    pub trait_definition: DefKey,
+    pub trait_arguments: Vec<Type>,
+    pub name: String,
+    pub item_arguments: Vec<Type>,
+}
+
 impl Ord for EffectInstance {
     fn cmp(&self, other: &Self) -> Ordering {
         self.definition
@@ -72,6 +84,9 @@ impl PartialOrd for EffectInstance {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EffectRow {
     pub effects: BTreeSet<EffectInstance>,
+    /// Symbolic associated effect-row terms. They are normalized by the trait
+    /// solver before a callable can become executable.
+    pub projections: Vec<EffectRowProjection>,
     /// Body-local row variable. It may not cross into a frozen interface or
     /// Typed Core product before elaboration has resolved it.
     pub tail: Option<EffectVar>,
@@ -88,6 +103,7 @@ impl EffectRow {
     pub fn closed_instances(effects: impl IntoIterator<Item = EffectInstance>) -> Self {
         Self {
             effects: effects.into_iter().collect(),
+            projections: vec![],
             tail: None,
         }
     }
@@ -177,6 +193,7 @@ impl InferContext {
         self.effect_bindings.push(None);
         EffectRow {
             effects: BTreeSet::new(),
+            projections: vec![],
             tail: Some(variable),
         }
     }
@@ -378,6 +395,7 @@ impl InferContext {
                     })
                 })
                 .collect::<Result<_, _>>()?,
+            projections: effects.projections,
             tail: None,
         })
     }
@@ -407,9 +425,16 @@ impl InferContext {
         }
         let (left_only, right_only) =
             self.partition_effect_instances(&left.effects, &right.effects)?;
+        if !left.projections.is_empty() || !right.projections.is_empty() {
+            return Err(TypeError::EffectRow {
+                expected: left,
+                found: right,
+            });
+        }
         match (left.tail, right.tail) {
             (None, None) if left_only.is_empty() && right_only.is_empty() => Ok(EffectRow {
                 effects: left.effects.union(&right.effects).cloned().collect(),
+                projections: vec![],
                 tail: None,
             }),
             (None, None) => Err(TypeError::EffectRow {
@@ -426,6 +451,7 @@ impl InferContext {
             }
             (Some(variable), Some(other)) if variable == other => Ok(EffectRow {
                 effects: left.effects.union(&right.effects).cloned().collect(),
+                projections: vec![],
                 tail: Some(variable),
             }),
             (Some(variable), Some(other)) => {
@@ -435,6 +461,7 @@ impl InferContext {
                     variable,
                     EffectRow {
                         effects: right_only,
+                        projections: vec![],
                         tail: Some(tail),
                     },
                 )?;
@@ -442,11 +469,13 @@ impl InferContext {
                     other,
                     EffectRow {
                         effects: left_only,
+                        projections: vec![],
                         tail: Some(tail),
                     },
                 )?;
                 Ok(EffectRow {
                     effects: left.effects.union(&right.effects).cloned().collect(),
+                    projections: vec![],
                     tail: Some(tail),
                 })
             }
@@ -619,6 +648,11 @@ impl InferContext {
         self.effect_bindings[variable.0 as usize] = Some(binding.clone());
         EffectRow {
             effects: effects.effects.union(&binding.effects).cloned().collect(),
+            projections: effects
+                .projections
+                .into_iter()
+                .chain(binding.projections)
+                .collect(),
             tail: binding.tail,
         }
     }
