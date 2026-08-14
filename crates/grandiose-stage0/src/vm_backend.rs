@@ -4498,6 +4498,10 @@ enum ReferenceTarget {
 #[derive(Clone)]
 struct RuntimeHandlerFrame {
     id: u64,
+    /// Dynamic call-stack depth of the function that installed this frame.
+    /// It remains visible to deeper ordinary calls, but its clause always
+    /// executes in this owning frame.
+    call_depth: usize,
     effect: DefKey,
     effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
@@ -4515,6 +4519,24 @@ struct RuntimeContinuation {
     performed: RuntimePerformed,
     above: Vec<RuntimeHandlerFrame>,
     pending_leave: Option<PendingLeave>,
+    /// Standalone artifacts have one execution frame. Programs additionally
+    /// retain the complete caller/callee path, so a performance may cross an
+    /// ordinary call and still resume at its original instruction.
+    program: Option<RuntimeProgramContinuation>,
+}
+
+#[derive(Clone)]
+struct RuntimeProgramCaller {
+    definition: DefKey,
+    registers: Vec<Option<VmValue>>,
+    pc: usize,
+    return_destination: u32,
+}
+
+#[derive(Clone)]
+struct RuntimeProgramContinuation {
+    definition: DefKey,
+    callers: Vec<RuntimeProgramCaller>,
 }
 
 /// A clause-side call frame for `ResumeReturn`.  It is intentionally separate
@@ -5330,6 +5352,7 @@ fn execute(
                     },
                     above,
                     pending_leave: None,
+                    program: None,
                 });
                 pc = frame.target as usize;
                 continue;
@@ -5354,6 +5377,7 @@ fn execute(
                         next_handler_id = next_handler_id.saturating_add(1);
                         id
                     },
+                    call_depth: 0,
                     effect,
                     effect_arguments,
                     operation,
@@ -5559,6 +5583,7 @@ fn execute(
                     performed: continuation.performed,
                     above: crossed,
                     pending_leave: continuation.pending_leave,
+                    program: None,
                 });
                 pc = frame.target as usize;
                 continue;
@@ -6540,11 +6565,25 @@ fn execute_with_arguments(
     for (index, value) in arguments.iter().enumerate() {
         registers[index] = Some(value.clone());
     }
+    // The program engine deliberately keeps ordinary calls explicit rather
+    // than recursively invoking a fresh interpreter. Handler frames are
+    // dynamically scoped, so a `Perform` in any callee must be able to find
+    // a frame installed by an ancestor. A continuation records this exact
+    // call stack and restores it on `Resume`.
+    let mut definition = definition;
+    let mut callers = Vec::<RuntimeProgramCaller>::new();
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
     let mut resumption_returns = Vec::<RuntimeResumptionReturn>::new();
     let mut next_handler_id = 0u64;
     let mut pc = 0usize;
-    while let Some(instruction) = function.instructions.get(pc) {
+    loop {
+        let function = program
+            .functions
+            .get(&definition)
+            .ok_or(VmArtifactError::MissingFunction { definition })?;
+        let Some(instruction) = function.instructions.get(pc) else {
+            return Err(VmArtifactError::NoReturn);
+        };
         budget.tick()?;
         match instruction {
             VmInstruction::ConstUnit { dst } => registers[*dst as usize] = Some(VmValue::Unit),
@@ -6787,23 +6826,41 @@ fn execute_with_arguments(
                         limit: budget.limits.max_retained_continuations,
                     });
                 }
-                let frame = &mut handlers[index];
-                if frame.payload_destinations.len() != values.len() {
+                let owner_depth = handlers[index].call_depth;
+                if owner_depth > callers.len() {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                let payload_destinations = handlers[index].payload_destinations.clone();
+                let handler_target = handlers[index].target;
+                if payload_destinations.len() != values.len() {
                     return Err(VmArtifactError::CallArity {
-                        expected: frame.payload_destinations.len() as u32,
+                        expected: payload_destinations.len() as u32,
                         found: values.len() as u32,
                     });
                 }
                 budget.reserve_allocation(registers.len())?;
                 let saved = registers.clone();
-                for (destination, value) in frame
-                    .payload_destinations
-                    .iter()
-                    .zip(values.iter().cloned())
+                let continuation_program = RuntimeProgramContinuation {
+                    definition,
+                    callers: callers.clone(),
+                };
+                // A matching ancestor owns the handler clause. Discard the
+                // active callee path from live execution only after storing
+                // it in the continuation; `Resume` restores it below.
+                if owner_depth < callers.len() {
+                    let owner = callers
+                        .get(owner_depth)
+                        .cloned()
+                        .ok_or(VmArtifactError::HandlerStateMismatch)?;
+                    definition = owner.definition;
+                    registers = owner.registers;
+                    callers.truncate(owner_depth);
+                }
+                for (destination, value) in payload_destinations.iter().zip(values.iter().cloned())
                 {
                     registers[*destination as usize] = Some(value);
                 }
-                frame.suspended = Some(RuntimeContinuation {
+                handlers[index].suspended = Some(RuntimeContinuation {
                     target: pc + 1,
                     dst: *dst,
                     registers: saved,
@@ -6815,8 +6872,9 @@ fn execute_with_arguments(
                     },
                     above,
                     pending_leave: None,
+                    program: Some(continuation_program),
                 });
-                pc = frame.target as usize;
+                pc = handler_target as usize;
                 continue;
             }
             VmInstruction::InstallHandler {
@@ -6839,6 +6897,7 @@ fn execute_with_arguments(
                         next_handler_id = next_handler_id.saturating_add(1);
                         id
                     },
+                    call_depth: callers.len(),
                     effect: *effect,
                     effect_arguments: effect_arguments.clone(),
                     operation: *operation,
@@ -6879,8 +6938,13 @@ fn execute_with_arguments(
                     registers: saved_registers,
                     above,
                     pending_leave,
+                    program,
                     ..
                 } = continuation;
+                if let Some(program) = program {
+                    definition = program.definition;
+                    callers = program.callers;
+                }
                 if let Some(leave) = pending_leave {
                     registers = saved_registers;
                     handlers.extend(above);
@@ -6920,6 +6984,7 @@ fn execute_with_arguments(
                     registers: saved_registers,
                     above,
                     pending_leave,
+                    program,
                     ..
                 } = continuation;
                 if pending_leave.is_some() {
@@ -6927,6 +6992,10 @@ fn execute_with_arguments(
                 }
                 handlers.last_mut().expect("active frame exists").suspended = None;
                 handlers.extend(above);
+                if let Some(program) = program {
+                    definition = program.definition;
+                    callers = program.callers;
+                }
                 registers = saved_registers;
                 registers[continuation_dst as usize] = Some(resumed);
                 pc = target;
@@ -6983,8 +7052,13 @@ fn execute_with_arguments(
                     registers: saved_registers,
                     above,
                     pending_leave,
+                    program,
                     ..
                 } = continuation;
+                if let Some(program) = program {
+                    definition = program.definition;
+                    callers = program.callers;
+                }
                 if let Some(leave) = pending_leave {
                     registers = saved_registers;
                     handlers.extend(above);
@@ -7019,31 +7093,52 @@ fn execute_with_arguments(
                 let mut crossed = handlers.split_off(index + 1);
                 crossed.push(declined);
                 crossed.extend(continuation.above.clone());
-                let frame = &mut handlers[index];
-                if frame.payload_destinations.len() != continuation.performed.payloads.len() {
+                let owner_depth = handlers[index].call_depth;
+                let payload_destinations = handlers[index].payload_destinations.clone();
+                let handler_target = handlers[index].target;
+                if payload_destinations.len() != continuation.performed.payloads.len() {
                     return Err(VmArtifactError::CallArity {
-                        expected: frame.payload_destinations.len() as u32,
+                        expected: payload_destinations.len() as u32,
                         found: continuation.performed.payloads.len() as u32,
                     });
                 }
                 budget.reserve_allocation(continuation.registers.len())?;
-                registers = continuation.registers.clone();
-                for (destination, payload) in frame
-                    .payload_destinations
+                let continuation_program = continuation.program.clone();
+                if let Some(program) = &continuation_program {
+                    if owner_depth > program.callers.len() {
+                        return Err(VmArtifactError::HandlerStateMismatch);
+                    }
+                    if owner_depth < program.callers.len() {
+                        let owner = program
+                            .callers
+                            .get(owner_depth)
+                            .cloned()
+                            .ok_or(VmArtifactError::HandlerStateMismatch)?;
+                        definition = owner.definition;
+                        registers = owner.registers;
+                        callers = program.callers[..owner_depth].to_vec();
+                    } else {
+                        registers = continuation.registers.clone();
+                    }
+                } else {
+                    registers = continuation.registers.clone();
+                }
+                for (destination, payload) in payload_destinations
                     .iter()
                     .zip(continuation.performed.payloads.iter().cloned())
                 {
                     registers[*destination as usize] = Some(payload);
                 }
-                frame.suspended = Some(RuntimeContinuation {
+                handlers[index].suspended = Some(RuntimeContinuation {
                     target: continuation.target,
                     dst: continuation.dst,
                     registers: continuation.registers,
                     performed: continuation.performed,
                     above: crossed,
                     pending_leave: continuation.pending_leave,
+                    program: continuation_program,
                 });
-                pc = frame.target as usize;
+                pc = handler_target as usize;
                 continue;
             }
             VmInstruction::Cancel => {
@@ -7420,13 +7515,34 @@ fn execute_with_arguments(
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                registers[*dst as usize] = Some(execute_with_arguments(
-                    program,
-                    *callee,
-                    &values,
-                    depth + 1,
-                    budget,
-                )?);
+                if depth.saturating_add(callers.len() as u32).saturating_add(1)
+                    >= budget.limits.max_call_depth
+                {
+                    return Err(VmArtifactError::CallDepthLimit {
+                        limit: budget.limits.max_call_depth,
+                    });
+                }
+                let callee_function =
+                    program
+                        .functions
+                        .get(callee)
+                        .ok_or(VmArtifactError::MissingFunction {
+                            definition: *callee,
+                        })?;
+                budget.reserve_allocation(callee_function.registers.len())?;
+                callers.push(RuntimeProgramCaller {
+                    definition,
+                    registers: std::mem::take(&mut registers),
+                    pc,
+                    return_destination: *dst,
+                });
+                definition = *callee;
+                registers = vec![None; callee_function.registers.len()];
+                for (index, value) in values.into_iter().enumerate() {
+                    registers[index] = Some(value);
+                }
+                pc = 0;
+                continue;
             }
             VmInstruction::MakeCallable {
                 dst,
@@ -7477,13 +7593,31 @@ fn execute_with_arguments(
                         .expect("verified register")
                         .clone()
                 }));
-                registers[*dst as usize] = Some(execute_with_arguments(
-                    program,
-                    callee,
-                    &values,
-                    depth + 1,
-                    budget,
-                )?);
+                if depth.saturating_add(callers.len() as u32).saturating_add(1)
+                    >= budget.limits.max_call_depth
+                {
+                    return Err(VmArtifactError::CallDepthLimit {
+                        limit: budget.limits.max_call_depth,
+                    });
+                }
+                let callee_function = program
+                    .functions
+                    .get(&callee)
+                    .ok_or(VmArtifactError::MissingFunction { definition: callee })?;
+                budget.reserve_allocation(callee_function.registers.len())?;
+                callers.push(RuntimeProgramCaller {
+                    definition,
+                    registers: std::mem::take(&mut registers),
+                    pc,
+                    return_destination: *dst,
+                });
+                definition = callee;
+                registers = vec![None; callee_function.registers.len()];
+                for (index, value) in values.into_iter().enumerate() {
+                    registers[index] = Some(value);
+                }
+                pc = 0;
+                continue;
             }
             VmInstruction::Jump { target } => {
                 pc = *target as usize;
@@ -7528,30 +7662,39 @@ fn execute_with_arguments(
                 continue;
             }
             VmInstruction::Return { value } => {
-                if !handlers.is_empty() {
+                // Ancestor handlers remain dynamically active across a
+                // callee return. Only a handler installed by this frame may
+                // make its return ill-formed.
+                if handlers
+                    .iter()
+                    .any(|handler| handler.call_depth == callers.len())
+                {
                     return Err(VmArtifactError::HandlerStillActive);
                 }
+                let value = registers[*value as usize]
+                    .as_ref()
+                    .expect("verified register")
+                    .clone();
+                if let Some(caller) = callers.pop() {
+                    definition = caller.definition;
+                    registers = caller.registers;
+                    registers[caller.return_destination as usize] = Some(value);
+                    pc = caller.pc + 1;
+                    continue;
+                }
                 if let Some(return_to_clause) = resumption_returns.pop() {
-                    let value = registers[*value as usize]
-                        .as_ref()
-                        .expect("verified register")
-                        .clone();
                     registers = return_to_clause.registers;
                     registers[return_to_clause.dst as usize] = Some(value);
                     handlers = return_to_clause.handlers;
                     pc = return_to_clause.pc;
                     continue;
                 }
-                return Ok(registers[*value as usize]
-                    .as_ref()
-                    .expect("verified register")
-                    .clone());
+                return Ok(value);
             }
             VmInstruction::Trap => return Err(VmArtifactError::Trap),
         }
         pc += 1;
     }
-    Err(VmArtifactError::NoReturn)
 }
 struct ExecutionBudget {
     limits: VmExecutionLimits,

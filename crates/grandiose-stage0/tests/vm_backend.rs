@@ -80,6 +80,281 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
 }
 
 #[test]
+fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
+    let effect = DefKey(Digest::of_bytes(b"cross-frame-ask"));
+    let caller = DefKey(Digest::of_bytes(b"cross-frame-caller"));
+    let callee = DefKey(Digest::of_bytes(b"cross-frame-callee"));
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: caller,
+        functions: BTreeMap::from([
+            (
+                caller,
+                VmFunction {
+                    definition: caller,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::I64; 5],
+                    instructions: vec![
+                        VmInstruction::ConstI64 { dst: 0, value: 41 },
+                        VmInstruction::InstallHandler {
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            payload_destinations: vec![1],
+                            resume_type: VmType::I64,
+                            continuation: VmContinuationPolicy::Consume,
+                            target: 5,
+                        },
+                        VmInstruction::Call {
+                            dst: 2,
+                            callee,
+                            arguments: vec![0],
+                        },
+                        VmInstruction::UninstallHandler,
+                        VmInstruction::Return { value: 2 },
+                        VmInstruction::ConstI64 { dst: 3, value: 1 },
+                        VmInstruction::AddI64 {
+                            dst: 4,
+                            left: 1,
+                            right: 3,
+                        },
+                        VmInstruction::Resume { value: 4 },
+                    ],
+                },
+            ),
+            (
+                callee,
+                VmFunction {
+                    definition: callee,
+                    captures: 0,
+                    parameters: 1,
+                    registers: vec![VmType::I64, VmType::I64],
+                    instructions: vec![
+                        VmInstruction::Perform {
+                            dst: 1,
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            arguments: vec![0],
+                        },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+        ]),
+        fingerprint: Digest::of_bytes(b"cross-frame-handler-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    assert_eq!(decode_program(&bytes).unwrap(), program);
+    let program = verify_vm_program(program).unwrap();
+    assert!(matches!(
+        program.run_i64_with_limits(VmExecutionLimits {
+            max_call_depth: 1,
+            ..VmExecutionLimits::default()
+        }),
+        Err(VmArtifactError::CallDepthLimit { limit: 1 })
+    ));
+    assert!(matches!(
+        program.run_i64_with_limits(VmExecutionLimits {
+            max_retained_continuations: 0,
+            ..VmExecutionLimits::default()
+        }),
+        Err(VmArtifactError::ContinuationLimit { limit: 0 })
+    ));
+    assert_eq!(program.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn program_forwards_a_nested_callee_performance_to_an_ancestor_handler() {
+    let effect = DefKey(Digest::of_bytes(b"cross-frame-forward"));
+    let outer = DefKey(Digest::of_bytes(b"cross-frame-forward-outer"));
+    let middle = DefKey(Digest::of_bytes(b"cross-frame-forward-middle"));
+    let leaf = DefKey(Digest::of_bytes(b"cross-frame-forward-leaf"));
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: outer,
+        functions: BTreeMap::from([
+            (
+                outer,
+                VmFunction {
+                    definition: outer,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::I64; 5],
+                    instructions: vec![
+                        VmInstruction::ConstI64 { dst: 0, value: 40 },
+                        VmInstruction::InstallHandler {
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            payload_destinations: vec![1],
+                            resume_type: VmType::I64,
+                            continuation: VmContinuationPolicy::Consume,
+                            target: 6,
+                        },
+                        VmInstruction::Call {
+                            dst: 2,
+                            callee: middle,
+                            arguments: vec![0],
+                        },
+                        VmInstruction::UninstallHandler,
+                        VmInstruction::Return { value: 2 },
+                        VmInstruction::Trap,
+                        VmInstruction::ConstI64 { dst: 3, value: 2 },
+                        VmInstruction::AddI64 {
+                            dst: 4,
+                            left: 1,
+                            right: 3,
+                        },
+                        VmInstruction::Resume { value: 4 },
+                    ],
+                },
+            ),
+            (
+                middle,
+                VmFunction {
+                    definition: middle,
+                    captures: 0,
+                    parameters: 1,
+                    registers: vec![VmType::I64; 3],
+                    instructions: vec![
+                        VmInstruction::InstallHandler {
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            payload_destinations: vec![2],
+                            resume_type: VmType::I64,
+                            continuation: VmContinuationPolicy::Consume,
+                            target: 5,
+                        },
+                        VmInstruction::Call {
+                            dst: 1,
+                            callee: leaf,
+                            arguments: vec![0],
+                        },
+                        VmInstruction::UninstallHandler,
+                        VmInstruction::Return { value: 1 },
+                        VmInstruction::Trap,
+                        VmInstruction::Forward,
+                    ],
+                },
+            ),
+            (
+                leaf,
+                VmFunction {
+                    definition: leaf,
+                    captures: 0,
+                    parameters: 1,
+                    registers: vec![VmType::I64; 2],
+                    instructions: vec![
+                        VmInstruction::Perform {
+                            dst: 1,
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            arguments: vec![0],
+                        },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+        ]),
+        fingerprint: Digest::of_bytes(b"cross-frame-forward-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn program_replay_resumption_returns_after_the_original_caller_path_completes() {
+    let effect = DefKey(Digest::of_bytes(b"cross-frame-replay"));
+    let caller = DefKey(Digest::of_bytes(b"cross-frame-replay-caller"));
+    let callee = DefKey(Digest::of_bytes(b"cross-frame-replay-callee"));
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        entry: caller,
+        functions: BTreeMap::from([
+            (
+                caller,
+                VmFunction {
+                    definition: caller,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::I64; 8],
+                    instructions: vec![
+                        VmInstruction::ConstI64 { dst: 0, value: 40 },
+                        VmInstruction::InstallHandler {
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            payload_destinations: vec![1],
+                            resume_type: VmType::I64,
+                            continuation: VmContinuationPolicy::Replay,
+                            target: 7,
+                        },
+                        VmInstruction::Call {
+                            dst: 2,
+                            callee,
+                            arguments: vec![0],
+                        },
+                        // These instructions are part of the suspended
+                        // caller path, not the handler clause. The returned
+                        // result distinguishes a real restored call frame
+                        // from a direct jump back into the clause.
+                        VmInstruction::ConstI64 { dst: 6, value: 10 },
+                        VmInstruction::AddI64 {
+                            dst: 7,
+                            left: 2,
+                            right: 6,
+                        },
+                        VmInstruction::UninstallHandler,
+                        VmInstruction::Return { value: 7 },
+                        VmInstruction::ConstI64 { dst: 3, value: 2 },
+                        VmInstruction::AddI64 {
+                            dst: 4,
+                            left: 1,
+                            right: 3,
+                        },
+                        VmInstruction::ResumeReturn { dst: 5, value: 4 },
+                        // ResumeReturn restores the replay snapshot; the
+                        // clause owns its cleanup and must not leave it live.
+                        VmInstruction::Cancel,
+                        VmInstruction::Return { value: 5 },
+                    ],
+                },
+            ),
+            (
+                callee,
+                VmFunction {
+                    definition: callee,
+                    captures: 0,
+                    parameters: 1,
+                    registers: vec![VmType::I64; 2],
+                    instructions: vec![
+                        VmInstruction::Perform {
+                            dst: 1,
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            arguments: vec![0],
+                        },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+        ]),
+        fingerprint: Digest::of_bytes(b"cross-frame-replay-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 52);
+}
+
+#[test]
 fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
     use grandiose_stage0::{
         ConstKind, EffectTail, Lifetime, VmEffectInstance, VmEffectRow, VmEffectRowProjection,
