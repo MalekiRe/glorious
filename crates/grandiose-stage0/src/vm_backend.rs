@@ -1418,6 +1418,15 @@ impl VmStorageErasureWitness {
         {
             return false;
         }
+        if storages
+            .iter()
+            .map(|storage| storage.binding)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != storages.len()
+        {
+            return false;
+        }
         if storages.iter().any(|storage| {
             protected_registers
                 .binary_search(&storage.value_register)
