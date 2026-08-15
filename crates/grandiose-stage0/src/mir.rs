@@ -5144,7 +5144,12 @@ impl MirFunction {
                                 .into(),
                         );
                     };
-                    if !storage_live.contains(&binding) {
+                    // A lifted capture or invocation argument is an
+                    // addressable child binding whose storage is initialized
+                    // by the callable ABI. It has an exact mapping but no
+                    // child-local `StorageLive`; ordinary lexical owners
+                    // still require the explicit transition.
+                    if !storage_live.contains(&binding) && !self.parameters.contains(dst) {
                         return Err("MIR Store targets source storage before StorageLive".into());
                     }
                     if live.contains(dst) {
@@ -23174,6 +23179,24 @@ impl Lowerer<'_> {
             child.named.insert(name.clone(), local);
             lifted_parameters.push(local);
         }
+        // The lifted body shares this Typed Core arena with its parent but
+        // owns a fresh executable ABI. Derive a new dense PlaceFlow graph
+        // rooted at the closure body and seeded only by that ABI; importing
+        // the parent graph would make child storage IDs and lexical owners
+        // spuriously alias their parent counterparts.
+        let lifted_abi = captures
+            .iter()
+            .map(|capture| (capture.name.clone(), capture.ty.clone()))
+            .chain(parameters.iter().cloned())
+            .collect::<Vec<_>>();
+        let child_flow = PlaceFlow::analyze_lifted(self.body, body, &lifted_abi);
+        if !child_flow.diagnostics.is_empty() {
+            self.error(
+                "G6002",
+                "lifted callable source-storage analysis did not converge",
+            );
+            return None;
+        }
         let Some(root) = child.value(body) else {
             self.diagnostics.extend(child.diagnostics);
             return None;
@@ -23197,8 +23220,8 @@ impl Lowerer<'_> {
                 instructions: child.instructions,
                 terminator: MirTerminator::Return { value: root },
             }],
-        }
-        .with_frozen_control_tables();
+        };
+        let function = MirLowering::freeze(function, &child_flow);
         if let Err(message) = function.validate() {
             self.error("G6002", &message);
             return None;

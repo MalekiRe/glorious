@@ -6969,11 +6969,23 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     for state in initial.iter_mut().take(function.parameters as usize) {
         *state = Some(true);
     }
+    // The callable ABI initializes its parameter register prefix before the
+    // first instruction.  Source-storage freezing may give an addressable
+    // capture or argument an exact mapping without emitting a child-local
+    // `StorageLive`, so the verifier must carry the corresponding lifetime
+    // fact as well as the definite-write fact above.
+    let mut initial_storage_live = vec![false; function.registers.len()];
+    for state in initial_storage_live
+        .iter_mut()
+        .take(function.parameters as usize)
+    {
+        *state = true;
+    }
     let mut incoming = vec![None; function.instructions.len()];
     if let Some(entry) = incoming.first_mut() {
         *entry = Some(VerifierState {
             registers: initial,
-            storage_live: vec![false; function.registers.len()],
+            storage_live: initial_storage_live,
             snapshots: vec![None; function.registers.len()],
             handlers: Vec::new(),
             pending_leave: None,

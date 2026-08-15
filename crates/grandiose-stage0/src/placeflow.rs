@@ -386,6 +386,24 @@ pub struct PlaceFlow {
 }
 impl PlaceFlow {
     pub fn analyze(body: &TypedBody) -> Self {
+        Self::analyze_root(body, body.root, &body.parameters)
+    }
+
+    /// Analyze one lifted callable body as an independent storage owner.
+    ///
+    /// A closure shares the immutable Typed Core arena with its parent, but
+    /// its captures and invocation parameters are a new executable ABI. The
+    /// resulting dense binding IDs must therefore begin at zero for the child
+    /// and may not import parent flow identities.
+    pub fn analyze_lifted(
+        body: &TypedBody,
+        root: CoreId,
+        parameters: &[(String, Type)],
+    ) -> Self {
+        Self::analyze_root(body, root, parameters)
+    }
+
+    fn analyze_root(body: &TypedBody, root: CoreId, parameters: &[(String, Type)]) -> Self {
         let mut a = Analyzer {
             body,
             states: BTreeMap::new(),
@@ -409,7 +427,7 @@ impl PlaceFlow {
             refinements: vec![],
             diagnostics: vec![],
         };
-        for (index, (name, _)) in body.parameters.iter().enumerate() {
+        for (index, (name, _)) in parameters.iter().enumerate() {
             let binding = a.bindings.intern(
                 name,
                 name,
@@ -427,8 +445,8 @@ impl PlaceFlow {
         // identities before visiting the body so a call or operation may
         // forward one into its result, and a child reborrow can suspend it,
         // without inventing a body-local backing place.
-        a.record_parameter_reference_origins();
-        a.visit_with_live_after(body.root, &BTreeSet::new());
+        a.record_parameter_reference_origins(parameters);
+        a.visit_with_live_after(root, &BTreeSet::new());
         a.diagnostics.sort_by_key(|d| d.span.start);
         let active_loans = a
             .projection_loans
@@ -519,10 +537,8 @@ type HandlerExit = (
 );
 
 impl Analyzer<'_> {
-    fn record_parameter_reference_origins(&mut self) {
-        let parameters = self
-            .body
-            .parameters
+    fn record_parameter_reference_origins(&mut self, abi: &[(String, Type)]) {
+        let parameters = abi
             .iter()
             .map(|(name, _)| name.as_str())
             .collect::<BTreeSet<_>>();

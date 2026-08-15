@@ -289,3 +289,66 @@ fn source_lowering_requires_lifecycle_storage_for_lifted_closure_bindings() {
         );
     }
 }
+
+/// Lifted closures cannot inherit their parent's PlaceFlow table: captures,
+/// invocation parameters, and child lets have a fresh ABI-local identity
+/// space. An assignment inside the child proves that its table is populated
+/// and that its executable storage mapping names the actual store target.
+#[test]
+fn lifted_closure_assignment_freezes_a_nonvacuous_child_storage_graph() {
+    let source = r#"
+        pub fn main(seed: i64) -> i64 {
+            let delayed = (input: i64) -> i64 {
+                let value = input;
+                value = seed + 1;
+                value
+            };
+            delayed(0)
+        }
+    "#;
+    let (_core, _flow, lowered) = lower_main(source);
+    let child = lowered
+        .lifted
+        .values()
+        .find(|function| {
+            function.blocks.iter().flat_map(|block| &block.instructions).any(
+                |instruction| matches!(instruction, grandiose_stage0::MirInstruction::Store { .. }),
+            )
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "assigned closure must publish a lifted MIR body: {:#?}",
+                lowered.diagnostics
+            )
+        });
+    child.validate().unwrap_or_else(|error| {
+        panic!("lifted assigned closure must validate: {error}\n{child:#?}")
+    });
+    assert!(
+        !child.control.move_paths.bindings.is_empty()
+            && child.control.source_storage.binding_locals.len()
+                == child.control.move_paths.bindings.len(),
+        "lifted child must publish its own nonempty dense storage graph: {child:#?}"
+    );
+    let stores = child
+        .blocks
+        .iter()
+        .flat_map(|block| &block.instructions)
+        .filter_map(|instruction| match instruction {
+            grandiose_stage0::MirInstruction::Store { dst, .. } => Some(*dst),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !stores.is_empty()
+            && stores.iter().all(|store| {
+                child
+                    .control
+                    .source_storage
+                    .binding_locals
+                    .iter()
+                    .any(|local| *local == Some(*store))
+            }),
+        "lifted assignment must target a child-owned mapped storage slot: {child:#?}"
+    );
+}

@@ -2991,6 +2991,23 @@ fn service_lowers_addressable_local_assignment_through_placeflow_and_the_vm() {
 }
 
 #[test]
+fn service_executes_assignment_inside_a_lifted_closure_with_its_own_storage_graph() {
+    let source = r#"
+        pub fn main() -> i64 {
+            let seed = 0;
+            let delayed = (input: i64) -> i64 {
+                let value = input;
+                value = seed + 1;
+                value
+            };
+            delayed(0)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 1);
+}
+
+#[test]
 fn service_lowers_unique_borrow_deref_and_mutation_without_copying_the_place() {
     let outcome = StageZeroCompiler::new()
         .compile(request(

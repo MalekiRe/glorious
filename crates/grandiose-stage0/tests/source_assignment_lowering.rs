@@ -345,15 +345,15 @@ fn lifted_closure_assignment_preserves_a_mapped_addressable_capture_slot() {
         let source_slots = source_slots(child);
         for instruction in instructions(child) {
             if let MirInstruction::Store { dst, .. } = instruction {
-                found_mutating_capture = true;
                 assert!(
                     source_slots.contains(dst),
                     "a lifted source assignment must Store to a frozen addressable capture slot, never an untracked temporary: {child:#?}"
                 );
-                assert!(
-                    child.parameters[..child.captures as usize].contains(dst),
-                    "the mutated child slot must be one of the lifted capture ABI parameters: {child:#?}"
-                );
+                // The outer lifted callable also stores its lexical `inner`
+                // binding.  Only the nested callable's Store proves the
+                // capture-parameter path; distinguish it by the ABI prefix
+                // instead of assuming every lifted Store is a capture write.
+                found_mutating_capture |= child.parameters[..child.captures as usize].contains(dst);
             }
         }
         assert_only_source_slots_are_stored(child);
