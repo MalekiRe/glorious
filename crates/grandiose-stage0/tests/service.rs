@@ -10759,6 +10759,63 @@ fn service_materializes_dependency_generic_trait_method_values_for_indirect_call
 }
 
 #[test]
+fn service_executes_aliased_reexported_generic_trait_gats_through_vm_handlers() {
+    // The root sees only a public facade alias.  Its selected subtrait method,
+    // associated layout GAT, and associated effect-row GAT must nevertheless
+    // retain the provider's exact identities through indirect invocation and
+    // VM handler dispatch.
+    let mut request = request(
+        "use bridge::Forward as Capability; use bridge::Audit as Trace; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn worker() -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { let packet = Packet { value: Capability<i64>::relay(0, 41) }; Trace<i64>::note(packet.value) } pub fn apply(callback: () -> i64 / Trace<i64>) -> i64 / Trace<i64> { callback() } pub fn main() -> i64 { handle apply(worker) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Child as Forward, Trace as Audit};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = U; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> U / {Trace<U>} { value } } impl Child<i64> for i64 {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("aliased generic trait facade identities must materialize into the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_aliased_reexported_generic_trait_gats_without_an_impl() {
+    // The implementation-contract normalizer is allowed to reduce only after
+    // selection.  A facade alias does not manufacture the missing parent
+    // evidence for the same generic associated row.
+    let mut request = request(
+        "use bridge::Forward as Capability; pub fn worker() -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { 0 } pub fn main() -> i64 { worker() }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::Child as Forward;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("a facade alias manufactured generic associated-item evidence");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4190"),
+        "missing unselected facade-GAT diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_returns_interprocedural_one_shot_continuation_results_to_the_handler_clause() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn worker() -> i64 / Ask { let value = Ask::ask(); value + 1 } pub fn main() -> i64 { handle worker() { Ask::ask() with k => k(41) + 1 } }";
     let outcome = StageZeroCompiler::new()

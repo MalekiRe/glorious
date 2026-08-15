@@ -1272,6 +1272,15 @@ impl ElaboratedInterface {
     }
 
     fn validate_associated_type_definitions(&mut self) {
+        // Method contracts are compared while the interface is still being
+        // assembled.  Keep an immutable snapshot for selected associated-item
+        // normalization so this validation never depends on later body work
+        // or on diagnostics accumulated during this pass.
+        let normalization_interface = ElaboratedInterface {
+            definitions: self.definitions.clone(),
+            host_imports: self.host_imports.clone(),
+            diagnostics: vec![],
+        };
         let mut diagnostics = Vec::new();
         for implementation in self.definitions.values().filter_map(|header| match header {
             ElaboratedHeader::Implementation(implementation) => Some(implementation),
@@ -1423,11 +1432,15 @@ impl ElaboratedInterface {
                         if expected.generics == method.generics
                             && expected.generic_kinds == method.generic_kinds =>
                     {
-                        let required = instantiate_trait_method_contract(
-                            expected,
-                            implementation,
+                        let required = normalize_instantiated_trait_method_contract(
+                            instantiate_trait_method_contract(expected, implementation),
+                            &normalization_interface,
                         );
-                        if required != *method {
+                        let provided = normalize_instantiated_trait_method_contract(
+                            method.clone(),
+                            &normalization_interface,
+                        );
+                        if required != provided {
                             diagnostics.push(SignatureDiagnostic {
                                 code: "G4147",
                                 message: format!(
@@ -3199,6 +3212,233 @@ fn instantiate_trait_method_contract(
             })
             .collect(),
     }
+}
+
+/// An implementation method is checked against the selected trait contract,
+/// not against an opaque spelling of that contract.  After `Self` and trait
+/// arguments have been installed, an associated item such as
+/// `<Self as Parent<T>>::Item<U>` has a concrete implementation head even
+/// though its item argument remains universally quantified.  The ordinary
+/// projection normalizer deliberately leaves that generic form symbolic for
+/// source calls; at this implementation-only equality boundary the selected
+/// rule is already fixed, so reduce it before comparing signatures.
+fn normalize_instantiated_trait_method_contract(
+    mut signature: CallableSignature,
+    interface: &ElaboratedInterface,
+) -> CallableSignature {
+    let mut solver = crate::TraitSolver::new(interface);
+    signature.parameters = signature
+        .parameters
+        .into_iter()
+        .map(|value| normalize_selected_contract_type(value, &mut solver, 64))
+        .collect();
+    signature.result = normalize_selected_contract_type(signature.result, &mut solver, 64);
+    signature.effects = normalize_selected_contract_effect_row(signature.effects, &mut solver, 64);
+    signature.where_bounds = signature
+        .where_bounds
+        .into_iter()
+        .map(|(subject, relation)| {
+            (
+                normalize_selected_contract_type(subject, &mut solver, 64),
+                normalize_selected_contract_trait_reference(relation, &mut solver, 64),
+            )
+        })
+        .collect();
+    signature
+}
+
+fn normalize_selected_contract_type(
+    value: Type,
+    solver: &mut crate::TraitSolver,
+    fuel: u32,
+) -> Type {
+    if fuel == 0 {
+        return value;
+    }
+    let value = solver.normalize_type(value.clone()).unwrap_or(value);
+    match value {
+        Type::Projection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            item_generic_kinds,
+            item_arguments,
+        } => {
+            let subject = normalize_selected_contract_type(*subject, solver, fuel - 1);
+            let trait_arguments = trait_arguments
+                .into_iter()
+                .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
+                .collect::<Vec<_>>();
+            let item_arguments = item_arguments
+                .into_iter()
+                .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
+                .collect::<Vec<_>>();
+            let projection = Type::Projection {
+                subject: Box::new(subject.clone()),
+                trait_definition,
+                trait_arguments: trait_arguments.clone(),
+                name: name.clone(),
+                item_generic_kinds,
+                item_arguments: item_arguments.clone(),
+            };
+            match solver.normalize_associated_type_application(
+                crate::TraitGoal {
+                    relation: ElaboratedTraitReference {
+                        definition: trait_definition,
+                        arguments: trait_arguments,
+                    },
+                    subject,
+                },
+                &name,
+                &item_arguments,
+            ) {
+                crate::TraitProjectionAnswer::Normalized { ty, .. } => {
+                    normalize_selected_contract_type(ty, solver, fuel - 1)
+                }
+                _ => projection,
+            }
+        }
+        Type::Nominal {
+            definition,
+            arguments,
+        } => Type::Nominal {
+            definition,
+            arguments: arguments
+                .into_iter()
+                .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
+                .collect(),
+        },
+        Type::Tuple(values) => Type::Tuple(
+            values
+                .into_iter()
+                .map(|value| normalize_selected_contract_type(value, solver, fuel - 1))
+                .collect(),
+        ),
+        Type::Array(value) => Type::Array(Box::new(normalize_selected_contract_type(
+            *value,
+            solver,
+            fuel - 1,
+        ))),
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability,
+            lifetime,
+            referent: Box::new(normalize_selected_contract_type(*referent, solver, fuel - 1)),
+        },
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            lifetime_binders,
+            parameters: parameters
+                .into_iter()
+                .map(|value| normalize_selected_contract_type(value, solver, fuel - 1))
+                .collect(),
+            result: Box::new(normalize_selected_contract_type(*result, solver, fuel - 1)),
+            effects: normalize_selected_contract_effect_row(effects, solver, fuel - 1),
+            invocation,
+        },
+        value => value,
+    }
+}
+
+fn normalize_selected_contract_generic_argument(
+    value: GenericArgument,
+    solver: &mut crate::TraitSolver,
+    fuel: u32,
+) -> GenericArgument {
+    match value {
+        GenericArgument::Type(value) => {
+            GenericArgument::Type(normalize_selected_contract_type(value, solver, fuel))
+        }
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(normalize_selected_contract_effect_row(value, solver, fuel))
+        }
+        value => value,
+    }
+}
+
+fn normalize_selected_contract_trait_reference(
+    relation: ElaboratedTraitReference,
+    solver: &mut crate::TraitSolver,
+    fuel: u32,
+) -> ElaboratedTraitReference {
+    ElaboratedTraitReference {
+        definition: relation.definition,
+        arguments: relation
+            .arguments
+            .into_iter()
+            .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel))
+            .collect(),
+    }
+}
+
+fn normalize_selected_contract_effect_row(
+    value: EffectRow,
+    solver: &mut crate::TraitSolver,
+    fuel: u32,
+) -> EffectRow {
+    if fuel == 0 {
+        return value;
+    }
+    let value = solver.normalize_effect_row(value.clone()).unwrap_or(value);
+    let mut result = EffectRow {
+        effects: value
+            .effects
+            .into_iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
+                    .collect(),
+            })
+            .collect(),
+        projections: vec![],
+        tail: value.tail,
+    };
+    let mut projections = value.projections;
+    while let Some(projection) = projections.pop() {
+        let original = projection.clone();
+        let subject = normalize_selected_contract_type(*projection.subject, solver, fuel - 1);
+        let trait_arguments = projection
+            .trait_arguments
+            .into_iter()
+            .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
+            .collect::<Vec<_>>();
+        let item_arguments = projection
+            .item_arguments
+            .into_iter()
+            .map(|argument| normalize_selected_contract_generic_argument(argument, solver, fuel - 1))
+            .collect::<Vec<_>>();
+        match solver.normalize_associated_effect_row_application(
+            crate::TraitGoal {
+                relation: ElaboratedTraitReference {
+                    definition: projection.trait_definition,
+                    arguments: trait_arguments,
+                },
+                subject,
+            },
+            &projection.name,
+            &item_arguments,
+        ) {
+            crate::TraitEffectRowProjectionAnswer::Normalized { row, .. } if row.tail.is_none() => {
+                let row = normalize_selected_contract_effect_row(row, solver, fuel - 1);
+                result.effects.extend(row.effects);
+                projections.extend(row.projections);
+            }
+            _ => result.projections.push(original),
+        }
+    }
+    result.canonicalized()
 }
 
 /// Substitute the trait-owned implicit receiver after ordinary declaration

@@ -99,6 +99,13 @@ coarse. The composite fixtures cover:
   projection, method selection, Core, and VM execution, but cannot expose a
   private provider trait (and therefore cannot leak its associated-item API)
   (`service_preserves_associated_item_authority_through_dependency_trait_facades`).
+- a twice-aliased dependency facade retains the provider identity of an
+  inherited generic trait method and both of its associated GAT families.  An
+  implementation contract normalizes selected `Self` projections before it is
+  compared, then its layout and effect row cross indirect invocation, handler
+  dispatch, and VM execution; without the selected implementation, the facade
+  remains a `G4190` rejection (`service_executes_aliased_reexported_generic_trait_gats_through_vm_handlers`,
+  `service_rejects_aliased_reexported_generic_trait_gats_without_an_impl`).
 - effect declaration visibility across dependency-package boundaries, including
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate
