@@ -367,6 +367,12 @@ coarse. The composite fixtures cover:
   projection may therefore drive a concrete layout and an outward handler row,
   while an inherited method uses the same instantiated parent edge
   (`service_materializes_inherited_gat_types_effect_rows_and_methods_through_vm`).
+- inherited associated constants use that same selected supertrait edge before
+  Core materializes a nominal const argument. A reciprocal public-module SCC
+  combines the const arithmetic with an HRTB effect callback; ambiguous export,
+  recursive const, and overlapping-impl revisions roll back without publishing
+  derived interfaces (`typed_core_selects_inherited_associated_consts_for_nominal_arithmetic`,
+  `service_rolls_back_const_hrtb_supertrait_cycles_before_publication`).
 - a public dependency facade preserves inherited associated effect-GAT
   evidence through a named `for<'a>` callback: the declaration-owned lifetime
   is selectable, its concrete row reaches handler lowering and verified VM

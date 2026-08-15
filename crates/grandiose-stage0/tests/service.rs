@@ -16695,6 +16695,51 @@ fn service_executes_recursive_public_hrtb_callable_aliases_through_vm() {
 }
 
 #[test]
+fn service_rolls_back_const_hrtb_supertrait_cycles_before_publication() {
+    // The const is selected through `Child`'s inherited Parent edge while the
+    // callback carries Parent's HRTB effect row through the reciprocal public
+    // module pair. Arithmetic makes an unresolved or stale const observable.
+    let root = "pub mod left; pub mod right; use left::{Callback, Capability, Trace}; pub struct Witness<n: u32> { value: i64 } pub fn forward() -> Callback { Capability<i64>::relay } pub fn apply(callback: Callback) -> i64 / Trace<7, i64> { let value = 34; let witness = Witness<<i64 as Capability<i64>>::Width> { value: 7 }; Trace<7, i64>::note(callback(&value) + witness.value) } pub fn main() -> i64 { handle apply(forward()) { Trace<7, i64>::note(value) with k => k(value + 1) } }";
+    let left = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { const Width: u32; type Effects<'a>: EffectRow; fn relay<'a>(value: &'a i64) -> i64 / { <Self as Parent<T>>::Effects<'a> }; } pub use crate::right::{Callback, Child as Capability};";
+    let right = "pub use crate::left::{Parent, Trace}; pub trait Child<T>: Parent<T> {} pub type Callback = for<'a> (&'a i64) -> i64 / { <i64 as Child<i64>>::Effects<'a> }; impl Parent<i64> for i64 { const Width = 7; type Effects<'a> = {Trace<<i64 as Parent<i64>>::Width, i64>}; fn relay<'a>(value: &'a i64) -> i64 / { <i64 as Parent<i64>>::Effects<'a> } { *value } } impl Child<i64> for i64 where i64: Parent<i64> {}";
+    let occurs = right.replace("const Width = 7", "const Width = <i64 as Parent<i64>>::Width");
+    let overlap = format!("{right} impl Parent<i64> for i64 {{ const Width = 7; type Effects<'a> = {{Trace<7, i64>}}; fn relay<'a>(value: &'a i64) -> i64 / Trace<7, i64> {{ *value }} }}");
+    let ambiguous_left = format!("{left} pub use crate::right::Alternate as Capability;");
+    let ambiguous_right = format!("{right} pub trait Alternate<T>: Parent<T> {{}} impl Alternate<i64> for i64 where i64: Parent<i64> {{}}");
+    let world = |left: &str, right: &str| request_with_logical_sources(root, &[("src/left/left.glorious", left), ("src/right/right.glorious", right)]);
+
+    let mut reordered = world(left, right);
+    let artifact = StageZeroCompiler::new().compile(reordered.clone()).expect("selected associated const arithmetic and HRTB rows must traverse the public SCC").artifact.unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new().compile(reordered).expect("source ordering must not perturb const/HRTB facade selection").artifact.unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(left, right), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let left_node = DependencyNode::Interface(ModuleKey { package: PackageKey("app@0.1.0".into()), path: "crate::left".into() });
+    let right_node = DependencyNode::Interface(ModuleKey { package: PackageKey("app@0.1.0".into()), path: "crate::right".into() });
+    let left_trace = compiler.dependency_trace(parent, &left_node).expect("legal const/HRTB left facade must freeze");
+    let right_trace = compiler.dependency_trace(parent, &right_node).expect("legal const/HRTB right facade must freeze");
+    for (label, candidate_left, candidate_right, code) in [("ambiguity", ambiguous_left.as_str(), ambiguous_right.as_str(), "G3318"), ("occurs", left, occurs.as_str(), "G4157"), ("overlap", left, overlap.as_str(), "G3404")] {
+        let rejected_world = world(candidate_left, candidate_right);
+        let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+        let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("invalid const/supertrait revision must not publish");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{label} revision missing {code}: {:#?}", error.diagnostics());
+        assert_eq!(compiler.interface_cache_stats(), cached, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &left_node), Some(left_trace.clone()));
+        assert_eq!(compiler.dependency_trace(parent, &right_node), Some(right_trace.clone()));
+        let mut reordered = rejected_world;
+        reordered.sources.reverse();
+        assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source ordering cannot admit invalid const/supertrait revisions").diagnostics(), "{label} diagnostics must be canonical");
+    }
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
+}
+
+#[test]
 fn service_rejects_recursive_public_hrtb_callable_alias_cycles() {
     let root = "pub mod left; pub mod right; use left::Callback; pub fn apply(callback: Callback<i64>) -> i64 { 0 } pub fn main() -> i64 { 0 }";
     let left = "pub type Callback<U> = crate::right::Inner<U>;";

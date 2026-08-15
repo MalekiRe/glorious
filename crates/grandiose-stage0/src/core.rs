@@ -5761,24 +5761,12 @@ impl Elaborator<'_> {
             self.recovered = true;
             return structural_const_error(expected);
         };
-        let Some(item) = trait_header.associated_consts.get(name) else {
-            self.error(
-                span,
-                code,
-                "trait does not declare this associated constant",
-            );
-            self.recovered = true;
-            return structural_const_error(expected);
-        };
-        if item.kind != expected {
-            self.error(
-                span,
-                code,
-                "associated constant has the wrong structural kind",
-            );
-            self.recovered = true;
-            return structural_const_error(expected);
-        }
+        // The named trait need not own the constant directly: an inherited
+        // associated item is selected through the same instantiated
+        // supertrait edge as methods, types, and effect rows. The trait
+        // solver performs that lookup (and verifies the resulting kind), so
+        // rejecting a missing direct header entry here would make a valid
+        // `<S as Child>::CONST` projection unreachable before selection.
         let Some(arguments) = self.body_generic_arguments(
             source_arguments,
             &trait_header.generic_kinds,
