@@ -64,6 +64,8 @@ coarse. The composite fixtures cover:
 - canonical keywordless callable declarations, result/effect omission, compact
   labels, implicit function labels, and recursive activation freshness;
 - labels as generic diverging callables and label-indexed protocol identity;
+- nested lexical label brands through refutable handler forwarding, a generic
+  facade transfer, and the enclosing normal-completion rejoin;
 - source-defined control names and contextual delayed blocks selected by `Fn`
   constraints rather than compiler-known names;
 - fresh callable/environment brands, sealed `RunsIn` evidence, the canonical

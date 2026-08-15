@@ -7588,6 +7588,77 @@ fn nested_handler_leave_preserves_the_outer_label_destination_contract() {
 }
 
 #[test]
+fn nested_generic_label_forward_rejoins_completion_after_refutable_handler() {
+    let source = r#"
+        escape<L>(destination: L, value: i64) -> !
+        where L: Label<i64>
+        {
+            destination(value)
+        }
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub main() -> i64 {
+            handle {
+                @outer: i64 {
+                    @inner: i64 {
+                        handle {
+                            handle Ask::ask(1) {
+                                Ask::ask(0) with k => k(0),
+                            }
+                        } {
+                            Ask::ask(value) => escape(@inner, value + 41),
+                        }
+                    }
+                }
+            } {
+                value => value + 100,
+            }
+        }
+    "#;
+    let core = core_for("core-nested-generic-label-forward-completion@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } if brand.label == 0 => Some(brand.owner),
+            _ => None,
+        })
+        .expect("outer label owner");
+    let lowered = MirLowering::lower(owner, &core, &flow);
+    let mir = lowered
+        .function
+        .unwrap_or_else(|| panic!("nested generic label forwarding lowers: {:#?}", lowered.diagnostics));
+    mir.validate()
+        .unwrap_or_else(|error| panic!("nested generic label MIR validates: {error}\n{mir:#?}"));
+    let entry = &mir.blocks[0].instructions;
+    let token = entry
+        .iter()
+        .position(|instruction| matches!(instruction, MirInstruction::MakeLabel { .. }))
+        .expect("the lexical token is materialized before handlers");
+    let handler = entry
+        .iter()
+        .position(|instruction| matches!(instruction, MirInstruction::InstallHandler { .. }))
+        .expect("the forwarded path installs handlers");
+    assert!(token < handler, "label token must predate handler depth capture: {mir:#?}");
+    assert!(mir.blocks.iter().any(|block| block
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, MirInstruction::Forward { .. }))),
+        "refutable inner arm must retain Forward: {mir:#?}");
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("MIR emits VM");
+    let verified = grandiose_stage0::decode_and_verify_artifact(
+        &grandiose_stage0::encode_artifact(&artifact),
+    )
+    .expect("encoded dynamic-label forwarding VM verifies");
+    assert!(matches!(
+        verified.run_i64(),
+        Err(grandiose_stage0::VmArtifactError::CallRequiresProgram)
+    ));
+}
+
+#[test]
 fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
     let core = core_for(
         "core-completion-label-transfer@0.1.0",

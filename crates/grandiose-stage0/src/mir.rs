@@ -3754,6 +3754,23 @@ impl MirLowering {
         // use the static `Leave` probe below: its transfer executes in an
         // ordinary callee. Give it a runtime token and a typed rejoin block
         // before generic value lowering sees the lexical scope as erased.
+        if let Some(function) = lowerer.lower_root_nested_first_class_label_partial_forward_completion(
+            body.root,
+            parameters.clone(),
+        ) {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer.lower_root_nested_first_class_label_handler(
             body.root,
             parameters.clone(),
@@ -12097,6 +12114,290 @@ impl Lowerer<'_> {
                     parameters: vec![join],
                     instructions: vec![],
                     terminator: MirTerminator::Return { value: join },
+                },
+            ],
+        })
+    }
+
+    /// Lower a nested partial handler beneath lexical labels when its failed
+    /// pattern forwards to an outer arm which invokes a label generically.
+    /// The rejoin enters a normal completion outside both handler frames.
+    ///
+    /// This is the two-frame counterpart to
+    /// [`Self::lower_root_nested_first_class_label_handler`].  The important
+    /// shared rule is that the first-class token belongs to the lexical label
+    /// boundary, not to whichever handler arm happens to invoke it.
+    fn lower_root_nested_first_class_label_partial_forward_completion(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let completion_root = match self.body.expression(root).kind.clone() {
+            CoreKind::Block(values) => values.last().copied().unwrap_or(root),
+            _ => root,
+        };
+        let CoreKind::Completion {
+            computation: completion_computation,
+            clauses: completion_clauses,
+        } = self.body.expression(completion_root).kind.clone()
+        else {
+            return None;
+        };
+        let [completion] = completion_clauses.as_slice() else {
+            return None;
+        };
+        if !pattern_is_irrefutable(&completion.pattern) {
+            return None;
+        }
+        let root_label = match self.body.expression(completion_computation).kind.clone() {
+            CoreKind::Label { .. } => completion_computation,
+            CoreKind::Block(values) => values.last().copied().filter(|value| {
+                matches!(self.body.expression(*value).kind, CoreKind::Label { .. })
+            })?,
+            _ => return None,
+        };
+        let mut labels = Vec::new();
+        let mut cursor = root_label;
+        loop {
+            let CoreKind::Label { brand, body } = self.body.expression(cursor).kind.clone()
+            else {
+                break;
+            };
+            labels.push(brand);
+            cursor = match self.body.expression(body).kind.clone() {
+                CoreKind::Label { .. } => body,
+                CoreKind::Block(values) => values
+                    .last()
+                    .copied()
+                    .filter(|value| matches!(self.body.expression(*value).kind, CoreKind::Label { .. }))
+                    .unwrap_or(body),
+                _ => body,
+            };
+        }
+        if labels.len() < 2 {
+            return None;
+        }
+        let (outer_computation, outer_clauses, lexical_prefix) =
+            self.lexical_handle(root_label)?;
+        let outer_computation = match self.body.expression(outer_computation).kind.clone() {
+            CoreKind::Block(values) => values.last().copied().unwrap_or(outer_computation),
+            _ => outer_computation,
+        };
+        let CoreKind::Handle {
+            computation: inner_computation,
+            clauses: inner_clauses,
+        } = self.body.expression(outer_computation).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+            ..
+        } = self.body.expression(inner_computation).kind.clone()
+        else {
+            return None;
+        };
+        let outer = outer_clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let inner = inner_clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let ([outer], [inner]) = (outer.as_slice(), inner.as_slice()) else {
+            return None;
+        };
+        if outer.patterns.len() != argument_ids.len()
+            || inner.patterns.len() != argument_ids.len()
+            || !outer.patterns.iter().all(pattern_is_irrefutable)
+            || inner.patterns.iter().all(pattern_is_irrefutable)
+            || self.handler_body_uses_snapshot_alias(outer.body)
+            || self.handler_body_uses_snapshot_alias(inner.body)
+        {
+            return None;
+        }
+        let CoreHandlerResumption::Explicit { quantity, .. } = inner.resumption else {
+            return None;
+        };
+        if quantity != crate::quantity::Quantity::ONCE {
+            return None;
+        }
+        let mut selected = None;
+        let mut label_value_ids = Vec::new();
+        for brand in labels {
+            let mut ids = Vec::new();
+            self.label_value_ids(outer.body, brand, &mut ids);
+            if !ids.is_empty() {
+                if selected.replace(brand).is_some() {
+                    return None;
+                }
+                label_value_ids = ids;
+            }
+        }
+        let brand = selected?;
+        let join = self.alloc(self.body.expression(root_label).ty.clone(), CoreId(u32::MAX));
+        self.label_values.insert(brand, (MirBlockId(1), join));
+        let token = self.alloc(
+            self.body.expression(label_value_ids[0]).ty.clone(),
+            label_value_ids[0],
+        );
+        self.instructions.push(MirInstruction::MakeLabel {
+            label: MirLabelId::UNASSIGNED,
+            dst: token,
+            brand,
+            target: MirBlockId(1),
+            destination: join,
+        });
+        for id in label_value_ids {
+            self.values.insert(id, token);
+        }
+        for expression in lexical_prefix {
+            self.statement(expression)?;
+        }
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let outer_payloads = outer
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), inner_computation))
+            .collect::<Vec<_>>();
+        let inner_payloads = inner
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), inner_computation))
+            .collect::<Vec<_>>();
+        let performed = self.alloc(
+            self.body.expression(inner_computation).ty.clone(),
+            inner_computation,
+        );
+        let arguments = argument_ids
+            .iter()
+            .map(|id| self.value(*id))
+            .collect::<Option<Vec<_>>>()?;
+        self.instructions.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
+            effect: outer.effect.definition,
+            effect_arguments: outer.effect.arguments.clone(),
+            operation: outer.operation,
+            payload_destinations: outer_payloads.clone(),
+            resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(2),
+        });
+        self.instructions.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
+            effect: inner.effect.definition,
+            effect_arguments: inner.effect.arguments.clone(),
+            operation: inner.operation,
+            payload_destinations: inner_payloads.clone(),
+            resume_type: self.body.expression(inner_computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(3),
+        });
+        self.instructions.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        self.instructions.push(MirInstruction::UninstallHandler);
+        self.instructions.push(MirInstruction::UninstallHandler);
+        let entry = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_completion_clause(completion, join)?;
+        let completed = self.value(completion.body)?;
+        let completion_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(&outer.patterns, &outer_payloads)?;
+        self.value(outer.body)?;
+        let outer_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(&inner.patterns, &inner_payloads)?;
+        let resumed = self.direct_handler_clause_value(inner)?;
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: resumed,
+        });
+        let inner_instructions = std::mem::take(&mut self.instructions);
+        let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), inner_computation);
+        let pattern = lower_pattern(inner.patterns[0].clone())?;
+        self.label_values.remove(&brand);
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![join],
+                    instructions: completion_instructions,
+                    terminator: MirTerminator::Return { value: completed },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: outer_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: condition,
+                        subject: inner_payloads[0],
+                        pattern,
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: MirBlockId(4),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(5),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: inner_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
+                    terminator: MirTerminator::Unreachable,
                 },
             ],
         })

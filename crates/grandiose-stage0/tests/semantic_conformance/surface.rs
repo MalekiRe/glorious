@@ -144,6 +144,38 @@ fn semantic_label_generic_effects_route_only_with_their_brand() {
 }
 
 #[test]
+fn semantic_nested_generic_labels_rejoin_after_refutable_forwarding_and_completion() {
+    let source = r#"
+        escape<L>(destination: L, value: i64) -> !
+        where L: Label<i64>
+        {
+            destination(value)
+        }
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub main() -> i64 {
+            handle {
+                @outer: i64 {
+                    @inner: i64 {
+                        handle {
+                            handle Ask::ask(1) {
+                                Ask::ask(0) with k => k(0),
+                            }
+                        } {
+                            Ask::ask(value) => escape(@inner, value + 41),
+                        }
+                    }
+                }
+            } {
+                value => value + 100,
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 142);
+}
+
+#[test]
 fn semantic_control_names_are_ordinary_source_bindings() {
     let source = r#"
         if(value: i64) -> i64 { value }
