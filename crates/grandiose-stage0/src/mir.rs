@@ -3854,6 +3854,25 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A skipped lazy branch is outside every handler's dynamic extent.
+        // Claim short-circuit roots before handler probes so an unreachable
+        // handler need not be lowered merely to prove it is not executed.
+        if lowerer.root_short_circuit_has_statically_skipped_branch(body.root)
+            && let Some(function) = lowerer.lower_root_short_circuit(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_outward_effect_call(body.root, parameters.clone())
         {
@@ -14109,6 +14128,30 @@ impl Lowerer<'_> {
             blocks,
         })
     }
+    fn root_short_circuit_has_statically_skipped_branch(&self, root: CoreId) -> bool {
+        let expression = match self.body.expression(root).kind.clone() {
+            CoreKind::IntrinsicCall { .. } => root,
+            CoreKind::Block(values) => match values.last() {
+                Some(last) => *last,
+                None => return false,
+            },
+            _ => return false,
+        };
+        let CoreKind::IntrinsicCall { operator, arguments } =
+            self.body.expression(expression).kind.clone()
+        else {
+            return false;
+        };
+        let [left, _] = arguments.as_slice() else {
+            return false;
+        };
+        match (operator.as_str(), &self.body.expression(*left).kind) {
+            ("and", CoreKind::Literal(value)) => value == "false",
+            ("or", CoreKind::Literal(value)) => value == "true",
+            _ => false,
+        }
+    }
+
     /// Lower the root short-circuit forms with real CFG edges rather than an
     /// eager boolean instruction. The join block's sole parameter is the
     /// semantic result: one predecessor supplies the skipped constant, the
@@ -14154,6 +14197,31 @@ impl Lowerer<'_> {
         {
             self.error("G6005", "short-circuit operator lost its boolean type");
             return Some(self.invalid_function(parameters));
+        }
+        // A statically skipped lazy branch is semantically unreachable. In
+        // particular, it must not demand MIR lowering for a handler or other
+        // control form nested in that branch; source evaluation ends at the
+        // left literal itself.
+        if matches!(self.body.expression(left).kind, CoreKind::Literal(ref value)
+            if (operator == "and" && value == "false") || (operator == "or" && value == "true"))
+        {
+            let result = self.value(left)?;
+            return Some(MirFunction {
+                nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+                definition: self.definition,
+                captures: 0,
+                parameters,
+                locals: self.locals.to_entries(),
+                result: self.declared_result_type(root),
+                control: MirControlTables::default(),
+                entry: MirBlockId(0),
+                blocks: vec![MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: std::mem::take(&mut self.instructions),
+                    terminator: MirTerminator::Return { value: result },
+                }],
+            });
         }
         let condition = self.value(left)?;
         let skipped = self.alloc(bool_ty.clone(), root);
@@ -22168,7 +22236,11 @@ impl Lowerer<'_> {
                     let (strict_root, prefix) = values.split_last()?;
                     let strict_context =
                         match self.body.expression(*strict_root).kind.clone() {
-                            CoreKind::IntrinsicCall { arguments, .. } => Some((arguments, Vec::new())),
+                            CoreKind::IntrinsicCall { operator, arguments }
+                                if !matches!(operator.as_str(), "and" | "or") =>
+                            {
+                                Some((arguments, Vec::new()))
+                            }
                             CoreKind::Call {
                                 callee, arguments, ..
                             } if !matches!(self.body.expression(callee).kind, CoreKind::Handle { .. }) => {
@@ -22280,6 +22352,12 @@ impl Lowerer<'_> {
             // then supplied from `values`, so the remaining operands run
             // exactly once after normal or terminal completion.
             CoreKind::IntrinsicCall { arguments, .. } => {
+                let CoreKind::IntrinsicCall { operator, .. } = self.body.expression(root).kind.clone() else {
+                    unreachable!("matched intrinsic root above");
+                };
+                if matches!(operator.as_str(), "and" | "or") {
+                    return None;
+                }
                 let handler_index = arguments.iter().position(|argument| {
                     matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
                 })?;

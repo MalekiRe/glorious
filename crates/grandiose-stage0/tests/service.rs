@@ -18886,6 +18886,26 @@ fn service_rejoins_terminal_opaque_handler_nested_in_a_record_initializer() {
 }
 
 #[test]
+fn service_keeps_an_opaque_handler_inside_a_lazy_boolean_branch() {
+    // `and` must not touch its right operand when the left operand is false,
+    // even though that operand contains an interprocedural handler frame.
+    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; false and handle apply(callback) { Ask::ask() with k => k(true) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert!(!decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+}
+
+#[test]
+fn service_keeps_an_opaque_handler_inside_a_short_circuited_or_branch() {
+    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn main() -> Bool { let callback = relay; true or handle apply(callback) { Ask::ask() with k => k(false) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through
