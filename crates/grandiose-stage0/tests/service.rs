@@ -4839,6 +4839,90 @@ fn service_rejects_unselected_recursive_defaulted_hrtb_supertrait_gats() {
 }
 
 #[test]
+fn service_executes_defaulted_hrtb_type_to_effect_gats_through_aliased_supertraits() {
+    // `Effects` is defaulted in terms of the selected `Item` GAT.  The
+    // public alias sees only Child, whose scoped parent contract provides
+    // the selected implementation.  HRTB use carries the resulting type and
+    // effect identities all the way through handler dispatch and the VM.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { value } pub fn apply(callback: for<'a> (&'a i64) -> &'a i64 / { <&'a i64 as Capability<i64>>::Effects<'a> }) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); Trace<i64>::note(*result) } pub fn main() -> i64 { handle apply(identity) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Child as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<'a> = i64; type Effects<'a>: EffectRow = {Trace<<Self as Parent<T>>::Item<'a>>}; } pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 {} impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("defaulted HRTB type-to-effect GATs must reach the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_mutually_defaulted_hrtb_gat_rows_without_forging_an_effect() {
+    // Here `Effects` feeds itself to the row generic of `Item`. Even though
+    // the Item default erases that argument, the requested row is cyclic as
+    // written. The compiler must end in a finite source rejection—not loop
+    // and not claim that `Trace<&i64>` is an admitted effect.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn worker<'a>(value: &'a i64) -> i64 / { <&'a i64 as Capability<i64>>::Effects<'a> } { Trace<&'a i64>::note(value) } pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Child as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<'a, row: EffectRow> = &'a T; type Effects<'a>: EffectRow = {Trace<<Self as Parent<T>>::Item<'a, { <Self as Parent<T>>::Effects<'a> }>>}; } pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 {} impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("mutually defaulted HRTB GAT row unexpectedly entered VM emission");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"),
+        "missing finite cyclic defaulted-row rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_alias_equivalent_polarity_for_defaulted_hrtb_gats() {
+    // Alias spelling cannot let a positive defaulted implementation coexist
+    // with a negative implementation of the same HRTB GAT-bearing trait.
+    let mut request = request(
+        "use bridge::{First as Positive, Second as Negative}; pub struct Local {} impl Positive<i64> for Local {} impl !Negative<i64> for Local {} pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Capability as First, Capability as Second};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Capability<T> { type Item<'a> = &'a T; type Effects<'a>: EffectRow = {Trace<<Self as Capability<T>>::Item<'a>>}; }".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("alias-equivalent positive and negative defaulted GAT impls coexisted");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G3406"),
+        "missing mixed-polarity defaulted-GAT coherence rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
