@@ -75,7 +75,14 @@ retained below but scheduled after the core language and tooling tranche.
   must additionally cover rejected store-before-live, read-after-dead,
   replacement without zero-use destruction, dead-with-live-loan, wrong drop
   flag transitions, and cleanup plans that omit, reorder, or destroy protected
-  owners; VM lowering must either execute the verified action sequence or
+  owners.  The enabled red composite witnesses
+  `mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave` and
+  `mir_requires_end_borrow_before_source_storage_cleanup` additionally cover
+  nested lexical exits, reverse destruction, protected transfer payloads, and
+  loan-before-storage ordering.  The red witness
+  `mir_requires_drop_flag_for_divergent_source_storage_initialization` covers
+  the required branch-correlated transition and VM erasure proof; VM lowering
+  must either execute the verified action sequence or
   prove its compact erasure preserves that sequence exactly.
 
 ### 5.4 Bytecode peepholes and validation

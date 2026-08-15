@@ -98,6 +98,9 @@ coarse. The composite fixtures cover:
 - exact move-captured closure consumption through local and imported callable
   transfers, including rejection of sequential activation and acceptance of
   mutually exclusive handler-arm transfers.
+- source-storage lifecycle at the hostile-MIR boundary: nested lexical exits
+  must execute `EndBorrow`, reverse-order destruction, and `StorageDead` in
+  order while preserving protected label/effect payloads.
 
 ## Previously enabled red semantic cases
 
@@ -116,6 +119,7 @@ The established service suite also keeps these implementation gaps enabled:
 | Finite replay followed by label transfer | `service_replayed_resumption_result_may_transfer_to_an_enclosing_label` |
 | Completion after resumption transfers to an enclosing label | `service_completion_after_a_resumption_may_transfer_to_an_enclosing_label` |
 | G1 source boundary rejects deferred non-exact and unbounded resumption quantities such as `[1,2]`, `[0,2]`, and `[1,infinity]` | `service_rejects_deferred_resumption_quantities_at_the_g1_source_boundary` |
+| Source-storage cleanup emits ordered actions, excludes protected payloads, ends loans before storage release, and preserves branch-correlated drop-flag erasure | `source_storage_cleanup.rs::mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave`, `source_storage_cleanup.rs::mir_requires_end_borrow_before_source_storage_cleanup`, `source_storage_cleanup.rs::mir_requires_drop_flag_for_divergent_source_storage_initialization` |
 
 ## Acceptance condition
 
