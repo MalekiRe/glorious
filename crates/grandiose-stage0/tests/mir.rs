@@ -711,6 +711,30 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
             .is_err_and(|error| error.contains("shared Array view")),
         "a unique Array reference must not be accepted where ArrayLen requires a shared view"
     );
+
+    let mut array_borrow = graph();
+    let i64 = Type::Scalar(ScalarType::I64);
+    array_borrow.locals.push(local(Type::Scalar(ScalarType::Usize)));
+    array_borrow.locals.push(local(Type::Reference {
+        mutability: Mutability::Shared,
+        lifetime: Lifetime::Elided,
+        referent: Box::new(Type::Array(Box::new(i64))),
+    }));
+    array_borrow.blocks[0]
+        .instructions
+        .push(MirInstruction::ArrayGetBorrow {
+            dst: MirLocal(1),
+            value: MirLocal(6),
+            index: MirLocal(5),
+            unique: false,
+            element_type: Type::Scalar(ScalarType::I64),
+        });
+    assert!(
+        array_borrow
+            .validate()
+            .is_err_and(|error| error.contains("shared element reference result")),
+        "ArrayGetBorrow must produce a reference to the requested element type"
+    );
 }
 
 #[test]

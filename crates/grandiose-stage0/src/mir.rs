@@ -7061,22 +7061,70 @@ impl MirFunction {
         }
         Ok(true)
     }
-    fn validate_shared_array_view(
+    fn validate_reference(
+        &self,
+        value: MirLocal,
+        mutability: Mutability,
+        referent: &Type,
+        instruction: &str,
+        requirement: &str,
+    ) -> Result<(), String> {
+        match self.local_type(value)? {
+            Type::Reference {
+                mutability: actual_mutability,
+                referent: actual_referent,
+                ..
+            } if *actual_mutability == mutability && actual_referent.as_ref() == referent => Ok(()),
+            _ => Err(format!("MIR {instruction} requires {requirement}")),
+        }
+    }
+
+    fn validate_array_view(
+        &self,
+        value: MirLocal,
+        element_type: &Type,
+        mutability: Mutability,
+        instruction: &str,
+        requirement: &str,
+    ) -> Result<(), String> {
+        self.validate_reference(
+            value,
+            mutability,
+            &Type::Array(Box::new(element_type.clone())),
+            instruction,
+            requirement,
+        )
+    }
+
+    fn validate_owned_array(
         &self,
         value: MirLocal,
         element_type: &Type,
         instruction: &str,
+        requirement: &str,
     ) -> Result<(), String> {
         let expected = Type::Array(Box::new(element_type.clone()));
-        match self.local_type(value)? {
-            Type::Reference {
-                mutability: Mutability::Shared,
-                referent,
-                ..
-            } if referent.as_ref() == &expected => Ok(()),
-            _ => Err(format!("MIR {instruction} requires a shared Array view")),
+        if self.local_type(value)? == &expected {
+            Ok(())
+        } else {
+            Err(format!("MIR {instruction} requires {requirement}"))
         }
     }
+
+    fn validate_local_type(
+        &self,
+        value: MirLocal,
+        expected: &Type,
+        instruction: &str,
+        requirement: &str,
+    ) -> Result<(), String> {
+        if self.local_type(value)? == expected {
+            Ok(())
+        } else {
+            Err(format!("MIR {instruction} requires {requirement}"))
+        }
+    }
+
     fn validate_array_view_instruction(
         &self,
         instruction: &MirInstruction,
@@ -7097,7 +7145,198 @@ impl MirFunction {
                     crate::types::ScalarType::Usize,
                     "array size destination",
                 )?;
-                self.validate_shared_array_view(*value, element_type, "array size")?;
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Shared,
+                    "array size",
+                    "a shared Array view",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayNew {
+                dst,
+                length,
+                fill,
+                element_type,
+            } => {
+                self.validate_owned_array(*dst, element_type, "array construction", "an Array result")?;
+                self.require_scalar_locals(
+                    &[*length],
+                    crate::types::ScalarType::Usize,
+                    "array construction length",
+                )?;
+                self.validate_local_type(*fill, element_type, "array construction", "an element fill value")?;
+                Ok(true)
+            }
+            MirInstruction::ArrayGetCopy {
+                dst,
+                value,
+                index,
+                element_type,
+            } => {
+                self.validate_local_type(*dst, element_type, "array copy get", "an element result")?;
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Shared,
+                    "array copy get",
+                    "a shared Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*index],
+                    crate::types::ScalarType::Usize,
+                    "array copy get index",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayGetMove {
+                dst,
+                value,
+                index,
+                element_type,
+            } => {
+                self.validate_local_type(*dst, element_type, "array move get", "an element result")?;
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array move get",
+                    "a unique Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*index],
+                    crate::types::ScalarType::Usize,
+                    "array move get index",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayGetBorrow {
+                dst,
+                value,
+                index,
+                unique,
+                element_type,
+            } => {
+                let mutability = if *unique {
+                    Mutability::Unique
+                } else {
+                    Mutability::Shared
+                };
+                let requirement = if *unique {
+                    "a unique Array view"
+                } else {
+                    "a shared Array view"
+                };
+                self.validate_reference(
+                    *dst,
+                    mutability,
+                    element_type,
+                    "array borrow get",
+                    if *unique {
+                        "a unique element reference result"
+                    } else {
+                        "a shared element reference result"
+                    },
+                )?;
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    mutability,
+                    "array borrow get",
+                    requirement,
+                )?;
+                self.require_scalar_locals(
+                    &[*index],
+                    crate::types::ScalarType::Usize,
+                    "array borrow get index",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArraySetMove {
+                value,
+                index,
+                item,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array set",
+                    "a unique Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*index],
+                    crate::types::ScalarType::Usize,
+                    "array set index",
+                )?;
+                self.validate_local_type(*item, element_type, "array set", "an element item")?;
+                Ok(true)
+            }
+            MirInstruction::ArrayEmpty { dst, element_type } => {
+                self.validate_owned_array(*dst, element_type, "array empty", "an Array result")?;
+                Ok(true)
+            }
+            MirInstruction::ArrayPushMove {
+                value,
+                item,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array push",
+                    "a unique Array view",
+                )?;
+                self.validate_local_type(*item, element_type, "array push", "an element item")?;
+                Ok(true)
+            }
+            MirInstruction::ArrayPopMove {
+                dst,
+                value,
+                element_type,
+            } => {
+                self.validate_local_type(*dst, element_type, "array pop", "an element result")?;
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array pop",
+                    "a unique Array view",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayReserve {
+                value,
+                additional,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array reserve",
+                    "a unique Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*additional],
+                    crate::types::ScalarType::Usize,
+                    "array reserve additional capacity",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayFinishDrained {
+                value,
+                element_type,
+            } => {
+                self.validate_owned_array(
+                    *value,
+                    element_type,
+                    "array finish drained",
+                    "an owned Array value",
+                )?;
                 Ok(true)
             }
             _ => Ok(false),
