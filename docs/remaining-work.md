@@ -69,20 +69,15 @@ retained below but scheduled after the core language and tooling tranche.
   lacks executable `StorageLive`/`StorageDead`, per-local storage kind and
   initialization state, compiler-created drop-flag transitions, and ordered
   `EndBorrow`/`Destroy`/`StorageDead` cleanup actions with protected payloads.
-  The enabled red witness
-  `mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering` proves
-  the first required rejection is currently absent.  Completing this slice
-  must additionally cover rejected store-before-live, read-after-dead,
-  replacement without zero-use destruction, dead-with-live-loan, wrong drop
-  flag transitions, and cleanup plans that omit, reorder, or destroy protected
-  owners.  The enabled red composite witnesses
-  `mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave` and
-  `mir_requires_end_borrow_before_source_storage_cleanup` additionally cover
-  nested lexical exits, reverse destruction, protected transfer payloads, and
-  loan-before-storage ordering.  The red witness
-  `mir_requires_drop_flag_for_divergent_source_storage_initialization` covers
-  the required branch-correlated transition and VM erasure proof; VM lowering
-  must either execute the verified action sequence or
+  The enabled red forged-MIR matrix covers uninitialized reads,
+  unique-loan invalidation, path-dependent initialization at joins, and cleanup
+  disarming protected `Leave` payloads. The red composite witnesses additionally
+  cover nested lexical exits, reverse destruction, loan-before-storage ordering,
+  branch-correlated drop-flag transitions, and VM erasure proof. Completing this
+  slice must additionally reject store-before-live, read-after-dead, replacement
+  without zero-use destruction, direct dead-with-live-loan, wrong drop-flag
+  transitions, and cleanup plans that omit or reorder required actions; VM
+  lowering must either execute the verified action sequence or
   prove its compact erasure preserves that sequence exactly.
 
 ### 5.4 Bytecode peepholes and validation

@@ -1225,3 +1225,13 @@ boundary:
   pass runner still invalidates changed passes conservatively. Source labels
   and `Leave` are implemented through MIR, cleanup validation, bytecode
   lowering, and O0-O3 execution.
+
+  The enabled forged-MIR lifecycle matrix in
+  `crates/grandiose-stage0/tests/mir.rs` is the implementation closure gate:
+  it rejects a read of dead storage, invalidating addressable storage while a
+  unique loan is live, a source-storage read after a path-dependent join, and
+  an ordered cleanup plan that disarms a protected `Leave` payload. The second
+  witness stands in for direct `StorageDead` until that statement exists; once
+  it does, the test must retain the same live-loan outcome using the direct
+  instruction as well. These are enabled red tests until the lifecycle/action
+  representation and VM boundary validation make them pass.

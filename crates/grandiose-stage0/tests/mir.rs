@@ -5,10 +5,12 @@ use grandiose_stage0::{
     EffectRow, EffectRowProjection, EnvironmentBrand, GenericArgument, GenericKind, InferVar,
     InstanceKey, Lifetime, LoanFact, MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture,
     MirCaptureEnvironment, MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirEdge,
-    MirEditor, MirFunction, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelId, MirLocal,
-    MirLocalDecl, MirOperationId, MirPattern, MirPatternField, MirPerformSiteId, MirProgram,
+    MirEditor, MirFunction, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelData,
+    MirLabelId, MirLocal, MirLocalDecl, MirMovePathData, MirMovePathId, MirMovePathTables, MirOperationId, MirPattern,
+    MirPatternField, MirPerformSiteId, MirPlaceBindingData, MirPlaceBindingId, MirProgram,
     MirResumptionSiteId, MirScopeId, MirTerminator, MirTraitMethodInstance, MoveFact, Mutability,
-    Quantity, ScalarType, Type, VmArtifactError, emit_vm, emit_vm_program, optimize_mir, verify_vm,
+    PlaceBindingId, PlaceBindingOrigin, Quantity, ScalarType, Type, VmArtifactError, emit_vm,
+    emit_vm_program, optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -49,6 +51,227 @@ fn mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering() {
     assert!(
         emit_vm(&function).is_err(),
         "the VM emitter must not accept a MIR body that reads dead source storage"
+    );
+}
+
+/// Sections 2.2, 3.2, and 4.2 require an addressable owner to remain stable
+/// while a unique loan is live.  `StorageDead` is not an executable MIR
+/// statement yet, so this forged-MIR witness exercises the observable
+/// equivalent: replacing the backing slot before the still-live dereference.
+/// The eventual lifecycle representation must reject both this mutation and a
+/// direct `StorageDead` on the same loan state.
+#[test]
+fn mir_rejects_addressable_storage_invalidation_while_unique_loan_is_live() {
+    let i64 = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"forged-mir-live-addressable-loan")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(i64.clone()),
+            local(Type::Reference {
+                mutability: Mutability::Unique,
+                lifetime: Lifetime::Elided,
+                referent: Box::new(i64.clone()),
+            }),
+            local(i64.clone()),
+            local(i64.clone()),
+        ],
+        result: i64,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 1,
+                },
+                MirInstruction::Borrow {
+                    dst: MirLocal(1),
+                    src: MirLocal(0),
+                    fields: vec![],
+                    unique: true,
+                    reborrow: false,
+                },
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(2),
+                    value: 2,
+                },
+                MirInstruction::Store {
+                    dst: MirLocal(0),
+                    src: MirLocal(2),
+                },
+                MirInstruction::DerefCopy {
+                    dst: MirLocal(3),
+                    reference: MirLocal(1),
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(3) },
+        }],
+    };
+
+    assert!(
+        function.validate().is_err(),
+        "MIR allowed an addressable owner to be replaced while its unique loan \
+         remains live; StorageDead must reject the same live-loan state"
+    );
+    assert!(
+        emit_vm(&function).is_err(),
+        "VM emission must not observe a reference after its backing storage was invalidated"
+    );
+}
+
+/// Sections 3.1, 4.1, and 5.3 require storage initialization to be tracked per
+/// incoming edge.  One branch below initializes `slot`; the other reaches the
+/// join without doing so.  The join cannot make the source-storage read valid
+/// by implicitly inserting destruction or guessing a drop-flag value.
+#[test]
+fn mir_rejects_path_dependent_source_storage_initialization_at_a_join() {
+    let bool_ty = Type::Scalar(ScalarType::Bool);
+    let i64 = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"forged-mir-path-dependent-storage")),
+        captures: 0,
+        parameters: vec![MirLocal(0)],
+        locals: vec![local(bool_ty), local(i64.clone())],
+        result: i64,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::SwitchBool {
+                    condition: MirLocal(0),
+                    then_target: MirBlockId(1),
+                    then_arguments: vec![],
+                    else_target: MirBlockId(2),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(1),
+                    value: 42,
+                }],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(3),
+                    arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(3),
+                    arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(1) },
+            },
+        ],
+    };
+
+    assert!(
+        function.validate().is_err(),
+        "MIR accepted a read at a join where source storage is initialized on \
+         only one predecessor"
+    );
+    assert!(
+        emit_vm(&function).is_err(),
+        "VM emission must reject a path-dependent uninitialized source-storage read"
+    );
+}
+
+/// Sections 3.1 and 4.3 require leave/return payloads to be transported as
+/// protected cleanup parameters.  Cleanup may destroy owners outside the
+/// target scope, but it must never disarm or destroy the payload that the
+/// destination receives.  Current legacy cleanup facts have no typed link to
+/// edge payloads, so this witness remains red until ordered cleanup actions
+/// and protected binding identities are frozen together.
+#[test]
+fn mir_rejects_cleanup_that_disarms_a_protected_leave_payload() {
+    let i64 = Type::Scalar(ScalarType::I64);
+    let brand = grandiose_stage0::LabelBrand {
+        owner: DefKey(Digest::of_bytes(b"forged-mir-protected-cleanup-owner")),
+        label: 0,
+    };
+    let mut control = MirControlTables::default();
+    control.labels = vec![MirLabelData {
+        brand,
+        scope: MirScopeId::ROOT,
+        destination: MirBlockId(1),
+        call_destination: false,
+    }];
+    control.move_paths = MirMovePathTables {
+        bindings: vec![MirPlaceBindingData {
+            source: PlaceBindingId(0),
+            origin: PlaceBindingOrigin::Parameter { index: 0 },
+            spelling: "payload".into(),
+        }],
+        paths: vec![MirMovePathData {
+            parent: None,
+            binding: MirPlaceBindingId(0),
+            field: None,
+        }],
+    };
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"forged-mir-protected-cleanup-payload")),
+        captures: 0,
+        parameters: vec![MirLocal(0)],
+        locals: vec![local(i64.clone())],
+        result: i64,
+        control,
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Leave {
+                    label: MirLabelId(0),
+                    brand,
+                    target: MirBlockId(1),
+                    arguments: vec![MirLocal(0)],
+                    cleanup: MirCleanupPlan {
+                        moved_paths: vec![MirMovePathId(0)],
+                        moved_places: vec![MoveFact {
+                            root: "payload".into(),
+                            fields: vec![],
+                        }],
+                        active_loans: vec![],
+                    },
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(0)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(0) },
+            },
+        ],
+    };
+
+    assert!(
+        function.validate().is_err(),
+        "MIR allowed a cleanup plan to disarm the protected payload of a leave edge"
+    );
+    assert!(
+        emit_vm(&function).is_err(),
+        "VM emission must not serialize a cleanup plan that destroys a protected payload"
     );
 }
 
