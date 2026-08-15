@@ -8831,6 +8831,18 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::MakeCallable { dst, captures, .. } => {
                 for &capture in captures {
                     read(&states, capture)?;
+                    // A callable environment is retained independently of
+                    // this frame. The executor cannot freeze an `&mut`
+                    // capture without severing its write-back target, so
+                    // reject the artifact at verification instead of
+                    // deferring this safety failure until a caller observes
+                    // the returned callable.
+                    if matches!(
+                        register_type(function, capture)?,
+                        VmType::Reference { unique: true, .. }
+                    ) {
+                        return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
+                    }
                 }
                 if !matches!(register_type(function, *dst)?, VmType::Callable { .. }) {
                     return Err(VmArtifactError::NotCallable { register: *dst });

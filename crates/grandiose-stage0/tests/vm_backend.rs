@@ -4183,6 +4183,99 @@ fn verifier_rejects_dynamic_label_rejoin_that_leaks_a_retained_facade() {
 }
 
 #[test]
+fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
+    let owner = DefKey(Digest::of_bytes(b"dynamic-label-unique-capture-owner"));
+    let facade = DefKey(Digest::of_bytes(b"dynamic-label-unique-capture-facade"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let closure = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // The normal CFG route removes the facade before jumping to the rejoin.
+    // A real label invocation instead reaches that rejoin with the facade
+    // retained. In either case, freezing the unique reference into the
+    // returned closure must fail before it can become observable.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::I64),
+                },
+                label,
+                closure,
+                VmType::Unit,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::Borrow {
+                    dst: 1,
+                    src: 0,
+                    fields: vec![],
+                    unique: true,
+                    reborrow: false,
+                },
+                VmInstruction::InstallHandler {
+                    effect: facade,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 9,
+                },
+                VmInstruction::MakeLabel {
+                    dst: 2,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 7,
+                    destination: 0,
+                },
+                VmInstruction::CallIndirect {
+                    dst: 4,
+                    callee: 2,
+                    arguments: vec![0],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Jump { target: 7 },
+                VmInstruction::MakeCallable {
+                    dst: 3,
+                    callee: DefKey(Digest::of_bytes(b"forged-unique-closure")),
+                    captures: vec![1],
+                    environment: None,
+                },
+                VmInstruction::Return { value: 3 },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"dynamic-label-unique-capture-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::UnsupportedEscapingUniqueReference)
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::UnsupportedEscapingUniqueReference)
+    ));
+}
+
+#[test]
 fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
