@@ -78,9 +78,11 @@ retained below but scheduled after the core language and tooling tranche.
   unique-loan invalidation, join facts, protected `Leave` payloads, nested
   lexical exits, reverse destruction, branch-correlated flags, VM erasure,
   shadowing, partial moves, handlers, completion binders, closures, and
-  nonlocal exits. Remaining work is broader cleanup scheduling and selection
-  for all general CFG transformations, not the executable source-storage
-  contract itself.
+  nonlocal exits. Branded label transfers retain their PlaceFlow-proven
+  source-storage boundary and emit ordered `Protect`/`Drop`, flag clearing,
+  and `StorageDead` actions for assigned owners. Remaining work is broader
+  cleanup scheduling and selection for general CFG transformations, not the
+  executable source-storage contract itself.
 
 ### 5.4 Bytecode peepholes and validation
 
