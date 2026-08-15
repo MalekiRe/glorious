@@ -5268,6 +5268,14 @@ fn service_recursively_normalizes_reexported_selected_const_method_contracts() {
 }
 
 #[test]
+fn service_rejects_recursive_selected_const_contracts_canonically() {
+    let root = "pub mod provider; use provider::Callback; pub fn apply(callback: Callback) -> i64 { let value = 41; callback(&value) } pub fn main() -> i64 { apply(provider::relay) }";
+    let provider = "pub trait Gate { const Width: u32; type Item<'a, n: u32>; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a, <i64 as Gate>::Width>; impl Gate for i64 { const Width = <i64 as Gate>::Width; type Item<'a, n: u32> = i64; } pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a, <i64 as Gate>::Width> { *value }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new().compile(request_with_logical_sources(root, &[("src/provider/provider.glorious", provider)])) else { panic!("recursive selected const contract entered an artifact"); };
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4157"), "missing finite-normal-form rejection for recursive selected-const contract: {diagnostics:#?}");
+}
+
+#[test]
 fn service_normalizes_generic_associated_consts_in_hrtb_gat_body_results() {
     let mut request = request(
         "use facade::layout; pub fn main() -> i64 { layout() }",
