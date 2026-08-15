@@ -11203,6 +11203,57 @@ fn service_seals_dag_hrtb_alias_interfaces_before_private_facade_transactions() 
 }
 
 #[test]
+fn service_revises_generic_operator_facade_cache_identities_transactionally() {
+    let root = "use left_facade::*; use right_facade::{Callback as RightRelay, Child as RightCapability, Trace as RightTrace}; pub fn left_call(callback: Callback<i64>) -> i64 / { <i64 as Child<i64>>::Effects<i64> } { callback(0, 41) } pub fn right_call(callback: RightRelay<i64>) -> i64 / { <i64 as RightCapability<i64>>::Effects<i64> } { callback(0, 41) } pub fn left_worker() -> i64 / Trace<i64> { Trace<i64>::note(left_call(Child<i64>::relay)) } pub fn right_worker() -> i64 / RightTrace<i64> { RightTrace<i64>::note(right_call(RightCapability<i64>::relay)) } pub fn left_value() -> i64 { handle left_worker() { Trace<i64>::note(value) with k => k(value + 1) } } pub fn right_value() -> i64 { handle right_worker() { RightTrace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + left_value() + right_value() }";
+    let ambiguity_root = "use left_facade::*; use right_facade::*; pub fn main() -> i64 { 1 ** 2 }";
+    let public = |fixity: &str| format!("pub {fixity} 30 **; pub trait Combine<T> {{ **(left: T, right: T) -> T; }} impl Combine<i64> for i64 {{ **(left: i64, right: i64) -> i64 {{ left - right }} }} pub effect Trace<T> {{ [1,1] note(value: T) -> i64; }} pub trait Parent<T> {{ type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> i64 / {{ <Self as Parent<T>>::Effects<U> }}; }} pub trait Child<T>: Parent<T> {{}} impl Parent<i64> for i64 {{ type Effects<U> = {{Trace<U>}}; fn relay<U>(receiver: i64, value: U) -> i64 / {{Trace<U>}} {{ Trace<U>::note(value) }} }} impl Child<i64> for i64 {{}} pub type Callback<U> = (i64, U) -> i64 / {{ <i64 as Child<i64>>::Effects<U> }};");
+    let private = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> i64 / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> i64 / { <i64 as Child<i64>>::Effects<U> };";
+    let world = |root: &str, providers: Vec<(&str, String)>, left: &str, right: &str| {
+        let mut input = request(root);
+        for (package, source) in providers { input.sources.push(SourceInput::new(PackageKey(package.into()), LogicalPath::parse("src/lib.glorious").unwrap(), source.into_bytes())); }
+        for (package, alias) in [("left-facade@0.1.0", left), ("right-facade@0.1.0", right)] {
+            input.sources.push(SourceInput::new(PackageKey(package.into()), LogicalPath::parse("src/lib.glorious").unwrap(), format!("pub use {alias}::{{Callback, Child, Combine, Trace}}; pub use {alias}::*;").into_bytes()));
+        }
+        input
+    };
+    let compiler = StageZeroCompiler::new();
+    let initial = world(root, vec![("semantic-core@0.1.0", public("infixl"))], "semantic_core", "semantic_core");
+    let parent = compiler.import_revision(initial.clone(), None).unwrap();
+    let first = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    assert_eq!(first.run_i64().unwrap(), 91);
+    let mut reordered = initial.clone(); reordered.sources.reverse();
+    let replay = compiler.import_revision(reordered, Some(parent)).unwrap(); assert_eq!(replay, parent);
+    let replay_artifact = compiler.compile_revision(replay).unwrap().artifact.unwrap();
+    assert_eq!(first.fingerprint(), replay_artifact.fingerprint()); assert_eq!(first.canonical_bytes(), replay_artifact.canonical_bytes());
+    let cached = compiler.interface_cache_stats();
+    let left_node = DependencyNode::Interface(ModuleKey { package: PackageKey("left-facade@0.1.0".into()), path: "crate".into() });
+    let left_parent = compiler.dependency_trace(parent, &left_node).unwrap();
+
+    let ambiguous = world(ambiguity_root, vec![("alpha-core@0.1.0", public("infixl")), ("beta-core@0.1.0", public("infixr"))], "alpha_core", "beta_core");
+    let mut ambiguous_reordered = ambiguous.clone(); ambiguous_reordered.sources.reverse();
+    let ambiguous_first = StageZeroCompiler::new().compile(ambiguous).expect_err("distinct provider operator identities must be ambiguous");
+    let ambiguous_second = StageZeroCompiler::new().compile(ambiguous_reordered).expect_err("source order cannot choose a provider fixity");
+    assert!(ambiguous_first.diagnostics().iter().any(|d| matches!(d.code, "G3314" | "G3318" | "G4111")));
+    assert_eq!(ambiguous_first.diagnostics(), ambiguous_second.diagnostics());
+
+    let rejected_world = world(root, vec![("semantic-core@0.2.0", private.into())], "semantic_core", "semantic_core");
+    let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+    let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("private provider aliases must reject the child revision");
+    assert!(error.diagnostics().iter().any(|d| matches!(d.code, "G3304" | "G3310" | "G3315" | "G3317" | "G3326")));
+    assert!(error.diagnostics().iter().all(|d| d.code != "G4111"));
+    assert_eq!(compiler.interface_cache_stats(), cached); assert!(compiler.dependency_traces(rejected).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &left_node), Some(left_parent.clone()));
+    let mut rejected_reordered = rejected_world; rejected_reordered.sources.reverse();
+    assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(rejected_reordered).expect_err("private rejection is order-invariant").diagnostics());
+
+    let repaired = compiler.import_revision(world(root, vec![("semantic-core@0.2.0", public("infixr"))], "semantic_core", "semantic_core"), Some(parent)).unwrap();
+    let second = compiler.compile_revision(repaired).unwrap().artifact.unwrap();
+    assert_eq!(second.run_i64().unwrap(), 95); assert_ne!(first.canonical_bytes(), second.canonical_bytes());
+    let left_repaired = compiler.dependency_trace(repaired, &left_node).unwrap(); assert_ne!(left_parent.fingerprint, left_repaired.fingerprint);
+    assert!(compiler.interface_cache_stats().misses > cached.misses);
+}
+
+#[test]
 fn service_isolates_illegal_hyphenated_package_cycles_from_legal_hrtb_module_sccs() {
     let legal_root = "use legal_facade::*; pub fn apply(callback: Callback<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); *result } pub fn effect_value() -> i64 { handle apply(relay) { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
     let illegal_root = "use legal_facade::*; use effects_lib::Callback as RejectedCallback; pub fn apply(callback: Callback<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); *result } pub fn effect_value() -> i64 { handle apply(relay) { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";

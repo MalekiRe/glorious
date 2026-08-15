@@ -167,6 +167,11 @@ coarse. The composite fixtures cover:
   Making one facade's aliases private is transactional, and repair restores
   the exact public artifact without stale products
   (`service_seals_dag_hrtb_alias_interfaces_before_private_facade_transactions`).
+- generic operator resolution keeps cache identity with generic callable and
+  GAT effect aliases: one provider deduplicates through two facades and is
+  byte-stable under reordering, distinct same-spelled providers are ambiguous,
+  private revision failures publish nothing, and a repaired provider revision
+  refreshes the facade and VM artifact (`service_revises_generic_operator_facade_cache_identities_transactionally`).
 - generic dependency effect identity through exact replay and optional
   cancellation, including rejection when the imported handler's concrete
   effect instance does not match the performed one.
