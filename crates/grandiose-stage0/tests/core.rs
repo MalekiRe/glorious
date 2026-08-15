@@ -445,6 +445,34 @@ fn typed_core_selects_methods_inherited_through_a_supertrait() {
 }
 
 #[test]
+fn typed_core_requires_child_evidence_for_inherited_qualified_methods() {
+    for (package, child_impl, expected) in [
+        (
+            "core-parent-only-inherited-method@0.1.0",
+            "",
+            "no implementation provides the qualified trait method",
+        ),
+        (
+            "core-negative-child-inherited-method@0.1.0",
+            "impl !Child<i64> for i64 {}",
+            "qualified trait method is refuted by a negative implementation",
+        ),
+    ] {
+        let source = format!(
+            "trait Parent<T> {{ fn relay(value: i64) -> i64; }} trait Child<U>: Parent<U> {{}} impl Parent<i64> for i64 {{ fn relay(value: i64) -> i64 {{ value }} }} {child_impl} pub fn main() -> i64 {{ Child<i64>::relay(42) }}"
+        );
+        let core = core_for(package, &source);
+        assert!(
+            core.diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "missing {expected}: {:#?}",
+            core.diagnostics
+        );
+    }
+}
+
+#[test]
 fn typed_core_normalizes_concrete_associated_effect_rows_on_method_values() {
     let core = core_for(
         "core-trait-method-associated-effect-row@0.1.0",

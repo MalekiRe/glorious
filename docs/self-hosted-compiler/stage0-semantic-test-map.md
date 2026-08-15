@@ -386,6 +386,15 @@ coarse. The composite fixtures cover:
   `typed_core_refutes_negative_child_inherited_type_effect_and_const_projections`,
   `typed_core_rejects_parent_only_inherited_type_effect_and_const_projections`,
   `service_keeps_negative_child_inherited_projections_authoritative_through_alias_revisions`).
+- inherited methods obey the same requested-trait boundary as associated
+  items: Parent evidence (including a lexical Parent-only assumption) cannot
+  select `Child::method`, and a negative Child implementation cannot enter a
+  method-value path. A reexported `for<'a>` method value is checked through
+  canonical source ordering and failed revisions before the positive facade is
+  allowed to execute on the VM
+  (`inherited_method_selection_requires_the_requested_child_evidence`,
+  `typed_core_requires_child_evidence_for_inherited_qualified_methods`,
+  `service_requires_child_evidence_for_inherited_hrtb_method_values_through_facade_revisions`).
 - a public dependency facade preserves inherited associated effect-GAT
   evidence through a named `for<'a>` callback: the declaration-owned lifetime
   is selectable, its concrete row reaches handler lowering and verified VM

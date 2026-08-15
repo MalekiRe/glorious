@@ -5229,6 +5229,112 @@ fn service_executes_reexported_hrtb_inherited_effect_gats_through_vm_handlers() 
 }
 
 #[test]
+fn service_requires_child_evidence_for_inherited_hrtb_method_values_through_facade_revisions() {
+    // The public method value is inherited from Parent but named through the
+    // reexported Child facade. Its lifetime binder exercises the same method
+    // selection route that Core uses for higher-ranked callback compatibility.
+    let root = "use facade::{Gateway as Capability, Trace}; pub fn apply(callback: for<'a> (&'a i64) -> i64 / Trace) -> i64 / Trace { let value = 40; let result = callback(&value); Trace::note(result) } pub fn main() -> i64 { handle apply(Capability<i64>::relay) { Trace::note(value) with k => k(value + 1) } }";
+    let provider = "pub effect Trace { [1,1] note(value: i64) -> i64; } pub trait Parent<T> { fn relay<'a>(value: &'a i64) -> i64 / Trace; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { fn relay<'a>(value: &'a i64) -> i64 / Trace { Trace::note(*value) } } impl Child<i64> for i64 {}";
+    let missing = provider.replacen("impl Child<i64> for i64 {}", "", 1);
+    let negative = provider.replacen(
+        "impl Child<i64> for i64 {}",
+        "impl !Child<i64> for i64 {}",
+        1,
+    );
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Child as Gateway, Trace};".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@1.0.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+
+    let mut reordered = world(provider);
+    let artifact = StageZeroCompiler::new()
+        .compile(reordered.clone())
+        .expect("selected inherited HRTB method value must reach the VM")
+        .artifact
+        .unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("source order must preserve inherited HRTB method selection")
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered_artifact.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let trace = compiler
+        .dependency_trace(parent, &facade)
+        .expect("selected inherited method facade must have a frozen trace");
+
+    for (name, invalid, expected) in [
+        (
+            "missing",
+            &missing,
+            "no implementation provides the qualified trait method",
+        ),
+        (
+            "negative",
+            &negative,
+            "no implementation provides the qualified trait method",
+        ),
+    ] {
+        let invalid_world = world(invalid);
+        let cache_before = compiler.interface_cache_stats();
+        let child = compiler
+            .import_revision(invalid_world.clone(), Some(parent))
+            .unwrap();
+        let error = compiler
+            .compile_session(&compiler.open_session(child).unwrap())
+            .expect_err("missing or refuted Child evidence must reject its inherited method");
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "{name} Child method boundary diagnostic missing: {:#?}",
+            error.diagnostics()
+        );
+        assert_eq!(
+            compiler.interface_cache_stats().misses,
+            cache_before.misses,
+            "{name} Child revision materialized a new cached interface"
+        );
+        assert!(compiler.dependency_traces(child).is_empty(), "{name} Child revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()));
+        let mut reversed = invalid_world;
+        reversed.sources.reverse();
+        assert_eq!(
+            error.diagnostics(),
+            StageZeroCompiler::new()
+                .compile(reversed)
+                .expect_err("source ordering cannot bypass the Child method boundary")
+                .diagnostics()
+        );
+        assert_eq!(
+            compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(),
+            parent_artifact.canonical_bytes()
+        );
+    }
+}
+
+#[test]
 fn service_keeps_negative_child_inherited_projections_authoritative_through_alias_revisions() {
     // The provider's public callback reaches Parent's type and effect items
     // through Child, and the application uses Child's inherited constant for

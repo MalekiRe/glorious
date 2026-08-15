@@ -293,6 +293,58 @@ fn supertrait_method_and_associated_items_follow_canonical_instantiated_edges() 
 }
 
 #[test]
+fn inherited_method_selection_requires_the_requested_child_evidence() {
+    let (interface, parent_only) = signatures(
+        "trait Parent<T> { fn relay(value: i64) -> i64; } trait Child<U>: Parent<U> {} impl Parent<i64> for i64 { fn relay(value: i64) -> i64 { value } }",
+    );
+    let child = key(&interface, "Child");
+    let parent = key(&interface, "Parent");
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: child,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+        subject: Type::Scalar(ScalarType::I64),
+    };
+    assert!(matches!(
+        TraitSolver::new(&parent_only).select_method(goal.clone(), "relay", &[]),
+        TraitMethodAnswer::NoSolution
+    ));
+    let parent_assumption = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: parent,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+        subject: Type::Scalar(ScalarType::I64),
+    };
+    assert!(matches!(
+        TraitSolver::new(&parent_only).select_method_with_assumptions(
+            goal,
+            "relay",
+            &[],
+            &[parent_assumption],
+        ),
+        TraitMethodAnswer::NoSolution
+    ));
+
+    let (interface, negative_child) = signatures(
+        "trait Parent<T> { fn relay(value: i64) -> i64; } trait Child<U>: Parent<U> {} impl Parent<i64> for i64 { fn relay(value: i64) -> i64 { value } } impl !Child<i64> for i64 {}",
+    );
+    let child = key(&interface, "Child");
+    let negative_goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: child,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+        subject: Type::Scalar(ScalarType::I64),
+    };
+    assert!(matches!(
+        TraitSolver::new(&negative_child).select_method(negative_goal, "relay", &[]),
+        TraitMethodAnswer::Refuted { .. }
+    ));
+}
+
+#[test]
 fn negative_child_trait_refutes_inherited_type_effect_and_const_projections() {
     let (interface, signatures) = signatures(
         "trait Parent<T> { type Item; type Effects: EffectRow; const Width: u32; } trait Child<U>: Parent<U> {} impl Parent<i64> for i64 { type Item = i64; type Effects = {}; const Width = 7; } impl !Child<i64> for i64 {}",
