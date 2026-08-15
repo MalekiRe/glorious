@@ -32,7 +32,7 @@ S17-05	17 safety	A label- or environment-dependent value cannot escape its gener
 S17-06	17 safety	A positive refinement binder is unavailable in a negative branch.	core.rs::negative_is_completion_arm_cannot_observe_positive_refinement_bindings	anchor
 S17-07	17 safety	A protecting borrow prevents invalidation of its live refinement evidence.	core.rs::forged_completion_refinement_shadowing_is_rejected_before_placeflow_or_mir	anchor
 S17-08	17 safety	Incompatible normal post-environments cannot join silently.	service.rs::service_checks_callable_lower_bounds_after_branch_hulls	anchor
-S17-09	17 safety	A custom Drop hook executes at most once on each legal normal or nonlocal cleanup path.	semantic_conformance/ownership.rs::semantic_drop_runs_once_on_normal_and_nonlocal_cleanup,service.rs::service_drops_a_custom_aggregate_once_across_forward_and_cancellation	anchor
+S17-09	17 safety	A custom Drop hook executes at most once on each legal normal or nonlocal cleanup path.	semantic_conformance/ownership.rs::semantic_drop_runs_once_on_normal_and_nonlocal_cleanup,service.rs::service_drops_a_custom_aggregate_once_across_forward_and_cancellation	red
 S17-10	17 safety	Safe code cannot partially move or ownership-deconstruct a custom-Drop aggregate.	semantic_conformance/ownership.rs::semantic_custom_drop_types_cannot_be_partially_moved_or_deconstructed	anchor
 S17-11	17 safety	Drop::drop cannot expose effects, suspension, or label transfer.	semantic_conformance/ownership.rs::semantic_drop_is_zero_use_only_and_cannot_expose_control	anchor
 S17-12	17 safety	A one-shot continuation cannot be resumed twice.	semantic_conformance/backend.rs::semantic_one_shot_resumptions_cannot_resume_twice	anchor
