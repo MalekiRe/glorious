@@ -7798,7 +7798,7 @@ impl MirProgram {
 /// not only local registers: aggregate layouts, patterns, handler frames,
 /// host ABI records, and capture environments are independently consumed by
 /// MIR/VM verification.
-pub(crate) fn materialized_instance_retains_generic_placeholder(function: &MirFunction) -> bool {
+fn materialized_instance_retains_generic_placeholder(function: &MirFunction) -> bool {
     type_retains_generic_placeholder(&function.result)
         || function
             .locals
