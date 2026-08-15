@@ -16,8 +16,8 @@ use crate::{
     core::{CallableId, CaptureMode, EnvironmentBrand},
     identity::{DefKey, Digest},
     mir::{
-        MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern, MirPatternField,
-        MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f64_bits,
+        MirCleanupAction, MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern,
+        MirPatternField, MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f64_bits,
         lifted_callable_definition, parse_char_literal, parse_f64_literal, parse_text_literal,
     },
     runtime_manifest::{FloatBinaryOp, FloatCompareOp, FloatPrimitive, FloatWidth, PrimitiveRole},
@@ -1097,13 +1097,25 @@ pub struct VmStorageErasureStorage {
 /// Canonically ordered source-storage cleanup actions.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum VmStorageErasureAction {
-    EndBorrow { storage: u32 },
+    EndBorrow {
+        storage: u32,
+    },
     /// Move a protected Leave payload out of source storage.  This disarms
     /// destruction while preserving the payload for parallel transfer.
-    Protect { storage: u32, register: u32 },
-    Destroy { storage: u32 },
-    SetDropFlag { drop_flag: u32, initialized: bool },
-    StorageDead { storage: u32 },
+    Protect {
+        storage: u32,
+        register: u32,
+    },
+    Destroy {
+        storage: u32,
+    },
+    SetDropFlag {
+        drop_flag: u32,
+        initialized: bool,
+    },
+    StorageDead {
+        storage: u32,
+    },
 }
 /// The runtime control payload for a verified `Leave`.  It is deliberately
 /// separate from a program counter: a perform can capture a continuation
@@ -1137,9 +1149,16 @@ pub struct VmCleanupLoan {
     pub unique: bool,
 }
 impl VmCleanupProof {
-    pub fn from_mir(plan: &crate::MirCleanupPlan, paths: &crate::MirMovePathTables) -> Self {
-        debug_assert!(plan.validate().is_ok());
-        debug_assert!(plan.validate_with_paths(paths).is_ok());
+    pub fn from_mir(
+        plan: &crate::MirCleanupPlan,
+        paths: &crate::MirMovePathTables,
+        storage: &crate::MirSourceStorageTables,
+    ) -> Result<Self, VmArtifactError> {
+        plan.validate_with_storage(paths, storage).map_err(|_| {
+            VmArtifactError::MalformedEncoding {
+                message: "MIR source-storage cleanup is not encodable",
+            }
+        })?;
         let mut moved_places = plan
             .moved_paths
             .iter()
@@ -1174,19 +1193,76 @@ impl VmCleanupProof {
                 right.unique,
             ))
         });
-        Self {
+        let exited = storage
+            .exited_bindings(plan.source_storage_scope, plan.target_storage_scope)
+            .map_err(|_| VmArtifactError::MalformedEncoding {
+                message: "MIR source-storage exit is not encodable",
+            })?;
+        let flags = plan
+            .drop_flags
+            .iter()
+            .map(|flag| (flag.binding.0, flag.id.0))
+            .collect::<BTreeMap<_, _>>();
+        let mut storages =
+            exited
+                .iter()
+                .map(|binding| {
+                    let local = storage.binding_local(*binding).ok_or(
+                        VmArtifactError::MalformedEncoding {
+                            message: "exited source storage has no VM local mapping",
+                        },
+                    )?;
+                    let drop_flag = flags.get(&binding.0).copied().ok_or(
+                        VmArtifactError::MalformedEncoding {
+                            message: "exited source storage has no typed drop flag",
+                        },
+                    )?;
+                    Ok(VmStorageErasureStorage {
+                        storage: binding.0,
+                        binding: binding.0,
+                        value_register: local.0,
+                        // A source drop flag means this owner is conditionally
+                        // initialized. Its explicit terminal action, rather than
+                        // a guessed register state, decides Drop versus Protect.
+                        initialized: true,
+                        drop_flag: Some(drop_flag),
+                    })
+                })
+                .collect::<Result<Vec<_>, VmArtifactError>>()?;
+        storages.sort_by_key(|storage| storage.storage);
+        let actions = plan
+            .actions
+            .iter()
+            .map(|action| match *action {
+                MirCleanupAction::EndBorrow { binding } => {
+                    VmStorageErasureAction::EndBorrow { storage: binding.0 }
+                }
+                MirCleanupAction::Drop { binding, .. } => {
+                    VmStorageErasureAction::Destroy { storage: binding.0 }
+                }
+                MirCleanupAction::Protect { binding, local } => VmStorageErasureAction::Protect {
+                    storage: binding.0,
+                    register: local.0,
+                },
+                MirCleanupAction::ClearDropFlag { flag } => VmStorageErasureAction::SetDropFlag {
+                    drop_flag: flag.0,
+                    initialized: false,
+                },
+                MirCleanupAction::StorageDead { binding } => {
+                    VmStorageErasureAction::StorageDead { storage: binding.0 }
+                }
+            })
+            .collect();
+        let protected_registers = plan.protected_values.iter().map(|local| local.0).collect();
+        Ok(Self {
             moved_places,
             active_loans,
-            storage_erasure: VmStorageErasureWitness::without_source_storage(),
-        }
-    }
-    /// Attach the protected values for one concrete Leave transfer.  This is
-    /// done at instruction selection, where MIR locals have become registers;
-    /// it deliberately does not make the generic cleanup proof depend on a
-    /// particular edge's block arguments.
-    pub fn with_protected_registers(mut self, arguments: &[u32]) -> Self {
-        self.storage_erasure.set_protected_registers(arguments);
-        self
+            storage_erasure: VmStorageErasureWitness::Verified {
+                storages,
+                actions,
+                protected_registers,
+            },
+        })
     }
     pub fn validate(&self) -> bool {
         if self.moved_places.iter().any(|place| {
@@ -1246,7 +1322,12 @@ impl VmStorageErasureWitness {
     }
 
     pub fn set_protected_registers(&mut self, registers: &[u32]) {
-        let protected_registers = registers.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
+        let protected_registers = registers
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         match self {
             Self::Missing => {}
             Self::Verified {
@@ -1266,13 +1347,21 @@ impl VmStorageErasureWitness {
             return false;
         };
         let leave_registers = leave_arguments.iter().copied().collect::<BTreeSet<_>>();
-        if protected_registers.iter().copied().collect::<BTreeSet<_>>().len()
+        if protected_registers
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .len()
             != protected_registers.len()
             || protected_registers
                 .iter()
                 .any(|register| !leave_registers.contains(register))
-            || protected_registers.iter().any(|register| *register as usize >= register_count)
-            || !storages.windows(2).all(|pair| pair[0].storage < pair[1].storage)
+            || protected_registers
+                .iter()
+                .any(|register| *register as usize >= register_count)
+            || !storages
+                .windows(2)
+                .all(|pair| pair[0].storage < pair[1].storage)
             || storages.iter().any(|storage| {
                 storage.storage == u32::MAX
                     || storage.binding == u32::MAX
@@ -1290,11 +1379,18 @@ impl VmStorageErasureWitness {
             .iter()
             .filter_map(|storage| storage.drop_flag)
             .collect::<BTreeSet<_>>();
-        if drop_flags.len() != storages.iter().filter_map(|storage| storage.drop_flag).count() {
+        if drop_flags.len()
+            != storages
+                .iter()
+                .filter_map(|storage| storage.drop_flag)
+                .count()
+        {
             return false;
         }
         if storages.iter().any(|storage| {
-            protected_registers.binary_search(&storage.value_register).is_ok()
+            protected_registers
+                .binary_search(&storage.value_register)
+                .is_ok()
                 && !leave_registers.contains(&storage.value_register)
         }) {
             return false;
@@ -1350,7 +1446,9 @@ impl VmStorageErasureWitness {
                         return false;
                     };
                     if !data.initialized
-                        || protected_registers.binary_search(&data.value_register).is_ok()
+                        || protected_registers
+                            .binary_search(&data.value_register)
+                            .is_ok()
                         || !matches!(*state, Progress::Start | Progress::BorrowEnded)
                     {
                         return false;
@@ -1394,7 +1492,12 @@ impl VmStorageErasureWitness {
             }
         }
         progress.values().all(|state| *state == Progress::Dead)
-            && terminal_order == storages.iter().rev().map(|storage| storage.storage).collect::<Vec<_>>()
+            && terminal_order
+                == storages
+                    .iter()
+                    .rev()
+                    .map(|storage| storage.storage)
+                    .collect::<Vec<_>>()
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2363,7 +2466,10 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
                 let target = *starts
                     .get(target.0 as usize)
                     .ok_or(VmArtifactError::UnsupportedControlFlow)?;
-                let arguments = arguments.iter().map(|argument| argument.0).collect::<Vec<_>>();
+                let arguments = arguments
+                    .iter()
+                    .map(|argument| argument.0)
+                    .collect::<Vec<_>>();
                 instructions.push(VmInstruction::Leave {
                     brand_owner: brand.owner,
                     brand_label: brand.label,
@@ -2374,8 +2480,11 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
                         .iter()
                         .map(|parameter| parameter.0)
                         .collect(),
-                    cleanup: VmCleanupProof::from_mir(cleanup, &function.control.move_paths)
-                        .with_protected_registers(&arguments),
+                    cleanup: VmCleanupProof::from_mir(
+                        cleanup,
+                        &function.control.move_paths,
+                        &function.control.source_storage,
+                    )?,
                 });
             }
             MirTerminator::SwitchBool {
@@ -3858,12 +3967,16 @@ impl<'a> Decoder<'a> {
                 let mut actions = Vec::with_capacity(count);
                 for _ in 0..count {
                     actions.push(match self.byte()? {
-                        0 => VmStorageErasureAction::EndBorrow { storage: self.u32()? },
+                        0 => VmStorageErasureAction::EndBorrow {
+                            storage: self.u32()?,
+                        },
                         1 => VmStorageErasureAction::Protect {
                             storage: self.u32()?,
                             register: self.u32()?,
                         },
-                        2 => VmStorageErasureAction::Destroy { storage: self.u32()? },
+                        2 => VmStorageErasureAction::Destroy {
+                            storage: self.u32()?,
+                        },
                         3 => VmStorageErasureAction::SetDropFlag {
                             drop_flag: self.u32()?,
                             initialized: match self.byte()? {
@@ -3876,7 +3989,9 @@ impl<'a> Decoder<'a> {
                                 }
                             },
                         },
-                        4 => VmStorageErasureAction::StorageDead { storage: self.u32()? },
+                        4 => VmStorageErasureAction::StorageDead {
+                            storage: self.u32()?,
+                        },
                         _ => {
                             return Err(VmArtifactError::MalformedEncoding {
                                 message: "unknown source-storage erasure action",
@@ -3884,7 +3999,8 @@ impl<'a> Decoder<'a> {
                         }
                     });
                 }
-                let count = self.count("source-storage protected registers", MAX_DECODE_REGISTERS)?;
+                let count =
+                    self.count("source-storage protected registers", MAX_DECODE_REGISTERS)?;
                 let mut protected_registers = Vec::with_capacity(count);
                 for _ in 0..count {
                     protected_registers.push(self.u32()?);

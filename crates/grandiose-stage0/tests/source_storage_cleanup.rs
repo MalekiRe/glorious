@@ -7,13 +7,15 @@
 //! as an always-live SSA register.
 
 use grandiose_stage0::{
-    CoreId, DefKey, Digest, EffectRow, LabelBrand, Lifetime, MirBlock, MirBlockId, MirCleanupAction,
-    MirCleanupDropFlag, MirCleanupPlan, MirControlTables, MirDropFlagId, MirFunction,
-    MirInstruction, MirLocal, MirLocalDecl, MirMovePathData,
-    MirMovePathId, MirMovePathTables, MirPlaceBindingData, MirPlaceBindingId, MirScopeId,
+    CoreId, DefKey, Digest, EffectRow, LabelBrand, Lifetime, MirBlock, MirBlockId,
+    MirCleanupAction, MirCleanupDropFlag, MirCleanupPlan, MirControlTables, MirDropFlagId,
+    MirFunction, MirInstruction, MirLocal, MirLocalDecl, MirMovePathData, MirMovePathId,
+    MirMovePathTables, MirPlaceBindingData, MirPlaceBindingId, MirScopeId,
     MirSourceStorageScopeData, MirSourceStorageScopeId, MirSourceStorageTables, MirStorageEvent,
     MirStorageEventKind, MirTerminator, Mutability, PlaceBindingId, PlaceBindingOrigin, Quantity,
-    ScalarType, SourceStorageScopeId, Type, emit_vm,
+    ScalarType, SourceStorageScopeId, Type, VmInstruction, VmStorageErasureAction,
+    VmStorageErasureStorage, VmStorageErasureWitness, decode_and_verify_artifact, decode_artifact,
+    emit_vm, encode_artifact,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -168,6 +170,128 @@ fn mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave() {
     assert!(
         emit_vm(&function).is_err(),
         "VM lowering must reject an unelaborated nested source-storage exit"
+    );
+}
+
+/// The VM does not rediscover source lifetimes from registers.  A valid,
+/// nonempty lexical exit must serialize the exact typed action sequence,
+/// compiler drop flag, and protected payload identity produced by MIR.
+#[test]
+fn vm_round_trips_typed_nonempty_source_storage_erasure_witness() {
+    let owner = DefKey(Digest::of_bytes(b"source-storage-vm-witness"));
+    let cleanup = MirCleanupPlan {
+        source_storage_scope: MirSourceStorageScopeId(1),
+        target_storage_scope: MirSourceStorageScopeId::ROOT,
+        moved_paths: vec![],
+        moved_places: vec![],
+        active_loans: vec![],
+        drop_flags: vec![MirCleanupDropFlag {
+            id: MirDropFlagId(0),
+            binding: MirPlaceBindingId(0),
+        }],
+        actions: vec![
+            MirCleanupAction::EndBorrow {
+                binding: MirPlaceBindingId(0),
+            },
+            MirCleanupAction::Protect {
+                binding: MirPlaceBindingId(0),
+                local: MirLocal(0),
+            },
+            MirCleanupAction::ClearDropFlag {
+                flag: MirDropFlagId(0),
+            },
+            MirCleanupAction::StorageDead {
+                binding: MirPlaceBindingId(0),
+            },
+        ],
+        protected_values: vec![MirLocal(0)],
+    };
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: owner,
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(Type::Scalar(ScalarType::I64)),
+            local(label_type()),
+            local(Type::Scalar(ScalarType::I64)),
+        ],
+        result: Type::Scalar(ScalarType::I64),
+        control: one_owner_storage(MirLocal(0), 103),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(0),
+                        value: 42,
+                    },
+                    MirInstruction::MakeLabel {
+                        label: grandiose_stage0::MirLabelId::UNASSIGNED,
+                        dst: MirLocal(1),
+                        brand: LabelBrand { owner, label: 0 },
+                        target: MirBlockId(1),
+                        destination: MirLocal(2),
+                    },
+                ],
+                terminator: MirTerminator::Leave {
+                    label: grandiose_stage0::MirLabelId::UNASSIGNED,
+                    brand: LabelBrand { owner, label: 0 },
+                    target: MirBlockId(1),
+                    arguments: vec![MirLocal(0)],
+                    cleanup,
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(2)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(2) },
+            },
+        ],
+    }
+    .with_frozen_control_tables();
+    function.validate().unwrap();
+
+    let artifact = emit_vm(&function).unwrap();
+    let encoded = encode_artifact(&artifact);
+    decode_and_verify_artifact(&encoded).unwrap();
+    let decoded = decode_artifact(&encoded).unwrap();
+    let witness = decoded
+        .function
+        .instructions
+        .iter()
+        .find_map(|instruction| match instruction {
+            VmInstruction::Leave { cleanup, .. } => Some(&cleanup.storage_erasure),
+            _ => None,
+        })
+        .expect("emitted source-storage fixture has a Leave");
+    assert_eq!(
+        witness,
+        &VmStorageErasureWitness::Verified {
+            storages: vec![VmStorageErasureStorage {
+                storage: 0,
+                binding: 0,
+                value_register: 0,
+                initialized: true,
+                drop_flag: Some(0),
+            }],
+            actions: vec![
+                VmStorageErasureAction::EndBorrow { storage: 0 },
+                VmStorageErasureAction::Protect {
+                    storage: 0,
+                    register: 0,
+                },
+                VmStorageErasureAction::SetDropFlag {
+                    drop_flag: 0,
+                    initialized: false,
+                },
+                VmStorageErasureAction::StorageDead { storage: 0 },
+            ],
+            protected_registers: vec![0],
+        }
     );
 }
 
@@ -607,7 +731,9 @@ fn source_storage_arena_rejects_forged_lifecycle_and_cleanup_boundaries() {
         flag: MirDropFlagId(1),
     };
     assert!(
-        drops_protected.validate_storage_actions(&storage).is_err_and(|error| error.contains("protected")),
+        drops_protected
+            .validate_storage_actions(&storage)
+            .is_err_and(|error| error.contains("protected")),
         "an owner carried through a leave must use Protect rather than Drop"
     );
 }
