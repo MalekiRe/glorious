@@ -925,9 +925,9 @@ impl TraitSolver {
         // item argument is an escaped HRTB placeholder. The recursive type
         // normalizer may opt in only after it has verified that the argument
         // is owned by a surrounding callable binder.
-        if trait_goal_contains_escaping_hrtb(&goal)
-            || (!scoped_hrtb_item_arguments
-                && arguments
+        if !scoped_hrtb_item_arguments
+            && (trait_goal_contains_escaping_hrtb(&goal)
+                || arguments
                     .iter()
                     .any(generic_argument_contains_escaping_hrtb))
         {
@@ -943,7 +943,15 @@ impl TraitSolver {
             SupertraitLookup::Missing => goal,
             SupertraitLookup::Ambiguous => return TraitProjectionAnswer::Ambiguous,
         };
-        match self.solve(goal.clone()) {
+        // The surrounding normalizer has verified that the goal's rigid
+        // regions are owned by its live callable binder. Re-entering the
+        // public solver would reject that same evidence as escaped.
+        let answer = if scoped_hrtb_item_arguments {
+            self.solve_scoped_hrtb(goal.clone())
+        } else {
+            self.solve(goal.clone())
+        };
+        match answer {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
                     return TraitProjectionAnswer::NoSolution;
@@ -1346,9 +1354,9 @@ impl TraitSolver {
         arguments: &[GenericArgument],
         scoped_hrtb_item_arguments: bool,
     ) -> TraitEffectRowProjectionAnswer {
-        if trait_goal_contains_escaping_hrtb(&goal)
-            || (!scoped_hrtb_item_arguments
-                && arguments
+        if !scoped_hrtb_item_arguments
+            && (trait_goal_contains_escaping_hrtb(&goal)
+                || arguments
                     .iter()
                     .any(generic_argument_contains_escaping_hrtb))
         {
@@ -1364,7 +1372,14 @@ impl TraitSolver {
             SupertraitLookup::Missing => goal,
             SupertraitLookup::Ambiguous => return TraitEffectRowProjectionAnswer::Ambiguous,
         };
-        match self.solve(goal.clone()) {
+        // Effect-row projection selection must use the same HRTB scope as
+        // its type projection counterpart above.
+        let answer = if scoped_hrtb_item_arguments {
+            self.solve_scoped_hrtb(goal.clone())
+        } else {
+            self.solve(goal.clone())
+        };
+        match answer {
             TraitAnswer::Proven { evidence } => {
                 let Some(rule) = self.rules.iter().find(|rule| rule.definition == evidence) else {
                     return TraitEffectRowProjectionAnswer::NoSolution;

@@ -4802,6 +4802,54 @@ fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
 }
 
 #[test]
+fn service_executes_alias_equivalent_hrtb_effect_gat_traits_through_vm() {
+    let mut request = request(
+        "use bridge::First as Primary; use bridge::Second as Secondary; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / { <&'a i64 as Secondary<i64>>::Effects<'a> } { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Primary<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Capability as First, Capability as Second, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Capability<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<'z, e: EffectRow, U>(receiver: Self, callback: for<'a> (<Self as Capability<T>>::Item<'a>) -> <Self as Capability<T>>::Item<'a> / { <Self as Capability<T>>::Effects<'a> | e }, marker: U) -> i64 / { <Self as Capability<T>>::Effects<'static> | e }; } impl<'r> Capability<i64> for &'r i64 { type Item<'a> = &'a i64; type Effects<'a> = {Trace<i64>}; fn apply<'z, e: EffectRow, U>(receiver: &'r i64, callback: for<'a> (<&'r i64 as Capability<i64>>::Item<'a>) -> <&'r i64 as Capability<i64>>::Item<'a> / { <&'r i64 as Capability<i64>>::Effects<'a> | e }, marker: U) -> i64 / { <&'r i64 as Capability<i64>>::Effects<'static> | e } { let value = 41; let result = callback(&value); Trace<i64>::note(*receiver); *result + 1 } }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("alias-equivalent HRTB GAT trait contracts must materialize");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_overlapping_impls_spelled_through_trait_reexport_aliases() {
+    let mut request = request(
+        "use bridge::First as Primary; use bridge::Second as Secondary; pub struct Local {} impl Primary<i64> for Local { type Effects<'a> = {}; } impl Secondary<i64> for Local { type Effects<'a> = {}; } pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Capability as First, Capability as Second};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub trait Capability<T> { type Effects<'a>: EffectRow; }".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("two aliases of one trait admitted overlapping implementations");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G3404"),
+        "missing alias-equivalent coherence rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_reexported_hrtb_inherited_effect_gats_without_selected_evidence() {
     // The scoped HRTB solver path may open `for<'a>`, but it must not turn the
     // binder itself into evidence.  The public facade exposes the inherited
