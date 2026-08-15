@@ -2485,7 +2485,7 @@ fn leave_fixture_offsets(bytes: &[u8]) -> LeaveFixtureOffsets {
     let leave_opcode = 53 + 32 + 8 + 10 + 8 + 8 + 13;
     assert_eq!(bytes[leave_opcode], 55, "fixture no longer encodes Leave");
     let brand_owner = leave_opcode + 1;
-    let target = brand_owner + 32 + 4;
+    let target = brand_owner + 32 + 4 + 4;
     let argument_count = target + 4;
     let destination_count = argument_count + 8 + 4;
     let cleanup = destination_count + 8 + 4;
@@ -2536,6 +2536,7 @@ fn encoded_leave_fixture() -> Vec<u8> {
                 VmInstruction::Leave {
                     brand_owner: DefKey(Digest::of_bytes(b"hostile-leave-owner")),
                     brand_label: 9,
+                    handler_depth: 0,
                     target: 2,
                     arguments: vec![0],
                     destinations: vec![1],
@@ -2589,6 +2590,7 @@ fn cleanup_carrying_leave_entry(definition: DefKey, first: VmInstruction) -> VmF
             VmInstruction::Leave {
                 brand_owner: definition,
                 brand_label: 3,
+                handler_depth: 0,
                 target: 3,
                 arguments: vec![0],
                 destinations: vec![1],
@@ -2648,6 +2650,7 @@ fn cleanup_leave_budget_loop(definition: DefKey) -> VmFunction {
             VmInstruction::Leave {
                 brand_owner: definition,
                 brand_label: 4,
+                handler_depth: 0,
                 target: 2,
                 arguments: vec![],
                 destinations: vec![],
@@ -5861,6 +5864,7 @@ fn verifier_rejects_a_label_brand_retargeted_to_another_typed_destination() {
             VmInstruction::Leave {
                 brand_owner: owner,
                 brand_label: 0,
+                handler_depth: 0,
                 target: 6,
                 arguments: vec![1],
                 destinations: vec![3],
@@ -5874,6 +5878,7 @@ fn verifier_rejects_a_label_brand_retargeted_to_another_typed_destination() {
             VmInstruction::Leave {
                 brand_owner: owner,
                 brand_label: 0,
+                handler_depth: 0,
                 target: 7,
                 arguments: vec![2],
                 destinations: vec![2],
@@ -6618,6 +6623,7 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
                 VmInstruction::Leave {
                     brand_owner: label_owner,
                     brand_label: 7,
+                    handler_depth: 0,
                     target: 3,
                     arguments: vec![0],
                     destinations: vec![1],
@@ -6659,6 +6665,46 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
     };
     program.fingerprint = program.computed_fingerprint();
     assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn cleanup_leave_preserves_the_lexical_outer_handler_prefix() {
+    let outer_effect = DefKey(Digest::of_bytes(b"leave-retained-outer-handler"));
+    let inner_effect = DefKey(Digest::of_bytes(b"leave-exited-inner-handler"));
+    let owner = DefKey(Digest::of_bytes(b"leave-retained-prefix-owner"));
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"leave-retained-prefix")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::InstallHandler { effect: outer_effect, effect_arguments: vec![], operation: 0, payload_destinations: vec![], resume_type: VmType::I64, continuation: VmContinuationPolicy::Consume, target: 6 },
+                VmInstruction::InstallHandler { effect: inner_effect, effect_arguments: vec![], operation: 0, payload_destinations: vec![], resume_type: VmType::I64, continuation: VmContinuationPolicy::Consume, target: 6 },
+                VmInstruction::Leave {
+                    brand_owner: owner,
+                    brand_label: 3,
+                    handler_depth: 1,
+                    target: 4,
+                    arguments: vec![0],
+                    destinations: vec![1],
+                    cleanup: VmCleanupProof { moved_places: vec![], active_loans: vec![], storage_erasure: VmStorageErasureWitness::without_source_storage() },
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 1 },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"leave-retained-prefix-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert_eq!(decode_and_verify_artifact(&bytes).unwrap().run_i64().unwrap(), 42);
 }
 
 #[test]
@@ -6746,6 +6792,7 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
                 VmInstruction::Leave {
                     brand_owner: owner,
                     brand_label: 0,
+                    handler_depth: 0,
                     target: 2,
                     arguments: vec![0],
                     destinations: vec![1],
@@ -6802,6 +6849,7 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
                 VmInstruction::Leave {
                     brand_owner: owner,
                     brand_label: 1,
+                    handler_depth: 0,
                     target: 3,
                     arguments: vec![0],
                     destinations: vec![1],
@@ -6841,6 +6889,7 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
                     VmInstruction::Leave {
                         brand_owner: owner,
                         brand_label: 0,
+                        handler_depth: 0,
                         target: 2,
                         arguments: vec![0],
                         destinations: vec![1],
@@ -6968,6 +7017,7 @@ fn leave_from_a_handler_clause_abandons_its_suspended_continuation() {
             VmInstruction::Leave {
                 brand_owner: owner,
                 brand_label: 2,
+                handler_depth: 0,
                 target: 7,
                 arguments: vec![0],
                 destinations: vec![3],

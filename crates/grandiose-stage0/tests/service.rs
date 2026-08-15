@@ -13415,6 +13415,27 @@ fn service_inner_reentrant_completion_leave_retains_outer_normal_completion_thro
 }
 
 #[test]
+fn service_outer_replay_after_inner_label_leave_reenters_effectful_dependency_completion() {
+    let mut request = request(
+        "use bridge::Ask; use bridge::Audit; use bridge::Tick; use bridge::invoke; use bridge::record; pub fn main() -> i64 { handle { handle { label done { handle { handle { handle { handle invoke() { Ask::ask(true) with k => k(1) + k(2) } } { value => value + 1; Tick::tick() with k => k(10) + k(20) } } { Ask::ask(_) with k => k(30) + k(40) } } { value => transfer done value } } } { value => { let audited = record(value); audited + 100 } } } { Audit::note(_) with k => k(1) + k(2) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Ask, Audit, Tick, audit, relay}; pub fn invoke() -> i64 / {Ask, Tick} { relay() } pub fn record(value: i64) -> i64 / Audit { audit(value) }".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Ask { [2,2] ask(value: Bool) -> i64; } pub effect Tick { [2,2] tick() -> i64; } pub effect Audit { [2,2] note(value: i64) -> i64; } pub fn relay() -> i64 / {Ask, Tick} { let tick = Tick::tick(); let asked = Ask::ask(false); tick + asked } pub fn audit(value: i64) -> i64 / Audit { Audit::note(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new().compile(request);
+    let outcome = outcome.expect("outer replay must re-enter the retained effectful completion");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 203);
+}
+
+#[test]
 fn service_links_private_helpers_reached_from_specialized_dependency_generics() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(

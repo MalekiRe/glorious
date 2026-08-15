@@ -6565,7 +6565,10 @@ fn lexical_scope_contexts(
                     .iter()
                     .rposition(|entry| *entry == MirScopeEntry::Label(*label))
                     .map(|index| context[..index].to_vec())
-                    .unwrap_or_default();
+                    // Direct branded leaves need not materialize a
+                    // first-class label value. Their explicit cleanups have
+                    // already left the lexical target prefix in `context`.
+                    .unwrap_or_else(|| context.clone());
                 merge_lexical_context(&mut contexts, &mut pending, *target, &exit);
             }
             MirTerminator::Return { .. } | MirTerminator::Unreachable => {}
@@ -18465,6 +18468,45 @@ impl Lowerer<'_> {
             }
             _ => root,
         };
+        // An enclosing effect handler can replay an effectful outer normal
+        // completion after the inner labelled replay graph leaves. Keep that
+        // frame around the label join: its operation is performed only while
+        // evaluating the retained completion, not by the inner graph.
+        let (top_root, completion_effect) = match self.body.expression(top_root).kind.clone() {
+            CoreKind::Handle { computation, clauses } => {
+                let computation = match self.body.expression(computation).kind.clone() {
+                    CoreKind::Block(values) => {
+                        let (tail, prefix) = values.split_last()?;
+                        if !prefix.is_empty() {
+                            return None;
+                        }
+                        *tail
+                    }
+                    _ => computation,
+                };
+                // Do not steal the outer replay row of the three-frame graph
+                // itself: this wrapper must complete a lexical label.
+                let completes_label = match self.body.expression(computation).kind.clone() {
+                    CoreKind::Completion { computation: protected, .. } => {
+                        let protected = match self.body.expression(protected).kind.clone() {
+                            CoreKind::Block(values) => *values.last()?,
+                            _ => protected,
+                        };
+                        matches!(self.body.expression(protected).kind, CoreKind::Label { .. })
+                    }
+                    _ => false,
+                };
+                if completes_label {
+                    let [clause] = clauses.as_slice() else {
+                        return None;
+                    };
+                    (computation, Some(clause.clone()))
+                } else {
+                    (top_root, None)
+                }
+            }
+            _ => (top_root, None),
+        };
         // A label may itself be the protected computation of an ordinary
         // outer completion. Its leave must rejoin that completion, rather
         // than turn into a premature function return.
@@ -18587,6 +18629,14 @@ impl Lowerer<'_> {
         let retained_outer_completion_valid = retained_outer_completion
             .as_ref()
             .is_none_or(|clause| pattern_is_irrefutable(&clause.pattern));
+        let completion_effect_valid = completion_effect.as_ref().is_none_or(|clause| {
+            !clause.terminal
+                && clause.patterns.len() == clause.payload_types.len()
+                && clause.patterns.iter().all(pattern_is_irrefutable)
+                && clause.continuation.is_some()
+                && replay(clause)
+                && !self.handler_body_uses_snapshot_alias(clause.body)
+        });
         if !root_prefix.is_empty()
             || !middle_prefix.is_empty()
             || outer.terminal
@@ -18619,6 +18669,12 @@ impl Lowerer<'_> {
             || !label_cancellation_valid
             || !label_completion_valid
             || !retained_outer_completion_valid
+            || !completion_effect_valid
+            || completion_effect.is_some()
+                && (retained_outer_completion.is_none() || label_completion.is_none())
+            || completion_effect
+                .as_ref()
+                .is_some_and(|clause| clause.effect == outer.effect || clause.effect == middle_clause.effect)
         {
             return None;
         }
@@ -18637,8 +18693,30 @@ impl Lowerer<'_> {
         let outer_payloads = payloads(self, outer);
         let middle_payloads = payloads(self, middle_clause);
         let inner_payloads = payloads(self, inner_clause);
+        let completion_effect_payloads = completion_effect
+            .as_ref()
+            .map(|clause| payloads(self, clause));
         let audit_payloads = label_cancellation.as_ref().map(|(_, clause)| payloads(self, clause));
         let mut entry = std::mem::take(&mut self.instructions);
+        let label_join_block = MirBlockId(6 + u32::from(label_cancellation.is_some()) * 2);
+        let completion_effect_block =
+            MirBlockId(label_join_block.0 + u32::from(completion_effect.is_some()));
+        if let Some(clause) = &completion_effect {
+            entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: completion_effect_payloads
+                    .clone()
+                    .expect("completion effect payloads allocated"),
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Replay {
+                    uses: exact_replay_uses(&clause.resumption)?,
+                },
+                target: completion_effect_block,
+            });
+        }
         if let Some((_, clause)) = &label_cancellation {
             entry.push(MirInstruction::InstallHandler {
                 site: MirHandlerSiteId::UNASSIGNED,
@@ -18773,6 +18851,28 @@ impl Lowerer<'_> {
             self.values = boundary_values.clone();
             self.bind_completion_clause(clause, *join)?;
             let value = self.value(clause.body)?;
+            let mut instructions = std::mem::take(&mut self.instructions);
+            if completion_effect.is_some() {
+                instructions.push(MirInstruction::UninstallHandler);
+            }
+            Some((instructions, value))
+        } else {
+            None
+        };
+        let completion_effect_arm = if let Some(clause) = &completion_effect {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(
+                &clause.patterns,
+                completion_effect_payloads
+                    .as_deref()
+                    .expect("completion effect payloads allocated"),
+            )?;
+            let value = self.direct_handler_clause_value(clause)?;
+            self.instructions.push(MirInstruction::Cancel {
+                site: MirResumptionSiteId::UNASSIGNED,
+            });
             Some((std::mem::take(&mut self.instructions), value))
         } else {
             None
@@ -18797,7 +18897,7 @@ impl Lowerer<'_> {
                         |(brand, value, _)| MirTerminator::Leave {
                             label: MirLabelId::UNASSIGNED,
                             brand: *brand,
-                            target: MirBlockId(if label_cancellation.is_some() { 8 } else { 6 }),
+                            target: label_join_block,
                             arguments: vec![*value],
                             cleanup: MirCleanupPlan {
                                 source_storage_scope: MirSourceStorageScopeId::ROOT,
@@ -18898,6 +18998,14 @@ impl Lowerer<'_> {
                                 .as_ref()
                                 .map_or(join, |(_, value)| *value),
                         },
+                    });
+                }
+                if let Some((instructions, value)) = completion_effect_arm {
+                    blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
+                        parameters: vec![],
+                        instructions,
+                        terminator: MirTerminator::Return { value },
                     });
                 }
                 blocks

@@ -1053,6 +1053,7 @@ pub enum VmInstruction {
     Leave {
         brand_owner: DefKey,
         brand_label: u32,
+        handler_depth: u32,
         target: u32,
         arguments: Vec<u32>,
         destinations: Vec<u32>,
@@ -1155,6 +1156,7 @@ pub enum VmStorageErasureAction {
 struct PendingLeave {
     brand_owner: DefKey,
     brand_label: u32,
+    handler_depth: u32,
     target: u32,
     arguments: Vec<u32>,
     destinations: Vec<u32>,
@@ -1836,7 +1838,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// every nonlocal Leave, so compact VM cleanup cannot lose its MIR proof.
 /// Schema 83 makes all generic and frozen integer shifts reject a count at or
 /// beyond the operand width instead of silently masking it.
-pub const STAGE0_VM_SCHEMA: u32 = 83;
+pub const STAGE0_VM_SCHEMA: u32 = 84;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2545,6 +2547,7 @@ fn emit_with_specialized_lifted_targets(
                 instructions.push(VmInstruction::Leave {
                     brand_owner: brand.owner,
                     brand_label: brand.label,
+                    handler_depth: retained_handler_depth(&block.instructions),
                     target,
                     arguments: arguments.clone(),
                     destinations: function.blocks[target_index(target, &starts)?]
@@ -2617,6 +2620,17 @@ fn emit_with_specialized_lifted_targets(
         function,
     })
 }
+fn retained_handler_depth(instructions: &[MirInstruction]) -> u32 {
+    instructions
+        .iter()
+        .fold(0i64, |depth, instruction| match instruction {
+            MirInstruction::InstallHandler { .. } => depth + 1,
+            MirInstruction::UninstallHandler => depth - 1,
+            _ => depth,
+        })
+        .max(0) as u32
+}
+
 fn edge_length(arguments: &[MirLocal], target: &crate::mir::MirBlock) -> u32 {
     let transfers = arguments
         .iter()
@@ -4395,6 +4409,7 @@ impl<'a> Decoder<'a> {
             55 => {
                 let brand_owner = self.def_key()?;
                 let brand_label = self.u32()?;
+                let handler_depth = self.u32()?;
                 let target = self.u32()?;
                 let count = self.count("leave arguments", MAX_DECODE_REGISTERS)?;
                 let mut arguments = Vec::with_capacity(count);
@@ -4414,6 +4429,7 @@ impl<'a> Decoder<'a> {
                 Ok(VmInstruction::Leave {
                     brand_owner,
                     brand_label,
+                    handler_depth,
                     target,
                     arguments,
                     destinations,
@@ -8883,6 +8899,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 advances = false;
             }
             VmInstruction::Leave {
+                handler_depth,
                 target,
                 arguments,
                 destinations,
@@ -8921,7 +8938,11 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 // A leave is a nonlocal exit: suspended continuations and all
                 // frame-branded snapshot capabilities are invalidated before
                 // control reaches its lexical destination.
-                states.handlers.clear();
+                let handler_depth = *handler_depth as usize;
+                if handler_depth > states.handlers.len() {
+                    return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                states.handlers.truncate(handler_depth);
                 states.snapshots.fill(None);
                 for &destination in destinations {
                     write(&mut states, destination)?;
@@ -13487,6 +13508,7 @@ fn execute(
             VmInstruction::Leave {
                 brand_owner,
                 brand_label,
+                handler_depth,
                 target,
                 arguments,
                 destinations,
@@ -13498,6 +13520,7 @@ fn execute(
                     PendingLeave {
                         brand_owner,
                         brand_label,
+                        handler_depth,
                         target,
                         arguments,
                         destinations,
@@ -13602,7 +13625,11 @@ fn complete_pending_leave(
     // A leave has crossed every active lexical handler. Any captured one-shot
     // continuation was abandoned by the source control transfer, so no frame
     // survives that could later re-authorize a stale snapshot.
-    handlers.clear();
+    let handler_depth = leave.handler_depth as usize;
+    if handler_depth > handlers.len() {
+        return Err(VmArtifactError::HandlerStateMismatch);
+    }
+    handlers.truncate(handler_depth);
     Ok(leave.target as usize)
 }
 fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
@@ -13905,6 +13932,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         VmInstruction::Leave {
             brand_owner,
             brand_label,
+            handler_depth,
             target,
             arguments,
             destinations,
@@ -13913,6 +13941,7 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(55);
             output.extend_from_slice(&brand_owner.0.as_bytes());
             output.extend_from_slice(&brand_label.to_le_bytes());
+            output.extend_from_slice(&handler_depth.to_le_bytes());
             output.extend_from_slice(&target.to_le_bytes());
             output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
             for argument in arguments {
@@ -16775,6 +16804,7 @@ fn execute_with_arguments(
             VmInstruction::Leave {
                 brand_owner,
                 brand_label,
+                handler_depth,
                 target,
                 arguments,
                 destinations,
@@ -16786,6 +16816,7 @@ fn execute_with_arguments(
                     PendingLeave {
                         brand_owner: *brand_owner,
                         brand_label: *brand_label,
+                        handler_depth: *handler_depth,
                         target: *target,
                         arguments: arguments.clone(),
                         destinations: destinations.clone(),
