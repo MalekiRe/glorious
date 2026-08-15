@@ -7379,13 +7379,13 @@ fn source_lowering_drops_protected_custom_aggregate_once_after_forwarded_cancell
         }
         pub fn main() -> i64 {
             let count = 41;
-            handle {
+            let result = handle {
                 let probe = Probe { target: &mut count };
                 handle Ask::ask(1) { Ask::ask(0, _) => 0 }
             } {
                 Ask::ask(_, _) => 0,
             };
-            count
+            count + result
         }
     "#;
     let package = PackageKey("core-forwarded-cancellation-drop@0.1.0".into());

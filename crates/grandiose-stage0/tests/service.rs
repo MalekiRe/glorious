@@ -8682,7 +8682,7 @@ fn service_drops_a_custom_aggregate_once_across_forward_and_cancellation() {
         }
         pub fn main() -> i64 {
             let count = 41;
-            handle {
+            let result = handle {
                 let probe = Probe { target: &mut count };
                 handle Ask::ask(1) {
                     Ask::ask(0, _) => 0,
@@ -8690,7 +8690,7 @@ fn service_drops_a_custom_aggregate_once_across_forward_and_cancellation() {
             } {
                 Ask::ask(_, _) => 0,
             };
-            count
+            count + result
         }
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -8698,6 +8698,43 @@ fn service_drops_a_custom_aggregate_once_across_forward_and_cancellation() {
     let artifact = outcome.artifact.unwrap();
     assert_eq!(artifact.run_i64().unwrap(), 42);
     let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_forwards_multifield_cancellation_without_duplicating_protected_drops() {
+    // This is the same structural two-frame control path with a heterogeneous
+    // payload, two protected custom-Drop owners, and a suffix depending on
+    // the handler result.  `ask(true, 1)` misses the inner arm, so only the
+    // outer cancellation path is reachable and each owner must contribute
+    // exactly one increment in reverse lexical cleanup order.
+    let source = r#"
+        effect Ask { [0, 1] ask(flag: Bool, value: i64) -> i64; }
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0, 1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> {
+            drop(&mut self) -> { *self.target = *self.target + 1; }
+        }
+        pub fn main() -> i64 {
+            let count = 40;
+            let result = handle {
+                let first = Probe { target: &mut count };
+                let second = Probe { target: &mut count };
+                handle Ask::ask(true, 1) {
+                    Ask::ask(false, 0, _) => 0,
+                }
+            } {
+                Ask::ask(_, _, _) => 0,
+            };
+            count + result
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
     assert_eq!(decoded.run_i64().unwrap(), 42);
 }
 
