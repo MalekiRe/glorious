@@ -22020,9 +22020,15 @@ impl Lowerer<'_> {
                     let handler_index = arguments.iter().position(|argument| {
                         matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
                     })?;
-                    if handler_index + 1 != arguments.len()
-                        || arguments[..handler_index].iter().any(|argument| {
-                            matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
+                    if arguments
+                        .iter()
+                        .enumerate()
+                        .any(|(index, argument)| {
+                            index != handler_index
+                                && matches!(
+                                    self.body.expression(*argument).kind,
+                                    CoreKind::Handle { .. }
+                                )
                         })
                     {
                         return None;
@@ -22078,20 +22084,19 @@ impl Lowerer<'_> {
                 )
                 }
             }
-            // Preserve left-to-right strict evaluation when the handled
-            // computation is the final operand of an intrinsic expression.
-            // The earlier operands execute before the dynamic frame is
-            // installed; after either normal call completion or a terminal
-            // clause, the same Core operand is supplied from `values` and
-            // the intrinsic finishes once.
+            // Preserve left-to-right strict evaluation when one intrinsic
+            // operand is a handled computation. Earlier operands execute
+            // before the dynamic frame is installed. The handler result is
+            // then supplied from `values`, so the remaining operands run
+            // exactly once after normal or terminal completion.
             CoreKind::IntrinsicCall { arguments, .. } => {
                 let handler_index = arguments.iter().position(|argument| {
                     matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
                 })?;
-                if handler_index + 1 != arguments.len()
-                    || arguments[..handler_index].iter().any(|argument| {
-                        matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
-                    })
+                if arguments.iter().enumerate().any(|(index, argument)| {
+                    index != handler_index
+                        && matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
+                })
                 {
                     return None;
                 }
@@ -22119,10 +22124,13 @@ impl Lowerer<'_> {
                 let handler_index = arguments.iter().position(|argument| {
                     matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
                 })?;
-                if handler_index + 1 != arguments.len()
-                    || matches!(self.body.expression(callee).kind, CoreKind::Handle { .. })
-                    || arguments[..handler_index].iter().any(|argument| {
-                        matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
+                if matches!(self.body.expression(callee).kind, CoreKind::Handle { .. })
+                    || arguments.iter().enumerate().any(|(index, argument)| {
+                        index != handler_index
+                            && matches!(
+                                self.body.expression(*argument).kind,
+                                CoreKind::Handle { .. }
+                            )
                     })
                 {
                     return None;

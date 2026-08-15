@@ -18841,6 +18841,28 @@ fn service_evaluates_terminal_opaque_handler_as_a_strict_call_argument() {
 }
 
 #[test]
+fn service_evaluates_opaque_handler_before_a_later_strict_operand() {
+    // The protected call is evaluated first. Only after the handler's result
+    // is available may the later right operand execute and combine with it.
+    let source = "effect Signal { [1,1] ping(value: i64) -> i64; } pub fn relay(value: i64) -> i64 / Signal { Signal::ping(value) } pub fn apply(callback: (i64) -> i64 / Signal, value: i64) -> i64 / Signal { callback(value) } pub fn main() -> i64 { let callback = relay; handle apply(callback, 40) { Signal::ping(value) with k => k(value) } + 1 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_evaluates_terminal_opaque_handler_before_a_later_strict_operand() {
+    // Terminal cancellation must still rejoin the strict expression and only
+    // then evaluate the operand to the handler's right.
+    let source = "effect Signal { [1,1] ping(value: i64) -> i64; halt(value: i64) -> !; } pub fn relay(value: i64) -> i64 / Signal { let ping = Signal::ping(value); Signal::halt(ping) } pub fn apply(callback: (i64) -> i64 / Signal, value: i64) -> i64 / Signal { callback(value) } pub fn main() -> i64 { let callback = relay; handle apply(callback, 40) { Signal::ping(value) with k => k(value + 2); Signal::halt(value) => value } + 1 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through
