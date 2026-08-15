@@ -4586,6 +4586,7 @@ impl MirFunction {
             };
             let block = &self.blocks[index];
             live.extend(block.parameters.iter().copied());
+            let mut unique_loans = BTreeMap::<MirLocal, MirLocal>::new();
             for instruction in &block.instructions {
                 let destination = destination(instruction);
                 let mut inputs = references(instruction);
@@ -4608,6 +4609,23 @@ impl MirFunction {
                             local.0
                         ));
                     }
+                }
+                if let MirInstruction::Store { dst, .. } = instruction
+                    && unique_loans.values().any(|borrowed| borrowed == dst)
+                {
+                    return Err(
+                        "MIR replaces addressable source storage while a unique loan is live"
+                            .into(),
+                    );
+                }
+                if let MirInstruction::Borrow {
+                    dst,
+                    src,
+                    unique: true,
+                    ..
+                } = instruction
+                {
+                    unique_loans.insert(*dst, *src);
                 }
                 if let Some(destination) = destination {
                     live.insert(destination);
@@ -5465,6 +5483,7 @@ impl MirFunction {
                     &self.control.move_paths,
                     &self.control.source_storage,
                 )?;
+                self.validate_leave_cleanup_payloads(index, arguments, cleanup)?;
                 self.validate_edge(*target, arguments)
             }
             MirTerminator::SwitchBool {
@@ -5490,6 +5509,55 @@ impl MirFunction {
             }
             MirTerminator::Unreachable => Ok(()),
         }
+    }
+    fn validate_leave_cleanup_payloads(
+        &self,
+        block: usize,
+        arguments: &[MirLocal],
+        cleanup: &MirCleanupPlan,
+    ) -> Result<(), String> {
+        // A cleanup path must never consume the value protected by the leave
+        // edge. Parameter-origin bindings are the only compact-MIR mapping
+        // available before full source-storage lowering, and are exact rather
+        // than spelling-based.
+        for path in &cleanup.moved_paths {
+            let path = &self.control.move_paths.paths[path.0 as usize];
+            let binding = &self.control.move_paths.bindings[path.binding.0 as usize];
+            if let PlaceBindingOrigin::Parameter { index } = binding.origin
+                && self
+                    .parameters
+                    .get(index as usize)
+                    .is_some_and(|local| arguments.contains(local))
+            {
+                return Err("MIR cleanup disarms a protected leave payload".into());
+            }
+        }
+
+        // Raw hostile MIR has no PlaceFlow source-storage arena. It may use
+        // ordinary SSA temporaries, but a `Leave` that creates a source value
+        // in the exiting block and carries a different payload must not claim
+        // that no cleanup is necessary. Frozen lowering supplies the typed
+        // scope/path table above; raw input is rejected rather than guessed.
+        if self.control.move_paths.bindings.is_empty()
+            && cleanup.moved_paths.is_empty()
+            && cleanup.moved_places.is_empty()
+        {
+            let has_unprotected_owner = self.blocks[block]
+                .instructions
+                .iter()
+                .filter_map(destination)
+                .filter(|local| !arguments.contains(local))
+                .any(|local| {
+                    !matches!(
+                        self.local_type(local),
+                        Ok(Type::Callable { result, .. }) if matches!(result.as_ref(), Type::Never)
+                    )
+                });
+            if has_unprotected_owner {
+                return Err("MIR leave exits initialized source storage without cleanup".into());
+            }
+        }
+        Ok(())
     }
 }
 

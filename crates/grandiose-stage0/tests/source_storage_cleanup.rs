@@ -9,7 +9,7 @@
 use grandiose_stage0::{
     emit_vm, CoreId, DefKey, Digest, EffectRow, LabelBrand, Lifetime, MirBlock, MirBlockId,
     MirCleanupPlan, MirControlTables, MirFunction, MirInstruction, MirLocal, MirLocalDecl,
-    MirScopeId, MirTerminator, Mutability, Quantity, ScalarType, Type,
+    MirScopeId, MirSourceStorageScopeId, MirTerminator, Mutability, Quantity, ScalarType, Type,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -85,6 +85,8 @@ fn mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave() {
                     target: MirBlockId(1),
                     arguments: vec![MirLocal(1)],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
@@ -174,6 +176,8 @@ fn mir_requires_end_borrow_before_source_storage_cleanup() {
                     target: MirBlockId(1),
                     arguments: vec![MirLocal(2)],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
@@ -260,6 +264,8 @@ fn mir_requires_drop_flag_for_divergent_source_storage_initialization() {
                     target: MirBlockId(3),
                     arguments: vec![MirLocal(1)],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
@@ -276,6 +282,8 @@ fn mir_requires_drop_flag_for_divergent_source_storage_initialization() {
                     target: MirBlockId(3),
                     arguments: vec![MirLocal(1)],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],

@@ -247,6 +247,8 @@ fn mir_rejects_cleanup_that_disarms_a_protected_leave_payload() {
                     target: MirBlockId(1),
                     arguments: vec![MirLocal(0)],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![MirMovePathId(0)],
                         moved_places: vec![MoveFact {
                             root: "payload".into(),
