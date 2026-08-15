@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     header::ParsedHeader,
-    identity::{DefKey, ModuleKey},
+    identity::{DefKey, ModuleKey, package_module_alias},
     interface::{DefinitionNamespace, PackageInterface},
     source::Span,
     types::GenericKind,
@@ -302,10 +302,14 @@ impl DefinitionIndex {
         }
         self.package_roots.clear();
         for module in self.modules.keys().filter(|module| module.path == "crate") {
-            self.package_roots
-                .entry(package_name(&module.package))
-                .or_default()
-                .push(module.clone());
+            // Normalized request worlds have already rejected an invalid
+            // package alias. Retain this guard because DefinitionIndex is a
+            // public defensive boundary and can also be built from hostile or
+            // recovered interface products outside a service request.
+            let Some(alias) = package_module_alias(&module.package) else {
+                continue;
+            };
+            self.package_roots.entry(alias).or_default().push(module.clone());
         }
         for roots in self.package_roots.values_mut() {
             roots.sort();
@@ -1608,13 +1612,6 @@ impl DefinitionIndex {
         visited.remove(&(module.clone(), namespace));
         names
     }
-}
-
-fn package_name(package: &crate::identity::PackageKey) -> String {
-    package
-        .0
-        .split_once('@')
-        .map_or_else(|| package.0.clone(), |(name, _)| name.to_owned())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

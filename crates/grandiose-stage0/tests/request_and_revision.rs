@@ -68,6 +68,43 @@ fn normalization_rejects_forged_file_identity_for_a_logical_source() {
 }
 
 #[test]
+fn normalization_rejects_invalid_and_colliding_dependency_source_module_aliases() {
+    let root = PackageKey("app@0.1.0".into());
+    let root_source = SourceInput::new(
+        root.clone(),
+        LogicalPath::parse("src/main.glorious").unwrap(),
+        b"main() { () }".as_slice(),
+    );
+    let invalid = SourceInput::new(
+        PackageKey("9lives@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn answer() { () }".as_slice(),
+    );
+    assert!(matches!(
+        request(vec![root_source.clone(), invalid]).normalize(),
+        Err(InputError::InvalidPackageModuleAlias(package)) if package.0 == "9lives@0.1.0"
+    ));
+
+    let hyphenated = SourceInput::new(
+        PackageKey("math-lib@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn answer() { () }".as_slice(),
+    );
+    let underscored = SourceInput::new(
+        PackageKey("math_lib@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn answer() { () }".as_slice(),
+    );
+    assert!(matches!(
+        request(vec![root_source, hyphenated, underscored]).normalize(),
+        Err(InputError::DuplicatePackageModuleAlias { alias, first, second })
+            if alias == "math_lib"
+                && first.0 == "math-lib@0.1.0"
+                && second.0 == "math_lib@0.1.0"
+    ));
+}
+
+#[test]
 fn stage_zero_build_identity_advances_the_vm_artifact_boundary() {
     let identity = CompilerBuildIdentity::stage0(Digest::of_bytes(b"stage0-vm"));
     assert_eq!(identity.bytecode_generation, STAGE0_BYTECODE_GENERATION);

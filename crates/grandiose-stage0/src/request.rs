@@ -1,7 +1,7 @@
-use std::{collections::BTreeMap, fmt, sync::Arc};
+use std::{collections::{BTreeMap, BTreeSet}, fmt, sync::Arc};
 
 use crate::{
-    identity::{Digest, FileKey, PackageKey},
+    identity::{Digest, FileKey, PackageKey, package_module_alias},
     runtime_manifest::RuntimeManifestInput,
 };
 
@@ -195,6 +195,12 @@ pub enum InputError {
     },
     InvalidUtf8(FileKey),
     InvalidLogicalPath(String),
+    InvalidPackageModuleAlias(PackageKey),
+    DuplicatePackageModuleAlias {
+        alias: String,
+        first: PackageKey,
+        second: PackageKey,
+    },
     DuplicateCapability(String),
     InvalidCapability(String),
     InvalidRuntimeManifest,
@@ -226,6 +232,20 @@ impl fmt::Display for InputError {
             ),
             Self::InvalidUtf8(file) => write!(formatter, "source {file:?} is not UTF-8"),
             Self::InvalidLogicalPath(path) => write!(formatter, "invalid logical path: {path}"),
+            Self::InvalidPackageModuleAlias(package) => write!(
+                formatter,
+                "package `{}` cannot form a valid source module alias",
+                package.0
+            ),
+            Self::DuplicatePackageModuleAlias {
+                alias,
+                first,
+                second,
+            } => write!(
+                formatter,
+                "packages `{}` and `{}` both normalize to source module alias `{alias}`",
+                first.0, second.0
+            ),
             Self::DuplicateCapability(capability) => {
                 write!(formatter, "duplicate capability: {capability}")
             }
@@ -282,6 +302,33 @@ impl CompilationRequest {
         for pair in self.sources.windows(2) {
             if pair[0].key == pair[1].key {
                 return Err(InputError::DuplicateFileKey(pair[0].key));
+            }
+        }
+
+        // Source package bindings are semantic input, not a resolver
+        // convenience. Validate the exact manifest-name to identifier bridge
+        // before any module graph or interface product is published. This
+        // makes `math-lib@…` available to source as `math_lib`, while two
+        // distinct package identities that would claim the same source name
+        // fail deterministically even if no body happens to import either.
+        let packages = self
+            .sources
+            .iter()
+            .map(|source| source.package.clone())
+            .chain(std::iter::once(self.root_package.clone()))
+            .collect::<BTreeSet<_>>();
+        let mut aliases = BTreeMap::new();
+        for package in packages {
+            let alias = package_module_alias(&package)
+                .ok_or_else(|| InputError::InvalidPackageModuleAlias(package.clone()))?;
+            if let Some(first) = aliases.insert(alias.clone(), package.clone())
+                && first != package
+            {
+                return Err(InputError::DuplicatePackageModuleAlias {
+                    alias,
+                    first,
+                    second: package,
+                });
             }
         }
 

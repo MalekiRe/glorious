@@ -9820,6 +9820,23 @@ fn service_links_public_dependency_package_interfaces_and_bodies() {
 }
 
 #[test]
+fn service_normalizes_hyphenated_dependency_package_names_into_source_module_aliases() {
+    // Package identity remains the manifest key (`math-lib@…`), while source
+    // paths use the deterministic language-level module alias (`math_lib`).
+    // Exercise the complete package/interface/body/VM route so this cannot
+    // regress into a header-only spelling normalization.
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math_lib::answer; pub fn main() -> i64 { answer() }",
+            "math-lib@0.1.0",
+            "pub fn answer() -> i64 { 42 }",
+        ))
+        .expect("a hyphenated dependency package must be reachable by its normalized alias");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_materializes_reachable_generic_dependency_callables() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(
@@ -10102,7 +10119,7 @@ fn service_rejects_unrooted_dependency_source_packages_instead_of_ignoring_them(
 }
 
 #[test]
-fn service_preserves_package_name_ambiguity_between_multiple_dependency_interfaces() {
+fn service_rejects_colliding_dependency_source_module_aliases_before_interface_publication() {
     let mut request = request("use math::answer; pub fn main() -> i64 { answer() }");
     for (package, value) in [("math@0.1.0", "1"), ("math@0.2.0", "2")] {
         request.sources.push(SourceInput::new(
@@ -10111,16 +10128,15 @@ fn service_preserves_package_name_ambiguity_between_multiple_dependency_interfac
             format!("pub fn answer() -> i64 {{ {value} }}").into_bytes(),
         ));
     }
-    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
-        StageZeroCompiler::new().compile(request)
-    else {
-        panic!("same-name dependency packages unexpectedly selected by source order");
-    };
+    let error = StageZeroCompiler::new()
+        .compile(request)
+        .expect_err("colliding dependency aliases must be rejected before resolution");
+    let diagnostics = error.diagnostics();
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G3328"),
-        "missing deterministic dependency package ambiguity diagnostic: {diagnostics:#?}"
+            .any(|diagnostic| diagnostic.code == "G7036"),
+        "missing deterministic package-alias collision diagnostic: {diagnostics:#?}"
     );
 }
 

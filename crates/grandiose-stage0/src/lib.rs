@@ -70,6 +70,7 @@ pub use header::{
 };
 pub use identity::{
     DefKey, Digest, FileKey, ModuleKey, PackageKey, RevisionId, implementation_method_key,
+    package_module_alias,
 };
 pub use instance::{
     CallSummary, InstanceArgument, InstanceGraph, InstanceGraphError, InstanceKey,

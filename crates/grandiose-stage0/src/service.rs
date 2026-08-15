@@ -794,6 +794,10 @@ impl CompileDiagnostic {
             }
             InputError::InvalidUtf8(_) => ("G7018", DiagnosticClass::InputCorruption),
             InputError::InvalidLogicalPath(_) => ("G7019", DiagnosticClass::Request),
+            InputError::InvalidPackageModuleAlias(_) => ("G7036", DiagnosticClass::Request),
+            InputError::DuplicatePackageModuleAlias { .. } => {
+                ("G7036", DiagnosticClass::Request)
+            }
             InputError::DuplicateCapability(_) => ("G7020", DiagnosticClass::Request),
             InputError::InvalidCapability(_) => ("G7021", DiagnosticClass::Request),
             InputError::InvalidRuntimeManifest => ("G7022", DiagnosticClass::Request),

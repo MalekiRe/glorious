@@ -53,6 +53,31 @@ impl fmt::Display for Digest {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PackageKey(pub String);
 
+/// The source-level module binding for one manifest package identity.
+///
+/// Package identity deliberately preserves the exact manifest spelling and
+/// version, while paths in Glorious use ordinary identifiers.  Generation one
+/// therefore maps the manifest's conventional hyphen spelling to `_` before
+/// resolution.  Invalid aliases are rejected when a request is normalized;
+/// this helper returns `None` so defensive consumers of independently
+/// constructed interface products fail closed rather than inventing a raw
+/// textual fallback.
+pub fn package_module_alias(package: &PackageKey) -> Option<String> {
+    let name = package
+        .0
+        .split_once('@')
+        .map_or(package.0.as_str(), |(name, _)| name);
+    let alias = name.replace('-', "_");
+    let mut bytes = alias.bytes();
+    match bytes.next() {
+        Some(byte) if byte.is_ascii_alphabetic() || byte == b'_' => {}
+        _ => return None,
+    }
+    bytes
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        .then_some(alias)
+}
+
 /// A stable file identity is derived from its owning package and logical path,
 /// rather than host checkout layout or an arena ordinal.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
