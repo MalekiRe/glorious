@@ -130,11 +130,26 @@ pub struct PlaceBindingId(pub u32);
 /// allocation can join identities without name resolution.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum PlaceBindingOrigin {
-    Parameter { index: u32 },
-    Let { expression: CoreId },
-    HandlerBinder { handle: CoreId, clause: u32, binder: u32 },
-    HandlerResumption { handle: CoreId, clause: u32 },
-    CompletionBinder { completion: CoreId, clause: u32, binder: u32 },
+    Parameter {
+        index: u32,
+    },
+    Let {
+        expression: CoreId,
+    },
+    HandlerBinder {
+        handle: CoreId,
+        clause: u32,
+        binder: u32,
+    },
+    HandlerResumption {
+        handle: CoreId,
+        clause: u32,
+    },
+    CompletionBinder {
+        completion: CoreId,
+        clause: u32,
+        binder: u32,
+    },
 }
 
 /// Presentation metadata for a [`PlaceBindingId`].  `spelling` is never a
@@ -512,12 +527,7 @@ impl Analyzer<'_> {
         }
     }
 
-    fn activate_binding(
-        &mut self,
-        spelling: &str,
-        identity: String,
-        origin: PlaceBindingOrigin,
-    ) {
+    fn activate_binding(&mut self, spelling: &str, identity: String, origin: PlaceBindingOrigin) {
         self.bindings.intern(&identity, spelling, origin);
         self.scopes
             .last_mut()
