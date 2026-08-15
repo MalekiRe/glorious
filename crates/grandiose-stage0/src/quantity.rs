@@ -48,6 +48,16 @@ impl Quantity {
         self.lower <= actual.lower && upper_leq(actual.upper, self.upper)
     }
 
+    /// The strongest interval which both quantities permit.  Structural
+    /// aggregates use this operation: every field (and every enum variant)
+    /// must be safe for the aggregate to be used at a given quantity.
+    pub fn intersection(self, other: Self) -> Result<Self, QuantityError> {
+        Self::new(
+            self.lower.max(other.lower),
+            upper_min(self.upper, other.upper),
+        )
+    }
+
     /// Sequencing adds uses on a normal path.
     pub fn sequence(self, other: Self) -> Result<Self, QuantityError> {
         Self::new(
@@ -103,6 +113,14 @@ fn upper_max(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.max(right)),
         _ => None,
+    }
+}
+
+fn upper_min(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
     }
 }
 

@@ -522,6 +522,17 @@ fn fallback_structural_const(kind: ConstKind) -> GenericArgument {
     }
 }
 
+/// Extract the interval carried by the language-owned `Use<Q>` relation.
+/// Its prelude identity has exactly one quantity const slot; malformed source
+/// is diagnosed by the principal-use validation pass instead of being treated
+/// as an arbitrary trait implementation.
+fn use_relation_quantity(reference: &ElaboratedTraitReference) -> Option<Quantity> {
+    match reference.arguments.as_slice() {
+        [GenericArgument::ConstQuantity(quantity)] => Some(*quantity),
+        _ => None,
+    }
+}
+
 /// Instantiate a nominal's own layout under rigid identity arguments. This
 /// preserves which generic field occurrences actually contribute to layout
 /// while avoiding body-local inference at the declaration boundary.
@@ -905,6 +916,242 @@ impl ElaboratedInterface {
                 ty: Some(ty),
             },
         );
+    }
+
+    /// Validate the language-owned `Use` relation once every nominal layout
+    /// has been frozen.  Unlike ordinary trait selection, `Use` has a single
+    /// principal interval per type: source implementations may narrow the
+    /// structural interval, but cannot add an alternative capability.
+    pub fn validate_principal_use_rules(&self) -> Vec<SignatureDiagnostic> {
+        let mut diagnostics = Vec::new();
+
+        for implementation in self.definitions.values().filter_map(|header| match header {
+            ElaboratedHeader::Implementation(implementation)
+                if implementation.relation.definition
+                    == crate::resolution::language_use_trait_definition() =>
+            {
+                Some(implementation)
+            }
+            _ => None,
+        }) {
+            let Some(declared) = use_relation_quantity(&implementation.relation) else {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4194",
+                    message: "a `Use` implementation must declare exactly one quantity interval"
+                        .into(),
+                });
+                continue;
+            };
+            if !matches!(implementation.self_ty, Type::Nominal { .. }) {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4194",
+                    message: "manual `Use` implementations are restricted to nominal types".into(),
+                });
+                continue;
+            }
+            let Some(structural) =
+                self.structural_principal_use(&implementation.self_ty, &mut vec![])
+            else {
+                // A type parameter without an ownership contract has no
+                // closed interval at an interface boundary.  Its concrete
+                // applications are checked when they become ownership
+                // relevant; do not invent an interval here.
+                continue;
+            };
+            if !structural.contains(declared) {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4194",
+                    message: format!(
+                        "manual `Use` interval {:?} widens the structural principal interval {:?}",
+                        declared, structural
+                    ),
+                });
+            }
+        }
+
+        // Derive each declared nominal with rigid identity arguments. This
+        // catches incompatible field requirements even when the nominal is
+        // never constructed by a body in the current package.
+        for (definition, header) in &self.definitions {
+            let ElaboratedHeader::Nominal {
+                generic_kinds,
+                layout,
+                ..
+            } = header
+            else {
+                continue;
+            };
+            let nominal = Type::Nominal {
+                definition: *definition,
+                arguments: nominal_identity_arguments(generic_kinds),
+            };
+            if let Some((left, right)) =
+                self.empty_direct_structural_use_intersection(layout, &nominal)
+            {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4195",
+                    message: format!(
+                        "structural principal use quantity intersection is empty between {:?} and {:?}",
+                        left, right
+                    ),
+                });
+            }
+        }
+
+        diagnostics
+    }
+
+    /// Return the one principal interval for a closed type. `None` means the
+    /// type still contains an unconstrained generic or projection and must be
+    /// resolved at its concrete use site.
+    pub fn principal_use_interval(&self, ty: &Type) -> Option<Quantity> {
+        self.principal_use(ty, &mut vec![])
+    }
+
+    fn principal_use(&self, ty: &Type, active: &mut Vec<Type>) -> Option<Quantity> {
+        self.manual_principal_use(ty)
+            .or_else(|| self.structural_principal_use(ty, active))
+    }
+
+    fn manual_principal_use(&self, ty: &Type) -> Option<Quantity> {
+        self.definitions.values().find_map(|header| {
+            let ElaboratedHeader::Implementation(implementation) = header else {
+                return None;
+            };
+            (implementation.relation.definition
+                == crate::resolution::language_use_trait_definition()
+                && implementation.self_ty == *ty)
+                .then(|| use_relation_quantity(&implementation.relation))
+                .flatten()
+        })
+    }
+
+    fn structural_principal_use(&self, ty: &Type, active: &mut Vec<Type>) -> Option<Quantity> {
+        match ty {
+            Type::Unit | Type::Never | Type::Scalar(_) => Some(Quantity::UNRESTRICTED),
+            Type::Tuple(values) => {
+                values
+                    .iter()
+                    .try_fold(Quantity::UNRESTRICTED, |quantity, value| {
+                        let field = self.principal_use(value, active)?;
+                        quantity.intersection(field).ok()
+                    })
+            }
+            // An array is moved as one aggregate, but every element must be
+            // legal under that aggregate's interval.
+            Type::Array(value) => self.principal_use(value, active),
+            Type::Reference { mutability, .. } => Some(match mutability {
+                Mutability::Shared => Quantity::UNRESTRICTED,
+                Mutability::Unique => Quantity::AFFINE,
+            }),
+            Type::Callable { invocation, .. } => Some(*invocation),
+            Type::Nominal {
+                definition,
+                arguments,
+            } => {
+                if active.iter().any(|value| value == ty) {
+                    return None;
+                }
+                active.push(ty.clone());
+                let result = match self.definitions.get(definition) {
+                    Some(ElaboratedHeader::Nominal { layout, .. }) => match layout {
+                        ElaboratedNominalLayout::Struct(fields) => {
+                            fields
+                                .iter()
+                                .try_fold(Quantity::UNRESTRICTED, |quantity, field| {
+                                    let field = substitute_alias_generic_identity(
+                                        field.ty.clone(),
+                                        arguments,
+                                    );
+                                    let field = self.principal_use(&field, active)?;
+                                    quantity.intersection(field).ok()
+                                })
+                        }
+                        ElaboratedNominalLayout::Enum(variants) => {
+                            variants
+                                .iter()
+                                .try_fold(Quantity::UNRESTRICTED, |quantity, variant| {
+                                    let fields: Vec<Type> = match &variant.payload {
+                                        ElaboratedEnumVariantPayload::Unit => vec![],
+                                        ElaboratedEnumVariantPayload::Tuple(fields) => {
+                                            fields.clone()
+                                        }
+                                        ElaboratedEnumVariantPayload::Struct(fields) => {
+                                            fields.iter().map(|field| field.ty.clone()).collect()
+                                        }
+                                    };
+                                    fields.into_iter().try_fold(quantity, |quantity, field| {
+                                        let field =
+                                            substitute_alias_generic_identity(field, arguments);
+                                        let field = self.principal_use(&field, active)?;
+                                        quantity.intersection(field).ok()
+                                    })
+                                })
+                        }
+                        ElaboratedNominalLayout::Opaque => None,
+                    },
+                    // `Available<E>` and opaque language carriers do not
+                    // have a source-owned structural layout.
+                    _ => None,
+                };
+                active.pop();
+                result
+            }
+            Type::Generic(_)
+            | Type::Infer(_)
+            | Type::Error
+            | Type::Projection { .. }
+            | Type::ConstU32(_)
+            | Type::ConstQuantity(_)
+            | Type::ConstGeneric { .. } => None,
+        }
+    }
+
+    /// Find an empty direct field/variant intersection in a nominal layout.
+    /// Unknown generic fields are intentionally deferred, while two known
+    /// intervals which cannot coexist are an unconditional interface error.
+    fn empty_direct_structural_use_intersection(
+        &self,
+        layout: &ElaboratedNominalLayout,
+        nominal: &Type,
+    ) -> Option<(Quantity, Quantity)> {
+        let Type::Nominal { arguments, .. } = nominal else {
+            return None;
+        };
+        let mut fields = Vec::new();
+        match layout {
+            ElaboratedNominalLayout::Struct(values) => {
+                fields.extend(values.iter().map(|field| field.ty.clone()));
+            }
+            ElaboratedNominalLayout::Enum(variants) => {
+                for variant in variants {
+                    match &variant.payload {
+                        ElaboratedEnumVariantPayload::Unit => {}
+                        ElaboratedEnumVariantPayload::Tuple(values) => {
+                            fields.extend(values.clone())
+                        }
+                        ElaboratedEnumVariantPayload::Struct(values) => {
+                            fields.extend(values.iter().map(|field| field.ty.clone()));
+                        }
+                    }
+                }
+            }
+            ElaboratedNominalLayout::Opaque => return None,
+        }
+        let mut quantity = Quantity::UNRESTRICTED;
+        for field in fields {
+            let field = substitute_alias_generic_identity(field, arguments);
+            let Some(field) = self.principal_use_interval(&field) else {
+                continue;
+            };
+            if quantity.intersection(field).is_err() {
+                return Some((quantity, field));
+            }
+            quantity = quantity
+                .intersection(field)
+                .expect("nonempty interval was checked");
+        }
+        None
     }
 
     pub fn instantiate_value_initializer_generic(

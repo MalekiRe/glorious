@@ -962,6 +962,26 @@ impl StageZeroCompiler {
                 }
             }
         }
+        // `Use` is not ordinary implementation selection: the frozen
+        // interface owns one structural principal interval per type, and a
+        // manual implementation may only restrict it.  Run this after the
+        // initializer prepass so memoized globals are checked against their
+        // actual frozen result types rather than a body-local inference term.
+        diagnostics.extend(signatures.validate_principal_use_rules().into_iter().map(
+            |diagnostic| CompileDiagnostic::source(diagnostic.code, diagnostic.message, None),
+        ));
+        for header in signatures.definitions.values() {
+            let ElaboratedHeader::ValueInitializer { ty: Some(ty), .. } = header else {
+                continue;
+            };
+            if signatures.principal_use_interval(ty) != Some(crate::Quantity::UNRESTRICTED) {
+                diagnostics.push(CompileDiagnostic::source(
+                    "G4196",
+                    "memoized top-level global has a restricted or unproven principal `Use` quantity",
+                    None,
+                ));
+            }
+        }
         // Host declarations are source-visible only when their exact frozen
         // capability is present in this request world.  This check happens
         // before bodies/Core are produced, so an unauthorized import can
