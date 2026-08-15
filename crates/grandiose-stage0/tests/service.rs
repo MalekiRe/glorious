@@ -1848,6 +1848,21 @@ fn service_compact_label_cannot_escape_through_a_closure() {
 }
 
 #[test]
+fn service_rejects_label_dependent_closure_exports_through_public_facades() {
+    let mut input = request("use top_facade::make; pub fn main() -> i64 { make()(0) }");
+    for (package, source) in [
+        ("label-core@0.1.0", "pub fn make() -> (i64) -> i64 { @done: i64 { let delayed = (value: i64) -> i64 { @done(value) }; delayed } }"),
+        ("middle-facade@0.1.0", "pub use label_core::make;"),
+        ("top-facade@0.1.0", "pub use middle_facade::*;"),
+    ] { input.sources.push(SourceInput::new(PackageKey(package.into()), LogicalPath::parse("src/lib.glorious").unwrap(), source.as_bytes())); }
+    let mut reordered = input.clone(); reordered.sources.reverse();
+    let first = StageZeroCompiler::new().compile(input).expect_err("a generative label closure cannot cross facades");
+    let second = StageZeroCompiler::new().compile(reordered).expect_err("source order cannot export a label brand");
+    assert!(first.diagnostics().iter().any(|d| d.code == "G4179"));
+    assert_eq!(first.diagnostics(), second.diagnostics());
+}
+
+#[test]
 fn service_accepts_symbolic_structural_const_layout_contracts() {
     let source = "pub struct Tag<n: u32> {} pub fn identity<n: u32>(value: Tag<n + 1>) -> Tag<1 + n> { value } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new()
