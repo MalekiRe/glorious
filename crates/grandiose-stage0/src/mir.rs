@@ -22,9 +22,54 @@ use crate::{
     },
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::ops::Deref;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MirLocal(pub u32);
+
+/// Append-only, typed storage for locals while a MIR body is being built.
+///
+/// `MirLocal` values are arena identities, never positions supplied by a
+/// caller.  Entries are neither removed nor reordered, so an identity stays
+/// valid across every lowering branch that clones the arena into a frozen
+/// `MirFunction`.  The frozen function intentionally still serializes its
+/// local declarations as a `Vec`: that is the established artifact boundary,
+/// whereas this arena is the persistent construction-side identity space.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct MirLocalArena {
+    entries: Vec<MirLocalDecl>,
+}
+
+impl MirLocalArena {
+    fn allocate(&mut self, declaration: MirLocalDecl) -> MirLocal {
+        let id = MirLocal(
+            u32::try_from(self.entries.len())
+                .expect("MIR local arena exceeded the representable local identity space"),
+        );
+        self.entries.push(declaration);
+        id
+    }
+
+    fn get(&self, local: MirLocal) -> Option<&MirLocalDecl> {
+        self.entries.get(local.0 as usize)
+    }
+
+    fn into_entries(self) -> Vec<MirLocalDecl> {
+        self.entries
+    }
+
+    fn to_entries(&self) -> Vec<MirLocalDecl> {
+        self.entries.clone()
+    }
+}
+
+impl Deref for MirLocalArena {
+    type Target = [MirLocalDecl];
+
+    fn deref(&self) -> &Self::Target {
+        &self.entries
+    }
+}
 /// Body-local basic-block identity. It never crosses a MIR body boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MirBlockId(pub u32);
@@ -1953,7 +1998,7 @@ impl MirLowering {
             // new identity space.
             owner: definition,
             definition,
-            locals: vec![],
+            locals: MirLocalArena::default(),
             nominal_copy_descriptors: vec![],
             building_nominal_copy_descriptors: vec![],
             values: BTreeMap::new(),
@@ -2998,7 +3043,7 @@ impl MirLowering {
                 definition,
                 captures: 0,
                 parameters,
-                locals: lowerer.locals,
+                locals: lowerer.locals.into_entries(),
                 result: body.expression(body.root).ty.clone(),
                 entry: MirBlockId(0),
                 blocks: vec![MirBlock {
@@ -4877,7 +4922,7 @@ struct Lowerer<'a> {
     /// executable MIR identity currently being built.
     owner: DefKey,
     definition: DefKey,
-    locals: Vec<MirLocalDecl>,
+    locals: MirLocalArena,
     nominal_copy_descriptors: Vec<MirNominalCopyDescriptor>,
     building_nominal_copy_descriptors: Vec<(DefKey, Vec<GenericArgument>)>,
     values: BTreeMap<CoreId, MirLocal>,
@@ -5274,7 +5319,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -5535,7 +5580,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -5779,7 +5824,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -5883,7 +5928,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -6085,7 +6130,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -6316,7 +6361,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -6518,7 +6563,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -6778,7 +6823,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -7026,7 +7071,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -7320,7 +7365,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -7402,7 +7447,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -7569,7 +7614,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: result_type,
             entry: MirBlockId(0),
             blocks: vec![
@@ -8480,7 +8525,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -8558,7 +8603,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -8838,7 +8883,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -9127,7 +9172,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -9571,7 +9616,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -9888,7 +9933,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -10229,7 +10274,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -10437,7 +10482,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -10749,7 +10794,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -10987,7 +11032,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -11186,7 +11231,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -11407,7 +11452,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -11549,7 +11594,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -11987,7 +12032,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -12173,7 +12218,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -12425,7 +12470,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -12481,7 +12526,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![MirBlock {
@@ -12667,7 +12712,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -12818,7 +12863,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -13062,7 +13107,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -13251,7 +13296,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -13651,7 +13696,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -13926,7 +13971,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -14133,7 +14178,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -14241,7 +14286,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -14363,7 +14408,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -14545,7 +14590,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -14706,7 +14751,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry,
             blocks,
@@ -15135,7 +15180,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -15304,7 +15349,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
             entry: MirBlockId(0),
             blocks,
@@ -15316,7 +15361,7 @@ impl Lowerer<'_> {
             definition: self.definition,
             captures: 0,
             parameters,
-            locals: self.locals.clone(),
+            locals: self.locals.to_entries(),
             result: Type::Error,
             entry: MirBlockId(0),
             blocks: vec![MirBlock {
@@ -18774,9 +18819,7 @@ impl Lowerer<'_> {
     }
     fn alloc(&mut self, ty: Type, source: CoreId) -> MirLocal {
         self.register_nominal_copy_descriptors(&ty);
-        let id = MirLocal(self.locals.len() as u32);
-        self.locals.push(MirLocalDecl { ty, source });
-        id
+        self.locals.allocate(MirLocalDecl { ty, source })
     }
     /// Freeze every declaration-owned nominal layout reachable from a runtime
     /// type before MIR erases the elaborated interface. Failure to instantiate
@@ -18964,7 +19007,7 @@ impl Lowerer<'_> {
     /// Structural destruction has no VM work yet, but every observable Drop
     /// method is a normal verified call over an exact unique borrow.
     fn emit_custom_drop(&mut self, local: MirLocal) -> Option<()> {
-        let ty = self.locals.get(local.0 as usize)?.ty.clone();
+        let ty = self.locals.get(local)?.ty.clone();
         let Some(signatures) = self.signatures else {
             return Some(());
         };
@@ -19233,7 +19276,7 @@ impl Lowerer<'_> {
             runtime_primitives: self.runtime_primitives,
             owner: self.owner,
             definition,
-            locals: vec![],
+            locals: MirLocalArena::default(),
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             building_nominal_copy_descriptors: vec![],
             values: BTreeMap::new(),
@@ -19277,7 +19320,7 @@ impl Lowerer<'_> {
             definition,
             captures: captures.len() as u32,
             parameters: lifted_parameters,
-            locals: child.locals,
+            locals: child.locals.into_entries(),
             result: self.body.expression(body).ty.clone(),
             entry: MirBlockId(0),
             blocks: vec![MirBlock {
