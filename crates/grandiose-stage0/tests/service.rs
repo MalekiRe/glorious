@@ -10813,6 +10813,116 @@ fn service_rejects_private_same_spelled_generic_effect_reexports_in_a_provider_d
 }
 
 #[test]
+fn service_executes_generic_authorized_reexport_diamond_with_operator_fixity() {
+    // Both facades expose the *same* provider identities.  This is therefore
+    // a valid diamond: duplicate glob paths must deduplicate the generic
+    // effect/GAT contract and its re-exported fixity/trait pair together.
+    let root = "use left_facade::*; use right_facade::*; pub struct Packet { value: <i64 as Child<i64>>::Item<i64> } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: Child<i64>::relay(0, 41) }; Trace<i64>::note(packet.value) } pub fn effect_value() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let provider = "pub infixr 30 **; pub trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {}";
+    let mut request = request(root);
+    for (package, source) in [
+        ("semantic-core@0.1.0", provider),
+        ("left-facade@0.1.0", "pub use semantic_core::*;"),
+        ("right-facade@0.1.0", "pub use semantic_core::*;"),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("authorized package facades must preserve generic effect and fixity identity");
+    let mut reordered = request;
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("authorized re-export artifacts must be source-order invariant");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 52);
+    assert_eq!(second.run_i64().unwrap(), 52);
+}
+
+#[test]
+fn service_reports_distinct_provider_reexported_fixities_canonically() {
+    let mut request = request("use left_facade::*; use right_facade::*; pub fn main() -> i64 { 1 ** 2 }");
+    let alpha = "pub infixl 30 **; pub trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left + right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Capability<T> { type Effects<U>: EffectRow; } impl Capability<i64> for i64 { type Effects<U> = {Trace<U>}; }";
+    let beta = "pub infixr 30 **; pub trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Capability<T> { type Effects<U>: EffectRow; } impl Capability<i64> for i64 { type Effects<U> = {Trace<U>}; }";
+    for (package, source) in [
+        ("alpha-core@0.1.0", alpha),
+        ("beta-core@0.1.0", beta),
+        ("left-facade@0.1.0", "pub use alpha_core::*;"),
+        ("right-facade@0.1.0", "pub use beta_core::*;"),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let mut reordered = request.clone();
+    reordered.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request)
+    else {
+        panic!("distinct re-exported fixities unexpectedly chose an operator grouping");
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(second)) =
+        StageZeroCompiler::new().compile(reordered)
+    else {
+        panic!("source ordering changed fixity ambiguity into success");
+    };
+    assert!(
+        first
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4111" && diagnostic.message.contains("ambiguous")),
+        "missing re-exported provider-fixity ambiguity: {first:#?}"
+    );
+    assert_eq!(first, second, "re-exported fixity diagnostics must be canonical");
+}
+
+#[test]
+fn service_rejects_private_generic_reexports_despite_public_operator_authority() {
+    let mut request = request("pub fn main() -> i64 { 42 }");
+    let provider = "pub infixl 30 **; pub trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left + right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Capability<T> { type Effects<U>: EffectRow; } impl Capability<i64> for i64 { type Effects<U> = {Trace<U>}; }";
+    for (package, source) in [
+        ("semantic-core@0.1.0", provider),
+        (
+            "left-facade@0.1.0",
+            "pub use semantic_core::{Capability, Trace}; pub use semantic_core::{Combine, **};",
+        ),
+        ("right-facade@0.1.0", "pub use semantic_core::{Combine, **};"),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let mut reordered = request.clone();
+    reordered.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request)
+    else {
+        panic!("public operator authority unexpectedly exposed private generic contracts");
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(second)) =
+        StageZeroCompiler::new().compile(reordered)
+    else {
+        panic!("source ordering changed private re-export rejection into success");
+    };
+    assert!(
+        first.iter().any(|diagnostic| diagnostic.code == "G3317"),
+        "missing private generic re-export authority diagnostic: {first:#?}"
+    );
+    assert_eq!(first, second, "private re-export diagnostics must be canonical");
+}
+
+#[test]
 fn service_materializes_reachable_generic_dependency_callables() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(

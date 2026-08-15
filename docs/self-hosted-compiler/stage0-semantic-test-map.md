@@ -175,6 +175,13 @@ coarse. The composite fixtures cover:
   private provider re-export (`service_keeps_same_spelled_generic_diamond_facades_provider_distinct_through_vm`,
   `service_reports_same_spelled_distinct_provider_diamond_aliases_as_ambiguous`,
   `service_rejects_private_same_spelled_generic_effect_reexports_in_a_provider_diamond`).
+- package facades preserve public generic effect/GAT authority and a provider's
+  operator fixity/trait as one identity: an authorized diamond executes and
+  emits stable VM bytes, while same-spelled fixities from distinct providers
+  remain a canonical ambiguity. Public operator authority cannot leak a
+  private generic effect or trait re-export (`service_executes_generic_authorized_reexport_diamond_with_operator_fixity`,
+  `service_reports_distinct_provider_reexported_fixities_canonically`,
+  `service_rejects_private_generic_reexports_despite_public_operator_authority`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and
