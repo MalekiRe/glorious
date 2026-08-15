@@ -11036,6 +11036,39 @@ fn recursive_row_generic_hrtb_callable_aliases_are_order_independent_and_execute
 }
 
 #[test]
+fn recursive_public_facade_globs_deduplicate_the_same_callable_alias_identity() {
+    // Every imported spelling below ultimately names the provider declaration.
+    // A module SCC must therefore not turn identical public aliases into a
+    // source-level ambiguity merely because they arrived through multiple
+    // facade paths.
+    let root = "pub mod provider; pub mod left; pub mod right; use left::*; use right::*; pub fn identity<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 { apply(identity) }";
+    let provider = "pub type Callback = for<'a> (&'a i64) -> &'a i64; pub fn apply(callback: Callback) -> i64 { let value = 42; let result = callback(&value); *result }";
+    let left = "pub use crate::provider::{Callback as Forward, apply}; pub use crate::right::Callback;";
+    let right = "pub use crate::provider::Callback; pub use crate::left::{Forward, apply};";
+    let sources = [
+        ("src/provider/provider.glorious", provider),
+        ("src/left/left.glorious", left),
+        ("src/right/right.glorious", right),
+    ];
+    let first = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(root, &sources))
+        .expect("identical recursive facade aliases must remain one public identity");
+    let mut reversed = request_with_logical_sources(root, &sources);
+    reversed.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reversed)
+        .expect("facade identity must not depend on source enumeration");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_aliased_reexported_generic_trait_gats_without_an_impl() {
     // The implementation-contract normalizer is allowed to reduce only after
     // selection.  A facade alias does not manufacture the missing parent

@@ -129,6 +129,10 @@ coarse. The composite fixtures cover:
   a reciprocal module SCC and normalize into an HRTB callback. Reversing
   logical-source enumeration preserves the emitted VM fingerprint and canonical
   bytes as well as execution (`recursive_row_generic_hrtb_callable_aliases_are_order_independent_and_execute`).
+- multiple public glob paths through a recursive facade graph may denote the
+  same provider callable alias and function. They deduplicate by declaration
+  identity instead of becoming a false ambiguity, independent of logical-source
+  enumeration (`recursive_public_facade_globs_deduplicate_the_same_callable_alias_identity`).
 - effect declaration visibility across dependency-package boundaries, including
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate
