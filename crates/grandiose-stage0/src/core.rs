@@ -3237,12 +3237,19 @@ impl TypedBody {
             elaborator.locals.define(parameter.name.clone(), ty.clone());
             parameters.push((parameter.name.clone(), ty));
         }
-        let root =
-            elaborator.expression_expected(body.root, Some(context.signature.result.clone()));
+        // The implementation header supplies concrete trait evidence even
+        // when a method keeps rigid declaration generics.  Open projections
+        // selected by that evidence before the body receives its contextual
+        // result type: otherwise `Item<'a, U>` is compared as an opaque
+        // projection with an `i64` body merely because `U` is universally
+        // quantified by the method.
+        let expected_result =
+            elaborator.normalize_selectable_type_projections(context.signature.result.clone());
+        let root = elaborator.expression_expected(body.root, Some(expected_result.clone()));
         let actual = elaborator.expressions[root.0 as usize].ty.clone();
         if elaborator
             .unify_rigid_lifetimes(
-                context.signature.result.clone(),
+                expected_result,
                 actual,
                 context.method.span,
             )
@@ -4789,6 +4796,201 @@ impl Elaborator<'_> {
             Err(answer) => self.projection_normalization_error(*answer),
         };
         self.normalize_nested_callable_effect_rows(value)
+    }
+
+    /// A method implementation owns its generic binders.  A projection whose
+    /// trait head is concrete may therefore be selected with those binders as
+    /// rigid arguments: the selected implementation proves its result for
+    /// every possible instantiation, rather than asking this body to guess
+    /// caller evidence.  This is intentionally narrower than general
+    /// normalization; projections with an abstract subject remain symbolic.
+    fn normalize_selectable_type_projections(&mut self, value: Type) -> Type {
+        let value = self.normalize_concrete_type_projections(value);
+        self.normalize_selectable_type_projections_inner(
+            value,
+            &mut std::collections::BTreeSet::new(),
+            &[],
+        )
+    }
+
+    fn normalize_selectable_type_projections_inner(
+        &mut self,
+        value: Type,
+        active: &mut std::collections::BTreeSet<Digest>,
+        hrtb_binders: &[u32],
+    ) -> Type {
+        match value {
+            Type::Nominal {
+                definition,
+                arguments,
+            } => Type::Nominal {
+                definition,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_selectable_type_argument(argument, active, hrtb_binders))
+                    .collect(),
+            },
+            Type::Projection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                item_generic_kinds,
+                item_arguments,
+            } => {
+                let subject = self.normalize_selectable_type_projections_inner(*subject, active, hrtb_binders);
+                let trait_arguments = trait_arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_selectable_type_argument(argument, active, hrtb_binders))
+                    .collect::<Vec<_>>();
+                let item_arguments = item_arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_selectable_type_argument(argument, active, hrtb_binders))
+                    .collect::<Vec<_>>();
+                let projection = Type::Projection {
+                    subject: Box::new(subject),
+                    trait_definition,
+                    trait_arguments,
+                    name,
+                    item_generic_kinds,
+                    item_arguments,
+                };
+                if !projection_is_selectable_type_projection(&projection, hrtb_binders) {
+                    return projection;
+                }
+                let Type::Projection {
+                    subject,
+                    trait_definition,
+                    trait_arguments,
+                    name,
+                    item_arguments,
+                    ..
+                } = &projection
+                else {
+                    unreachable!("projection was just constructed")
+                };
+                let trait_arguments_encoding =
+                    canonical_generic_arguments_encoding(trait_arguments);
+                let subject_encoding = canonical_type_encoding(subject);
+                let item_arguments_encoding = canonical_generic_arguments_encoding(item_arguments);
+                let key = Digest::of_parts([
+                    b"grandiose-stage0-selectable-type-projection-v1".as_slice(),
+                    trait_definition.0.as_bytes().as_slice(),
+                    trait_arguments_encoding.as_slice(),
+                    subject_encoding.as_slice(),
+                    name.as_bytes(),
+                    item_arguments_encoding.as_slice(),
+                ]);
+                if !active.insert(key) {
+                    return projection;
+                }
+                let answer = self.trait_query().normalize_associated_type_application(
+                    TraitGoal {
+                        relation: crate::ElaboratedTraitReference {
+                            definition: *trait_definition,
+                            arguments: trait_arguments.clone(),
+                        },
+                        subject: *subject.clone(),
+                    },
+                    name,
+                    item_arguments,
+                );
+                active.remove(&key);
+                match answer {
+                    TraitProjectionAnswer::Normalized { ty, .. } => {
+                        self.normalize_selectable_type_projections_inner(ty, active, hrtb_binders)
+                    }
+                    _ => projection,
+                }
+            }
+            Type::Tuple(values) => Type::Tuple(
+                values
+                    .into_iter()
+                    .map(|value| self.normalize_selectable_type_projections_inner(value, active, hrtb_binders))
+                    .collect(),
+            ),
+            Type::Array(value) => Type::Array(Box::new(
+                self.normalize_selectable_type_projections_inner(*value, active, hrtb_binders),
+            )),
+            Type::Reference {
+                mutability,
+                lifetime,
+                referent,
+            } => Type::Reference {
+                mutability,
+                lifetime,
+                referent: Box::new(
+                    self.normalize_selectable_type_projections_inner(*referent, active, hrtb_binders),
+                ),
+            },
+            Type::Callable {
+                lifetime_binders,
+                parameters,
+                result,
+                effects,
+                invocation,
+            } => {
+                let mut nested_binders = Vec::with_capacity(hrtb_binders.len() + 1);
+                nested_binders.push(lifetime_binders);
+                nested_binders.extend_from_slice(hrtb_binders);
+                Type::Callable {
+                    lifetime_binders,
+                    parameters: parameters
+                        .into_iter()
+                        .map(|parameter| {
+                            self.normalize_selectable_type_projections_inner(
+                                parameter,
+                                active,
+                                &nested_binders,
+                            )
+                        })
+                        .collect(),
+                    result: Box::new(self.normalize_selectable_type_projections_inner(
+                        *result,
+                        active,
+                        &nested_binders,
+                    )),
+                    effects: self.normalize_selectable_effect_row(effects),
+                    invocation,
+                }
+            }
+            value => value,
+        }
+    }
+
+    fn normalize_selectable_type_argument(
+        &mut self,
+        argument: GenericArgument,
+        active: &mut std::collections::BTreeSet<Digest>,
+        hrtb_binders: &[u32],
+    ) -> GenericArgument {
+        match argument {
+            GenericArgument::Type(value) => GenericArgument::Type(
+                self.normalize_selectable_type_projections_inner(value, active, hrtb_binders),
+            ),
+            GenericArgument::EffectRow(value) => {
+                GenericArgument::EffectRow(self.normalize_selectable_effect_row(value))
+            }
+            GenericArgument::ConstProjection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                kind,
+            } => GenericArgument::ConstProjection {
+                subject: Box::new(
+                    self.normalize_selectable_type_projections_inner(*subject, active, hrtb_binders),
+                ),
+                trait_definition,
+                trait_arguments: trait_arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_selectable_type_argument(argument, active, hrtb_binders))
+                    .collect(),
+                name,
+                kind,
+            },
+            argument => argument,
+        }
     }
 
     /// Type projection normalization deliberately leaves effect rows opaque
@@ -12733,6 +12935,105 @@ fn generic_argument_is_selectable_effect_projection(value: &GenericArgument) -> 
                         .all(generic_argument_is_selectable_effect_projection)
                 })
         )
+}
+
+/// A selected associated type may carry a declaration-owned generic item
+/// argument.  The trait head still has to be concrete, so this does not let a
+/// body select an implementation for an abstract `Self`; it only lets the
+/// selected implementation substitute a rigid parameter into its item value.
+///
+/// Keep unresolved associated projections and inference variables out of this
+/// set.  Treating either as rigid would allow a concrete head to choose an
+/// implementation based on evidence that belongs to a caller or has not been
+/// inferred yet.
+fn projection_is_selectable_type_projection(value: &Type, hrtb_binders: &[u32]) -> bool {
+    let Type::Projection {
+        subject,
+        trait_arguments,
+        item_arguments,
+        ..
+    } = value
+    else {
+        return false;
+    };
+    projection_is_concrete(subject)
+        && trait_arguments.iter().all(generic_argument_is_concrete)
+        && item_arguments
+            .iter()
+            .all(|argument| {
+                generic_argument_is_selectable_type_projection(argument, hrtb_binders)
+            })
+}
+
+fn generic_argument_is_selectable_type_projection(
+    value: &GenericArgument,
+    hrtb_binders: &[u32],
+) -> bool {
+    match value {
+        GenericArgument::Type(value) => {
+            type_is_selectable_type_projection_argument(value, hrtb_binders)
+        }
+        GenericArgument::EffectRow(value) => {
+            value.projections.is_empty()
+                && value.effects.iter().all(|effect| {
+                    effect
+                        .arguments
+                        .iter()
+                        .all(|argument| {
+                            generic_argument_is_selectable_type_projection(argument, hrtb_binders)
+                        })
+                })
+                && matches!(value.tail, None | Some(crate::EffectTail::Generic(_)))
+        }
+        GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided | Lifetime::Generic(_))
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. } => true,
+        GenericArgument::Lifetime(Lifetime::Bound { depth, index }) => hrtb_binders
+            .get(*depth as usize)
+            .is_some_and(|count| *index < *count),
+        GenericArgument::ConstProjection { .. }
+        | GenericArgument::ConstInfer { .. } => false,
+    }
+}
+
+fn type_is_selectable_type_projection_argument(value: &Type, hrtb_binders: &[u32]) -> bool {
+    match value {
+        Type::Generic(_) | Type::ConstGeneric { .. } => true,
+        Type::Infer(_) | Type::Error => false,
+        Type::Nominal { arguments, .. } => arguments
+            .iter()
+            .all(|argument| generic_argument_is_selectable_type_projection(argument, hrtb_binders)),
+        Type::Tuple(values) => values
+            .iter()
+            .all(|value| type_is_selectable_type_projection_argument(value, hrtb_binders)),
+        // A nested projection is selectable only once it has been selected
+        // to a concrete type by the recursive normalizer above.
+        Type::Projection { .. } => projection_is_concrete(value),
+        Type::Array(value) => type_is_selectable_type_projection_argument(value, hrtb_binders),
+        Type::Reference {
+            lifetime, referent, ..
+        } => {
+            (matches!(lifetime, Lifetime::Static | Lifetime::Elided | Lifetime::Generic(_))
+                || matches!(lifetime, Lifetime::Bound { depth, index }
+                    if hrtb_binders.get(*depth as usize).is_some_and(|count| *index < *count)))
+                && type_is_selectable_type_projection_argument(referent, hrtb_binders)
+        }
+        Type::Callable {
+            parameters, result, ..
+        } => {
+            parameters
+                .iter()
+                .all(|value| type_is_selectable_type_projection_argument(value, hrtb_binders))
+                && type_is_selectable_type_projection_argument(result, hrtb_binders)
+        }
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_) => true,
+    }
 }
 
 fn literal_type(text: &str) -> Type {

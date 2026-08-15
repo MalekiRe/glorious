@@ -5587,6 +5587,34 @@ fn service_rejects_ambiguous_hrtb_nested_selected_effect_contracts_through_publi
 }
 
 #[test]
+fn service_materializes_hrtb_type_const_and_effect_contracts_through_public_aliases() {
+    let mut request = request(
+        "use facade::width; pub fn main() -> i64 { width() }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as Gateway, Trace, width}; pub type Callback<U, E: EffectRow> = provider::Callback<U, E>;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub struct Witness<n: u32> { value: i64 } pub trait Gate<T> { type Item<'a, U>; const Width: u32; type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> <Self as Gate<T>>::Item<'a, U> / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Item<'a, U> = i64, Effects<'a, U, e> = {Trace<i64>, | e}>; } pub trait Top<T>: Base<T> {} pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> <i64 as Gate<i64>>::Item<'a, U> / { <i64 as Gate<i64>>::Effects<'a, U, E> }; impl Gate<i64> for i64 { type Item<'a, U> = i64; const Width = 7; type Effects<'a, U, e: EffectRow> = {Trace<i64>, | e}; } pub fn width() -> i64 { let witness = Witness<<i64 as Gate<i64>>::Width> { value: 7 }; witness.value } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> <i64 as Gate<i64>>::Item<'a, U> / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Item<'a, U> = i64, Effects<'a, U, e> = {Trace<i64>, | e}> { *value } } impl Top<i64> for i64 where i64: Base<i64> {}".as_slice(),
+    ));
+    let first = StageZeroCompiler::new().compile(request.clone()).expect("composite HRTB contract must materialize");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new().compile(request).expect("source order must preserve composite HRTB contracts");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 7);
+    assert_eq!(second.run_i64().unwrap(), 7);
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
