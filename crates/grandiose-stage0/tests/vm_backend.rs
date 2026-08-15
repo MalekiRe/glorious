@@ -2282,8 +2282,14 @@ fn verifier_rejects_an_unrestored_handler_across_a_replay_return() {
         fingerprint: Digest::of_bytes(b"replay-return-frame-proof-candidate"),
     };
     candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
     assert!(matches!(
-        verify_vm(candidate),
+        verify_vm(candidate.clone()),
+        Err(VmArtifactError::HandlerStillActive)
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
         Err(VmArtifactError::HandlerStillActive)
     ));
 }
@@ -4176,8 +4182,14 @@ fn verifier_rejects_dynamic_label_rejoin_that_leaks_a_retained_facade() {
         fingerprint: Digest::of_bytes(b"dynamic-label-facade-leak-candidate"),
     };
     candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
     assert!(matches!(
-        verify_vm(candidate),
+        verify_vm(candidate.clone()),
+        Err(VmArtifactError::HandlerStillActive)
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
         Err(VmArtifactError::HandlerStillActive)
     ));
 }
@@ -5227,8 +5239,14 @@ fn verifier_rejects_a_forged_nested_arm_that_skips_the_inner_continuation() {
         fingerprint: Digest::of_bytes(b"forged-nested-arm-resume-candidate"),
     };
     candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
     assert!(matches!(
-        verify_vm(candidate),
+        verify_vm(candidate.clone()),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
         Err(VmArtifactError::HandlerResumeUnavailable)
     ));
 }
@@ -5606,11 +5624,17 @@ fn verifier_rejects_a_snapshot_alias_after_its_handler_is_cancelled() {
         fingerprint: Digest::of_bytes(b"cancelled-snapshot-alias-candidate"),
     };
     candidate.fingerprint = candidate.computed_fingerprint();
-    let error = verify_vm(candidate).unwrap_err();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    let error = verify_vm(candidate.clone()).unwrap_err();
     assert!(
         matches!(error, VmArtifactError::HandlerResumeUnavailable),
         "cancellation must invalidate all snapshot aliases before a later handler activates: {error:?}"
     );
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
 }
 
 #[test]

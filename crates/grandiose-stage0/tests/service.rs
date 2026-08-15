@@ -8531,6 +8531,59 @@ fn service_dynamic_label_call_leaves_a_nested_partial_handler_forwarding_chain()
 }
 
 #[test]
+fn service_round_trips_nested_replay_forwarding_and_cancellation() {
+    // The outer `read` frame replays the protected path exactly twice while
+    // retaining the copyable `shared` value in its clause. Each restored path
+    // reinstalls the inner partial frame, which forwards `read` but consumes
+    // its own affine `write` continuation before the replay result returns.
+    let source = r#"
+        effect Console {
+            [2, 2] read(value: Bool) -> i64;
+            [0, 1] write(value: i64) -> i64;
+        }
+        pub fn relay(value: Bool) -> i64 / Console {
+            let read = Console::read(value);
+            Console::write(read)
+        }
+        pub fn main() -> i64 {
+            handle {
+                handle relay(false) {
+                    Console::read(true) with k => k(1) + k(2),
+                    Console::write(_) with _ => 40,
+                }
+            } {
+                Console::read(_) with k => {
+                    let shared = 20;
+                    k(shared) + k(shared + 1)
+                },
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("nested replay and cancellation must preserve both handler frames");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(entry.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::InstallHandler {
+            continuation: VmContinuationPolicy::Replay { uses: 2 },
+            ..
+        }
+    )));
+    assert!(program.functions.values().any(|function| function
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, VmInstruction::Cancel))));
+    assert_eq!(artifact.run_i64().unwrap(), 80);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 80);
+}
+
+#[test]
 fn service_dynamic_label_rejoins_through_outer_completion_after_three_handler_frames() {
     // The label is captured after the outer completion boundary but before
     // the two operation handlers. The inner partial handler forwards to the
