@@ -14399,6 +14399,30 @@ fn verified_vm_program_enforces_explicit_instruction_limits() {
 }
 
 #[test]
+fn source_text_materialization_respects_vm_value_limits_transactionally() {
+    let artifact = StageZeroCompiler::new()
+        .compile(request("pub fn main() -> Text { \"a\" + \"b\" }"))
+        .unwrap()
+        .artifact
+        .unwrap();
+    let tight = VmExecutionLimits {
+        max_value_elements: 1,
+        ..VmExecutionLimits::default()
+    };
+    assert!(matches!(
+        artifact.run_text_with_limits(tight),
+        Err(VmArtifactError::ValueSizeLimit {
+            kind: "text bytes",
+            limit: 1,
+            found: 2,
+        })
+    ));
+    // A failed run owns no VM state. Retrying this immutable verified program
+    // under its normal execution budget must not inherit an exhausted quota.
+    assert_eq!(artifact.run_text().unwrap(), "ab");
+}
+
+#[test]
 fn service_compiles_explicit_external_modules_from_the_request_source_world() {
     let root = "mod math; pub fn main() -> i64 { math::add_two(40) }";
     let child = "pub fn add_two(value: i64) -> i64 { value + 2 }";

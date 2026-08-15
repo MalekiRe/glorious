@@ -2120,7 +2120,13 @@ impl VerifiedVmArtifact {
         expect_char(self.execute_with_limits(VmExecutionLimits::default())?)
     }
     pub fn run_text(&self) -> Result<String, VmArtifactError> {
-        Ok(expect_text(self.execute_with_limits(VmExecutionLimits::default())?)?.to_string())
+        self.run_text_with_limits(VmExecutionLimits::default())
+    }
+    pub fn run_text_with_limits(
+        &self,
+        limits: VmExecutionLimits,
+    ) -> Result<String, VmArtifactError> {
+        Ok(expect_text(self.execute_with_limits(limits)?)?.to_string())
     }
 }
 impl VerifiedVmProgram {
@@ -12606,6 +12612,7 @@ fn execute(
                     Some(VmValue::Char(char::from_u32(value).expect("verified char")))
             }
             VmInstruction::ConstText { dst, value } => {
+                budget.reserve_value("text bytes", value.len())?;
                 registers[dst as usize] = Some(VmValue::Text(Arc::from(value)));
             }
             VmInstruction::TextByteLen { dst, value } => {
@@ -12627,6 +12634,12 @@ fn execute(
                         .as_ref()
                         .expect("verified register"),
                 )?;
+                let length = left.len().checked_add(right.len()).ok_or(
+                    VmArtifactError::AllocationLimit {
+                        limit: budget.limits.max_allocation_elements,
+                    },
+                )?;
+                budget.reserve_value("text bytes", length)?;
                 registers[dst as usize] = Some(VmValue::Text(Arc::from(format!("{left}{right}"))));
             }
             VmInstruction::TextEq { dst, left, right } => {
@@ -12648,6 +12661,7 @@ fn execute(
                         .as_ref()
                         .expect("verified register"),
                 )?;
+                budget.reserve_value("text bytes", bytes.len())?;
                 let text =
                     String::from_utf8(bytes.to_vec()).map_err(|_| VmArtifactError::InvalidUtf8)?;
                 registers[dst as usize] = Some(VmValue::Text(Arc::from(text)));
@@ -12658,6 +12672,7 @@ fn execute(
                         .as_ref()
                         .expect("verified register"),
                 )?;
+                budget.reserve_value("bytes", text.len())?;
                 registers[dst as usize] = Some(VmValue::Bytes(Arc::from(text.as_bytes())));
             }
             VmInstruction::CharFromU32Checked { dst, value } => {
@@ -12687,18 +12702,24 @@ fn execute(
                 registers[dst as usize] = Some(VmValue::Usize(value.len() as u64));
             }
             VmInstruction::BytesConcat { dst, left, right } => {
-                let mut value = expect_bytes(
+                let left = expect_bytes(
                     registers[left as usize]
                         .as_ref()
                         .expect("verified register"),
-                )?
-                .to_vec();
-                value.extend_from_slice(&expect_bytes(
+                )?;
+                let right = expect_bytes(
                     registers[right as usize]
                         .as_ref()
                         .expect("verified register"),
-                )?);
-                budget.reserve_value("bytes", value.len())?;
+                )?;
+                let length = left.len().checked_add(right.len()).ok_or(
+                    VmArtifactError::AllocationLimit {
+                        limit: budget.limits.max_allocation_elements,
+                    },
+                )?;
+                budget.reserve_value("bytes", length)?;
+                let mut value = left.to_vec();
+                value.extend_from_slice(&right);
                 registers[dst as usize] = Some(VmValue::Bytes(Arc::from(value)));
             }
             VmInstruction::BytesGet { dst, bytes, index } => {
@@ -12757,6 +12778,7 @@ fn execute(
                         });
                     }
                 };
+                budget.reserve_value("bytes", values.len())?;
                 let value = values
                     .iter()
                     .map(expect_u8)
@@ -14000,6 +14022,12 @@ fn execute(
                         .as_ref()
                         .expect("verified register"),
                 )?;
+                let length = left.len().checked_add(right.len()).ok_or(
+                    VmArtifactError::AllocationLimit {
+                        limit: budget.limits.max_allocation_elements,
+                    },
+                )?;
+                budget.reserve_value("text bytes", length)?;
                 registers[dst as usize] = Some(VmValue::Text(Arc::from(format!("{left}{right}"))));
             }
             VmInstruction::SubF64 { dst, left, right } => {
@@ -15695,6 +15723,7 @@ fn execute_with_arguments(
                 ))
             }
             VmInstruction::ConstText { dst, value } => {
+                budget.reserve_value("text bytes", value.len())?;
                 registers[*dst as usize] = Some(VmValue::Text(Arc::from(value.as_str())));
             }
             VmInstruction::TextByteLen { dst, value } => {
@@ -15716,6 +15745,12 @@ fn execute_with_arguments(
                         .as_ref()
                         .expect("verified register"),
                 )?;
+                let length = left.len().checked_add(right.len()).ok_or(
+                    VmArtifactError::AllocationLimit {
+                        limit: budget.limits.max_allocation_elements,
+                    },
+                )?;
+                budget.reserve_value("text bytes", length)?;
                 registers[*dst as usize] = Some(VmValue::Text(Arc::from(format!("{left}{right}"))));
             }
             VmInstruction::TextEq { dst, left, right } => {
@@ -15737,6 +15772,7 @@ fn execute_with_arguments(
                         .as_ref()
                         .expect("verified register"),
                 )?;
+                budget.reserve_value("text bytes", bytes.len())?;
                 let text =
                     String::from_utf8(bytes.to_vec()).map_err(|_| VmArtifactError::InvalidUtf8)?;
                 registers[*dst as usize] = Some(VmValue::Text(Arc::from(text)));
@@ -15747,6 +15783,7 @@ fn execute_with_arguments(
                         .as_ref()
                         .expect("verified register"),
                 )?;
+                budget.reserve_value("bytes", text.len())?;
                 registers[*dst as usize] = Some(VmValue::Bytes(Arc::from(text.as_bytes())));
             }
             VmInstruction::CharFromU32Checked { dst, value } => {
@@ -15776,18 +15813,24 @@ fn execute_with_arguments(
                 registers[*dst as usize] = Some(VmValue::Usize(value.len() as u64));
             }
             VmInstruction::BytesConcat { dst, left, right } => {
-                let mut value = expect_bytes(
+                let left = expect_bytes(
                     registers[*left as usize]
                         .as_ref()
                         .expect("verified register"),
-                )?
-                .to_vec();
-                value.extend_from_slice(&expect_bytes(
+                )?;
+                let right = expect_bytes(
                     registers[*right as usize]
                         .as_ref()
                         .expect("verified register"),
-                )?);
-                budget.reserve_value("bytes", value.len())?;
+                )?;
+                let length = left.len().checked_add(right.len()).ok_or(
+                    VmArtifactError::AllocationLimit {
+                        limit: budget.limits.max_allocation_elements,
+                    },
+                )?;
+                budget.reserve_value("bytes", length)?;
+                let mut value = left.to_vec();
+                value.extend_from_slice(&right);
                 registers[*dst as usize] = Some(VmValue::Bytes(Arc::from(value)));
             }
             VmInstruction::BytesGet { dst, bytes, index } => {
@@ -15848,6 +15891,7 @@ fn execute_with_arguments(
                         });
                     }
                 };
+                budget.reserve_value("bytes", values.len())?;
                 let value = values
                     .iter()
                     .map(expect_u8)
@@ -17153,6 +17197,12 @@ fn execute_with_arguments(
                         .as_ref()
                         .expect("verified register"),
                 )?;
+                let length = left.len().checked_add(right.len()).ok_or(
+                    VmArtifactError::AllocationLimit {
+                        limit: budget.limits.max_allocation_elements,
+                    },
+                )?;
+                budget.reserve_value("text bytes", length)?;
                 registers[*dst as usize] = Some(VmValue::Text(Arc::from(format!("{left}{right}"))));
             }
             VmInstruction::SubF64 { dst, left, right } => {

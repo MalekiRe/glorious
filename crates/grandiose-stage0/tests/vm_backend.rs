@@ -8435,6 +8435,77 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
 }
 
 #[test]
+fn text_materialization_obeys_value_limits_before_standalone_and_decoded_program_allocation() {
+    let definition = DefKey(Digest::of_bytes(b"text-materialization-limits"));
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Text, VmType::Text, VmType::Text],
+        instructions: vec![
+            VmInstruction::ConstText {
+                dst: 0,
+                value: "a".into(),
+            },
+            VmInstruction::ConstText {
+                dst: 1,
+                value: "b".into(),
+            },
+            VmInstruction::TextConcat {
+                dst: 2,
+                left: 0,
+                right: 1,
+            },
+            VmInstruction::Return { value: 2 },
+        ],
+    };
+    let tight = VmExecutionLimits {
+        max_value_elements: 1,
+        ..VmExecutionLimits::default()
+    };
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: function.clone(),
+        fingerprint: Digest::of_bytes(b"text-materialization-artifact-stale"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    let artifact = verify_vm(artifact).unwrap();
+    assert!(matches!(
+        artifact.run_text_with_limits(tight),
+        Err(VmArtifactError::ValueSizeLimit {
+            kind: "text bytes",
+            limit: 1,
+            found: 2,
+        })
+    ));
+    assert_eq!(artifact.run_text().unwrap(), "ab");
+
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry: definition,
+        functions: BTreeMap::from([(definition, function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"text-materialization-program-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    let program = decode_and_verify_program(&bytes).unwrap();
+    assert!(matches!(
+        program.run_text_with_limits(tight),
+        Err(VmArtifactError::ValueSizeLimit {
+            kind: "text bytes",
+            limit: 1,
+            found: 2,
+        })
+    ));
+    assert_eq!(program.run_text().unwrap(), "ab");
+}
+
+#[test]
 fn vm_leave_in_cfg_successor_retains_outer_handler_depth() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let owner = DefKey(Digest::of_bytes(b"successor-leave-owner"));
