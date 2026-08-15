@@ -4208,8 +4208,17 @@ impl Elaborator<'_> {
             // same source of information an ordinary generic function value
             // uses to close its substitution.
             ExprKind::Path(path) => {
-                if let Some(value) =
-                    self.trait_method_value(path, vec![], vec![], expected, expression.span)
+                if let Some(value) = self.trait_method_value(
+                    path.clone(),
+                    vec![],
+                    vec![],
+                    expected.clone(),
+                    expression.span,
+                )
+                {
+                    return value;
+                }
+                if let Some(value) = self.named_hrtb_function_value(path, expected, expression.span)
                 {
                     return value;
                 }
@@ -6907,6 +6916,99 @@ impl Elaborator<'_> {
             ),
             _ => self.fail(span, "G4104", "unresolved value reference"),
         }
+    }
+
+    /// Materialize a declaration-level lifetime-polymorphic named function as
+    /// a first-class higher-ranked callable.  A function declaration owns
+    /// generic lifetime slots, whereas a callable annotation owns lexical
+    /// `for<'a>` binders.  They are the same universal contract only after we
+    /// prove the declaration under fresh bound placeholders.  The executable
+    /// instance itself uses `'static`: VM references erase regions, and this
+    /// concrete instance is justified by the checked universal source
+    /// contract rather than by treating `'static` as an HRTB coercion.
+    fn named_hrtb_function_value(
+        &mut self,
+        path: Vec<String>,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Option<CoreId> {
+        let Type::Callable {
+            lifetime_binders,
+            parameters: expected_parameters,
+            result: expected_result,
+            effects: expected_effects,
+            invocation: expected_invocation,
+        } = expected?
+        else {
+            return None;
+        };
+        if lifetime_binders == 0 {
+            return None;
+        }
+        let ResolutionState::Resolved(definition) =
+            self.index
+                .resolve_path(DefinitionNamespace::Value, self.module, &path)
+        else {
+            return None;
+        };
+        let definition = self
+            .signatures
+            .value_alias_target(definition)
+            .unwrap_or(definition);
+        let Some(signature) = self
+            .signatures
+            .definitions
+            .get(&definition)
+            .and_then(callable)
+        else {
+            return None;
+        };
+        if signature.generic_kinds.len() != lifetime_binders as usize
+            || !signature
+                .generic_kinds
+                .iter()
+                .all(|kind| matches!(kind, crate::GenericKind::Lifetime))
+        {
+            return None;
+        }
+
+        let bound_arguments = (0..lifetime_binders)
+            .map(|index| GenericArgument::Lifetime(Lifetime::Bound { depth: 0, index }))
+            .collect::<Vec<_>>();
+        let bound_signature = self
+            .signatures
+            .instantiate_callable_generic(definition, &bound_arguments)
+            .ok()?;
+        let bound_callable = Type::Callable {
+            lifetime_binders,
+            parameters: bound_signature.parameters,
+            result: Box::new(bound_signature.result),
+            effects: bound_signature.effects,
+            invocation: bound_signature.invocation,
+        };
+        let expected = Type::Callable {
+            lifetime_binders,
+            parameters: expected_parameters,
+            result: expected_result,
+            effects: expected_effects,
+            invocation: expected_invocation,
+        };
+        if self.inference.unify(bound_callable, expected.clone()).is_err() {
+            return None;
+        }
+
+        let arguments = (0..lifetime_binders)
+            .map(|_| GenericArgument::Lifetime(Lifetime::Static))
+            .collect::<Vec<_>>();
+        Some(self.alloc(
+            CoreKind::Function {
+                definition,
+                arguments,
+                host_import: self.signatures.host_imports.get(&definition).cloned(),
+            },
+            expected,
+            span,
+        ))
     }
 
     /// Resolve an explicitly applied direct callable.  Body syntax keeps the

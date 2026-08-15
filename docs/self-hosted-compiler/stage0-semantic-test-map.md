@@ -130,6 +130,10 @@ coarse. The composite fixtures cover:
   projection may therefore drive a concrete layout and an outward handler row,
   while an inherited method uses the same instantiated parent edge
   (`service_materializes_inherited_gat_types_effect_rows_and_methods_through_vm`).
+- a declaration-level lifetime-polymorphic named function is checked against
+  fresh `for<'a>` placeholders before becoming a first-class callback; the
+  callback is then invoked and its returned reference dereferenced through the
+  VM (`service_executes_hrtb_function_values_through_reference_returning_calls`).
 - generic integer wrappers preserve their operand width through deferred MIR
   materialization: signed right shift remains arithmetic, unsigned right shift
   remains logical, and every count at least the operand width traps rather than
