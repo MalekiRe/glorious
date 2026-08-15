@@ -3166,6 +3166,214 @@ fn optimizer_requires_joined_block_arguments_to_agree() {
 }
 
 #[test]
+fn optimizer_eliminates_identical_general_phi_inputs_and_preserves_execution() {
+    let bool_ty = Type::Scalar(ScalarType::Bool);
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"mir-general-phi")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(bool_ty),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+        ],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::ConstBool {
+                        dst: MirLocal(0),
+                        value: true,
+                    },
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(1),
+                        value: 41,
+                    },
+                ],
+                terminator: MirTerminator::SwitchBool {
+                    condition: MirLocal(0),
+                    then_target: MirBlockId(1),
+                    then_arguments: vec![],
+                    else_target: MirBlockId(2),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(3),
+                    arguments: vec![MirLocal(1)],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(3),
+                    arguments: vec![MirLocal(1)],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(2)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(2) },
+            },
+        ],
+    };
+
+    let (optimized, report) = optimize_mir(function).unwrap();
+    assert_eq!(report.eliminated_phis, 1);
+    assert!(optimized.blocks[3].parameters.is_empty());
+    for block in [MirBlockId(1), MirBlockId(2)] {
+        assert!(matches!(
+            optimized.blocks[block.0 as usize].terminator,
+            MirTerminator::Goto { ref arguments, .. } if arguments.is_empty()
+        ));
+    }
+    assert!(matches!(
+        optimized.blocks[3].terminator,
+        MirTerminator::Return { value: MirLocal(1) }
+    ));
+    assert_eq!(
+        verify_vm(emit_vm(&optimized).unwrap()).unwrap().run_i64().unwrap(),
+        41
+    );
+}
+
+#[test]
+fn optimizer_eliminates_cyclic_phi_only_when_every_edge_agrees() {
+    let bool_ty = Type::Scalar(ScalarType::Bool);
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let loop_phi = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"mir-cyclic-general-phi")),
+        captures: 0,
+        parameters: vec![MirLocal(0)],
+        locals: vec![
+            local(bool_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+        ],
+        result: i64_ty.clone(),
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(1),
+                    value: 7,
+                }],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![MirLocal(1)],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(2)],
+                instructions: vec![],
+                terminator: MirTerminator::SwitchBool {
+                    condition: MirLocal(0),
+                    then_target: MirBlockId(1),
+                    then_arguments: vec![MirLocal(1)],
+                    else_target: MirBlockId(2),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(2) },
+            },
+        ],
+    };
+    let (optimized, report) = optimize_mir(loop_phi).unwrap();
+    assert_eq!(report.eliminated_phis, 1);
+    assert!(optimized.blocks[1].parameters.is_empty());
+    assert!(matches!(
+        &optimized.blocks[1].terminator,
+        MirTerminator::SwitchBool {
+            then_arguments,
+            ..
+        } if then_arguments.is_empty()
+    ));
+    assert!(matches!(
+        optimized.blocks[2].terminator,
+        MirTerminator::Return { value: MirLocal(1) }
+    ));
+
+    let divergent = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"mir-divergent-general-phi")),
+        captures: 0,
+        parameters: vec![MirLocal(0), MirLocal(1), MirLocal(2)],
+        locals: vec![
+            local(bool_ty),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+        ],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::SwitchBool {
+                    condition: MirLocal(0),
+                    then_target: MirBlockId(1),
+                    then_arguments: vec![],
+                    else_target: MirBlockId(2),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(3),
+                    arguments: vec![MirLocal(1)],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(3),
+                    arguments: vec![MirLocal(2)],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(3)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(3) },
+            },
+        ],
+    };
+    let (unchanged, report) = optimize_mir(divergent).unwrap();
+    assert_eq!(report.eliminated_phis, 0);
+    assert_eq!(unchanged.blocks[3].parameters, vec![MirLocal(3)]);
+}
+
+#[test]
 fn optimizer_folds_comparisons_and_carries_them_to_a_successor_branch() {
     let bool_ty = Type::Scalar(ScalarType::Bool);
     let i64_ty = Type::Scalar(ScalarType::I64);

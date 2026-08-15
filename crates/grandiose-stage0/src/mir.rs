@@ -3373,6 +3373,7 @@ fn operation_is_effectful(instruction: &MirInstruction) -> bool {
 pub struct MirOptimizationReport {
     pub constant_folds: u32,
     pub eliminated_branches: u32,
+    pub eliminated_phis: u32,
 }
 /// Deterministic sparse constant propagation over validated MIR.
 ///
@@ -3420,9 +3421,285 @@ pub fn optimize(function: MirFunction) -> Result<(MirFunction, MirOptimizationRe
             report.eliminated_branches += 1;
         }
     }
+    // A block parameter is MIR's phi representation.  After sparse folding
+    // has selected every statically known branch, erase a parameter only
+    // when every ordinary predecessor transports one identical, already-live
+    // local.  Dynamic label and handler entries intentionally remain opaque:
+    // their payload is not an ordinary CFG predecessor fact.
+    while let Some((block, parameter, replacement, predecessors)) =
+        trivial_phi_candidate(&editor.function)
+    {
+        if simplify_trivial_phi(
+            &mut editor,
+            block,
+            parameter,
+            replacement,
+            &predecessors,
+        )
+        .is_ok()
+        {
+            report.eliminated_phis += 1;
+        } else {
+            // The candidate is structurally plausible but cannot prove the
+            // replacement local live through every edge. Leave it intact;
+            // a failed speculative editor transaction has restored the
+            // exact original body.
+            break;
+        }
+    }
     let function = editor.finish();
     function.validate()?;
     Ok((function, report))
+}
+
+/// Return one simplifiable block parameter together with all incoming typed
+/// edges. The list is deliberately complete, including unreachable ordinary
+/// predecessors, because their argument lists remain part of the validated
+/// frozen CFG even when they have no current entry facts.
+fn trivial_phi_candidate(
+    function: &MirFunction,
+) -> Option<(MirBlockId, usize, MirLocal, Vec<(MirBlockId, MirEdge)>)> {
+    let dynamic_entries = function
+        .control
+        .labels
+        .iter()
+        .map(|label| label.destination)
+        .chain(function.control.handlers.iter().map(|handler| handler.target))
+        .collect::<BTreeSet<_>>();
+    for (block_index, block_data) in function.blocks.iter().enumerate() {
+        let block = MirBlockId(block_index as u32);
+        if block == function.entry
+            || function.control.tombstoned_blocks.contains(&block)
+            || dynamic_entries.contains(&block)
+        {
+            continue;
+        }
+        let predecessors = ordinary_predecessor_edges(function, block);
+        if predecessors.is_empty() {
+            continue;
+        }
+        for (parameter_index, &parameter) in block_data.parameters.iter().enumerate() {
+            let Some((first_predecessor, first_edge)) = predecessors.first().copied() else {
+                continue;
+            };
+            let replacement = edge_arguments(
+                &function.blocks[first_predecessor.0 as usize].terminator,
+                first_edge,
+            )?
+            .get(parameter_index)
+            .copied()?;
+            if replacement == parameter {
+                continue;
+            }
+            if predecessors.iter().all(|&(predecessor, edge)| {
+                edge_arguments(&function.blocks[predecessor.0 as usize].terminator, edge)
+                    .and_then(|arguments| arguments.get(parameter_index))
+                    == Some(&replacement)
+            }) {
+                return Some((block, parameter_index, replacement, predecessors));
+            }
+        }
+    }
+    None
+}
+
+fn ordinary_predecessor_edges(
+    function: &MirFunction,
+    target: MirBlockId,
+) -> Vec<(MirBlockId, MirEdge)> {
+    let mut predecessors = Vec::new();
+    for (index, block) in function.blocks.iter().enumerate() {
+        let source = MirBlockId(index as u32);
+        if function.control.tombstoned_blocks.contains(&source) {
+            continue;
+        }
+        match &block.terminator {
+            MirTerminator::Goto { target: edge_target, .. } if *edge_target == target => {
+                predecessors.push((source, MirEdge::Goto));
+            }
+            MirTerminator::SwitchBool {
+                then_target,
+                else_target,
+                ..
+            } => {
+                if *then_target == target {
+                    predecessors.push((source, MirEdge::Then));
+                }
+                if *else_target == target {
+                    predecessors.push((source, MirEdge::Else));
+                }
+            }
+            // `Leave` is a branded dynamic transfer. Its target is always a
+            // frozen label entry and therefore excluded before this helper is
+            // queried; retaining that distinction prevents a direct leave
+            // payload from becoming an ordinary phi proof.
+            MirTerminator::Leave { .. }
+            | MirTerminator::Goto { .. }
+            | MirTerminator::Return { .. }
+            | MirTerminator::Unreachable => {}
+        }
+    }
+    predecessors
+}
+
+fn edge_arguments(terminator: &MirTerminator, edge: MirEdge) -> Option<&[MirLocal]> {
+    match (terminator, edge) {
+        (MirTerminator::Goto { arguments, .. }, MirEdge::Goto)
+        | (MirTerminator::Leave { arguments, .. }, MirEdge::Leave) => Some(arguments),
+        (MirTerminator::SwitchBool { then_arguments, .. }, MirEdge::Then) => {
+            Some(then_arguments)
+        }
+        (MirTerminator::SwitchBool { else_arguments, .. }, MirEdge::Else) => {
+            Some(else_arguments)
+        }
+        _ => None,
+    }
+}
+
+fn edge_arguments_mut(
+    terminator: &mut MirTerminator,
+    edge: MirEdge,
+) -> Result<&mut Vec<MirLocal>, String> {
+    match (terminator, edge) {
+        (MirTerminator::Goto { arguments, .. }, MirEdge::Goto)
+        | (MirTerminator::Leave { arguments, .. }, MirEdge::Leave) => Ok(arguments),
+        (MirTerminator::SwitchBool { then_arguments, .. }, MirEdge::Then) => Ok(then_arguments),
+        (MirTerminator::SwitchBool { else_arguments, .. }, MirEdge::Else) => Ok(else_arguments),
+        _ => Err("MIR phi predecessor edge no longer matches its terminator".into()),
+    }
+}
+
+fn simplify_trivial_phi(
+    editor: &mut MirEditor,
+    block: MirBlockId,
+    parameter_index: usize,
+    replacement: MirLocal,
+    predecessors: &[(MirBlockId, MirEdge)],
+) -> Result<(), String> {
+    editor.transaction(MirAnalysisInvalidation::ALL, |function| {
+        let use_region = ordinary_phi_use_region(function, block);
+        let parameter = *function
+            .blocks
+            .get(block.0 as usize)
+            .and_then(|block| block.parameters.get(parameter_index))
+            .ok_or_else(|| "MIR phi parameter no longer exists".to_owned())?;
+        // Block-parameter locals are live through ordinary successor blocks,
+        // not lexically confined to their defining block. Rewrite that exact
+        // CFG region before retiring the parameter. A separate dynamic
+        // label/handler entry deliberately receives no speculative local
+        // substitution from an ordinary phi proof.
+        for block in use_region {
+            let block_data = &mut function.blocks[block.0 as usize];
+            for instruction in &mut block_data.instructions {
+                replace_instruction_inputs(instruction, parameter, replacement);
+            }
+            replace_terminator_inputs(&mut block_data.terminator, parameter, replacement);
+        }
+        function
+            .blocks
+            .get_mut(block.0 as usize)
+            .ok_or_else(|| format!("MIR phi block {} is absent", block.0))?
+            .parameters
+            .remove(parameter_index);
+        for &(predecessor, edge) in predecessors {
+            let arguments = edge_arguments_mut(
+                &mut function
+                    .blocks
+                    .get_mut(predecessor.0 as usize)
+                    .ok_or_else(|| format!("MIR phi predecessor {} is absent", predecessor.0))?
+                    .terminator,
+                edge,
+            )?;
+            if arguments.get(parameter_index) != Some(&replacement) {
+                return Err("MIR phi predecessor argument changed during simplification".into());
+            }
+            arguments.remove(parameter_index);
+        }
+        Ok(())
+    })
+}
+
+fn ordinary_phi_use_region(function: &MirFunction, start: MirBlockId) -> BTreeSet<MirBlockId> {
+    let dynamic_entries = function
+        .control
+        .labels
+        .iter()
+        .map(|label| label.destination)
+        .chain(function.control.handlers.iter().map(|handler| handler.target))
+        .collect::<BTreeSet<_>>();
+    let mut region = BTreeSet::new();
+    let mut pending = VecDeque::from([start]);
+    while let Some(block) = pending.pop_front() {
+        if function.control.tombstoned_blocks.contains(&block) || !region.insert(block) {
+            continue;
+        }
+        let Some(block_data) = function.blocks.get(block.0 as usize) else {
+            continue;
+        };
+        let successors = match &block_data.terminator {
+            MirTerminator::Goto { target, .. } => vec![*target],
+            MirTerminator::SwitchBool {
+                then_target,
+                else_target,
+                ..
+            } => vec![*then_target, *else_target],
+            // A `Leave` crosses into a branded dynamic label entry. Its
+            // argument carries an independently checked cleanup boundary,
+            // so it is not an ordinary phi-use propagation edge.
+            MirTerminator::Leave { .. }
+            | MirTerminator::Return { .. }
+            | MirTerminator::Unreachable => vec![],
+        };
+        for successor in successors {
+            if !dynamic_entries.contains(&successor) {
+                pending.push_back(successor);
+            }
+        }
+    }
+    region
+}
+
+fn replace_instruction_inputs(
+    instruction: &mut MirInstruction,
+    from: MirLocal,
+    to: MirLocal,
+) {
+    for input in 0.. {
+        let Ok(local) = operation_input_mut(instruction, input) else {
+            break;
+        };
+        if *local == from {
+            *local = to;
+        }
+    }
+}
+
+fn replace_terminator_inputs(terminator: &mut MirTerminator, from: MirLocal, to: MirLocal) {
+    let replace = |local: &mut MirLocal| {
+        if *local == from {
+            *local = to;
+        }
+    };
+    match terminator {
+        MirTerminator::Goto { arguments, .. } | MirTerminator::Leave { arguments, .. } => {
+            for argument in arguments {
+                replace(argument);
+            }
+        }
+        MirTerminator::SwitchBool {
+            condition,
+            then_arguments,
+            else_arguments,
+            ..
+        } => {
+            replace(condition);
+            for argument in then_arguments.iter_mut().chain(else_arguments) {
+                replace(argument);
+            }
+        }
+        MirTerminator::Return { value } => replace(value),
+        MirTerminator::Unreachable => {}
+    }
 }
 /// Compute the constants available at the entry to every reachable block.
 ///
