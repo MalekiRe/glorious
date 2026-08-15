@@ -6830,6 +6830,11 @@ struct VerifierContinuation {
     target: u32,
     dst: u32,
     registers: Vec<Option<bool>>,
+    /// The continuation resumes the exact source-storage lifetime state at
+    /// the performance site.  Register initialization alone cannot recover
+    /// this fact: `Some(false)` means either a moved SSA value or a live,
+    /// uninitialized addressable slot.
+    storage_live: Vec<bool>,
     snapshots: Vec<Option<u32>>,
     performed: VerifierPerformed,
     /// Frames crossed while looking for the selected outer handler. They are
@@ -6850,6 +6855,11 @@ struct VerifierPerformed {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierState {
     registers: Vec<Option<bool>>,
+    /// Addressable source slots have a lifetime independent from their
+    /// resident value.  A live-but-uninitialized slot is a valid target for a
+    /// first definition, whereas an emptied SSA register remains unavailable
+    /// until a CFG edge supplies a new definition.
+    storage_live: Vec<bool>,
     /// Provenance for first-class continuation values. `Some(frame)` means
     /// this register was produced by `CaptureResumption` for that exact live
     /// frame. The type system still sees a callable; this parallel proof fact
@@ -6963,6 +6973,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     if let Some(entry) = incoming.first_mut() {
         *entry = Some(VerifierState {
             registers: initial,
+            storage_live: vec![false; function.registers.len()],
             snapshots: vec![None; function.registers.len()],
             handlers: Vec::new(),
             pending_leave: None,
@@ -7888,6 +7899,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         target: (pc + 1) as u32,
                         dst: *dst,
                         registers: saved,
+                        storage_live: states.storage_live.clone(),
                         snapshots: states.snapshots.clone(),
                         performed: VerifierPerformed {
                             effect: *effect,
@@ -8010,6 +8022,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
                         registers: continuation.registers,
+                        storage_live: continuation.storage_live,
                         snapshots: continuation.snapshots,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
@@ -8069,6 +8082,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     resumed_handlers.iter().map(|frame| frame.id).collect();
                 let mut resumed = VerifierState {
                     registers: continuation.registers,
+                    storage_live: continuation.storage_live,
                     snapshots: continuation.snapshots,
                     handlers: resumed_handlers,
                     pending_leave: continuation.pending_leave,
@@ -8175,6 +8189,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     resumed_handlers.extend(continuation.above);
                     let mut resumed = VerifierState {
                         registers: continuation.registers,
+                        storage_live: continuation.storage_live,
                         snapshots: continuation.snapshots,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
@@ -8217,6 +8232,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         });
                     }
                     forwarded.registers = continuation.registers.clone();
+                    forwarded.storage_live = continuation.storage_live.clone();
                     forwarded.snapshots = continuation.snapshots.clone();
                     for (destination, argument) in outer
                         .payload_destinations
@@ -8233,6 +8249,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         target: continuation.target,
                         dst: continuation.dst,
                         registers: continuation.registers,
+                        storage_live: continuation.storage_live,
                         snapshots: continuation.snapshots,
                         performed: continuation.performed,
                         above: crossed,
@@ -8266,36 +8283,52 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
             }
             VmInstruction::StorageLive { local, .. } => {
+                let index = *local as usize;
                 let slot = states
-                    .get_mut(*local as usize)
+                    .registers
+                    .get_mut(index)
                     .ok_or(VmArtifactError::InvalidRegister { register: *local })?;
-                if slot.is_some() {
+                if states.storage_live[index] || slot.is_some() {
                     return Err(VmArtifactError::ReadBeforeWrite { register: *local });
                 }
                 *slot = Some(false);
+                states.storage_live[index] = true;
                 states.snapshots[*local as usize] = None;
             }
             VmInstruction::StorageDead { local, .. } => {
+                let index = *local as usize;
                 let slot = states
-                    .get_mut(*local as usize)
+                    .registers
+                    .get_mut(index)
                     .ok_or(VmArtifactError::InvalidRegister { register: *local })?;
-                if *slot != Some(false) {
+                if !states.storage_live[index] || *slot != Some(false) {
                     return Err(VmArtifactError::ReadBeforeWrite { register: *local });
                 }
                 *slot = None;
+                states.storage_live[index] = false;
                 states.snapshots[*local as usize] = None;
             }
             VmInstruction::SetDropFlag { flag, .. } => {
                 expect_type(function, *flag, VmType::Bool)?;
-                write(&mut states, *flag)?;
+                let slot = states
+                    .registers
+                    .get_mut(*flag as usize)
+                    .ok_or(VmArtifactError::InvalidRegister { register: *flag })?;
+                // Drop flags are compiler-created state cells. Their explicit
+                // transitions are the sole allowed overwrite operation and
+                // may occur repeatedly as initialization changes.
+                *slot = Some(true);
+                states.snapshots[*flag as usize] = None;
             }
             VmInstruction::DestroyIf { local, flag } => {
                 read(&states, *flag)?;
                 expect_type(function, *flag, VmType::Bool)?;
+                let index = *local as usize;
                 let slot = states
-                    .get_mut(*local as usize)
+                    .registers
+                    .get_mut(index)
                     .ok_or(VmArtifactError::InvalidRegister { register: *local })?;
-                if slot.is_none() {
+                if !states.storage_live[index] || slot.is_none() {
                     return Err(VmArtifactError::ReadBeforeWrite { register: *local });
                 }
                 *slot = Some(false);
@@ -8304,8 +8337,10 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::Store { dst, src } => {
                 read(&states, *src)?;
                 same_type(function, *dst, *src)?;
+                let index = *dst as usize;
                 let state = states
-                    .get_mut(*dst as usize)
+                    .registers
+                    .get_mut(index)
                     .ok_or(VmArtifactError::InvalidRegister { register: *dst })?;
                 *state = Some(true);
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
@@ -9250,15 +9285,26 @@ fn same_type(function: &VmFunction, destination: u32, source: u32) -> Result<(),
     }
 }
 
-fn write(states: &mut [Option<bool>], register: u32) -> Result<(), VmArtifactError> {
-    let state = states
-        .get_mut(register as usize)
+fn write(states: &mut VerifierState, register: u32) -> Result<(), VmArtifactError> {
+    let index = register as usize;
+    let storage_live = *states
+        .storage_live
+        .get(index)
         .ok_or(VmArtifactError::InvalidRegister { register })?;
-    if state.is_some() {
-        Err(VmArtifactError::DoubleWrite { register })
-    } else {
-        *state = Some(true);
-        Ok(())
+    let state = states
+        .registers
+        .get_mut(index)
+        .ok_or(VmArtifactError::InvalidRegister { register })?;
+    match *state {
+        None => {
+            *state = Some(true);
+            Ok(())
+        }
+        Some(false) if storage_live => {
+            *state = Some(true);
+            Ok(())
+        }
+        _ => Err(VmArtifactError::DoubleWrite { register }),
     }
 }
 fn read(states: &[Option<bool>], register: u32) -> Result<(), VmArtifactError> {

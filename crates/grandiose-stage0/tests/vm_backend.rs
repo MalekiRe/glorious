@@ -7053,3 +7053,96 @@ fn cleanup_leave_program_artifacts_are_insertion_order_deterministic() {
         42
     );
 }
+
+/// Source storage has an independent lifetime: `StorageLive` makes a slot
+/// addressable but does not define a resident value.  The first ordinary
+/// definition into that slot must therefore be accepted, while a second
+/// ordinary definition remains a forged replacement.
+#[test]
+fn verifier_and_runtime_distinguish_live_uninitialized_storage_from_double_writes() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"live-uninitialized-storage")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::StorageLive {
+                binding: 0,
+                local: 0,
+            },
+            VmInstruction::ConstI64 { dst: 1, value: 42 },
+            VmInstruction::Copy { dst: 0, src: 1 },
+            VmInstruction::Move { dst: 2, src: 0 },
+            VmInstruction::StorageDead {
+                binding: 0,
+                local: 0,
+            },
+            VmInstruction::Return { value: 2 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"live-uninitialized-storage-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let encoded = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
+    assert_eq!(
+        decode_and_verify_artifact(&encoded)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+
+    let mut forged = candidate;
+    forged.function.instructions.insert(
+        3,
+        VmInstruction::ConstI64 {
+            dst: 0,
+            value: 7,
+        },
+    );
+    forged.fingerprint = forged.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(forged),
+        Err(VmArtifactError::DoubleWrite { register: 0 })
+    ));
+}
+
+/// Compiler-created drop flags are explicit state cells, so changing their
+/// value is not a generic SSA double write.  This keeps their lifecycle
+/// separate from ordinary source-storage initialization.
+#[test]
+fn verifier_allows_explicit_drop_flag_transitions_without_relaxing_value_writes() {
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"drop-flag-transitions")),
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Bool, VmType::I64],
+        instructions: vec![
+            VmInstruction::SetDropFlag {
+                flag: 0,
+                value: true,
+            },
+            VmInstruction::SetDropFlag {
+                flag: 0,
+                value: false,
+            },
+            VmInstruction::ConstI64 { dst: 1, value: 42 },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function,
+        fingerprint: Digest::of_bytes(b"drop-flag-transitions-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
