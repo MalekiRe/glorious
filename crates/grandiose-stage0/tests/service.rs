@@ -5148,6 +5148,38 @@ fn service_materializes_unique_hrtb_static_method_values_with_defaulted_gats_and
 }
 
 #[test]
+fn service_materializes_hrtb_static_type_gat_callable_aliases_with_structural_consts() {
+    let mut request = request(
+        "use facade::{Callback, Gateway as Capability, Trace}; pub fn apply(callback: Callback) -> i64 / Trace<7, i64> { let value = 41; let result = callback(&value); Trace<7, i64>::note(result) } pub fn main() -> i64 { handle apply(Capability::relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as Gateway, Trace}; pub type Callback = provider::Callback;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Gate { type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; } pub trait Base: Gate { fn relay<'a>(value: &'a i64) -> <Self as Gate>::Item<'a, 7> / { <Self as Gate>::Effects<'a, 7> }; } pub trait Top: Base {} pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a, 7> / { <i64 as Gate>::Effects<'a, 7> }; impl Gate for i64 { type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n, i64>}; } impl Base for i64 { fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a, 7> / { <i64 as Gate>::Effects<'a, 7> } { *value } } impl Top for i64 where i64: Base {}".as_slice(),
+    ));
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("selected HRTB static type GAT alias must materialize");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(request)
+        .expect("source order must preserve selected HRTB static type GAT aliases");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,

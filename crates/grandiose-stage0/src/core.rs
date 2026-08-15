@@ -9076,7 +9076,7 @@ impl Elaborator<'_> {
         } else {
             self.normalize_concrete_effect_row(signature.effects.clone())
         };
-        let callable = Type::Callable {
+        let callable = self.normalize_selectable_type_projections(Type::Callable {
             lifetime_binders: if hrtb_method_value {
                 expected_lifetime_binders
             } else {
@@ -9086,7 +9086,7 @@ impl Elaborator<'_> {
             result: Box::new(signature.result.clone()),
             effects,
             invocation: signature.invocation,
-        };
+        });
         let Some(expected) = expected else {
             unreachable!("the contextual callable was checked above");
         };
@@ -9111,6 +9111,7 @@ impl Elaborator<'_> {
         } else {
             expected
         };
+        let expected = self.normalize_selectable_type_projections(expected);
         if self.inference.unify(expected, callable.clone()).is_err() {
             return Some(self.fail(
                 span,
