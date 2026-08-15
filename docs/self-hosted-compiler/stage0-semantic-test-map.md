@@ -86,6 +86,10 @@ coarse. The composite fixtures cover:
   same-entry construction/projection and rejected cross-entry access;
 - mixed-polarity trait coherence at the service boundary, so contradictory
   positive and negative implementations cannot reach executable lowering.
+- effect declaration visibility across dependency-package boundaries, including
+  direct public perform/handler execution and rejection of a private effect;
+- qualified nominal identity for same-named public declarations in separate
+  modules, carried through record construction, projection, and VM execution.
 
 ## Previously enabled red semantic cases
 

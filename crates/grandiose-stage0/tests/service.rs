@@ -9874,6 +9874,38 @@ fn service_preserves_package_name_ambiguity_between_multiple_dependency_interfac
 }
 
 #[test]
+fn service_enforces_effect_declaration_visibility_across_package_boundaries() {
+    // Effect declarations have the same namespace and authority boundary as
+    // other exported semantic declarations.  Exercise both sides through a
+    // real perform/handler path so visibility cannot be lost after interface
+    // resolution or bypassed by operation lowering.
+    let public = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::Signal; pub fn main() -> i64 { handle Signal::ping() { Signal::ping() with k => k(42) } }",
+            "math@0.1.0",
+            "pub effect Signal { [1,1] ping() -> i64; }",
+        ))
+        .expect("a public dependency effect must be performable and handleable");
+    assert!(public.diagnostics.is_empty(), "{:#?}", public.diagnostics);
+    assert_eq!(public.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let private = StageZeroCompiler::new().compile(request_with_dependency(
+        "use math::Signal; pub fn main() -> i64 { handle Signal::ping() { Signal::ping() with k => k(42) } }",
+        "math@0.1.0",
+        "effect Signal { [1,1] ping() -> i64; }",
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = private else {
+        panic!("a private dependency effect unexpectedly crossed the package boundary");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic.code, "G3326" | "G4104")),
+        "missing cross-package effect-visibility diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_resolves_module_qualified_values_without_last_segment_collisions() {
     let root = "mod math; mod other; pub fn main() -> i64 { math::add(40) + other::add(0) }";
     let outcome = StageZeroCompiler::new()
@@ -9885,6 +9917,24 @@ fn service_resolves_module_qualified_values_without_last_segment_collisions() {
             ],
         ))
         .unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_preserves_qualified_nominal_identity_across_same_named_modules() {
+    // Nominal identity is definition-based, not a final-segment spelling.
+    // Two public `Token` declarations must remain distinct through source
+    // resolution, record construction/projection, and VM layout selection.
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_modules(
+            "pub mod alpha; pub mod beta; pub fn main() -> i64 { let first = alpha::Token { value: 40 }; let second = beta::Token { value: 2 }; first.value + second.value }",
+            &[
+                ("alpha", "pub struct Token { value: i64 }"),
+                ("beta", "pub struct Token { value: i64 }"),
+            ],
+        ))
+        .expect("qualified same-named nominal constructors must remain distinct");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
 
