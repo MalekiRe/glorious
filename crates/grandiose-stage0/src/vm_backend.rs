@@ -5231,12 +5231,39 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
             message: "program function map key does not match definition",
         });
     }
+    // A nominal value may cross any direct call boundary while retaining only
+    // its nominal identity in the register type.  Its field layout therefore
+    // cannot be a function-local opinion: two functions which declare the
+    // same instantiated nominal layout must freeze byte-for-byte identical
+    // descriptors, or a caller can construct one layout and a callee can
+    // project it as another.
+    let mut nominal_layouts = Vec::<&VmNominalCopyDescriptor>::new();
+    for function in program.functions.values() {
+        for descriptor in &function.nominal_copy_descriptors {
+            if let Some(previous) = nominal_layouts.iter().find(|previous| {
+                previous.definition == descriptor.definition
+                    && previous.arguments == descriptor.arguments
+            }) {
+                if **previous != *descriptor {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "program nominal layout declarations disagree",
+                    });
+                }
+            } else {
+                nominal_layouts.push(descriptor);
+            }
+        }
+    }
     let declared = program
         .host_capabilities
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
     if declared.len() != program.host_capabilities.len()
+        || program
+            .host_capabilities
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
         || declared.iter().any(|capability| {
             capability.is_empty()
                 || capability.contains('*')

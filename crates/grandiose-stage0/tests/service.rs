@@ -18477,6 +18477,53 @@ fn service_preserves_qualified_nominal_identity_across_same_named_modules() {
 }
 
 #[test]
+fn service_keeps_generic_nominal_layouts_consistent_across_direct_vm_calls() {
+    let source = "pub struct Packet<T> { value: T } pub fn inspect<T>(packet: Packet<T>) -> T { packet.value } pub fn main() -> i64 { let packet = Packet<i64> { value: 42 }; inspect<i64>(packet) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("generic nominal values must cross direct VM calls with one layout authority");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let functions = program.functions.values().collect::<Vec<_>>();
+    let shared_layouts = functions
+        .iter()
+        .enumerate()
+        .flat_map(|(index, left)| {
+            functions[index + 1..].iter().flat_map(move |right| {
+                left.nominal_copy_descriptors
+                    .iter()
+                    .filter(move |descriptor| {
+                        right.nominal_copy_descriptors.iter().any(|other| {
+                            other.definition == descriptor.definition
+                                && other.arguments == descriptor.arguments
+                        })
+                    })
+                    .map(move |descriptor| {
+                        let other = right
+                            .nominal_copy_descriptors
+                            .iter()
+                            .find(|other| {
+                                other.definition == descriptor.definition
+                                    && other.arguments == descriptor.arguments
+                            })
+                            .expect("filter retained matching descriptor");
+                        descriptor == other
+                    })
+            })
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !shared_layouts.is_empty() && shared_layouts.into_iter().all(|same| same),
+        "caller and callee must carry one nominal layout authority: {program:#?}"
+    );
+    let verified = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("the cross-call nominal artifact must verify");
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(verified.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_resolves_explicit_import_aliases() {
     let root = "mod math; use math::add_two as add; pub fn main() -> i64 { add(40) }";
     let child = "pub fn add_two(value: i64) -> i64 { value + 2 }";

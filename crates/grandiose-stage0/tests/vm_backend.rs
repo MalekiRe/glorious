@@ -1938,6 +1938,174 @@ fn program_host_capabilities_exclude_unreachable_emitted_helpers() {
 }
 
 #[test]
+fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts() {
+    let entry = DefKey(Digest::of_bytes(b"cross-function-layout-entry"));
+    let callee = DefKey(Digest::of_bytes(b"cross-function-layout-callee"));
+    let nominal = DefKey(Digest::of_bytes(b"cross-function-layout-record"));
+    let nominal_type = VmType::Nominal {
+        definition: nominal,
+        arguments: vec![],
+    };
+    // The caller constructs `Record { I64 }`, while the callee claims that
+    // the same frozen nominal identity is `Record { Bool }`. Both bodies are
+    // locally well-typed because VM nominal registers erase fields; only the
+    // program graph can reject the contradictory declaration authority.
+    let mut conflicting_layouts = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: Some(Digest::of_bytes(b"cross-function-layout-manifest")),
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([
+            (
+                entry,
+                VmFunction {
+                    nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        definition: nominal,
+                        arguments: vec![],
+                        variants: vec![vec![VmType::I64]],
+                    }],
+                    definition: entry,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::I64, nominal_type.clone(), VmType::Bool],
+                    instructions: vec![
+                        VmInstruction::ConstI64 { dst: 0, value: 42 },
+                        VmInstruction::MakeRecord {
+                            dst: 1,
+                            definition: nominal,
+                            fields: vec![0],
+                            field_types: vec![VmType::I64],
+                        },
+                        VmInstruction::Call {
+                            dst: 2,
+                            callee,
+                            arguments: vec![1],
+                        },
+                        VmInstruction::Return { value: 2 },
+                    ],
+                },
+            ),
+            (
+                callee,
+                VmFunction {
+                    nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        definition: nominal,
+                        arguments: vec![],
+                        variants: vec![vec![VmType::Bool]],
+                    }],
+                    definition: callee,
+                    captures: 0,
+                    parameters: 1,
+                    registers: vec![nominal_type, VmType::Bool],
+                    instructions: vec![
+                        VmInstruction::ProjectRecord {
+                            dst: 1,
+                            base: 0,
+                            index: 0,
+                            field_count: 1,
+                            field_type: VmType::Bool,
+                        },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+        ]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"cross-function-layout-stale"),
+    };
+    conflicting_layouts.fingerprint = conflicting_layouts.computed_fingerprint();
+    let layout_bytes = encode_program(&conflicting_layouts);
+    assert!(matches!(
+        verify_vm_program(conflicting_layouts),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "program nominal layout declarations disagree"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&layout_bytes),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "program nominal layout declarations disagree"
+        })
+    ));
+
+    let helper = DefKey(Digest::of_bytes(b"unordered-capability-helper"));
+    let mut unordered_manifest = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: Some(Digest::of_bytes(b"unordered-capability-manifest")),
+        // This represents the same authority set as the reachable imports,
+        // but serializes it in a different order. Program fingerprints must
+        // have one canonical spelling for that manifest.
+        host_capabilities: vec!["zeta".into(), "alpha".into()],
+        entry,
+        functions: BTreeMap::from([
+            (
+                entry,
+                VmFunction {
+                    nominal_copy_descriptors: vec![],
+                    definition: entry,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::I64, VmType::I64],
+                    instructions: vec![
+                        VmInstruction::Call {
+                            dst: 0,
+                            callee: helper,
+                            arguments: vec![],
+                        },
+                        VmInstruction::HostCall {
+                            dst: 1,
+                            capability: "zeta".into(),
+                            symbol: "after_call".into(),
+                            parameters: vec![],
+                            result: VmType::I64,
+                            arguments: vec![],
+                        },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+            (
+                helper,
+                VmFunction {
+                    nominal_copy_descriptors: vec![],
+                    definition: helper,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::I64],
+                    instructions: vec![
+                        VmInstruction::HostCall {
+                            dst: 0,
+                            capability: "alpha".into(),
+                            symbol: "before_call".into(),
+                            parameters: vec![],
+                            result: VmType::I64,
+                            arguments: vec![],
+                        },
+                        VmInstruction::Return { value: 0 },
+                    ],
+                },
+            ),
+        ]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"unordered-capability-stale"),
+    };
+    unordered_manifest.fingerprint = unordered_manifest.computed_fingerprint();
+    let manifest_bytes = encode_program(&unordered_manifest);
+    assert!(matches!(
+        verify_vm_program(unordered_manifest),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "host capability declarations are not canonical"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&manifest_bytes),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "host capability declarations are not canonical"
+        })
+    ));
+}
+
+#[test]
 fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
     let effect = DefKey(Digest::of_bytes(b"cross-frame-ask"));
     let caller = DefKey(Digest::of_bytes(b"cross-frame-caller"));
