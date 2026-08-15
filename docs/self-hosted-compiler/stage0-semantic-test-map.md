@@ -91,6 +91,10 @@ coarse. The composite fixtures cover:
   same-entry construction/projection and rejected cross-entry access;
 - mixed-polarity trait coherence at the service boundary, so contradictory
   positive and negative implementations cannot reach executable lowering.
+- package-level orphan coherence through public re-export facades: a local
+  self type remains a valid anchor for an imported trait and reaches VM
+  execution, while an imported trait plus imported self type is rejected
+  before body lowering (`service_enforces_cross_package_orphan_coherence_through_public_reexports`).
 - effect declaration visibility across dependency-package boundaries, including
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate

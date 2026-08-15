@@ -10402,6 +10402,55 @@ fn service_rejects_ambiguous_dependency_fixity_imports() {
 }
 
 #[test]
+fn service_enforces_cross_package_orphan_coherence_through_public_reexports() {
+    let legal = {
+        let mut request = request(
+            "use bridge::ForeignTrait; pub struct Local {} impl ForeignTrait for Local { fn value(receiver: Local) -> i64 { 42 } } pub fn main() -> i64 { ForeignTrait::value(Local {}) }",
+        );
+        request.sources.push(SourceInput::new(
+            PackageKey("bridge@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::ForeignTrait;".as_slice(),
+        ));
+        request.sources.push(SourceInput::new(
+            PackageKey("provider@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub trait ForeignTrait { fn value(receiver: Self) -> i64; } pub struct ForeignType {};".as_slice(),
+        ));
+        StageZeroCompiler::new().compile(request)
+    };
+    let legal = legal.expect("a local self type must anchor an imported trait implementation");
+    assert!(legal.diagnostics.is_empty(), "{:#?}", legal.diagnostics);
+    assert_eq!(legal.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let rejected = {
+        let mut request = request(
+            "use bridge::{ForeignTrait, ForeignType}; impl ForeignTrait for ForeignType { fn value(receiver: ForeignType) -> i64 { 42 } } pub fn main() -> i64 { 0 }",
+        );
+        request.sources.push(SourceInput::new(
+            PackageKey("bridge@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{ForeignTrait, ForeignType};".as_slice(),
+        ));
+        request.sources.push(SourceInput::new(
+            PackageKey("provider@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub trait ForeignTrait { fn value(receiver: Self) -> i64; } pub struct ForeignType {};".as_slice(),
+        ));
+        StageZeroCompiler::new().compile(request)
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = rejected else {
+        panic!("a foreign trait implementation for a foreign reexport unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3407"),
+        "missing cross-package orphan diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_materializes_dependency_generic_function_values_for_indirect_calls() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(
