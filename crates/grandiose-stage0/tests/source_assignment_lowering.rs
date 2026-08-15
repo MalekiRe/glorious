@@ -14,7 +14,7 @@ use grandiose_stage0::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-fn lower_main(source: &str) -> (TypedBody, PlaceFlow, MirLowering) {
+fn lower_function(source: &str, function: &str) -> (TypedBody, PlaceFlow, MirLowering) {
     let package = PackageKey("source-assignment-lowering@0.1.0".into());
     let file = FileKey::new(
         &package,
@@ -29,9 +29,9 @@ fn lower_main(source: &str) -> (TypedBody, PlaceFlow, MirLowering) {
     let definition = interface
         .definitions
         .iter()
-        .find(|definition| definition.name.as_deref() == Some("main"))
-        .expect("main definition");
-    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+        .find(|definition| definition.name.as_deref() == Some(function))
+        .expect("requested function definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("requested function body"));
     let core = TypedBody::elaborate(
         definition,
         &body,
@@ -43,6 +43,10 @@ fn lower_main(source: &str) -> (TypedBody, PlaceFlow, MirLowering) {
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
     let lowered = MirLowering::lower(definition.key, &core, &flow);
     (core, flow, lowered)
+}
+
+fn lower_main(source: &str) -> (TypedBody, PlaceFlow, MirLowering) {
+    lower_function(source, "main")
 }
 
 fn compile_main(source: &str) -> grandiose_stage0::CompilationOutcome {
@@ -544,5 +548,87 @@ fn source_leave_protects_reinitialized_owner_payload_before_storage_dead() {
             MirCleanupAction::StorageDead { binding: candidate } if *candidate == binding
         )),
         "the transferred source owner still needs an explicit lexical StorageDead: {cleanup:#?}"
+    );
+}
+
+/// A `Leave` emitted from a handler clause is a separate MIR block from the
+/// lexical label body.  It must still consume the label's branded
+/// source-storage boundary and preserve a direct source owner as the payload,
+/// rather than reconstructing cleanup from the handler block or moving the
+/// owner through an untracked temporary.
+#[test]
+fn handler_leave_protects_a_direct_reinitialized_source_owner_payload() {
+    let source = r#"
+        pub struct Token { number: i64 }
+        effect Ask { [1,1] ask() -> Token; }
+
+        pub fn escape() -> Token {
+            label done {
+                let owner = Token { number: 1 };
+                move owner;
+                owner = Token { number: 42 };
+                handle Ask::ask() {
+                    Ask::ask() => transfer done owner
+                }
+            }
+        }
+
+        pub fn main() -> i64 {
+            let token = escape();
+            token.number
+        }
+    "#;
+    let (_core, _flow, lowered) = lower_function(source, "escape");
+    let function = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "handler payload leave must lower: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    function.validate().unwrap_or_else(|error| {
+        panic!("handler payload leave MIR must validate: {error}\n{function:#?}")
+    });
+    let (arguments, cleanup) = function
+        .blocks
+        .iter()
+        .find_map(|block| match &block.terminator {
+            MirTerminator::Leave {
+                arguments, cleanup, ..
+            } if !cleanup.actions.is_empty() => Some((arguments, cleanup)),
+            _ => None,
+        })
+        .expect("handler clause transfer must retain executable source cleanup");
+    assert_eq!(
+        cleanup.protected_values, *arguments,
+        "the protected storage payload must exactly match the handler Leave arguments: {cleanup:#?}"
+    );
+    let protected = cleanup
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            MirCleanupAction::Protect { binding, local } => Some((*binding, *local)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        protected.len(),
+        1,
+        "only the directly transferred owner may be protected: {cleanup:#?}"
+    );
+    assert_eq!(protected[0].1, arguments[0]);
+    assert!(
+        cleanup.actions.iter().any(|action| matches!(
+            action,
+            MirCleanupAction::StorageDead { binding } if *binding == protected[0].0
+        )),
+        "the protected owner must still leave lexical source storage"
+    );
+    assert_eq!(
+        compile_main(source)
+            .artifact
+            .expect("handler payload leave must publish an artifact")
+            .run_i64()
+            .expect("handler payload leave must execute"),
+        42
     );
 }
