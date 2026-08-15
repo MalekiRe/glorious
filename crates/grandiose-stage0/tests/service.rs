@@ -18928,6 +18928,15 @@ fn service_dispatches_an_opaque_handler_from_a_dynamic_lazy_branch() {
 }
 
 #[test]
+fn service_rejoins_dynamic_lazy_handler_after_a_terminal_sibling_operation() {
+    let source = "effect Ask { [1,1] ask() -> Bool; halt() -> !; } pub fn relay() -> Bool / Ask { let answer = Ask::ask(); Ask::halt(); answer } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(flag: Bool, callback: () -> Bool / Ask) -> Bool { flag and handle apply(callback) { Ask::ask() with k => k(true); Ask::halt() => true } } pub fn main() -> Bool { select(false, relay) or select(true, relay) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through

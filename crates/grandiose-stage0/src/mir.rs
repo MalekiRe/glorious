@@ -14372,12 +14372,21 @@ impl Lowerer<'_> {
         if effects.effects.is_empty() || effects.tail.is_some() || !effects.projections.is_empty() {
             return None;
         }
-        // This branch CFG currently owns one resumptive operation. A terminal
-        // sibling needs an additional cancellation-to-join edge and must not
-        // be silently omitted from the dynamic frame set.
-        if clauses.iter().any(|clause| clause.terminal) {
+        let terminal = clauses
+            .iter()
+            .filter(|clause| clause.terminal && effects.effects.contains(&clause.effect))
+            .cloned()
+            .collect::<Vec<_>>();
+        if terminal.len() > 1
+            || terminal.iter().any(|clause| {
+                clause.patterns.len() != clause.payload_types.len()
+                    || !clause.patterns.iter().all(pattern_is_irrefutable)
+                    || !matches!(clause.resumption, CoreHandlerResumption::Terminal)
+            })
+        {
             return None;
         }
+        let terminal = terminal.into_iter().next();
         let active = clauses
             .iter()
             .filter(|clause| !clause.terminal && effects.effects.contains(&clause.effect))
@@ -14434,6 +14443,28 @@ impl Lowerer<'_> {
             .iter()
             .map(|ty| self.alloc(ty.clone(), computation))
             .collect::<Vec<_>>();
+        let terminal_payloads = terminal.as_ref().map(|clause| {
+            clause
+                .payload_types
+                .iter()
+                .map(|ty| self.alloc(ty.clone(), computation))
+                .collect::<Vec<_>>()
+        });
+        if let Some(terminal_clause) = &terminal {
+            self.instructions.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: terminal_clause.effect.definition,
+                effect_arguments: terminal_clause.effect.arguments.clone(),
+                operation: terminal_clause.operation,
+                payload_destinations: terminal_payloads
+                    .as_ref()
+                    .expect("terminal payloads were allocated")
+                    .clone(),
+                resume_type: Type::Never,
+                continuation: MirContinuationPolicy::Terminal,
+                target: MirBlockId(3),
+            });
+        }
         self.instructions.push(MirInstruction::InstallHandler {
             site: MirHandlerSiteId::UNASSIGNED,
             effect: clause.effect.definition,
@@ -14442,7 +14473,7 @@ impl Lowerer<'_> {
             payload_destinations: payloads.clone(),
             resume_type: clause.continuation.as_ref()?.parameter.clone(),
             continuation: MirContinuationPolicy::Consume,
-            target: MirBlockId(3),
+            target: MirBlockId(if terminal.is_some() { 4 } else { 3 }),
         });
         match callee_kind {
             CoreKind::Function {
@@ -14479,7 +14510,29 @@ impl Lowerer<'_> {
             }),
         }
         self.instructions.push(MirInstruction::UninstallHandler);
+        if terminal.is_some() {
+            self.instructions.push(MirInstruction::UninstallHandler);
+        }
         let call_instructions = std::mem::take(&mut self.instructions);
+
+        let terminal_block = if let Some(terminal_clause) = &terminal {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(
+                &terminal_clause.patterns,
+                terminal_payloads
+                    .as_ref()
+                    .expect("terminal payloads were allocated"),
+            )?;
+            let result = self.value(terminal_clause.body)?;
+            self.instructions.push(MirInstruction::Cancel {
+                site: MirResumptionSiteId::UNASSIGNED,
+            });
+            Some((std::mem::take(&mut self.instructions), result))
+        } else {
+            None
+        };
 
         self.instructions = Vec::new();
         self.named = boundary_named;
@@ -14512,6 +14565,56 @@ impl Lowerer<'_> {
         } else {
             (MirBlockId(2), vec![skipped], MirBlockId(1), vec![])
         };
+        let mut blocks = vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: entry,
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target,
+                    then_arguments,
+                    else_target,
+                    else_arguments,
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: call_instructions,
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(2),
+                    arguments: vec![call_result],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![joined],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: joined },
+            },
+        ];
+        if let Some((instructions, result)) = terminal_block {
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions,
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(2),
+                    arguments: vec![result],
+                },
+            });
+        }
+        blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: handler_instructions,
+            terminator: if consume_returning {
+                MirTerminator::Return { value: resumed }
+            } else {
+                MirTerminator::Unreachable
+            },
+        });
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
@@ -14521,45 +14624,7 @@ impl Lowerer<'_> {
             result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
-            blocks: vec![
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: entry,
-                    terminator: MirTerminator::SwitchBool {
-                        condition,
-                        then_target,
-                        then_arguments,
-                        else_target,
-                        else_arguments,
-                    },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: call_instructions,
-                    terminator: MirTerminator::Goto {
-                        target: MirBlockId(2),
-                        arguments: vec![call_result],
-                    },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![joined],
-                    instructions: vec![],
-                    terminator: MirTerminator::Return { value: joined },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: handler_instructions,
-                    terminator: if consume_returning {
-                        MirTerminator::Return { value: resumed }
-                    } else {
-                        MirTerminator::Unreachable
-                    },
-                },
-            ],
+            blocks,
         })
     }
     /// Lower a straight-line sequence of one-shot performances under one
