@@ -23,6 +23,15 @@ fn temporary_directory() -> std::path::PathBuf {
     directory
 }
 
+fn staging_files(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+    fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "tmp"))
+        .collect()
+}
+
 #[test]
 fn cli_emits_verifies_and_runs_verified_vm_programs() {
     let directory = temporary_directory();
@@ -68,6 +77,34 @@ fn cli_emits_verifies_and_runs_verified_vm_programs() {
     );
     assert_eq!(String::from_utf8(run.stdout).unwrap(), "\"glorious\"\n");
 
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn cli_failed_output_publication_preserves_existing_target_state() {
+    let directory = temporary_directory();
+    let source = directory.join("main.glorious");
+    let output_directory = directory.join("program.g0vp");
+    fs::write(&source, "pub fn main() -> i64 { 42 }").unwrap();
+    fs::create_dir(&output_directory).unwrap();
+    let sentinel = output_directory.join("previous-output");
+    fs::write(&sentinel, b"visible before failed publication").unwrap();
+
+    let emitted = Command::new(env!("CARGO_BIN_EXE_grc-stage0"))
+        .args([
+            "emit-vm",
+            source.to_str().unwrap(),
+            output_directory.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!emitted.status.success());
+    assert_eq!(
+        fs::read(sentinel).unwrap(),
+        b"visible before failed publication"
+    );
+    assert!(staging_files(&directory).is_empty());
     fs::remove_dir_all(directory).unwrap();
 }
 

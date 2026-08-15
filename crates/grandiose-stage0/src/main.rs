@@ -6,7 +6,7 @@ use grandiose_stage0::{
     BootstrapLimits, BootstrapManifest, BootstrapStage, CompilationMode, CompilationRequest,
     CompileDiagnostic, CompilerBuildIdentity, Digest, HostImportSelector, LogicalPath, PackageKey,
     PrimitiveRole, PrimitiveSelector, RuntimeManifestInput, SourceInput, StageZeroCompiler,
-    decode_and_verify_program,
+    decode_and_verify_program, write_atomically,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -201,7 +201,7 @@ fn main() -> ExitCode {
                 let artifact = outcome
                     .artifact
                     .expect("successful build has verified artifact");
-                if let Err(error) = fs::write(&output, artifact.canonical_bytes()) {
+                if let Err(error) = write_atomically(&output, &artifact.canonical_bytes()) {
                     eprintln!("grc-stage0: cannot write {output}: {error}");
                     return ExitCode::from(1);
                 }
@@ -216,7 +216,7 @@ fn main() -> ExitCode {
                             return ExitCode::from(1);
                         }
                     };
-                    if let Err(error) = fs::write(&manifest_output, bytes) {
+                    if let Err(error) = write_atomically(&manifest_output, &bytes) {
                         eprintln!("grc-stage0: cannot write {manifest_output}: {error}");
                         return ExitCode::from(1);
                     }

@@ -22,6 +22,7 @@ pub mod mir;
 pub mod mir_storage;
 pub mod module_graph;
 pub mod operation;
+pub mod output;
 pub mod pattern;
 pub mod placeflow;
 pub mod quantity;
@@ -100,6 +101,7 @@ pub use mir_storage::{
 };
 pub use module_graph::{ModuleDiagnostic, ModuleGraph, ModuleNode};
 pub use operation::{Budget, BudgetError, CancellationToken, PublicationGuard};
+pub use output::{AtomicWriteError, write_atomically};
 pub use pattern::{
     BinderKey, BindingMode, PatternBinding, PatternDecision, PatternDiagnostic, PatternElaboration,
     PatternGenericScope, PatternPlan, elaborate_pattern, elaborate_pattern_with_scope,
