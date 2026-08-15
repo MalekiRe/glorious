@@ -5421,6 +5421,48 @@ fn service_rolls_back_private_selected_associated_item_facade_revisions() {
 }
 
 #[test]
+fn service_closes_generic_supertrait_selected_items_across_facade_revisions() {
+    let root = "use facade::{Capability, Parent, Trace}; pub fn apply(callback: for<'a> (i64, &'a i64) -> <i64 as Capability<i64>>::Item<'a> / { <i64 as Capability<i64>>::Effects<'a> }) -> i64 / Trace<7, i64> { let value = 41; let result = callback(0, &value); Trace<7, i64>::note(result) } pub fn main() -> i64 { handle apply(Parent<i64>::relay) { Trace<7, i64>::note(value) with resume => resume(value + 1) } }";
+    let provider = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; fn relay<'a>(marker: T, value: &'a i64) -> <Self as Parent<T>>::Item<'a> / { <Self as Parent<T>>::Effects<'a> }; } pub trait Child<T>: Parent<T> {} impl<T> Parent<T> for i64 { const Width = 7; type Item<'a> = i64; type Effects<'a> = {Trace<<i64 as Parent<T>>::Width, i64>}; fn relay<'a>(marker: T, value: &'a i64) -> <i64 as Parent<T>>::Item<'a> / { <i64 as Parent<T>>::Effects<'a> } { marker; *value } } impl<T> Child<T> for i64 where i64: Parent<T> {}";
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Child as Capability, Parent, Trace};".as_slice()));
+        input.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+        input
+    };
+    let mut reordered = world(provider);
+    let first = StageZeroCompiler::new().compile(reordered.clone()).expect("generic selected supertrait items must execute through the facade").artifact.unwrap();
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new().compile(reordered).expect("source order must preserve generic selected supertrait items").artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+
+    let overlap = format!("{provider} impl Parent<i64> for i64 {{ const Width = 7; type Item<'a> = i64; type Effects<'a> = {{Trace<7, i64>}}; fn relay<'a>(marker: i64, value: &'a i64) -> i64 / Trace<7, i64> {{ marker; *value }} }}");
+    let private = provider.replace("pub trait Parent", "trait Parent").replace("pub trait Child", "trait Child");
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(provider), None).unwrap();
+    let artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey { package: PackageKey("facade@0.1.0".into()), path: "crate".into() });
+    let parent_trace = compiler.dependency_trace(parent, &facade).expect("legal facade interface must be frozen");
+    for (label, source, expected_code) in [("overlap", overlap.as_str(), "G3404"), ("private", private.as_str(), "G3317")] {
+        let rejected_world = world(source);
+        let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+        let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("invalid facade revision must not publish");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == expected_code), "{label} revision is missing {expected_code}: {:#?}", error.diagnostics());
+        assert_eq!(compiler.interface_cache_stats(), cached, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published dependency traces");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(parent_trace.clone()), "{label} revision disturbed the legal facade trace");
+        let mut reordered = rejected_world;
+        reordered.sources.reverse();
+        assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source reordering cannot admit an invalid facade revision").diagnostics(), "{label} diagnostics must be canonical");
+    }
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), artifact.canonical_bytes());
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,

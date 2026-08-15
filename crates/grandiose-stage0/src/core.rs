@@ -12966,7 +12966,14 @@ fn projection_is_selectable_type_projection(value: &Type, hrtb_binders: &[u32]) 
         return false;
     };
     projection_is_concrete(subject)
-        && trait_arguments.iter().all(generic_argument_is_concrete)
+        // An implementation body owns its declaration generics. Once the
+        // subject is concrete, those rigid trait arguments select the same
+        // generic impl evidence for every instantiation; requiring them to
+        // be fully concrete leaves `<i64 as Parent<T>>::Item<'a>` opaque in
+        // precisely the body that establishes `Parent<T> for i64`.
+        && trait_arguments.iter().all(|argument| {
+            generic_argument_is_selectable_type_projection(argument, hrtb_binders)
+        })
         && item_arguments
             .iter()
             .all(|argument| {

@@ -2706,12 +2706,13 @@ fn materialization_body_arguments(
             }
             if let Some(receiver) = receiver {
                 bind_impl_head_type(&implementation.self_ty, receiver, &mut bindings)?;
-            } else if !implementation.generic_kinds.is_empty() {
-                return Err(
-                    "selected generic implementation method needs a concrete Self to reconstruct its body substitution"
-                        .into(),
-                );
             }
+            // Static trait methods have no receiver slot in their executable
+            // identity. Their implementation generics may nevertheless be
+            // fully determined by the selected trait relation (for example
+            // `impl<T> Parent<T> for i64`). The binder completeness check
+            // below remains the authority for rejecting genuinely
+            // unconstrained generic implementations.
             let mut arguments =
                 Vec::with_capacity(implementation.generic_kinds.len() + method_arguments);
             for (index, kind) in implementation.generic_kinds.iter().enumerate() {
