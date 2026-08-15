@@ -5241,6 +5241,7 @@ fn service_keeps_negative_child_inherited_projections_authoritative_through_alia
         "impl !Child<i64> for i64 {}",
         1,
     );
+    let unimplemented = provider.replacen("impl Child<i64> for i64 {}", "", 1);
     let overlapping = format!("{provider} impl !Child<i64> for i64 {{}}");
     let world = |provider: &str| {
         let mut input = request(root);
@@ -5321,6 +5322,47 @@ fn service_keeps_negative_child_inherited_projections_authoritative_through_alia
         StageZeroCompiler::new()
             .compile(rejected_reordered)
             .expect_err("source ordering cannot bypass a negative Child impl")
+            .diagnostics()
+    );
+    assert_eq!(
+        compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(),
+        parent_artifact.canonical_bytes()
+    );
+
+    let missing_cached = compiler.interface_cache_stats();
+    let missing_world = world(&unimplemented);
+    let missing = compiler
+        .import_revision(missing_world.clone(), Some(parent))
+        .unwrap();
+    let missing_error = compiler
+        .compile_session(&compiler.open_session(missing).unwrap())
+        .expect_err("Parent evidence alone must not select Child-named inherited projections");
+    for expected in [
+        "associated type projection",
+        "associated effect-row projection",
+        "associated const projection",
+    ] {
+        assert!(
+            missing_error.diagnostics().iter().any(|diagnostic| {
+                diagnostic.message.contains(expected)
+                    && diagnostic
+                        .message
+                        .contains("has no trait obligation or implementation evidence")
+            }),
+            "missing Parent-only projection rejection for {expected}: {:#?}",
+            missing_error.diagnostics()
+        );
+    }
+    assert_eq!(compiler.interface_cache_stats(), missing_cached, "Parent-only revision published cache state");
+    assert!(compiler.dependency_traces(missing).is_empty(), "Parent-only revision published traces");
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()));
+    let mut missing_reordered = missing_world;
+    missing_reordered.sources.reverse();
+    assert_eq!(
+        missing_error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(missing_reordered)
+            .expect_err("source ordering cannot make Parent evidence satisfy Child")
             .diagnostics()
     );
     assert_eq!(

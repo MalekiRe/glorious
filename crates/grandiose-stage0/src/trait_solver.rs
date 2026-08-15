@@ -979,9 +979,10 @@ impl TraitSolver {
             return TraitProjectionAnswer::NoSolution;
         }
         // An inherited item is still being requested through `goal`'s
-        // trait.  Check that boundary before following a supertrait edge:
-        // otherwise `impl !Child for T` could be bypassed by an unrelated
-        // `impl Parent for T` that supplies `Child`'s inherited item.
+        // trait.  Require that boundary before following a supertrait edge:
+        // otherwise either `impl !Child for T`, or no Child evidence at all,
+        // could be bypassed by an unrelated `impl Parent for T` that supplies
+        // Child's inherited item.
         let requested = if scoped_hrtb_item_arguments {
             self.solve_scoped_hrtb(goal.clone())
         } else {
@@ -993,7 +994,8 @@ impl TraitSolver {
             }
             TraitAnswer::Ambiguous => return TraitProjectionAnswer::Ambiguous,
             TraitAnswer::Overflow => return TraitProjectionAnswer::Overflow,
-            TraitAnswer::Proven { .. } | TraitAnswer::NoSolution => {}
+            TraitAnswer::Proven { .. } => {}
+            TraitAnswer::NoSolution => return TraitProjectionAnswer::NoSolution,
         }
         let goal = match self.find_associated_item_goal(
             &goal,
@@ -1285,15 +1287,17 @@ impl TraitSolver {
         name: &str,
         expected: crate::ConstKind,
     ) -> TraitConstProjectionAnswer {
-        // Preserve the requested trait's negative evidence before selecting
-        // the ancestor that declares this inherited constant.
+        // The requested trait must be selected before following the ancestor
+        // that declares this inherited constant; Parent evidence alone is not
+        // evidence for a Child-named projection.
         match self.solve(goal.clone()) {
             TraitAnswer::Refuted { evidence } => {
                 return TraitConstProjectionAnswer::Refuted { evidence };
             }
             TraitAnswer::Ambiguous => return TraitConstProjectionAnswer::Ambiguous,
             TraitAnswer::Overflow => return TraitConstProjectionAnswer::Overflow,
-            TraitAnswer::Proven { .. } | TraitAnswer::NoSolution => {}
+            TraitAnswer::Proven { .. } => {}
+            TraitAnswer::NoSolution => return TraitConstProjectionAnswer::NoSolution,
         }
         let goal = match self.find_associated_item_goal(
             &goal,
@@ -1434,8 +1438,9 @@ impl TraitSolver {
         {
             return TraitEffectRowProjectionAnswer::NoSolution;
         }
-        // As with associated types, a supertrait declaration does not erase
-        // negative evidence for the trait through which the row was named.
+        // As with associated types, a supertrait declaration neither erases
+        // negative evidence nor supplies missing evidence for the trait
+        // through which the row was named.
         let requested = if scoped_hrtb_item_arguments {
             self.solve_scoped_hrtb(goal.clone())
         } else {
@@ -1447,7 +1452,8 @@ impl TraitSolver {
             }
             TraitAnswer::Ambiguous => return TraitEffectRowProjectionAnswer::Ambiguous,
             TraitAnswer::Overflow => return TraitEffectRowProjectionAnswer::Overflow,
-            TraitAnswer::Proven { .. } | TraitAnswer::NoSolution => {}
+            TraitAnswer::Proven { .. } => {}
+            TraitAnswer::NoSolution => return TraitEffectRowProjectionAnswer::NoSolution,
         }
         let goal = match self.find_associated_item_goal(
             &goal,

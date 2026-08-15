@@ -566,6 +566,32 @@ fn typed_core_refutes_negative_child_inherited_type_effect_and_const_projections
 }
 
 #[test]
+fn typed_core_rejects_parent_only_inherited_type_effect_and_const_projections() {
+    // Parent's implementation does not establish the distinct Child
+    // capability through which each projection is written.
+    let core = core_for(
+        "core-unimplemented-child-projections@0.1.0",
+        "effect Trace { note() -> i64; } trait Parent<T> { const Width: u32; type Item; type Effects: EffectRow; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { const Width = 7; type Item = i64; type Effects = {Trace}; } struct Witness<n: u32> { value: i64 } pub fn main() -> <i64 as Child<i64>>::Item / { <i64 as Child<i64>>::Effects } { let witness = Witness<<i64 as Child<i64>>::Width> { value: 42 }; witness.value }",
+    );
+    let messages = core
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "no implementation can normalize this associated type projection",
+        "no implementation can normalize this associated effect-row projection",
+        "no implementation can normalize this associated constant",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "missing {expected}: {:#?}",
+            core.diagnostics
+        );
+    }
+}
+
+#[test]
 fn typed_core_materializes_defaulted_nominal_items_before_partial_move_analysis() {
     let source = "struct Token {} struct Packet<T> { head: T, tail: i64 } trait Mark: Use<[0, 0]> {} impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } trait Family { type Item<T> = Packet<T>; } impl Family for i64 {} fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
     let core = core_for("core-defaulted-nominal-partial-move@0.1.0", source);
