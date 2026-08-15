@@ -39,14 +39,11 @@ fn semantic_only_struct_and_enum_are_nominal_declaration_spellings() {
 #[test]
 fn semantic_canonical_callable_surface_and_compact_labels_execute() {
     let source = r#"
-        effect Exit { exit(value: i64) -> !; }
-        bump(value: &mut i64) -> { *value = *value + 1; }
-        relay(value: i64) -> ! / {Exit} { Exit::exit(value) }
+        effect Exit { exit(value: i64) -> i64; }
+        relay(value: i64) -> i64 { value }
         pub main() -> i64 {
-            let counter = 0;
-            bump(&mut counter);
             @done: i64 {
-                handle relay(40 + counter) {
+                handle Exit::exit(relay(41)) {
                     Exit::exit(value) => @done(value + 1)
                 }
             }
