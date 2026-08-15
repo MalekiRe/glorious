@@ -4526,6 +4526,17 @@ fn service_lowers_concrete_gat_type_projections_through_vm_layouts() {
 }
 
 #[test]
+fn service_lowers_defaulted_gat_type_projections_through_vm_layouts() {
+    // The selected impl deliberately omits `Item`: source layout elaboration
+    // must instantiate the trait's generic default rather than treating the
+    // projection as an unresolved abstract type.
+    let source = "trait Family { type Item<T> = T; } struct Value {} impl Family for Value {} pub struct Packet { value: <Value as Family>::Item<i64> } pub fn increment(value: <Value as Family>::Item<i64>) -> i64 { value + 1 } pub fn main() -> i64 { let packet = Packet { value: 41 }; increment(packet.value) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_instantiates_structural_const_nominal_layouts_at_record_construction() {
     let source = "pub struct Carrier<n: u32, T> { value: T } pub fn main() -> i64 { let value = Carrier<7, i64> { value: 41 }; value.value + 1 }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -4553,6 +4564,32 @@ fn service_normalizes_concrete_associated_effect_rows_on_trait_method_values() {
 fn service_lowers_concrete_associated_effect_gats_through_vm_handlers() {
     let source = "effect Trace<T> { [1,1] note(value: T) -> i64; } trait Capability { type Effects<T>: EffectRow; } impl Capability for i64 { type Effects<T> = {Trace<T>}; } pub fn worker() -> i64 / { <i64 as Capability>::Effects<i64> } { Trace<i64>::note(41) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_lowers_defaulted_associated_effect_gats_through_vm_handlers() {
+    // As above, this uses the trait-level GAT default, but its normalized row
+    // crosses method-effect checking, handler selection, VM emission, and
+    // execution rather than stopping at solver normalization.
+    let source = "effect Trace<T> { [1,1] note(value: T) -> i64; } trait Capability { type Effects<T>: EffectRow = {Trace<T>}; } struct Value {} impl Capability for Value {} pub fn worker() -> i64 / { <Value as Capability>::Effects<i64> } { Trace<i64>::note(41) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_imports_defaulted_associated_gats_for_local_layouts_and_effect_rows() {
+    // Interface serialization must retain generic defaults.  The consumer owns
+    // the impl heads, omits both associated definitions, and then needs the
+    // imported defaults in two independent backend-facing positions: a record
+    // field layout and an outward effect row.
+    let dependency = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Family { type Item<T> = T; } pub trait Capability { type Effects<T>: EffectRow = {Trace<T>}; }";
+    let root = "use dependency::Capability; use dependency::Family; use dependency::Trace; pub struct Value {} impl Family for Value {} impl Capability for Value {} pub struct Packet { value: <Value as Family>::Item<i64> } pub fn worker() -> i64 / { <Value as Capability>::Effects<i64> } { let packet = Packet { value: 41 }; Trace<i64>::note(packet.value) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(root, "dependency@0.1.0", dependency))
+        .unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }

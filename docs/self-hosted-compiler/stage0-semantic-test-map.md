@@ -95,6 +95,13 @@ coarse. The composite fixtures cover:
   effect instance does not match the performed one.
 - imported reference lifetime relations through a local closure and handler,
   including rejection of a closure escape after the imported call.
+- defaulted generic associated types and associated effect rows through source
+  layout construction, outward-effect checking, handler lowering, VM execution,
+  and dependency-interface serialization. The selected local impl may omit both
+  associated definitions: `service_lowers_defaulted_gat_type_projections_through_vm_layouts`,
+  `service_lowers_defaulted_associated_effect_gats_through_vm_handlers`, and
+  `service_imports_defaulted_associated_gats_for_local_layouts_and_effect_rows`
+  keep the default-selection path executable end to end.
 - exact move-captured closure consumption through local and imported callable
   transfers, including rejection of sequential activation and acceptance of
   mutually exclusive handler-arm transfers.
