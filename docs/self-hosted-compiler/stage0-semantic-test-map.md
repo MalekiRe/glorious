@@ -125,6 +125,10 @@ coarse. The composite fixtures cover:
   normalization terminates with `G3307` rather than publishing a provisional
   interface (`service_executes_recursive_public_hrtb_callable_aliases_through_vm`,
   `service_rejects_recursive_public_hrtb_callable_alias_cycles`).
+- row-generic public aliases keep their braced tail rows intact while they cross
+  a reciprocal module SCC and normalize into an HRTB callback. Reversing
+  logical-source enumeration preserves the emitted VM fingerprint and canonical
+  bytes as well as execution (`recursive_row_generic_hrtb_callable_aliases_are_order_independent_and_execute`).
 - effect declaration visibility across dependency-package boundaries, including
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate

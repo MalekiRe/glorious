@@ -11004,6 +11004,38 @@ fn service_rejects_recursive_public_hrtb_callable_alias_cycles() {
 }
 
 #[test]
+fn recursive_row_generic_hrtb_callable_aliases_are_order_independent_and_execute() {
+    // The type-alias headers themselves carry generic effect rows.  That makes
+    // this deliberately exercise the header scanner, public interface
+    // convergence through the `left`/`right` SCC, higher-ranked callback
+    // normalization, and canonical VM artifact emission in one program.
+    let root = "pub mod left; pub mod right; use left::Callback; use left::Trace; pub fn relay<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn apply(callback: Callback<{Trace<i64>}, i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); *result } pub fn main() -> i64 { handle apply(relay) { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let left = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Effects<U>: EffectRow; } pub use crate::right::Child; pub type Callback<E: EffectRow, U> = crate::right::Inner<E, U>;";
+    let right = "pub use crate::left::{Parent, Trace}; pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; } impl Child<i64> for i64 {} pub type Inner<E: EffectRow, U> = for<'a> (&'a i64) -> &'a i64 / { <i64 as Child<i64>>::Effects<U>, | E };";
+    let sources = [
+        ("src/left/left.glorious", left),
+        ("src/right/right.glorious", right),
+    ];
+    let first = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(root, &sources))
+        .expect("row-generic HRTB aliases must converge through the module SCC");
+    let mut reversed = request_with_logical_sources(root, &sources);
+    reversed.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reversed)
+        .expect("source enumeration must not affect row-generic alias interfaces");
+
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 41);
+    assert_eq!(second.run_i64().unwrap(), 41);
+}
+
+#[test]
 fn service_rejects_aliased_reexported_generic_trait_gats_without_an_impl() {
     // The implementation-contract normalizer is allowed to reduce only after
     // selection.  A facade alias does not manufacture the missing parent
