@@ -3754,6 +3754,23 @@ impl MirLowering {
         // use the static `Leave` probe below: its transfer executes in an
         // ordinary callee. Give it a runtime token and a typed rejoin block
         // before generic value lowering sees the lexical scope as erased.
+        if let Some(function) = lowerer.lower_root_nested_first_class_label_handler(
+            body.root,
+            parameters.clone(),
+        ) {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer
             .lower_root_first_class_label_partial_forward_one_shot_handler(
                 body.root,
@@ -12085,6 +12102,181 @@ impl Lowerer<'_> {
         })
     }
 
+    /// Lower a direct handler beneath one or more lexical labels when an arm
+    /// invokes one of those labels through an ordinary generic callable.
+    ///
+    /// The token must be created *before* `InstallHandler`: a label minted in
+    /// the selected arm would record that handler in its runtime depth and
+    /// could rejoin with a dead frame still active.  Materializing the token
+    /// at the lexical boundary and caching it under every corresponding Core
+    /// label-value node lets generic call lowering carry the same sealed brand
+    /// into the arm without giving source spelling any special meaning.
+    fn lower_root_nested_first_class_label_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let root_label = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => root,
+            CoreKind::Block(values) => values.last().copied().filter(|value| {
+                matches!(self.body.expression(*value).kind, CoreKind::Label { .. })
+            })?,
+            _ => return None,
+        };
+        let mut labels = Vec::new();
+        let mut cursor = root_label;
+        loop {
+            let CoreKind::Label { brand, body } = self.body.expression(cursor).kind.clone()
+            else {
+                break;
+            };
+            labels.push(brand);
+            cursor = match self.body.expression(body).kind.clone() {
+                CoreKind::Label { .. } => body,
+                CoreKind::Block(values) => values.last().copied().filter(|value| {
+                    matches!(self.body.expression(*value).kind, CoreKind::Label { .. })
+                }).unwrap_or(body),
+                _ => body,
+            };
+        }
+        if labels.len() < 2 {
+            return None;
+        }
+        let (computation, clauses, lexical_prefix) = self.lexical_handle(root_label)?;
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+            ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let matching = clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        if clause.patterns.len() != argument_ids.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+        {
+            return None;
+        }
+        let mut selected = None;
+        let mut label_value_ids = Vec::new();
+        for brand in labels {
+            let mut ids = Vec::new();
+            self.label_value_ids(clause.body, brand, &mut ids);
+            if !ids.is_empty() {
+                if selected.replace(brand).is_some() {
+                    return None;
+                }
+                label_value_ids = ids;
+            }
+        }
+        let brand = selected?;
+        let join = self.alloc(self.body.expression(root_label).ty.clone(), CoreId(u32::MAX));
+        self.label_values.insert(brand, (MirBlockId(1), join));
+        let token = self.alloc(
+            self.body.expression(label_value_ids[0]).ty.clone(),
+            label_value_ids[0],
+        );
+        self.instructions.push(MirInstruction::MakeLabel {
+            label: MirLabelId::UNASSIGNED,
+            dst: token,
+            brand,
+            target: MirBlockId(1),
+            destination: join,
+        });
+        for id in label_value_ids {
+            self.values.insert(id, token);
+        }
+        for expression in lexical_prefix {
+            self.statement(expression)?;
+        }
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let payloads = clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let performed = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let arguments = argument_ids
+            .iter()
+            .map(|id| self.value(*id))
+            .collect::<Option<Vec<_>>>()?;
+        self.instructions.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payloads.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(2),
+        });
+        self.instructions.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        // Every matched arm is irrefutable and selected by this performance.
+        // Retain the ordinary edge solely as verifier evidence for the
+        // hypothetical nonlocal call's inactive handler frame.
+        self.instructions.push(MirInstruction::UninstallHandler);
+        let entry = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.bind_handler_patterns(&clause.patterns, &payloads)?;
+        self.value(clause.body)?;
+        let arm = std::mem::take(&mut self.instructions);
+        self.label_values.remove(&brand);
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(1),
+                        arguments: vec![performed],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: arm,
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
+        })
+    }
+
     fn contains_label_value(&self, id: CoreId, target: crate::LabelBrand) -> bool {
         match self.body.expression(id).kind.clone() {
             CoreKind::LabelValue { brand } => brand == target,
@@ -12143,6 +12335,83 @@ impl Lowerer<'_> {
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
             | CoreKind::Error => false,
+        }
+    }
+
+    fn label_value_ids(
+        &self,
+        id: CoreId,
+        target: crate::LabelBrand,
+        ids: &mut Vec<CoreId>,
+    ) {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::LabelValue { brand } if brand == target => ids.push(id),
+            // A closure depending on this token is an escaping-label error;
+            // do not make its deferred body look like an arm-local use.
+            CoreKind::Closure { .. } => {}
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
+                for value in values {
+                    self.label_value_ids(value, target, ids);
+                }
+            }
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+                for field in fields {
+                    self.label_value_ids(field, target, ids);
+                }
+            }
+            CoreKind::Field { base, .. }
+            | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Let { value: base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
+            | CoreKind::Move(base)
+            | CoreKind::Label { body: base, .. }
+            | CoreKind::Transfer { value: base, .. } => self.label_value_ids(base, target, ids),
+            CoreKind::Assign { value, .. } => self.label_value_ids(value, target, ids),
+            CoreKind::IntrinsicCall { arguments, .. } => {
+                for argument in arguments {
+                    self.label_value_ids(argument, target, ids);
+                }
+            }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
+                self.label_value_ids(callee, target, ids);
+                for argument in arguments {
+                    self.label_value_ids(argument, target, ids);
+                }
+            }
+            CoreKind::Perform { arguments, .. } => {
+                for argument in arguments {
+                    self.label_value_ids(argument, target, ids);
+                }
+            }
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => {
+                self.label_value_ids(computation, target, ids);
+                for clause in clauses {
+                    self.label_value_ids(clause.body, target, ids);
+                }
+            }
+            CoreKind::Completion {
+                computation,
+                clauses,
+            } => {
+                self.label_value_ids(computation, target, ids);
+                for clause in clauses {
+                    self.label_value_ids(clause.body, target, ids);
+                }
+            }
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::LabelValue { .. }
+            | CoreKind::Resumption { .. }
+            | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant { .. }
+            | CoreKind::Error => {}
         }
     }
 

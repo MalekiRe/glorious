@@ -451,7 +451,6 @@ bridges executable:
 
 | Missing semantic behavior | Test |
 | --- | --- |
-| A generic public-facade label call rejoins through nested lexical labels and an active handler, preserving the supplied brand and producing the terminal value | `service_generic_facade_label_rejoins_through_nested_lexical_handler_scopes` |
 | Transfer in an effect argument exits before the performance | `service_label_transfer_exits_from_an_effect_argument_before_performance` |
 | Refutable handler joins normal and label-transfer clauses | `service_refutable_handler_mixes_normal_and_label_transfer_outcomes` |
 | Resumption result exits to an enclosing label | `service_resumption_result_may_transfer_to_an_enclosing_label` |
