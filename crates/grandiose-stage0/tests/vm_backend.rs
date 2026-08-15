@@ -3,7 +3,7 @@ use grandiose_stage0::{
     DefKey, DefinitionIndex, Digest, ElaboratedInterface, EnvironmentBrand, FileKey,
     GenericArgument, InterfaceSet, LabelBrand, LexedFile, LogicalPath, MirBlock, MirBlockId,
     MirCleanupPlan, MirControlTables, MirFunction, MirInstruction, MirLabelId, MirLocal,
-    MirLocalDecl, MirLowering, MirPerformSiteId, MirProgram, MirScopeId, MirTerminator, PackageKey,
+    MirLocalDecl, MirLowering, MirPerformSiteId, MirProgram, MirScopeId, MirSourceStorageScopeId, MirTerminator, PackageKey,
     PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCapture, VmCaptureEnvironment,
     VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmContinuationPolicy,
     VmEffectRow, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction,
@@ -5794,6 +5794,8 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
                     target: MirBlockId(1),
                     arguments: vec![MirLocal(0)],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],

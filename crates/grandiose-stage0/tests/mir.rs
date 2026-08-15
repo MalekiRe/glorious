@@ -9,8 +9,8 @@ use grandiose_stage0::{
     MirLabelId, MirLocal, MirLocalDecl, MirMovePathData, MirMovePathId, MirMovePathTables, MirOperationId, MirPattern,
     MirPatternField, MirPerformSiteId, MirPlaceBindingData, MirPlaceBindingId, MirProgram,
     MirResumptionSiteId, MirScopeId, MirTerminator, MirTraitMethodInstance, MoveFact, Mutability,
-    PlaceBindingId, PlaceBindingOrigin, Quantity, ScalarType, Type, VmArtifactError, emit_vm,
-    emit_vm_program, optimize_mir, verify_vm,
+    MirSourceStorageScopeId, PlaceBindingId, PlaceBindingOrigin, Quantity, ScalarType, Type,
+    VmArtifactError, emit_vm, emit_vm_program, optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -360,6 +360,8 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
                     target: MirBlockId(3),
                     arguments: vec![MirLocal(1)],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
@@ -379,6 +381,8 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
                     target: MirBlockId(4),
                     arguments: vec![MirLocal(2)],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
@@ -509,6 +513,8 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
         ],
     };
     let overlapping_moves = MirCleanupPlan {
+        source_storage_scope: MirSourceStorageScopeId::ROOT,
+        target_storage_scope: MirSourceStorageScopeId::ROOT,
         moved_paths: vec![],
         moved_places: vec![
             MoveFact {
@@ -529,6 +535,8 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
     );
 
     let moved_live_loan = MirCleanupPlan {
+        source_storage_scope: MirSourceStorageScopeId::ROOT,
+        target_storage_scope: MirSourceStorageScopeId::ROOT,
         moved_paths: vec![],
         moved_places: vec![MoveFact {
             root: "pair".into(),

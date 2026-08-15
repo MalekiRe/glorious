@@ -19,6 +19,7 @@ pub mod identity;
 pub mod instance;
 pub mod interface;
 pub mod mir;
+pub mod mir_storage;
 pub mod module_graph;
 pub mod operation;
 pub mod pattern;
@@ -90,6 +91,10 @@ pub use mir::{
     MirResumptionSiteId, MirResumptionSiteKind, MirScopeData, MirScopeId, MirTerminator,
     MirTraitMethodInstance, optimize as optimize_mir,
 };
+pub use mir_storage::{
+    MirSourceStorageScopeData, MirSourceStorageScopeId, MirSourceStorageTables, MirStorageEvent,
+    MirStorageEventKind,
+};
 pub use module_graph::{ModuleDiagnostic, ModuleGraph, ModuleNode};
 pub use operation::{Budget, BudgetError, CancellationToken, PublicationGuard};
 pub use pattern::{
@@ -99,6 +104,7 @@ pub use pattern::{
 pub use placeflow::{
     FlowDiagnostic, FlowEvent, FlowEventKind, LoanFact, LocalState, MoveFact, MovePathData,
     MovePathId, PlaceBinding, PlaceBindingId, PlaceBindingOrigin, PlaceFlow, RefinementFact,
+    SourceStorageScope, SourceStorageScopeId,
 };
 pub use quantity::{Quantity, QuantityError};
 pub use request::{

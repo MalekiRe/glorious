@@ -8,6 +8,7 @@ use crate::{
     },
     identity::{DefKey, Digest},
     instance::InstanceKey,
+    mir_storage::{MirSourceStorageScopeId, MirSourceStorageTables},
     placeflow::{PlaceBindingId, PlaceBindingOrigin, PlaceFlow},
     runtime_manifest::{FloatPrimitive, PrimitiveRole},
     signature::{
@@ -191,6 +192,10 @@ pub struct MirControlTables {
     /// stay reserved so persistent operation and diagnostic identities cannot
     /// be accidentally rebound to a different executable block.
     pub tombstoned_blocks: BTreeSet<MirBlockId>,
+    /// Persistent lexical source-storage scopes and their validated
+    /// `StorageLive`/`StorageDead` lifecycle events. This is deliberately
+    /// distinct from the control scope tree above.
+    pub source_storage: MirSourceStorageTables,
 }
 
 /// One lexical frame while the raw CFG is frozen.  These markers are only a
@@ -218,6 +223,7 @@ impl Default for MirControlTables {
             operations: MirOperationArena::default(),
             move_paths: MirMovePathTables::default(),
             tombstoned_blocks: BTreeSet::new(),
+            source_storage: MirSourceStorageTables::default(),
         }
     }
 }
@@ -1567,6 +1573,11 @@ pub enum MirTerminator {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirCleanupPlan {
+    /// Exact typed source-storage boundary crossed by this cleanup. These are
+    /// distinct from label/handler control scopes and are supplied by
+    /// PlaceFlow/lowering, never reverse-engineered from the CFG.
+    pub source_storage_scope: MirSourceStorageScopeId,
+    pub target_storage_scope: MirSourceStorageScopeId,
     /// Body-local ownership paths which are disarmed by this exit.  These are
     /// authoritative in MIR; `moved_places` is retained only until the VM
     /// artifact has a typed cleanup encoding.
@@ -1685,6 +1696,20 @@ impl MirCleanupPlan {
             }
         }
         Ok(())
+    }
+
+    pub fn validate_with_storage(
+        &self,
+        tables: &MirMovePathTables,
+        storage: &MirSourceStorageTables,
+    ) -> Result<(), String> {
+        self.validate_with_paths(tables)?;
+        storage.validate_cleanup_exit(
+            tables,
+            self.source_storage_scope,
+            self.target_storage_scope,
+            &self.moved_paths,
+        )
     }
 }
 
@@ -3059,6 +3084,7 @@ impl MirLowering {
     fn freeze(function: MirFunction, flow: &PlaceFlow) -> MirFunction {
         function
             .with_frozen_move_paths(flow)
+            .with_frozen_source_storage(flow)
             .with_frozen_control_tables()
     }
     pub fn lower(definition: DefKey, body: &TypedBody, flow: &PlaceFlow) -> Self {
@@ -3161,6 +3187,8 @@ impl MirLowering {
             instructions: vec![],
             diagnostics: vec![],
             leave_cleanup: MirCleanupPlan {
+                source_storage_scope: MirSourceStorageScopeId::ROOT,
+                target_storage_scope: MirSourceStorageScopeId::ROOT,
                 moved_paths: vec![],
                 moved_places: flow.moved_places.clone(),
                 active_loans: flow.active_loans.clone(),
@@ -4314,6 +4342,14 @@ impl MirFunction {
         self
     }
 
+    /// Import source-storage ownership boundaries from the same PlaceFlow
+    /// product as move paths.  Consumers therefore obtain a typed lifetime
+    /// graph rather than reconstructing lexical scope from local spellings.
+    pub fn with_frozen_source_storage(mut self, flow: &PlaceFlow) -> Self {
+        self.control.source_storage = MirSourceStorageTables::from_placeflow(flow);
+        self
+    }
+
     /// Freeze the body-local control arena after lowering has finished
     /// constructing its CFG.  Allocation deliberately happens once, at the
     /// MIR artifact boundary: all instruction and terminator references are
@@ -4324,6 +4360,7 @@ impl MirFunction {
         let mut control = MirControlTables {
             move_paths: self.control.move_paths.clone(),
             tombstoned_blocks: self.control.tombstoned_blocks.clone(),
+            source_storage: self.control.source_storage.clone(),
             ..MirControlTables::default()
         };
         let mut labels = BTreeMap::<crate::LabelBrand, MirLabelId>::new();
@@ -4490,6 +4527,7 @@ impl MirFunction {
         }
         validate_nominal_copy_descriptors(&self.nominal_copy_descriptors)?;
         self.validate_move_path_tables()?;
+        self.control.source_storage.validate(&self.control.move_paths)?;
         validate_mir_type(&self.result, &mut vec![])?;
         for local in &self.locals {
             validate_mir_type(&local.ty, &mut vec![])?;
@@ -5296,7 +5334,10 @@ impl MirFunction {
                 ..
             } => {
                 cleanup.validate()?;
-                cleanup.validate_with_paths(&self.control.move_paths)?;
+                cleanup.validate_with_storage(
+                    &self.control.move_paths,
+                    &self.control.source_storage,
+                )?;
                 self.validate_edge(*target, arguments)
             }
             MirTerminator::SwitchBool {
@@ -7431,7 +7472,9 @@ impl Lowerer<'_> {
                         brand,
                         target: MirBlockId(join_block),
                         arguments: vec![value],
-                        cleanup: MirCleanupPlan {
+                cleanup: MirCleanupPlan {
+                    source_storage_scope: MirSourceStorageScopeId::ROOT,
+                    target_storage_scope: MirSourceStorageScopeId::ROOT,
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
@@ -7462,6 +7505,8 @@ impl Lowerer<'_> {
                     target: MirBlockId(join_block),
                     arguments: vec![value],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
@@ -7703,6 +7748,8 @@ impl Lowerer<'_> {
                             target: MirBlockId(5),
                             arguments: vec![completed],
                             cleanup: MirCleanupPlan {
+                                source_storage_scope: MirSourceStorageScopeId::ROOT,
+                                target_storage_scope: MirSourceStorageScopeId::ROOT,
                                 moved_paths: vec![],
                                 moved_places: self.leave_cleanup.moved_places.clone(),
                                 active_loans: self.leave_cleanup.active_loans.clone(),
@@ -7751,6 +7798,8 @@ impl Lowerer<'_> {
                             target: MirBlockId(3),
                             arguments: vec![completed],
                             cleanup: MirCleanupPlan {
+                                source_storage_scope: MirSourceStorageScopeId::ROOT,
+                                target_storage_scope: MirSourceStorageScopeId::ROOT,
                                 moved_paths: vec![],
                                 moved_places: self.leave_cleanup.moved_places.clone(),
                                 active_loans: self.leave_cleanup.active_loans.clone(),
@@ -8010,6 +8059,8 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![value],
                         cleanup: MirCleanupPlan {
+                            source_storage_scope: MirSourceStorageScopeId::ROOT,
+                            target_storage_scope: MirSourceStorageScopeId::ROOT,
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
@@ -8172,6 +8223,8 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![transferred],
                         cleanup: MirCleanupPlan {
+                            source_storage_scope: MirSourceStorageScopeId::ROOT,
+                            target_storage_scope: MirSourceStorageScopeId::ROOT,
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
@@ -8378,6 +8431,8 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![transferred],
                         cleanup: MirCleanupPlan {
+                            source_storage_scope: MirSourceStorageScopeId::ROOT,
+                            target_storage_scope: MirSourceStorageScopeId::ROOT,
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
@@ -8586,6 +8641,8 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![value],
                         cleanup: MirCleanupPlan {
+                            source_storage_scope: MirSourceStorageScopeId::ROOT,
+                            target_storage_scope: MirSourceStorageScopeId::ROOT,
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
@@ -8835,6 +8892,8 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![transferred],
                         cleanup: MirCleanupPlan {
+                            source_storage_scope: MirSourceStorageScopeId::ROOT,
+                            target_storage_scope: MirSourceStorageScopeId::ROOT,
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
@@ -9003,6 +9062,8 @@ impl Lowerer<'_> {
                     target: MirBlockId(1),
                     arguments: vec![value],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
@@ -9262,6 +9323,8 @@ impl Lowerer<'_> {
                     target: MirBlockId(1),
                     arguments: vec![value],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
@@ -9664,6 +9727,8 @@ impl Lowerer<'_> {
                         target: MirBlockId(2),
                         arguments: vec![transferred],
                         cleanup: MirCleanupPlan {
+                            source_storage_scope: MirSourceStorageScopeId::ROOT,
+                            target_storage_scope: MirSourceStorageScopeId::ROOT,
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
@@ -9910,6 +9975,8 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![value],
                         cleanup: MirCleanupPlan {
+                            source_storage_scope: MirSourceStorageScopeId::ROOT,
+                            target_storage_scope: MirSourceStorageScopeId::ROOT,
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
@@ -21892,6 +21959,8 @@ impl Lowerer<'_> {
             instructions: vec![],
             diagnostics: vec![],
             leave_cleanup: MirCleanupPlan {
+                source_storage_scope: MirSourceStorageScopeId::ROOT,
+                target_storage_scope: MirSourceStorageScopeId::ROOT,
                 moved_paths: vec![],
                 moved_places: vec![],
                 active_loans: vec![],

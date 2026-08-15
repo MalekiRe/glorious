@@ -124,6 +124,27 @@ pub struct MovePathId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PlaceBindingId(pub u32);
 
+/// Typed lexical storage-scope identity published with one [`PlaceFlow`]
+/// product.  This is deliberately independent from parser/source scopes: it
+/// records exactly the scopes which own addressable bindings and therefore
+/// determine `StorageLive`/`StorageDead` and cleanup boundaries in MIR.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SourceStorageScopeId(pub u32);
+
+impl SourceStorageScopeId {
+    pub const ROOT: Self = Self(0);
+}
+
+/// One immutable lexical storage scope. Bindings are retained in their
+/// initialization order; cleanup must consume that order in reverse and may
+/// not infer it from a presentation spelling.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceStorageScope {
+    pub id: SourceStorageScopeId,
+    pub parent: Option<SourceStorageScopeId>,
+    pub bindings: Vec<PlaceBindingId>,
+}
+
 /// Stable Typed-Core provenance for a lexical storage binding.
 ///
 /// The presentation spelling is deliberately insufficient: an inner `value`
@@ -340,6 +361,10 @@ pub struct FlowDiagnostic {
 pub struct PlaceFlow {
     /// Frozen lexical storage identities referenced by `move_paths`.
     pub bindings: Vec<PlaceBinding>,
+    /// Persistent lexical source-storage arena. `binding_scopes` is dense in
+    /// `bindings` order and names the exact scope which owns each binding.
+    pub storage_scopes: Vec<SourceStorageScope>,
+    pub binding_scopes: Vec<SourceStorageScopeId>,
     pub final_states: BTreeMap<String, LocalState>,
     /// Projection-granular uninitialized paths. `final_states` remains the
     /// compact whole-local summary for existing consumers; this retains the
@@ -371,6 +396,13 @@ impl PlaceFlow {
             move_paths: MovePathArena::default(),
             bindings: PlaceBindingArena::default(),
             scopes: vec![BTreeMap::new()],
+            storage_scopes: vec![SourceStorageScope {
+                id: SourceStorageScopeId::ROOT,
+                parent: None,
+                bindings: vec![],
+            }],
+            active_storage_scopes: vec![SourceStorageScopeId::ROOT],
+            binding_scopes: vec![],
             scope_refinement_starts: vec![0],
             next_shadow: 0,
             events: vec![],
@@ -378,7 +410,7 @@ impl PlaceFlow {
             diagnostics: vec![],
         };
         for (index, (name, _)) in body.parameters.iter().enumerate() {
-            a.bindings.intern(
+            let binding = a.bindings.intern(
                 name,
                 name,
                 PlaceBindingOrigin::Parameter {
@@ -386,6 +418,7 @@ impl PlaceFlow {
                         .expect("parameter index exceeded PlaceFlow identity space"),
                 },
             );
+            a.record_storage_binding(binding);
             a.states.insert(name.clone(), LocalState::Initialized);
             a.scopes[0].insert(name.clone(), name.clone());
         }
@@ -423,6 +456,8 @@ impl PlaceFlow {
             .collect();
         Self {
             bindings: a.bindings.into_entries(),
+            storage_scopes: a.storage_scopes,
+            binding_scopes: a.binding_scopes,
             final_states: a.states,
             moved_places,
             move_paths: a.move_paths.into_entries(),
@@ -457,6 +492,12 @@ struct Analyzer<'a> {
     /// ownership facts need lexical identities so an inner `let value` does
     /// not alias an outer loan of the same spelling.
     scopes: Vec<BTreeMap<String, String>>,
+    /// Persistent counterpart to `scopes`. The mutable name map is still the
+    /// analyzer's resolver, while this arena is the artifact-facing lifetime
+    /// graph imported by MIR.
+    storage_scopes: Vec<SourceStorageScope>,
+    active_storage_scopes: Vec<SourceStorageScopeId>,
+    binding_scopes: Vec<SourceStorageScopeId>,
     /// The refinement journal position at each lexical boundary.  Positive
     /// pattern evidence is branch-local evidence, so it must not survive an
     /// arm/block exit merely because it shares a source spelling with an
@@ -532,11 +573,27 @@ impl Analyzer<'_> {
     }
 
     fn activate_binding(&mut self, spelling: &str, identity: String, origin: PlaceBindingOrigin) {
-        self.bindings.intern(&identity, spelling, origin);
+        let binding = self.bindings.intern(&identity, spelling, origin);
+        self.record_storage_binding(binding);
         self.scopes
             .last_mut()
             .expect("PlaceFlow always has a root lexical scope")
             .insert(spelling.to_owned(), identity);
+    }
+
+    fn record_storage_binding(&mut self, binding: PlaceBindingId) {
+        let scope = *self
+            .active_storage_scopes
+            .last()
+            .expect("PlaceFlow always has a root source-storage scope");
+        let index = binding.0 as usize;
+        if self.binding_scopes.len() == index {
+            self.binding_scopes.push(scope);
+        } else {
+            debug_assert_eq!(self.binding_scopes[index], scope);
+            return;
+        }
+        self.storage_scopes[scope.0 as usize].bindings.push(binding);
     }
 
     fn fresh_binding(&mut self, name: &str) -> String {
@@ -548,9 +605,26 @@ impl Analyzer<'_> {
     fn begin_scope(&mut self) {
         self.scopes.push(BTreeMap::new());
         self.scope_refinement_starts.push(self.refinements.len());
+        let parent = *self
+            .active_storage_scopes
+            .last()
+            .expect("PlaceFlow always has a root source-storage scope");
+        let id = SourceStorageScopeId(
+            u32::try_from(self.storage_scopes.len())
+                .expect("PlaceFlow source-storage arena exceeded identity space"),
+        );
+        self.storage_scopes.push(SourceStorageScope {
+            id,
+            parent: Some(parent),
+            bindings: vec![],
+        });
+        self.active_storage_scopes.push(id);
     }
 
     fn end_scope(&mut self, span: Span) {
+        self.active_storage_scopes
+            .pop()
+            .expect("nested PlaceFlow source-storage scope");
         let scope = self.scopes.pop().expect("nested PlaceFlow scope");
         let refinement_start = self
             .scope_refinement_starts
