@@ -209,8 +209,9 @@ impl Analyzer<'_> {
             }
             CoreKind::Closure {
                 callable,
+                parameters,
                 environment,
-                ..
+                body,
             } => {
                 let runs_in_matches = environment.runs_in.sealed
                     && environment.runs_in.environment == environment.brand
@@ -237,34 +238,56 @@ impl Analyzer<'_> {
                     );
                     return Value::None;
                 }
+                // A closure can create its escaping borrow only when it is
+                // invoked: `() -> &i64 { callback(&local) }` captures the
+                // local *place*, not an already-borrowed value.  Evaluate
+                // the frozen body in an isolated invocation environment to
+                // retain that result provenance without leaking its local
+                // bindings or writes into the enclosing creation site.
+                let outer_values = self.values.clone();
+                for (name, ty) in &parameters {
+                    self.values.insert(name.clone(), parameter_value(ty));
+                }
+                let returned = self.value(body);
+                self.values = outer_values;
+
+                let mut captures = environment
+                    .captures
+                    .into_iter()
+                    .flat_map(|capture| {
+                        let value = self
+                            .values
+                            .get(&capture.name)
+                            .cloned()
+                            .unwrap_or(Value::None);
+                        // Moving a reference into a callable changes the
+                        // owner of the reference slot, not the provenance of
+                        // its backing place.  Treat move captures exactly as
+                        // borrowed captures at this outlives boundary: a
+                        // returned callable, aggregate, or effect payload
+                        // must still carry every backing root.  PlaceFlow
+                        // separately records the move/reborrow and keeps the
+                        // loan live for the callable environment.
+                        borrowed_roots(&value)
+                            .into_iter()
+                            .map(|root| Capture::Borrowed {
+                                root,
+                                environment: environment.brand,
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                captures.extend(borrowed_roots(&returned).into_iter().map(|root| {
+                    Capture::Borrowed {
+                        root,
+                        environment: environment.brand,
+                    }
+                }));
+                captures.sort_by_key(|capture| format!("{capture:?}"));
+                captures.dedup();
                 Value::Closure {
                     environment: environment.brand,
-                    captures: environment
-                        .captures
-                        .into_iter()
-                        .flat_map(|capture| {
-                            let value = self
-                                .values
-                                .get(&capture.name)
-                                .cloned()
-                                .unwrap_or(Value::None);
-                            // Moving a reference into a callable changes the
-                            // owner of the reference slot, not the provenance of
-                            // its backing place.  Treat move captures exactly as
-                            // borrowed captures at this outlives boundary: a
-                            // returned callable, aggregate, or effect payload
-                            // must still carry every backing root.  PlaceFlow
-                            // separately records the move/reborrow and keeps the
-                            // loan live for the callable environment.
-                            borrowed_roots(&value)
-                                .into_iter()
-                                .map(|root| Capture::Borrowed {
-                                    root,
-                                    environment: environment.brand,
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                        .collect(),
+                    captures,
                 }
             }
             CoreKind::Call {

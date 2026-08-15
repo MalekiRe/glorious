@@ -5630,6 +5630,73 @@ fn service_bounds_recursive_supertrait_and_generic_overlap_revisions() {
 }
 
 #[test]
+fn service_executes_shared_gat_hrtb_reborrows_through_facades() {
+    let legal = "use facade::{relay, Callback}; pub fn apply(callback: Callback) -> i64 { let value = 41; let shared = &value; let closure = () -> i64 { *callback(shared) + 1 }; closure() } pub fn main() -> i64 { apply(relay) }";
+    let provider = "pub trait Gate { type Item<'a>; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a>; impl Gate for i64 { type Item<'a> = &'a i64; } pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> { value }";
+    let world = |root: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Gate, relay}; pub type Callback = provider::Callback;".as_slice()));
+        input.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+        input
+    };
+    let mut reordered = world(legal);
+    let first = StageZeroCompiler::new().compile(reordered.clone()).expect("shared GAT HRTB reborrow closure must reach the VM").artifact.unwrap();
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new().compile(reordered).expect("source order must preserve shared GAT HRTB reborrows").artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+
+    let mutable = "use facade::Gate; pub fn accepts_short(slot: &mut <i64 as Gate>::Item<'_>) -> i64 { 0 } pub fn bad(value: &'static i64) -> i64 { let long = value; accepts_short(&mut long) } pub fn main() -> i64 { let candidate = bad; 0 }";
+    let escape = "use facade::Callback; pub fn bad(callback: Callback) -> () -> &i64 { let value = 1; () -> &i64 { callback(&value) } } pub fn main() -> i64 { let candidate = bad; 0 }";
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(legal), None).unwrap();
+    let artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey { package: PackageKey("facade@0.1.0".into()), path: "crate".into() });
+    let trace = compiler.dependency_trace(parent, &facade).expect("legal lifetime facade must be frozen");
+    for (label, root, code) in [("mutable", mutable, "G5017"), ("escape", escape, "G5014")] {
+        let rejected_world = world(root);
+        let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+        let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("illegal lifetime revision must not publish");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{label} revision missing {code}: {:#?}", error.diagnostics());
+        assert_eq!(compiler.interface_cache_stats(), cached, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()), "{label} revision disturbed legal traces");
+        let mut reordered = rejected_world;
+        reordered.sources.reverse();
+        assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source ordering cannot admit illegal lifetime revisions").diagnostics(), "{label} diagnostics must be canonical");
+    }
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), artifact.canonical_bytes());
+}
+
+#[test]
+fn service_preserves_caller_reference_closure_results_and_rejects_invocation_locals() {
+    let legal = "pub fn retain<'a>(value: &'a i64) -> () -> &'a i64 { () -> &'a i64 { value } } pub fn main() -> i64 { let value = 41; let closure = retain(&value); 42 }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(legal))
+        .expect("a returned closure may retain a caller-provided reference")
+        .artifact
+        .unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("caller-reference closure artifact must decode and verify");
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+
+    let escaping = "pub fn bad() -> () -> &i64 { let local = 1; () -> &i64 { &local } } pub fn main() -> i64 { 0 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(escaping))
+    else {
+        panic!("a closure returning an invocation-local borrow unexpectedly compiled");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G5014"),
+        "missing invocation-local closure escape diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,

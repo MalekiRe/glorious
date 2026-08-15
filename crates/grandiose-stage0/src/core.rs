@@ -2984,7 +2984,12 @@ impl TypedBody {
         {
             if let Some(header) = definition.callable_header() {
                 for (parameter, ty) in header.parameters.iter().zip(signature.parameters.iter()) {
-                    let ty = elaborator.normalize_concrete_type_projections(ty.clone());
+                    // A callable parameter can itself be an HRTB alias whose
+                    // selected GAT result carries the invocation-region
+                    // relation.  Keep that relation concrete in the body so
+                    // calls through the parameter freeze the caller loan
+                    // before escape analysis and VM lowering.
+                    let ty = elaborator.normalize_selectable_type_projections(ty.clone());
                     elaborator.locals.define(parameter.name.clone(), ty.clone());
                     parameters.push((parameter.name.clone(), ty));
                 }
