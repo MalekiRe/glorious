@@ -1,7 +1,7 @@
 //! Typed Core, the semantic boundary before ownership facts and MIR.
 
 use crate::{
-    body::{BodySyntax, ClosureParameter, ExprId, ExprKind, HandlerClause},
+    body::{BodySyntax, ClosureParameter, ExprId, ExprKind, HandlerClause, PatternKind},
     fixity::FixityTable,
     header::FixityForm,
     identity::{DefKey, Digest, ModuleKey},
@@ -10344,8 +10344,80 @@ impl Elaborator<'_> {
         expected: Option<Type>,
         span: Span,
     ) -> CoreId {
-        let subject = self.expression(computation);
+        let subject = self.expression_expected(
+            computation,
+            self.completion_bool_subject_hint(computation, clauses),
+        );
         self.completion_handle_core(subject, clauses, expected, span)
+    }
+
+    fn completion_bool_subject_hint(
+        &self,
+        computation: ExprId,
+        clauses: &[HandlerClause],
+    ) -> Option<Type> {
+        // The synthetic `Result<(), ()>` carrier is only a contextual target
+        // for primitive predicates.  Supplying it to an ordinary call such
+        // as `handle option() { Result::Ok(_) => ... }` would instead try to
+        // coerce that real `Result<T, E>` into the carrier and erase its
+        // payload contract.  Operator chains are the body form that can
+        // directly produce the primitive comparison Bool we need to lift.
+        if !matches!(self.body.expression(computation).kind, ExprKind::OperatorChain { .. }) {
+            return None;
+        }
+        let mut definition = None;
+        let mut variants = std::collections::BTreeSet::new();
+        for clause in clauses {
+            let pattern = clause.completion?;
+            let PatternKind::Enum { path, arguments, .. } = &self.body.pattern(pattern).kind else {
+                return None;
+            };
+            if !arguments.is_empty() {
+                return None;
+            }
+            let (variant, type_path) = path.split_last()?;
+            let ResolutionState::Resolved(candidate) = self.index.resolve_path(
+                DefinitionNamespace::Type,
+                self.module,
+                type_path,
+            ) else {
+                return None;
+            };
+            if definition.replace(candidate).is_some_and(|known| known != candidate) {
+                return None;
+            }
+            variants.insert(variant.as_str());
+        }
+        if variants != std::collections::BTreeSet::from(["Ok", "Err"]) {
+            return None;
+        }
+        let definition = definition?;
+        let Some(ElaboratedHeader::Nominal { generic_kinds, .. }) =
+            self.signatures.definitions.get(&definition)
+        else {
+            return None;
+        };
+        if generic_kinds.as_slice() != [crate::GenericKind::Type, crate::GenericKind::Type] {
+            return None;
+        }
+        let arguments = vec![
+            GenericArgument::Type(Type::Unit),
+            GenericArgument::Type(Type::Unit),
+        ];
+        let ok = self
+            .signatures
+            .instantiate_enum_variant_generic(definition, &arguments, "Ok")
+            .ok();
+        let err = self
+            .signatures
+            .instantiate_enum_variant_generic(definition, &arguments, "Err")
+            .ok();
+        matches!(ok, Some((_, fields)) if fields == vec![Type::Unit])
+            .then_some(())
+            .and_then(|_| {
+                matches!(err, Some((_, fields)) if fields == vec![Type::Unit])
+                    .then_some(Type::Nominal { definition, arguments })
+            })
     }
     fn completion_handle_core(
         &mut self,

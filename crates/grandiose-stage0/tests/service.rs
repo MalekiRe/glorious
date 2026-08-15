@@ -20377,6 +20377,21 @@ fn service_specializes_numeric_literals_from_generic_operator_contracts() {
 }
 
 #[test]
+fn service_lifts_primitive_comparisons_from_result_completion_arms() {
+    let source = r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        pub fn main() -> i64 {
+            handle 1 < 2 { Result::Ok(_) => 42, Result::Err(_) => 0 }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("Result completion arms must contextualize a primitive predicate");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_selects_prefix_trait_operators_and_preserves_callable_contracts() {
     let source = r#"
         prefix 80 ~;

@@ -25437,6 +25437,9 @@ impl Lowerer<'_> {
             }
             _ => return None,
         };
+        if self.contains_evaluated_completion(computation) {
+            return None;
+        }
         let subject = if let CoreKind::Handle {
             computation: handled_computation,
             clauses: operation_clauses,
@@ -25786,6 +25789,11 @@ impl Lowerer<'_> {
         else {
             return None;
         };
+        if !self.values.contains_key(&computation)
+            && matches!(self.body.expression(computation).kind, CoreKind::Completion { .. })
+        {
+            return self.lower_nested_completion_computation(computation, root, blocks);
+        }
 
         // `value` stopped before allocating or evaluating the completion
         // itself.  Its computation belongs to the common prefix and runs
@@ -25852,6 +25860,113 @@ impl Lowerer<'_> {
         self.instructions = entry_instructions;
         blocks[entry.0 as usize].instructions = std::mem::take(&mut self.instructions);
 
+        let mut next = if has_fallback {
+            *arms.last().expect("completion fallback arm exists")
+        } else {
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Unreachable,
+            });
+            id
+        };
+        let tested = if has_fallback {
+            selected.len().saturating_sub(1)
+        } else {
+            selected.len()
+        };
+        for index in (0..tested).rev() {
+            let pattern = lower_pattern(selected[index].pattern.clone())?;
+            let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+            let id = MirBlockId(blocks.len() as u32);
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::PatternTest {
+                    dst: condition,
+                    subject,
+                    pattern,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target: arms[index],
+                    then_arguments: vec![],
+                    else_target: next,
+                    else_arguments: vec![],
+                },
+            });
+            next = id;
+        }
+        blocks[entry.0 as usize].terminator = MirTerminator::Goto {
+            target: next,
+            arguments: vec![],
+        };
+        Some(entry)
+    }
+
+    /// Lower a completion whose selected value is the subject of an outer
+    /// completion. Each inner arm re-enters the original continuation with
+    /// its value published at the inner Core id; the outer decision is then
+    /// lowered by the ordinary continuation path.
+    fn lower_nested_completion_computation(
+        &mut self,
+        completion: CoreId,
+        root: CoreId,
+        blocks: &mut Vec<MirBlock>,
+    ) -> Option<MirBlockId> {
+        let CoreKind::Completion {
+            computation,
+            clauses,
+        } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+        let subject = self.value(computation)?;
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let boundary_values = self.values.clone();
+        let boundary_named = self.named.clone();
+        let entry = MirBlockId(blocks.len() as u32);
+        blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: vec![],
+            terminator: MirTerminator::Unreachable,
+        });
+        let fallback_index = clauses
+            .iter()
+            .position(|clause| pattern_is_irrefutable(&clause.pattern));
+        let selected = fallback_index
+            .map(|index| clauses[..=index].to_vec())
+            .unwrap_or(clauses);
+        let has_fallback = fallback_index.is_some();
+        let mut arms = Vec::with_capacity(selected.len());
+        for clause in &selected {
+            self.instructions = Vec::new();
+            self.values = boundary_values.clone();
+            self.named = boundary_named.clone();
+            self.bind_completion_clause(clause, subject)?;
+            if matches!(self.body.expression(clause.body).ty, Type::Never) {
+                self.statement(clause.body)?;
+                let id = MirBlockId(blocks.len() as u32);
+                blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: std::mem::take(&mut self.instructions),
+                    terminator: MirTerminator::Unreachable,
+                });
+                arms.push(id);
+                continue;
+            }
+            let value = self.value(clause.body)?;
+            self.values.insert(completion, value);
+            arms.push(self.lower_completion_continuation_segment(root, blocks)?);
+        }
+        self.values = boundary_values;
+        self.named = boundary_named;
+        self.instructions = entry_instructions;
+        blocks[entry.0 as usize].instructions = std::mem::take(&mut self.instructions);
         let mut next = if has_fallback {
             *arms.last().expect("completion fallback arm exists")
         } else {
