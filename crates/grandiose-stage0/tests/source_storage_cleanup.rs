@@ -7,12 +7,13 @@
 //! as an always-live SSA register.
 
 use grandiose_stage0::{
-    emit_vm, CoreId, DefKey, Digest, EffectRow, LabelBrand, Lifetime, MirBlock, MirBlockId,
-    MirCleanupPlan, MirControlTables, MirFunction, MirInstruction, MirLocal, MirLocalDecl,
-    MirMovePathData, MirMovePathId, MirMovePathTables, MirPlaceBindingData, MirPlaceBindingId,
-    MirScopeId, MirSourceStorageScopeData, MirSourceStorageScopeId, MirSourceStorageTables,
-    MirStorageEvent, MirStorageEventKind, MirTerminator, Mutability, PlaceBindingId,
-    PlaceBindingOrigin, Quantity, ScalarType, SourceStorageScopeId, Type,
+    CoreId, DefKey, Digest, EffectRow, LabelBrand, Lifetime, MirBlock, MirBlockId, MirCleanupAction,
+    MirCleanupDropFlag, MirCleanupPlan, MirControlTables, MirDropFlagId, MirFunction,
+    MirInstruction, MirLocal, MirLocalDecl, MirMovePathData,
+    MirMovePathId, MirMovePathTables, MirPlaceBindingData, MirPlaceBindingId, MirScopeId,
+    MirSourceStorageScopeData, MirSourceStorageScopeId, MirSourceStorageTables, MirStorageEvent,
+    MirStorageEventKind, MirTerminator, Mutability, PlaceBindingId, PlaceBindingOrigin, Quantity,
+    ScalarType, SourceStorageScopeId, Type, emit_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -29,6 +30,56 @@ fn label_type() -> Type {
         result: Box::new(Type::Never),
         effects: EffectRow::empty(),
         invocation: Quantity::ONCE,
+    }
+}
+
+/// Raw-MIR fixture storage for one lexical owner.  Keeping this at the raw
+/// boundary proves that no VM or lowering pass may invent its cleanup facts.
+fn one_owner_storage(local: MirLocal, expression: u32) -> MirControlTables {
+    let binding = MirPlaceBindingId(0);
+    MirControlTables {
+        move_paths: MirMovePathTables {
+            bindings: vec![MirPlaceBindingData {
+                source: PlaceBindingId(0),
+                origin: PlaceBindingOrigin::Let {
+                    expression: CoreId(expression),
+                },
+                spelling: "owner".into(),
+            }],
+            paths: vec![MirMovePathData {
+                parent: None,
+                binding,
+                field: None,
+            }],
+        },
+        source_storage: MirSourceStorageTables {
+            scopes: vec![
+                MirSourceStorageScopeData {
+                    source: SourceStorageScopeId::ROOT,
+                    parent: None,
+                    bindings: vec![],
+                    events: vec![],
+                },
+                MirSourceStorageScopeData {
+                    source: SourceStorageScopeId(1),
+                    parent: Some(MirSourceStorageScopeId::ROOT),
+                    bindings: vec![binding],
+                    events: vec![
+                        MirStorageEvent {
+                            kind: MirStorageEventKind::Live,
+                            binding,
+                        },
+                        MirStorageEvent {
+                            kind: MirStorageEventKind::Dead,
+                            binding,
+                        },
+                    ],
+                },
+            ],
+            binding_scopes: vec![MirSourceStorageScopeId(1)],
+            binding_locals: vec![Some(local)],
+        },
+        ..MirControlTables::default()
     }
 }
 
@@ -59,7 +110,7 @@ fn mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave() {
             local(Type::Scalar(ScalarType::I64)),
         ],
         result: Type::Scalar(ScalarType::I64),
-        control: MirControlTables::default(),
+        control: one_owner_storage(MirLocal(0), 100),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
@@ -88,11 +139,14 @@ fn mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave() {
                     target: MirBlockId(1),
                     arguments: vec![MirLocal(1)],
                     cleanup: MirCleanupPlan {
-                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        source_storage_scope: MirSourceStorageScopeId(1),
                         target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                     },
                 },
             },
@@ -143,7 +197,7 @@ fn mir_requires_end_borrow_before_source_storage_cleanup() {
             local(i64_ty.clone()),
         ],
         result: i64_ty,
-        control: MirControlTables::default(),
+        control: one_owner_storage(MirLocal(0), 101),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
@@ -179,11 +233,14 @@ fn mir_requires_end_borrow_before_source_storage_cleanup() {
                     target: MirBlockId(1),
                     arguments: vec![MirLocal(2)],
                     cleanup: MirCleanupPlan {
-                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        source_storage_scope: MirSourceStorageScopeId(1),
                         target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                     },
                 },
             },
@@ -233,7 +290,7 @@ fn mir_requires_drop_flag_for_divergent_source_storage_initialization() {
             local(i64_ty.clone()),
         ],
         result: i64_ty,
-        control: MirControlTables::default(),
+        control: one_owner_storage(MirLocal(2), 102),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
@@ -267,11 +324,14 @@ fn mir_requires_drop_flag_for_divergent_source_storage_initialization() {
                     target: MirBlockId(3),
                     arguments: vec![MirLocal(1)],
                     cleanup: MirCleanupPlan {
-                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        source_storage_scope: MirSourceStorageScopeId(1),
                         target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                     },
                 },
             },
@@ -285,11 +345,14 @@ fn mir_requires_drop_flag_for_divergent_source_storage_initialization() {
                     target: MirBlockId(3),
                     arguments: vec![MirLocal(1)],
                     cleanup: MirCleanupPlan {
-                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        source_storage_scope: MirSourceStorageScopeId(1),
                         target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                     },
                 },
             },
@@ -491,5 +554,60 @@ fn source_storage_arena_rejects_forged_lifecycle_and_cleanup_boundaries() {
             )
             .is_err_and(|error| error.contains("reverse lexical initialization order")),
         "cleanup must destroy later-initialized storage before earlier storage"
+    );
+
+    let witness = MirCleanupPlan {
+        source_storage_scope: MirSourceStorageScopeId(1),
+        target_storage_scope: MirSourceStorageScopeId::ROOT,
+        moved_paths: vec![],
+        moved_places: vec![],
+        active_loans: vec![],
+        drop_flags: vec![
+            MirCleanupDropFlag {
+                id: MirDropFlagId(0),
+                binding: MirPlaceBindingId(3),
+            },
+            MirCleanupDropFlag {
+                id: MirDropFlagId(1),
+                binding: MirPlaceBindingId(2),
+            },
+        ],
+        actions: vec![
+            MirCleanupAction::EndBorrow {
+                binding: MirPlaceBindingId(3),
+            },
+            MirCleanupAction::Drop {
+                binding: MirPlaceBindingId(3),
+                flag: MirDropFlagId(0),
+            },
+            MirCleanupAction::ClearDropFlag {
+                flag: MirDropFlagId(0),
+            },
+            MirCleanupAction::StorageDead {
+                binding: MirPlaceBindingId(3),
+            },
+            MirCleanupAction::Protect {
+                binding: MirPlaceBindingId(2),
+                local: MirLocal(2),
+            },
+            MirCleanupAction::ClearDropFlag {
+                flag: MirDropFlagId(1),
+            },
+            MirCleanupAction::StorageDead {
+                binding: MirPlaceBindingId(2),
+            },
+        ],
+        protected_values: vec![MirLocal(2)],
+    };
+    witness.validate_storage_actions(&storage).unwrap();
+
+    let mut drops_protected = witness;
+    drops_protected.actions[4] = MirCleanupAction::Drop {
+        binding: MirPlaceBindingId(2),
+        flag: MirDropFlagId(1),
+    };
+    assert!(
+        drops_protected.validate_storage_actions(&storage).is_err_and(|error| error.contains("protected")),
+        "an owner carried through a leave must use Protect rather than Drop"
     );
 }

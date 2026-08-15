@@ -100,10 +100,16 @@ impl MirSourceStorageTables {
                         kind: MirStorageEventKind::Live,
                         binding,
                     })
-                    .chain(bindings.iter().rev().copied().map(|binding| MirStorageEvent {
-                        kind: MirStorageEventKind::Dead,
-                        binding,
-                    }))
+                    .chain(
+                        bindings
+                            .iter()
+                            .rev()
+                            .copied()
+                            .map(|binding| MirStorageEvent {
+                                kind: MirStorageEventKind::Dead,
+                                binding,
+                            }),
+                    )
                     .collect();
                 MirSourceStorageScopeData {
                     source: scope.id,
@@ -135,7 +141,9 @@ impl MirSourceStorageTables {
             return Err("MIR source-storage bindings do not cover frozen move bindings".into());
         }
         if self.binding_locals.len() != paths.bindings.len() {
-            return Err("MIR source-storage local mapping does not cover frozen move bindings".into());
+            return Err(
+                "MIR source-storage local mapping does not cover frozen move bindings".into(),
+            );
         }
         let mut observed_bindings = vec![None; paths.bindings.len()];
         for (index, scope) in self.scopes.iter().enumerate() {
@@ -172,7 +180,9 @@ impl MirSourceStorageTables {
                     return Err("MIR source-storage binding belongs to multiple scopes".into());
                 }
                 if self.binding_scopes[binding_index] != MirSourceStorageScopeId(index as u32) {
-                    return Err("MIR source-storage binding-to-scope index disagrees with arena".into());
+                    return Err(
+                        "MIR source-storage binding-to-scope index disagrees with arena".into(),
+                    );
                 }
             }
             let expected = scope
@@ -183,10 +193,17 @@ impl MirSourceStorageTables {
                     kind: MirStorageEventKind::Live,
                     binding,
                 })
-                .chain(scope.bindings.iter().rev().copied().map(|binding| MirStorageEvent {
-                    kind: MirStorageEventKind::Dead,
-                    binding,
-                }))
+                .chain(
+                    scope
+                        .bindings
+                        .iter()
+                        .rev()
+                        .copied()
+                        .map(|binding| MirStorageEvent {
+                            kind: MirStorageEventKind::Dead,
+                            binding,
+                        }),
+                )
                 .collect::<Vec<_>>();
             if scope.events != expected {
                 return Err(format!(
@@ -233,14 +250,26 @@ impl MirSourceStorageTables {
         moved_paths: &[MirMovePathId],
     ) -> Result<(), String> {
         let scope = |scope: MirSourceStorageScopeId| {
-            self.scopes
-                .get(scope.0 as usize)
-                .ok_or_else(|| format!("MIR cleanup references absent source-storage scope {}", scope.0))
+            self.scopes.get(scope.0 as usize).ok_or_else(|| {
+                format!(
+                    "MIR cleanup references absent source-storage scope {}",
+                    scope.0
+                )
+            })
         };
         scope(source)?;
         scope(target)?;
         if !self.is_ancestor(target, source) {
             return Err("MIR cleanup target source-storage scope is not an ancestor".into());
+        }
+        // A same-scope nonlocal transfer has no storage boundary to destroy.
+        // Its typed paths are disarmed ownership facts carried through the
+        // legacy cleanup proof, not destruction actions; protected-payload
+        // validation remains the caller's responsibility. Requiring those
+        // paths to lie strictly below the target would reject valid partial
+        // moves such as `transfer label pair.right` after `move pair.left`.
+        if source == target {
+            return Ok(());
         }
         let mut previous: Option<(MirSourceStorageScopeId, MirPlaceBindingId)> = None;
         for &path in moved_paths {
@@ -255,10 +284,11 @@ impl MirSourceStorageTables {
             // edge: it must be below the target boundary and no deeper than
             // the plan source. This rejects a forged cleanup that reaches
             // into a sibling, descendant, or outer live frame.
-            if !self.is_ancestor(target, binding_scope)
-                || !self.is_ancestor(binding_scope, source)
+            if !self.is_ancestor(target, binding_scope) || !self.is_ancestor(binding_scope, source)
             {
-                return Err("MIR cleanup path lies outside its declared source-storage exit".into());
+                return Err(
+                    "MIR cleanup path lies outside its declared source-storage exit".into(),
+                );
             }
             if binding_scope == target {
                 return Err("MIR cleanup disarms storage retained by its target scope".into());
@@ -274,7 +304,53 @@ impl MirSourceStorageTables {
         Ok(())
     }
 
-    fn is_ancestor(&self, ancestor: MirSourceStorageScopeId, mut scope: MirSourceStorageScopeId) -> bool {
+    /// Source owners whose lexical storage lifetime ends on `source ->
+    /// target`, in the required destruction order: inner scopes first and
+    /// reverse declaration order within a scope.
+    pub fn exited_bindings(
+        &self,
+        source: MirSourceStorageScopeId,
+        target: MirSourceStorageScopeId,
+    ) -> Result<Vec<MirPlaceBindingId>, String> {
+        if self.scopes.get(source.0 as usize).is_none()
+            || self.scopes.get(target.0 as usize).is_none()
+        {
+            return Err("MIR cleanup references absent source-storage scope".into());
+        }
+        if !self.is_ancestor(target, source) {
+            return Err("MIR cleanup target source-storage scope is not an ancestor".into());
+        }
+        let mut bindings = Vec::new();
+        let mut scope = source;
+        while scope != target {
+            let data = &self.scopes[scope.0 as usize];
+            bindings.extend(data.bindings.iter().rev().copied());
+            scope = data
+                .parent
+                .expect("validated non-root source-storage scope has a parent");
+        }
+        Ok(bindings)
+    }
+
+    /// The executable local imported for this binding, if compact lowering
+    /// has one.  This is a typed arena lookup, never a spelling lookup.
+    pub fn binding_local(&self, binding: MirPlaceBindingId) -> Option<MirLocal> {
+        self.binding_locals.get(binding.0 as usize).copied().flatten()
+    }
+
+    pub fn scope_is_ancestor(
+        &self,
+        ancestor: MirSourceStorageScopeId,
+        scope: MirSourceStorageScopeId,
+    ) -> bool {
+        self.is_ancestor(ancestor, scope)
+    }
+
+    fn is_ancestor(
+        &self,
+        ancestor: MirSourceStorageScopeId,
+        mut scope: MirSourceStorageScopeId,
+    ) -> bool {
         loop {
             if ancestor == scope {
                 return true;
@@ -303,7 +379,8 @@ impl MirSourceStorageTables {
             .bindings
             .iter()
             .position(|candidate| *candidate == binding)
-            .expect("validated source-storage binding belongs to its scope") as u32;
+            .expect("validated source-storage binding belongs to its scope")
+            as u32;
         (scope.0, position)
     }
 }

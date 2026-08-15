@@ -1205,11 +1205,15 @@ boundary:
   changed/unchanged outcomes are deterministic and never speculative. It still needs
   to derive all edge-transfer-temporary lists directly and thereby remove the
   seeded-bytecode-anchor completion step.
-- **Not yet realized.** `Store`/`StorageLive`/`StorageDead` statements,
-  persistent typed arenas for remaining source-storage scopes, multi-scope
-  lexical export for cleanup, and frontend-emitted drop flags
-  (branch post-states must agree at source level). Places and locals already
-  have typed arenas; frozen typed control tables publish label, handler,
+- **Not yet realized.** Executable `StorageLive`/`StorageDead` statements and
+  frontend-emitted drop flags (branch post-states must agree at source level).
+  Frozen bodies now retain a separate typed source-storage scope arena with
+  binding provenance, deterministic live-forward/dead-reverse lifecycle
+  events, binding-to-local mapping, and validated cleanup source/target
+  boundaries. Raw and frozen MIR both reject path-dependent uninitialized
+  reads; cleanup cannot consume a protected leave payload or replace an
+  addressable slot under a live unique loan. Places and locals already have
+  typed arenas; frozen typed control tables publish label, handler,
   performance, and resumption identities. Freezing derives the full lexical
   label/handler scope tree and validates innermost-first handler candidates.
   Typed `BlockId`/`BlockKind` and `MirOperationId` checked editors now perform

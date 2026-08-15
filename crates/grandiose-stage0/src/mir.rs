@@ -63,6 +63,12 @@ pub struct MirMovePathId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MirPlaceBindingId(pub u32);
 
+/// Stable identity for a cleanup drop flag.  Flags are body-local and are
+/// deliberately distinct from locals: a later VM lowering may erase their
+/// storage representation, but may not manufacture or retarget one.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirDropFlagId(pub u32);
+
 impl MirScopeId {
     pub const ROOT: Self = Self(0);
 }
@@ -1584,6 +1590,43 @@ pub struct MirCleanupPlan {
     pub moved_paths: Vec<MirMovePathId>,
     pub moved_places: Vec<crate::MoveFact>,
     pub active_loans: Vec<crate::LoanFact>,
+    /// One stable drop flag for every source-storage owner whose scope is
+    /// exited. The flag makes conditional initialization explicit even though
+    /// the current VM may erase it after checking this witness.
+    pub drop_flags: Vec<MirCleanupDropFlag>,
+    /// Ordered executable cleanup witness. It is intentionally a typed MIR
+    /// object rather than an inference made by VM lowering.
+    pub actions: Vec<MirCleanupAction>,
+    /// Values intentionally carried across the leave boundary. A protected
+    /// source-storage owner is preserved with `Protect`, never dropped.
+    pub protected_values: Vec<MirLocal>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MirCleanupDropFlag {
+    pub id: MirDropFlagId,
+    pub binding: MirPlaceBindingId,
+}
+
+/// A single ordered action in a source-storage cleanup witness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirCleanupAction {
+    /// End every borrow of this owner before changing its lifetime.
+    EndBorrow { binding: MirPlaceBindingId },
+    /// Conditionally destroy the owner if its flag says it was initialized.
+    Drop {
+        binding: MirPlaceBindingId,
+        flag: MirDropFlagId,
+    },
+    /// Preserve an owner that is explicitly transferred over the edge.
+    Protect {
+        binding: MirPlaceBindingId,
+        local: MirLocal,
+    },
+    /// Mark the owner uninitialized after its terminal action.
+    ClearDropFlag { flag: MirDropFlagId },
+    /// End the addressable source storage lifetime.
+    StorageDead { binding: MirPlaceBindingId },
 }
 
 impl MirCleanupPlan {
@@ -1709,7 +1752,114 @@ impl MirCleanupPlan {
             self.source_storage_scope,
             self.target_storage_scope,
             &self.moved_paths,
-        )
+        )?;
+        self.validate_storage_actions(storage)
+    }
+
+    /// Validate the executable lifetime witness.  Every source binding in an
+    /// exited lexical frame has exactly one terminal action and a matching
+    /// flag transition.  This gives VM lowering a closed, ordered input: it
+    /// never has to rediscover storage, drops, or protected values from raw
+    /// registers.
+    pub fn validate_storage_actions(&self, storage: &MirSourceStorageTables) -> Result<(), String> {
+        let expected = storage.exited_bindings(
+            self.source_storage_scope,
+            self.target_storage_scope,
+        )?;
+        if expected.is_empty() {
+            if !self.drop_flags.is_empty() || !self.actions.is_empty() || !self.protected_values.is_empty() {
+                return Err("MIR cleanup has a storage witness without exited source storage".into());
+            }
+            return Ok(());
+        }
+
+        if self.protected_values.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("MIR cleanup protected values are not canonically sorted".into());
+        }
+        let expected_set = expected.iter().copied().collect::<BTreeSet<_>>();
+        let mut flags = BTreeMap::new();
+        for (index, flag) in self.drop_flags.iter().enumerate() {
+            if flag.id.0 as usize != index {
+                return Err("MIR cleanup drop-flag IDs are not dense and stable".into());
+            }
+            if !expected_set.contains(&flag.binding) || flags.insert(flag.binding, flag.id).is_some() {
+                return Err("MIR cleanup drop flags do not account for each exited owner exactly once".into());
+            }
+        }
+        if flags.len() != expected.len() {
+            return Err("MIR cleanup exit omits a source-storage drop flag".into());
+        }
+
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        enum Progress { Start, EndedBorrow, Terminal, Cleared, Dead }
+        let mut progress = expected
+            .iter()
+            .copied()
+            .map(|binding| (binding, Progress::Start))
+            .collect::<BTreeMap<_, _>>();
+        let mut terminal_order = Vec::new();
+        for action in &self.actions {
+            let binding = match *action {
+                MirCleanupAction::EndBorrow { binding }
+                | MirCleanupAction::Drop { binding, .. }
+                | MirCleanupAction::Protect { binding, .. }
+                | MirCleanupAction::StorageDead { binding } => binding,
+                MirCleanupAction::ClearDropFlag { flag } => flags
+                    .iter()
+                    .find_map(|(&binding, &candidate)| (candidate == flag).then_some(binding))
+                    .ok_or_else(|| "MIR cleanup clears an unknown drop flag".to_owned())?,
+            };
+            let state = progress
+                .get_mut(&binding)
+                .ok_or_else(|| "MIR cleanup action targets retained or absent source storage".to_owned())?;
+            match *action {
+                MirCleanupAction::EndBorrow { .. } => {
+                    if !matches!(*state, Progress::Start | Progress::EndedBorrow) {
+                        return Err("MIR cleanup ends a borrow after terminal storage cleanup".into());
+                    }
+                    *state = Progress::EndedBorrow;
+                }
+                MirCleanupAction::Drop { flag, .. } => {
+                    if !matches!(*state, Progress::Start | Progress::EndedBorrow) || flags[&binding] != flag {
+                        return Err("MIR cleanup drop is out of order or uses the wrong flag".into());
+                    }
+                    if storage.binding_local(binding) .is_some_and(|local| self.protected_values.binary_search(&local).is_ok()) {
+                        return Err("MIR cleanup drops a protected leave value".into());
+                    }
+                    *state = Progress::Terminal;
+                    terminal_order.push(binding);
+                }
+                MirCleanupAction::Protect { local, .. } => {
+                    if !matches!(*state, Progress::Start | Progress::EndedBorrow)
+                        || storage.binding_local(binding) != Some(local)
+                        || self.protected_values.binary_search(&local).is_err()
+                    {
+                        return Err("MIR cleanup protection is not an explicit protected source owner".into());
+                    }
+                    *state = Progress::Terminal;
+                    terminal_order.push(binding);
+                }
+                MirCleanupAction::ClearDropFlag { flag } => {
+                    if *state != Progress::Terminal || flags[&binding] != flag {
+                        return Err("MIR cleanup clears a drop flag before terminal cleanup".into());
+                    }
+                    *state = Progress::Cleared;
+                }
+                MirCleanupAction::StorageDead { .. } => {
+                    if *state != Progress::Cleared {
+                        return Err("MIR cleanup ends source storage before clearing its drop flag".into());
+                    }
+                    *state = Progress::Dead;
+                }
+            }
+        }
+        if progress.values().any(|state| *state != Progress::Dead) {
+            return Err("MIR cleanup exit omits an ordered source-storage action".into());
+        }
+        if terminal_order != expected {
+            return Err("MIR cleanup does not process source-storage owners in reverse lexical order".into());
+        }
+        Ok(())
     }
 }
 
@@ -1882,10 +2032,10 @@ impl MirEditor {
             {
                 return Err("MIR cannot merge a tombstoned block".into());
             }
-            let predecessor_block = function
-                .blocks
-                .get(predecessor.0 as usize)
-                .ok_or_else(|| format!("MIR merge predecessor block {} is absent", predecessor.0))?;
+            let predecessor_block =
+                function.blocks.get(predecessor.0 as usize).ok_or_else(|| {
+                    format!("MIR merge predecessor block {} is absent", predecessor.0)
+                })?;
             let (target, arguments) = match &predecessor_block.terminator {
                 MirTerminator::Goto { target, arguments } => (*target, arguments),
                 _ => return Err("MIR merge predecessor does not end in a plain goto".into()),
@@ -1902,8 +2052,16 @@ impl MirEditor {
             }
             if successor == function.entry
                 || predecessor_count(function, successor) != 1
-                || function.control.handlers.iter().any(|site| site.target == successor)
-                || function.control.labels.iter().any(|label| label.destination == successor)
+                || function
+                    .control
+                    .handlers
+                    .iter()
+                    .any(|site| site.target == successor)
+                || function
+                    .control
+                    .labels
+                    .iter()
+                    .any(|label| label.destination == successor)
             {
                 return Err("MIR merge successor is an externally visible entry".into());
             }
@@ -1917,10 +2075,8 @@ impl MirEditor {
             let (instructions, terminator) = {
                 let successor_block = function.blocks.get_mut(successor.0 as usize).unwrap();
                 let instructions = std::mem::take(&mut successor_block.instructions);
-                let terminator = std::mem::replace(
-                    &mut successor_block.terminator,
-                    MirTerminator::Unreachable,
-                );
+                let terminator =
+                    std::mem::replace(&mut successor_block.terminator, MirTerminator::Unreachable);
                 (instructions, terminator)
             };
             let predecessor_block = function.blocks.get_mut(predecessor.0 as usize).unwrap();
@@ -1932,7 +2088,9 @@ impl MirEditor {
                     data.instruction_index = data
                         .instruction_index
                         .checked_add(instruction_offset)
-                        .ok_or_else(|| "MIR operation location overflow while merging".to_owned())?;
+                        .ok_or_else(|| {
+                            "MIR operation location overflow while merging".to_owned()
+                        })?;
                 }
             }
             function.control.tombstoned_blocks.insert(successor);
@@ -2162,14 +2320,31 @@ fn redirect_terminator_edge(
     arguments: Vec<MirLocal>,
 ) -> Result<(), String> {
     match (terminator, edge) {
-        (MirTerminator::Goto { target: slot, arguments: slots }, MirEdge::Goto)
-        | (MirTerminator::Leave { target: slot, arguments: slots, .. }, MirEdge::Leave) => {
+        (
+            MirTerminator::Goto {
+                target: slot,
+                arguments: slots,
+            },
+            MirEdge::Goto,
+        )
+        | (
+            MirTerminator::Leave {
+                target: slot,
+                arguments: slots,
+                ..
+            },
+            MirEdge::Leave,
+        ) => {
             *slot = target;
             *slots = arguments;
             Ok(())
         }
         (
-            MirTerminator::SwitchBool { then_target, then_arguments, .. },
+            MirTerminator::SwitchBool {
+                then_target,
+                then_arguments,
+                ..
+            },
             MirEdge::Then,
         ) => {
             *then_target = target;
@@ -2177,7 +2352,11 @@ fn redirect_terminator_edge(
             Ok(())
         }
         (
-            MirTerminator::SwitchBool { else_target, else_arguments, .. },
+            MirTerminator::SwitchBool {
+                else_target,
+                else_arguments,
+                ..
+            },
             MirEdge::Else,
         ) => {
             *else_target = target;
@@ -2188,17 +2367,28 @@ fn redirect_terminator_edge(
     }
 }
 
-fn synchronize_terminator_control(function: &mut MirFunction, block: MirBlockId) -> Result<(), String> {
+fn synchronize_terminator_control(
+    function: &mut MirFunction,
+    block: MirBlockId,
+) -> Result<(), String> {
     let terminator = function
         .blocks
         .get(block.0 as usize)
         .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?
         .terminator
         .clone();
-    if let MirTerminator::Leave { label, brand, target, .. } = terminator {
-        let entry = function.control.labels.get_mut(label.0 as usize).ok_or_else(|| {
-            format!("MIR leave references absent label {}", label.0)
-        })?;
+    if let MirTerminator::Leave {
+        label,
+        brand,
+        target,
+        ..
+    } = terminator
+    {
+        let entry = function
+            .control
+            .labels
+            .get_mut(label.0 as usize)
+            .ok_or_else(|| format!("MIR leave references absent label {}", label.0))?;
         if entry.brand != brand {
             return Err("MIR leave brand disagrees with frozen control table".into());
         }
@@ -2228,7 +2418,8 @@ fn terminator_replacement_invalidation(
             | MirAnalysisInvalidation::FLOW
             | MirAnalysisInvalidation::VALUES;
     }
-    if matches!(before, MirTerminator::Leave { .. }) || matches!(after, MirTerminator::Leave { .. }) {
+    if matches!(before, MirTerminator::Leave { .. }) || matches!(after, MirTerminator::Leave { .. })
+    {
         invalidation |= MirAnalysisInvalidation::EFFECTS | MirAnalysisInvalidation::FLOW;
     }
     invalidation
@@ -2237,7 +2428,11 @@ fn terminator_replacement_invalidation(
 fn terminator_successors(terminator: &MirTerminator) -> Vec<MirBlockId> {
     match terminator {
         MirTerminator::Goto { target, .. } | MirTerminator::Leave { target, .. } => vec![*target],
-        MirTerminator::SwitchBool { then_target, else_target, .. } => vec![*then_target, *else_target],
+        MirTerminator::SwitchBool {
+            then_target,
+            else_target,
+            ..
+        } => vec![*then_target, *else_target],
         MirTerminator::Return { .. } | MirTerminator::Unreachable => vec![],
     }
 }
@@ -2247,7 +2442,12 @@ fn terminator_references(terminator: &MirTerminator) -> Vec<MirLocal> {
         MirTerminator::Goto { arguments, .. } | MirTerminator::Leave { arguments, .. } => {
             arguments.clone()
         }
-        MirTerminator::SwitchBool { condition, then_arguments, else_arguments, .. } => {
+        MirTerminator::SwitchBool {
+            condition,
+            then_arguments,
+            else_arguments,
+            ..
+        } => {
             let mut references = vec![*condition];
             references.extend(then_arguments);
             references.extend(else_arguments);
@@ -2270,19 +2470,32 @@ fn scope_after_block_prefix(
     let mut scope = block_data.scope;
     for instruction in &block_data.instructions[..at] {
         match instruction {
-            MirInstruction::MakeLabel { label: label_id, .. } => {
-                let label = function.control.labels.get(label_id.0 as usize).ok_or_else(|| {
-                    format!("MIR split instruction references absent label {}", label_id.0)
-                })?;
+            MirInstruction::MakeLabel {
+                label: label_id, ..
+            } => {
+                let label = function
+                    .control
+                    .labels
+                    .get(label_id.0 as usize)
+                    .ok_or_else(|| {
+                        format!(
+                            "MIR split instruction references absent label {}",
+                            label_id.0
+                        )
+                    })?;
                 if !scope_enters_label(&function.control, label.scope, scope, *label_id) {
                     return Err("MIR split label disagrees with lexical scope".into());
                 }
                 scope = label.scope;
             }
             MirInstruction::InstallHandler { site, .. } => {
-                let handler = function.control.handlers.get(site.0 as usize).ok_or_else(|| {
-                    format!("MIR split instruction references absent handler {}", site.0)
-                })?;
+                let handler = function
+                    .control
+                    .handlers
+                    .get(site.0 as usize)
+                    .ok_or_else(|| {
+                        format!("MIR split instruction references absent handler {}", site.0)
+                    })?;
                 if !scope_enters_handler(&function.control, handler.scope, scope, *site) {
                     return Err("MIR split handler disagrees with lexical scope".into());
                 }
@@ -2305,16 +2518,20 @@ fn relocate_operations_after_split(
     at: usize,
 ) {
     for entry in &mut function.control.operations.entries {
-        if let Some(data) = entry.as_mut().filter(|data| {
-            data.block == source && data.instruction_index >= at as u32
-        }) {
+        if let Some(data) = entry
+            .as_mut()
+            .filter(|data| data.block == source && data.instruction_index >= at as u32)
+        {
             data.block = suffix;
             data.instruction_index -= at as u32;
         }
     }
 }
 
-fn refresh_control_block_sites(function: &mut MirFunction, block: MirBlockId) -> Result<(), String> {
+fn refresh_control_block_sites(
+    function: &mut MirFunction,
+    block: MirBlockId,
+) -> Result<(), String> {
     let instructions = function
         .blocks
         .get(block.0 as usize)
@@ -3192,6 +3409,9 @@ impl MirLowering {
                 moved_paths: vec![],
                 moved_places: flow.moved_places.clone(),
                 active_loans: flow.active_loans.clone(),
+            drop_flags: vec![],
+            actions: vec![],
+            protected_values: vec![],
             },
             resumption_snapshots: BTreeMap::new(),
             label_rejoins: BTreeMap::new(),
@@ -4349,7 +4569,9 @@ impl MirFunction {
         let mut storage = MirSourceStorageTables::from_placeflow(flow);
         for (index, binding) in self.control.move_paths.bindings.iter().enumerate() {
             let local = match binding.origin {
-                PlaceBindingOrigin::Parameter { index } => self.parameters.get(index as usize).copied(),
+                PlaceBindingOrigin::Parameter { index } => {
+                    self.parameters.get(index as usize).copied()
+                }
                 PlaceBindingOrigin::Let { expression } => self
                     .locals
                     .iter()
@@ -4527,9 +4749,10 @@ impl MirFunction {
             return Err("MIR entry block is tombstoned".into());
         }
         for &block_id in &self.control.tombstoned_blocks {
-            let block = self.blocks.get(block_id.0 as usize).ok_or_else(|| {
-                format!("MIR tombstoned block {} is absent", block_id.0)
-            })?;
+            let block = self
+                .blocks
+                .get(block_id.0 as usize)
+                .ok_or_else(|| format!("MIR tombstoned block {} is absent", block_id.0))?;
             if !block.parameters.is_empty()
                 || !block.instructions.is_empty()
                 || !matches!(block.terminator, MirTerminator::Unreachable)
@@ -4542,7 +4765,9 @@ impl MirFunction {
         }
         validate_nominal_copy_descriptors(&self.nominal_copy_descriptors)?;
         self.validate_move_path_tables()?;
-        self.control.source_storage.validate(&self.control.move_paths)?;
+        self.control
+            .source_storage
+            .validate(&self.control.move_paths)?;
         self.control
             .source_storage
             .validate_local_mapping(&self.control.move_paths, self.locals.len())?;
@@ -4631,7 +4856,9 @@ impl MirFunction {
                     live.insert(destination);
                 }
             }
-            let mut check_edge = |target: MirBlockId, arguments: &[MirLocal]| -> Result<(), String> {
+            let mut check_edge = |target: MirBlockId,
+                                  arguments: &[MirLocal]|
+             -> Result<(), String> {
                 for local in arguments {
                     if !live.contains(local) {
                         return Err(format!(
@@ -4646,7 +4873,10 @@ impl MirFunction {
                 }
                 let changed = match &mut entries[target_index] {
                     Some(current) => {
-                        let next = current.intersection(&live).copied().collect::<BTreeSet<_>>();
+                        let next = current
+                            .intersection(&live)
+                            .copied()
+                            .collect::<BTreeSet<_>>();
                         if *current == next {
                             false
                         } else {
@@ -4666,7 +4896,9 @@ impl MirFunction {
             };
             match &block.terminator {
                 MirTerminator::Goto { target, arguments }
-                | MirTerminator::Leave { target, arguments, .. } => check_edge(*target, arguments)?,
+                | MirTerminator::Leave {
+                    target, arguments, ..
+                } => check_edge(*target, arguments)?,
                 MirTerminator::SwitchBool {
                     condition,
                     then_target,
@@ -5512,10 +5744,22 @@ impl MirFunction {
     }
     fn validate_leave_cleanup_payloads(
         &self,
-        block: usize,
+        _block: usize,
         arguments: &[MirLocal],
         cleanup: &MirCleanupPlan,
     ) -> Result<(), String> {
+        if !self
+            .control
+            .source_storage
+            .exited_bindings(
+                cleanup.source_storage_scope,
+                cleanup.target_storage_scope,
+            )?
+            .is_empty()
+            && cleanup.protected_values != arguments
+        {
+            return Err("MIR cleanup protected values do not exactly match leave payloads".into());
+        }
         // A cleanup path must never consume the value protected by the leave
         // edge. Parameter-origin bindings are the only compact-MIR mapping
         // available before full source-storage lowering, and are exact rather
@@ -5533,30 +5777,6 @@ impl MirFunction {
             }
         }
 
-        // Raw hostile MIR has no PlaceFlow source-storage arena. It may use
-        // ordinary SSA temporaries, but a `Leave` that creates a source value
-        // in the exiting block and carries a different payload must not claim
-        // that no cleanup is necessary. Frozen lowering supplies the typed
-        // scope/path table above; raw input is rejected rather than guessed.
-        if self.control.move_paths.bindings.is_empty()
-            && cleanup.moved_paths.is_empty()
-            && cleanup.moved_places.is_empty()
-        {
-            let has_unprotected_owner = self.blocks[block]
-                .instructions
-                .iter()
-                .filter_map(destination)
-                .filter(|local| !arguments.contains(local))
-                .any(|local| {
-                    !matches!(
-                        self.local_type(local),
-                        Ok(Type::Callable { result, .. }) if matches!(result.as_ref(), Type::Never)
-                    )
-                });
-            if has_unprotected_owner {
-                return Err("MIR leave exits initialized source storage without cleanup".into());
-            }
-        }
         Ok(())
     }
 }
@@ -7667,12 +7887,15 @@ impl Lowerer<'_> {
                         brand,
                         target: MirBlockId(join_block),
                         arguments: vec![value],
-                cleanup: MirCleanupPlan {
-                    source_storage_scope: MirSourceStorageScopeId::ROOT,
-                    target_storage_scope: MirSourceStorageScopeId::ROOT,
+                        cleanup: MirCleanupPlan {
+                            source_storage_scope: MirSourceStorageScopeId::ROOT,
+                            target_storage_scope: MirSourceStorageScopeId::ROOT,
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                         },
                     },
                 ),
@@ -7705,6 +7928,9 @@ impl Lowerer<'_> {
                         moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
+                    drop_flags: vec![],
+                    actions: vec![],
+                    protected_values: vec![],
                     },
                 },
             ),
@@ -7948,6 +8174,9 @@ impl Lowerer<'_> {
                                 moved_paths: vec![],
                                 moved_places: self.leave_cleanup.moved_places.clone(),
                                 active_loans: self.leave_cleanup.active_loans.clone(),
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                             },
                         },
                     },
@@ -7998,6 +8227,9 @@ impl Lowerer<'_> {
                                 moved_paths: vec![],
                                 moved_places: self.leave_cleanup.moved_places.clone(),
                                 active_loans: self.leave_cleanup.active_loans.clone(),
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                             },
                         },
                     },
@@ -8259,6 +8491,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                         },
                     }
                 } else {
@@ -8423,6 +8658,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                         },
                     },
                 },
@@ -8631,6 +8869,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                         },
                     },
                 },
@@ -8841,6 +9082,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                         },
                     }
                 }),
@@ -9092,6 +9336,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                         },
                     },
                 },
@@ -9262,6 +9509,9 @@ impl Lowerer<'_> {
                         moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
+                    drop_flags: vec![],
+                    actions: vec![],
+                    protected_values: vec![],
                     },
                 }
             } else if matches!(self.body.expression(clause.body).ty, Type::Never) {
@@ -9523,6 +9773,9 @@ impl Lowerer<'_> {
                         moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
+                    drop_flags: vec![],
+                    actions: vec![],
+                    protected_values: vec![],
                     },
                 }
             } else if matches!(self.body.expression(clause.body).ty, Type::Never) {
@@ -9927,6 +10180,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                         },
                     },
                 },
@@ -10175,6 +10431,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                         },
                     },
                 },
@@ -22159,6 +22418,9 @@ impl Lowerer<'_> {
                 moved_paths: vec![],
                 moved_places: vec![],
                 active_loans: vec![],
+            drop_flags: vec![],
+            actions: vec![],
+            protected_values: vec![],
             },
             resumption_snapshots: BTreeMap::new(),
             label_rejoins: BTreeMap::new(),

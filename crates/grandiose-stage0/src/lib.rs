@@ -82,7 +82,8 @@ pub use interface::{
 };
 pub use mir::{
     MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment,
-    MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirDiagnostic, MirEdge, MirEditor,
+    MirCleanupAction, MirCleanupDropFlag, MirCleanupPlan, MirContinuationPolicy,
+    MirControlTables, MirDiagnostic, MirDropFlagId, MirEdge, MirEditor,
     MirFunction, MirHandlerSiteData, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelData,
     MirLabelId, MirLocal, MirLocalDecl, MirLowering, MirMovePathData, MirMovePathId,
     MirMovePathTables, MirNominalCopyDescriptor, MirOperationArena, MirOperationData,

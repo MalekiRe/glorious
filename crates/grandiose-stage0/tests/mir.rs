@@ -6,11 +6,12 @@ use grandiose_stage0::{
     InstanceKey, Lifetime, LoanFact, MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture,
     MirCaptureEnvironment, MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirEdge,
     MirEditor, MirFunction, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelData,
-    MirLabelId, MirLocal, MirLocalDecl, MirMovePathData, MirMovePathId, MirMovePathTables, MirOperationId, MirPattern,
-    MirPatternField, MirPerformSiteId, MirPlaceBindingData, MirPlaceBindingId, MirProgram,
-    MirResumptionSiteId, MirScopeId, MirTerminator, MirTraitMethodInstance, MoveFact, Mutability,
-    MirSourceStorageScopeId, PlaceBindingId, PlaceBindingOrigin, Quantity, ScalarType, Type,
-    VmArtifactError, emit_vm, emit_vm_program, optimize_mir, verify_vm,
+    MirLabelId, MirLocal, MirLocalDecl, MirMovePathData, MirMovePathId, MirMovePathTables,
+    MirOperationId, MirPattern, MirPatternField, MirPerformSiteId, MirPlaceBindingData,
+    MirPlaceBindingId, MirProgram, MirResumptionSiteId, MirScopeId, MirSourceStorageScopeId,
+    MirTerminator, MirTraitMethodInstance, MoveFact, Mutability, PlaceBindingId,
+    PlaceBindingOrigin, Quantity, ScalarType, Type, VmArtifactError, emit_vm, emit_vm_program,
+    optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -255,6 +256,9 @@ fn mir_rejects_cleanup_that_disarms_a_protected_leave_payload() {
                             fields: vec![],
                         }],
                         active_loans: vec![],
+                    drop_flags: vec![],
+                    actions: vec![],
+                    protected_values: vec![],
                     },
                 },
             },
@@ -367,6 +371,9 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
+                    drop_flags: vec![],
+                    actions: vec![],
+                    protected_values: vec![],
                     },
                 },
             },
@@ -388,6 +395,9 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
                         moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
+                    drop_flags: vec![],
+                    actions: vec![],
+                    protected_values: vec![],
                     },
                 },
             },
@@ -529,6 +539,9 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
             },
         ],
         active_loans: vec![],
+    drop_flags: vec![],
+    actions: vec![],
+    protected_values: vec![],
     };
     assert!(
         leave(overlapping_moves)
@@ -551,6 +564,9 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
             fields: vec![],
             unique: false,
         }],
+        drop_flags: vec![],
+        actions: vec![],
+        protected_values: vec![],
     };
     assert!(
         leave(moved_live_loan)
@@ -1833,6 +1849,9 @@ fn externally_visible_label_merge_function() -> MirFunction {
                         moved_places: vec![],
                         moved_paths: vec![],
                         active_loans: vec![],
+                    drop_flags: vec![],
+                    actions: vec![],
+                    protected_values: vec![],
                     },
                 },
             },
@@ -1864,7 +1883,9 @@ fn checked_mir_editor_rejects_merging_externally_visible_control_entries() {
     ] {
         function.validate().unwrap();
         let mut editor = MirEditor::open(function.clone()).unwrap();
-        let error = editor.merge_blocks(MirBlockId(1), MirBlockId(2)).unwrap_err();
+        let error = editor
+            .merge_blocks(MirBlockId(1), MirBlockId(2))
+            .unwrap_err();
         assert!(error.contains("externally visible entry"), "{error}");
         assert_eq!(editor.finish(), function);
     }
@@ -1874,14 +1895,16 @@ fn checked_mir_editor_rejects_merging_externally_visible_control_entries() {
 fn checked_mir_editor_rolls_back_leave_and_label_metadata_together() {
     let original = externally_visible_label_merge_function();
     let mut editor = MirEditor::open(original.clone()).unwrap();
-    assert!(editor
-        .redirect_edge(
-            MirBlockId(0),
-            MirEdge::Leave,
-            MirBlockId(99),
-            vec![MirLocal(0)],
-        )
-        .is_err());
+    assert!(
+        editor
+            .redirect_edge(
+                MirBlockId(0),
+                MirEdge::Leave,
+                MirBlockId(99),
+                vec![MirLocal(0)],
+            )
+            .is_err()
+    );
     // The failed edit briefly changes the label destination internally; a
     // transactional failure must restore that frozen control entry as well as
     // the terminator that named it.
