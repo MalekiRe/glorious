@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    core::{CallableId, CaptureMode, EnvironmentBrand},
+    core::CaptureMode,
     identity::{DefKey, Digest},
     mir::{
         MirCleanupAction, MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern,
@@ -5163,16 +5163,10 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                 definition: *callee,
             });
         };
-        if *callee
-            != lifted_callable_definition(EnvironmentBrand {
-                owner: environment.owner,
-                callable: CallableId(environment.callable),
-            })
-        {
-            return Err(VmArtifactError::InvalidCallableEnvironment {
-                message: "callable environment registry brand does not match lifted target",
-            });
-        }
+        // The source environment brand authenticates the capture layout, but
+        // a generic owner may choose a distinct concrete executable identity
+        // for the same lifted source callable. The checks below bind that
+        // environment to this exact target's ABI.
         if target.captures != environment.captures.len() as u32 {
             return Err(VmArtifactError::InvalidCallableEnvironment {
                 message: "callable environment registry count does not match target",
@@ -5259,15 +5253,10 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                                 message: "callable producer does not match target sealed environment",
                             });
                         }
-                        let expected_callee = lifted_callable_definition(EnvironmentBrand {
-                            owner: environment.owner,
-                            callable: CallableId(environment.callable),
-                        });
-                        if *callee != expected_callee {
-                            return Err(VmArtifactError::InvalidCallableEnvironment {
-                                message: "callable environment brand does not match lifted target",
-                            });
-                        }
+                        // The environment brand remains source provenance;
+                        // a generic source callable may target a separately
+                        // materialized executable body. The exact target ABI
+                        // is checked immediately below.
                         if environment.captures.len() != captures.len() {
                             return Err(VmArtifactError::InvalidCallableEnvironment {
                                 message: "callable environment layout does not match capture count",

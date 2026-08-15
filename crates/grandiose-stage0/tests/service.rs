@@ -9971,6 +9971,26 @@ fn generic_closure_values_preserve_indirect_call_contracts() {
 }
 
 #[test]
+fn service_materializes_generic_value_captures_in_returned_closures() {
+    let source = "pub fn capture<T>(value: T) -> () -> T { () -> T { value } } pub fn main() -> i64 { capture(42)() }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a returned closure must specialize its captured generic value");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_materializes_nested_generic_value_captures_in_returned_closures() {
+    let source = "pub fn capture<T>(value: T) -> () -> () -> T { () -> () -> T { () -> T { value } } } pub fn main() -> i64 { capture(42)()() }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("nested returned closures must specialize their captured generic value");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn callable_values_cross_record_and_return_indirect_boundaries() {
     let source = "pub struct Holder { callback: (i64) -> i64 } pub fn make(value: i64) -> Holder { Holder { callback: (input: i64) -> i64 { value + input } } } pub fn main() -> i64 { let holder = make(40); holder.callback(2) }";
     let outcome = StageZeroCompiler::new()

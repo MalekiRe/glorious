@@ -5956,7 +5956,7 @@ impl MirFunction {
             return Ok(());
         }
         if let MirInstruction::MakeCallable {
-            callee,
+            callee: _,
             captures,
             environment,
             ..
@@ -5964,12 +5964,11 @@ impl MirFunction {
         {
             match environment {
                 Some(environment) => {
-                    if *callee != lifted_callable_definition(environment.brand) {
-                        return Err(
-                            "MIR callable environment brand does not match its lifted target"
-                                .into(),
-                        );
-                    }
+                    // A generic owner can materialize this source-lifted
+                    // callable into a distinct concrete executable body. The
+                    // environment brand still authenticates the source
+                    // layout, while `MirProgram::validate` checks that the
+                    // selected target exists and has the same capture ABI.
                     if captures.len() != environment.captures.len() {
                         return Err(
                             "MIR callable capture registers do not match their sealed layout"

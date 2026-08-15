@@ -2421,8 +2421,15 @@ fn materialize_concrete_instances(
         materialize_deferred_scalar_operations(&mut specialized)?;
         register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
         targets.insert(key.clone(), executable);
-        instances.insert(executable, MirInstance { key, executable });
         functions.insert(executable, specialized);
+        materialize_lifted_callable_instances(
+            functions,
+            &key,
+            executable,
+            &body_arguments,
+            signatures,
+        )?;
+        instances.insert(executable, MirInstance { key, executable });
     }
     for function in functions.values_mut() {
         for block in &mut function.blocks {
@@ -2547,6 +2554,90 @@ fn materialize_concrete_instances(
         }
     }
     Ok(instances)
+}
+
+/// Give every closure lifted from a concrete generic callable instance its
+/// own executable MIR body. A lifted closure is a separate function, but its
+/// capture ABI and body retain the enclosing callable's generic placeholders.
+/// Reusing the source template's lifted definition would therefore leave the
+/// VM with a callable whose types disagree with its materialized environment.
+///
+/// The closure identity includes the enclosing instance and its source lifted
+/// definition. Nested closures are processed transitively because they inherit
+/// the same enclosing substitutions.
+fn materialize_lifted_callable_instances(
+    functions: &mut BTreeMap<DefKey, MirFunction>,
+    instance: &InstanceKey,
+    executable: DefKey,
+    body_arguments: &[GenericArgument],
+    signatures: &ElaboratedInterface,
+) -> Result<(), String> {
+    let mut targets = BTreeMap::<DefKey, DefKey>::new();
+    let mut pending = vec![executable];
+
+    while let Some(definition) = pending.pop() {
+        let discovered = {
+            let function = functions.get_mut(&definition).ok_or_else(|| {
+                format!(
+                    "materialized callable body disappeared before lifted closures were specialized: {definition:?}"
+                )
+            })?;
+            let mut discovered = Vec::new();
+            for block in &mut function.blocks {
+                for instruction in &mut block.instructions {
+                    let MirInstruction::MakeCallable {
+                        callee,
+                        environment: Some(_),
+                        ..
+                    } = instruction
+                    else {
+                        continue;
+                    };
+                    let source = *callee;
+                    let (target, is_new) = match targets.get(&source).copied() {
+                        Some(target) => (target, false),
+                        None => {
+                            let target = lifted_callable_instance_definition(instance, source);
+                            targets.insert(source, target);
+                            (target, true)
+                        }
+                    };
+                    *callee = target;
+                    if is_new {
+                        discovered.push((source, target));
+                    }
+                }
+            }
+            discovered
+        };
+
+        for (source, target) in discovered {
+            if functions.contains_key(&target) {
+                return Err(format!(
+                    "specialized lifted callable identity collided with an existing MIR function: {target:?}"
+                ));
+            }
+            let mut specialized = functions.get(&source).cloned().ok_or_else(|| {
+                format!("lifted callable body is unavailable for specialization: {source:?}")
+            })?;
+            specialized.definition = target;
+            specialize_mir_local_types(&mut specialized, body_arguments);
+            normalize_materialized_associated_consts(&mut specialized, signatures)?;
+            materialize_deferred_scalar_operations(&mut specialized)?;
+            register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
+            functions.insert(target, specialized);
+            pending.push(target);
+        }
+    }
+    Ok(())
+}
+
+fn lifted_callable_instance_definition(instance: &InstanceKey, source: DefKey) -> DefKey {
+    DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable-instance-v1".as_slice(),
+        instance.fingerprint().as_bytes().as_slice(),
+        source.0.as_bytes().as_slice(),
+    ]))
 }
 
 /// Translate the executable instance identity for a selected trait method
