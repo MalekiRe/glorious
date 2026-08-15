@@ -1657,6 +1657,14 @@ pub enum VmArtifactError {
     InvalidLabelContract {
         message: &'static str,
     },
+    /// A source-storage binding is a frozen identity, not an annotation on an
+    /// arbitrary register. Every executable StorageLive/StorageDead mention
+    /// must retain its one-to-one binding/local pairing across the artifact.
+    InvalidSourceStorageIdentity {
+        binding: u32,
+        local: u32,
+        message: &'static str,
+    },
     /// A boundary that snapshots its payload (for example a callable capture
     /// or retained continuation) cannot carry a unique reference without
     /// losing write-back. Ordinary call/return boundaries use live caller
@@ -6932,6 +6940,45 @@ fn verify_label_brand_contracts(function: &VmFunction) -> Result<(), VmArtifactE
     Ok(())
 }
 
+/// The bytecode keeps source-storage provenance as a dense binding identity
+/// beside its executable register slot.  The state-machine verifier below
+/// proves each slot is live or dead on every CFG path, but that alone cannot
+/// detect an artifact which swaps two simultaneously-live slots at its
+/// `StorageDead` instruction. Freeze the association up front so every later
+/// lifecycle transition refers to the same source owner.
+fn verify_source_storage_identity_contracts(function: &VmFunction) -> Result<(), VmArtifactError> {
+    let mut binding_locals = BTreeMap::<u32, u32>::new();
+    let mut local_bindings = BTreeMap::<u32, u32>::new();
+    for instruction in &function.instructions {
+        let (VmInstruction::StorageLive { binding, local }
+        | VmInstruction::StorageDead { binding, local }) = instruction
+        else {
+            continue;
+        };
+        match binding_locals.insert(*binding, *local) {
+            Some(expected) if expected != *local => {
+                return Err(VmArtifactError::InvalidSourceStorageIdentity {
+                    binding: *binding,
+                    local: *local,
+                    message: "source-storage binding was paired with multiple locals",
+                });
+            }
+            _ => {}
+        }
+        match local_bindings.insert(*local, *binding) {
+            Some(expected) if expected != *binding => {
+                return Err(VmArtifactError::InvalidSourceStorageIdentity {
+                    binding: *binding,
+                    local: *local,
+                    message: "source-storage local was paired with multiple bindings",
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
@@ -6953,6 +7000,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
         }
     }
     verify_label_brand_contracts(function)?;
+    verify_source_storage_identity_contracts(function)?;
     verify_handler_entry_boundaries(function)?;
     let mut initial = vec![None; function.registers.len()];
     if function.captures > function.parameters {
