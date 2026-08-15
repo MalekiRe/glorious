@@ -5412,6 +5412,15 @@ fn service_materializes_selected_associated_consts_in_trait_method_computation()
 }
 
 #[test]
+fn service_rolls_back_private_selected_associated_item_facade_revisions() {
+    let root = "use top_facade::Gateway as Capability; pub fn main() -> i64 { Capability::relay(41) }";
+    let public = "pub struct Witness<n: u32> { value: i64 } pub trait Gate { const Width: u32; type Effects: EffectRow; fn relay(value: i64) -> i64; } impl Gate for i64 { const Width = 7; type Effects = {}; fn relay(value: i64) -> i64 { let witness = Witness<<i64 as Gate>::Width> { value: 1 }; value + witness.value } }";
+    let private = "pub struct Witness<n: u32> { value: i64 } trait Gate { const Width: u32; type Effects: EffectRow; fn relay(value: i64) -> i64; } impl Gate for i64 { const Width = 7; type Effects = {}; fn relay(value: i64) -> i64 { let witness = Witness<<i64 as Gate>::Width> { value: 1 }; value + witness.value } }";
+    let world = |provider: &str| { let mut input = request(root); for (p,s) in [("provider@1.2.3", provider), ("middle-facade@0.1.0", "pub use provider::Gate as Gateway;"), ("top-facade@0.1.0", "pub use middle_facade::*;")] { input.sources.push(SourceInput::new(PackageKey(p.into()), LogicalPath::parse("src/lib.glorious").unwrap(), s.as_bytes())); } input };
+    let compiler = StageZeroCompiler::new(); let parent = compiler.import_revision(world(public), None).unwrap(); assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().run_i64().unwrap(), 42); let cached=compiler.interface_cache_stats(); let child=compiler.import_revision(world(private),Some(parent)).unwrap(); let error=compiler.compile_session(&compiler.open_session(child).unwrap()).expect_err("private associated item cannot cross facade"); assert!(error.diagnostics().iter().any(|d| matches!(d.code,"G3317"|"G3326"))); assert_eq!(compiler.interface_cache_stats(),cached); assert!(compiler.dependency_traces(child).is_empty());
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,
