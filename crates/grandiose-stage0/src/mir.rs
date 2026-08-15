@@ -7008,6 +7008,55 @@ impl MirFunction {
                 self.require_scalar_locals(&[*dst], ScalarType::I128, "i64-to-i128 result")?;
                 self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-i128 input")?;
             }
+            MirInstruction::TextByteLen { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Usize, "Text byte length result")?;
+                self.require_scalar_locals(&[*value], ScalarType::Text, "Text byte length input")?;
+            }
+            MirInstruction::TextConcat { dst, left, right } => {
+                self.require_scalar_locals(&[*dst, *left, *right], ScalarType::Text, "Text concatenation")?;
+            }
+            MirInstruction::TextEq { dst, left, right } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U32, "Text equality result")?;
+                self.require_scalar_locals(&[*left, *right], ScalarType::Text, "Text equality inputs")?;
+            }
+            MirInstruction::TextFromUtf8Checked { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Text, "UTF-8 decode result")?;
+                self.require_scalar_locals(&[*value], ScalarType::Bytes, "UTF-8 decode input")?;
+            }
+            MirInstruction::TextAsBytes { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Bytes, "Text bytes result")?;
+                self.require_scalar_locals(&[*value], ScalarType::Text, "Text bytes input")?;
+            }
+            MirInstruction::CharFromU32Checked { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Char, "char conversion result")?;
+                self.require_scalar_locals(&[*value], ScalarType::U32, "char conversion input")?;
+            }
+            MirInstruction::CharToU32 { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U32, "char code point result")?;
+                self.require_scalar_locals(&[*value], ScalarType::Char, "char code point input")?;
+            }
+            MirInstruction::BytesLen { dst, value }
+            | MirInstruction::BytesUtf8ValidUpTo { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Usize, "Bytes length result")?;
+                self.require_scalar_locals(&[*value], ScalarType::Bytes, "Bytes length input")?;
+            }
+            MirInstruction::BytesConcat { dst, left, right } => {
+                self.require_scalar_locals(&[*dst, *left, *right], ScalarType::Bytes, "Bytes concatenation")?;
+            }
+            MirInstruction::BytesGet { dst, bytes, index } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U8, "Bytes get result")?;
+                self.require_scalar_locals(&[*bytes], ScalarType::Bytes, "Bytes get input")?;
+                self.require_scalar_locals(&[*index], ScalarType::Usize, "Bytes get index")?;
+            }
+            MirInstruction::BytesSlice {
+                dst,
+                bytes,
+                start,
+                end,
+            } => {
+                self.require_scalar_locals(&[*dst, *bytes], ScalarType::Bytes, "Bytes slice carrier")?;
+                self.require_scalar_locals(&[*start, *end], ScalarType::Usize, "Bytes slice bounds")?;
+            }
             _ => return Ok(false),
         }
         Ok(true)

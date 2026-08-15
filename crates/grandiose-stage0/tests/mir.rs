@@ -658,6 +658,20 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
             .is_err_and(|error| error.contains("u32 operation")),
         "an i64 register must not be accepted as a u32 arithmetic operand"
     );
+
+    let mut text = graph();
+    text.locals.push(local(Type::Scalar(ScalarType::Text)));
+    text.blocks[0]
+        .instructions
+        .push(MirInstruction::TextByteLen {
+            dst: MirLocal(1),
+            value: MirLocal(5),
+        });
+    assert!(
+        text.validate()
+            .is_err_and(|error| error.contains("Text byte length result")),
+        "an i64 register must not be accepted as a Text byte-length result"
+    );
 }
 
 #[test]
