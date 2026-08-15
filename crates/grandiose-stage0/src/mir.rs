@@ -14392,23 +14392,26 @@ impl Lowerer<'_> {
             .filter(|clause| !clause.terminal && effects.effects.contains(&clause.effect))
             .cloned()
             .collect::<Vec<_>>();
-        let [clause] = active.as_slice() else {
-            return None;
+        let clause = match active.as_slice() {
+            [clause] => Some(clause),
+            [] if terminal.is_some() => None,
+            _ => return None,
         };
-        if clause.patterns.len() != clause.payload_types.len()
-            || !clause.patterns.iter().all(pattern_is_irrefutable)
-            || !matches!(
-                clause.resumption,
-                CoreHandlerResumption::Tail {
-                    quantity: crate::quantity::Quantity::ONCE
-                } | CoreHandlerResumption::Explicit {
-                    quantity: crate::quantity::Quantity::ONCE,
-                    ..
-                }
-            )
-            || clause.continuation.is_none()
-            || self.handler_body_uses_snapshot_alias(clause.body)
-        {
+        if clause.is_some_and(|clause| {
+            clause.patterns.len() != clause.payload_types.len()
+                || !clause.patterns.iter().all(pattern_is_irrefutable)
+                || !matches!(
+                    clause.resumption,
+                    CoreHandlerResumption::Tail {
+                        quantity: crate::quantity::Quantity::ONCE
+                    } | CoreHandlerResumption::Explicit {
+                        quantity: crate::quantity::Quantity::ONCE,
+                        ..
+                    }
+                )
+                || clause.continuation.is_none()
+                || self.handler_body_uses_snapshot_alias(clause.body)
+        }) {
             return None;
         }
         for expression in root_prefix {
@@ -14439,10 +14442,14 @@ impl Lowerer<'_> {
         };
         let call_result = self.alloc(self.body.expression(computation).ty.clone(), computation);
         let payloads = clause
-            .payload_types
-            .iter()
-            .map(|ty| self.alloc(ty.clone(), computation))
-            .collect::<Vec<_>>();
+            .map(|clause| {
+                clause
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), computation))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let terminal_payloads = terminal.as_ref().map(|clause| {
             clause
                 .payload_types
@@ -14465,16 +14472,18 @@ impl Lowerer<'_> {
                 target: MirBlockId(3),
             });
         }
-        self.instructions.push(MirInstruction::InstallHandler {
-            site: MirHandlerSiteId::UNASSIGNED,
-            effect: clause.effect.definition,
-            effect_arguments: clause.effect.arguments.clone(),
-            operation: clause.operation,
-            payload_destinations: payloads.clone(),
-            resume_type: clause.continuation.as_ref()?.parameter.clone(),
-            continuation: MirContinuationPolicy::Consume,
-            target: MirBlockId(if terminal.is_some() { 4 } else { 3 }),
-        });
+        if let Some(clause) = clause {
+            self.instructions.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads.clone(),
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target: MirBlockId(if terminal.is_some() { 4 } else { 3 }),
+            });
+        }
         match callee_kind {
             CoreKind::Function {
                 definition,
@@ -14509,7 +14518,9 @@ impl Lowerer<'_> {
                 arguments,
             }),
         }
-        self.instructions.push(MirInstruction::UninstallHandler);
+        if clause.is_some() {
+            self.instructions.push(MirInstruction::UninstallHandler);
+        }
         if terminal.is_some() {
             self.instructions.push(MirInstruction::UninstallHandler);
         }
@@ -14534,31 +14545,42 @@ impl Lowerer<'_> {
             None
         };
 
-        self.instructions = Vec::new();
-        self.named = boundary_named;
-        self.values = boundary_values;
-        self.bind_handler_patterns(&clause.patterns, &payloads)?;
-        let consume_returning = matches!(
-            clause.resumption,
-            CoreHandlerResumption::Explicit {
-                quantity: crate::quantity::Quantity::ONCE,
-                ..
+        let active_block = if let Some(clause) = clause {
+            self.instructions = Vec::new();
+            self.named = boundary_named;
+            self.values = boundary_values;
+            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            let consume_returning = matches!(
+                clause.resumption,
+                CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                }
+            );
+            let resumed = if consume_returning {
+                self.direct_handler_clause_value_for_consuming_return(clause)?
+            } else {
+                self.direct_handler_clause_value(clause)?
+            };
+            if consume_returning {
+                self.instructions.push(MirInstruction::UninstallHandler);
+            } else {
+                self.instructions.push(MirInstruction::Resume {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                    value: resumed,
+                });
             }
-        );
-        let resumed = if consume_returning {
-            self.direct_handler_clause_value_for_consuming_return(clause)?
+            Some((
+                std::mem::take(&mut self.instructions),
+                if consume_returning {
+                    MirTerminator::Return { value: resumed }
+                } else {
+                    MirTerminator::Unreachable
+                },
+            ))
         } else {
-            self.direct_handler_clause_value(clause)?
+            None
         };
-        if consume_returning {
-            self.instructions.push(MirInstruction::UninstallHandler);
-        } else {
-            self.instructions.push(MirInstruction::Resume {
-                site: MirResumptionSiteId::UNASSIGNED,
-                value: resumed,
-            });
-        }
-        let handler_instructions = std::mem::take(&mut self.instructions);
         let joined = self.alloc(bool_ty, root);
         let (then_target, then_arguments, else_target, else_arguments) = if operator == "and" {
             (MirBlockId(1), vec![], MirBlockId(2), vec![skipped])
@@ -14605,16 +14627,14 @@ impl Lowerer<'_> {
                 },
             });
         }
-        blocks.push(MirBlock {
-            scope: MirScopeId::ROOT,
-            parameters: vec![],
-            instructions: handler_instructions,
-            terminator: if consume_returning {
-                MirTerminator::Return { value: resumed }
-            } else {
-                MirTerminator::Unreachable
-            },
-        });
+        if let Some((instructions, terminator)) = active_block {
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions,
+                terminator,
+            });
+        }
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,

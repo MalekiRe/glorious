@@ -18937,6 +18937,15 @@ fn service_rejoins_dynamic_lazy_handler_after_a_terminal_sibling_operation() {
 }
 
 #[test]
+fn service_rejoins_dynamic_lazy_terminal_only_handler() {
+    let source = "effect Halt { halt() -> !; } pub fn relay() -> Bool / Halt { Halt::halt() } pub fn apply(callback: () -> Bool / Halt) -> Bool / Halt { callback() } pub fn select(flag: Bool, callback: () -> Bool / Halt) -> Bool { flag and handle apply(callback) { Halt::halt() => true } } pub fn main() -> Bool { select(false, relay) or select(true, relay) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through
