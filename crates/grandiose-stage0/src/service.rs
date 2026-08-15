@@ -974,7 +974,15 @@ impl StageZeroCompiler {
             let ElaboratedHeader::ValueInitializer { ty: Some(ty), .. } = header else {
                 continue;
             };
-            if signatures.principal_use_interval(ty) != Some(crate::Quantity::UNRESTRICTED) {
+            // A generalized initializer can retain an abstract principal
+            // interval until a concrete instantiation supplies its generic
+            // arguments. Reject known restricted globals here; an unknown
+            // symbolic interval is not evidence of a restricted runtime
+            // allocation and must remain generalizable.
+            if signatures
+                .principal_use_interval(ty)
+                .is_some_and(|quantity| quantity != crate::Quantity::UNRESTRICTED)
+            {
                 diagnostics.push(CompileDiagnostic::source(
                     "G4196",
                     "memoized top-level global has a restricted or unproven principal `Use` quantity",
