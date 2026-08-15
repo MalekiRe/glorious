@@ -1125,6 +1125,18 @@ impl StageZeroCompiler {
         }));
         diagnostics.extend(
             index
+                .validate_package_import_cycles()
+                .into_iter()
+                .map(|diagnostic| {
+                    CompileDiagnostic::source(
+                        diagnostic.code,
+                        diagnostic.message,
+                        Some(diagnostic.span),
+                    )
+                }),
+        );
+        diagnostics.extend(
+            index
                 .validate_exported_imports()
                 .into_iter()
                 .map(|diagnostic| {

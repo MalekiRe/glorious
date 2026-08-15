@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     header::{GenericParameters, HeaderStructuralConst, HeaderStructuralU32Expr, ParsedHeader},
-    identity::{DefKey, ModuleKey, package_module_alias},
+    identity::{DefKey, ModuleKey, PackageKey, package_module_alias},
     interface::{DefinitionNamespace, PackageInterface},
     source::Span,
     types::{GenericArgument, GenericKind, StructuralU32Expr},
@@ -991,6 +991,88 @@ impl DefinitionIndex {
         diagnostics
     }
 
+    /// Package imports form the request's package-dependency graph.  Module
+    /// interface SCCs are a supported fixed-point boundary, but a package
+    /// dependency cycle has no declared manifest ordering or publication
+    /// authority.  Detect it from resolved import-module edges before body
+    /// elaboration can materialize an otherwise well-typed cross-package loop.
+    pub fn validate_package_import_cycles(&self) -> Vec<ResolutionDiagnostic> {
+        let mut edges = BTreeMap::<PackageKey, Vec<(PackageKey, Span)>>::new();
+        for imports in self.imports.values() {
+            for import in imports {
+                let Some(target) = self.import_target_module(import) else {
+                    continue;
+                };
+                if target.package != import.module.package {
+                    edges
+                        .entry(import.module.package.clone())
+                        .or_default()
+                        .push((target.package, import.span));
+                }
+            }
+        }
+        for targets in edges.values_mut() {
+            targets.sort();
+            targets.dedup();
+        }
+
+        let mut packages = edges.keys().cloned().collect::<BTreeSet<_>>();
+        packages.extend(
+            edges
+                .values()
+                .flatten()
+                .map(|(package, _)| package.clone()),
+        );
+        let mut assigned = BTreeSet::new();
+        let mut diagnostics = vec![];
+        for seed in packages {
+            if assigned.contains(&seed) {
+                continue;
+            }
+            let component = package_cycle_component(&seed, &edges);
+            if component.is_empty() {
+                continue;
+            }
+            assigned.extend(component.iter().cloned());
+            let members = component
+                .iter()
+                .map(|package| package.0.as_str())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            let message = format!("package dependency cycle includes {members}");
+            for package in &component {
+                for (target, span) in edges.get(package).into_iter().flatten() {
+                    if component.contains(target) {
+                        diagnostics.push(ResolutionDiagnostic {
+                            code: "G3321",
+                            span: *span,
+                            message: message.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        canonicalize_diagnostics(&mut diagnostics);
+        diagnostics
+    }
+
+    fn import_target_module(&self, import: &ImportBinding) -> Option<ModuleKey> {
+        // An explicit import's final segment usually denotes a declaration,
+        // while a module alias may consume the whole path.  Trying every
+        // decreasing prefix covers both without treating an unresolved import
+        // as a package edge.
+        for length in (1..=import.path.len()).rev() {
+            if let ModuleLookup::Found(target) = self.lexical_module(
+                &import.module,
+                &import.module,
+                &import.path[..length],
+            ) {
+                return Some(target);
+            }
+        }
+        None
+    }
+
     /// Source import sites are ordinary semantic occurrences.  Returning
     /// them from the same index which resolves body paths keeps definition,
     /// references, highlighting, and rename in agreement about aliases and
@@ -1835,6 +1917,56 @@ fn canonicalize_diagnostics(diagnostics: &mut Vec<ResolutionDiagnostic>) {
         (left.code, left.span, &left.message).cmp(&(right.code, right.span, &right.message))
     });
     diagnostics.dedup();
+}
+
+fn package_cycle_component(
+    seed: &PackageKey,
+    edges: &BTreeMap<PackageKey, Vec<(PackageKey, Span)>>,
+) -> BTreeSet<PackageKey> {
+    let mut packages = edges.keys().cloned().collect::<BTreeSet<_>>();
+    packages.extend(
+        edges
+            .values()
+            .flatten()
+            .map(|(package, _)| package.clone()),
+    );
+    let component = packages
+        .into_iter()
+        .filter(|candidate| {
+            package_reaches(seed, candidate, edges) && package_reaches(candidate, seed, edges)
+        })
+        .collect::<BTreeSet<_>>();
+    let self_cycle = edges
+        .get(seed)
+        .into_iter()
+        .flatten()
+        .any(|(target, _)| target == seed);
+    if component.len() > 1 || self_cycle {
+        component
+    } else {
+        BTreeSet::new()
+    }
+}
+
+fn package_reaches(
+    source: &PackageKey,
+    target: &PackageKey,
+    edges: &BTreeMap<PackageKey, Vec<(PackageKey, Span)>>,
+) -> bool {
+    let mut pending = vec![source.clone()];
+    let mut visited = BTreeSet::new();
+    while let Some(package) = pending.pop() {
+        if !visited.insert(package.clone()) {
+            continue;
+        }
+        for (next, _) in edges.get(&package).into_iter().flatten() {
+            if next == target {
+                return true;
+            }
+            pending.push(next.clone());
+        }
+    }
+    false
 }
 
 /// Journaled lexical scopes with deterministic shadowing. Parsing and body

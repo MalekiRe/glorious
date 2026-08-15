@@ -150,6 +150,11 @@ coarse. The composite fixtures cover:
   the source boundary through the required hyphen-to-underscore module alias;
   malformed and colliding aliases fail while the immutable request world is
   normalized, before interface or body publication.
+- package-level dependency cycles are rejected from resolved import-module
+  edges before bodies can materialize. This remains true when reciprocal
+  hyphenated package aliases publicly re-export a generic effect and selected
+  trait GAT contract, and diagnostics are invariant under source enumeration
+  (`service_rejects_recursive_hyphenated_dependency_facades_with_generic_effect_gats`).
 - generic dependency effect identity through exact replay and optional
   cancellation, including rejection when the imported handler's concrete
   effect instance does not match the performed one.

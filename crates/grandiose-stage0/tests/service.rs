@@ -10432,6 +10432,53 @@ fn service_normalizes_hyphenated_dependency_package_names_into_source_module_ali
 }
 
 #[test]
+fn service_rejects_recursive_hyphenated_dependency_facades_with_generic_effect_gats() {
+    // Both package identities contain hyphens, so their source aliases differ
+    // from their manifest keys. The two public interfaces import each other:
+    // `effects_lib` owns the effect and reexports the trait, while
+    // `traits_lib` imports the effect to define the selected generic GAT row.
+    let mut request = request(
+        "use effects_lib::{Capability, Trace}; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: Capability<i64>::relay(0, 41) }; Trace<i64>::note(packet.value) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("effects-lib@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub use traits_lib::Child as Capability;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("traits-lib@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use effects_lib::Trace; pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {}".as_slice(),
+    ));
+    let mut reordered = request.clone();
+    reordered.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(first)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("a package import cycle unexpectedly reached VM materialization");
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(second)) =
+        StageZeroCompiler::new().compile(reordered)
+    else {
+        panic!("source enumeration changed package-cycle rejection into success");
+    };
+    assert!(
+        first.iter().any(|diagnostic| diagnostic.code == "G3321"),
+        "missing package-cycle diagnostic: {first:#?}"
+    );
+    assert!(
+        first.iter().all(|diagnostic| diagnostic.code == "G3321"),
+        "package-cycle input must fail before later semantic products: {first:#?}"
+    );
+    assert_eq!(
+        first.len(),
+        2,
+        "each reciprocal package import must retain its source diagnostic"
+    );
+    assert_eq!(first, second, "package-cycle diagnostics must be canonical");
+}
+
+#[test]
 fn service_materializes_reachable_generic_dependency_callables() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(
