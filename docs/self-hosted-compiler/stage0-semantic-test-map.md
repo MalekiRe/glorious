@@ -508,6 +508,14 @@ coarse. The composite fixtures cover:
   cancels its sibling operation
   (`interprocedural_replay_forwards_after_a_late_payload_then_cancels`,
   `service_replays_late_payload_forwarding_then_facade_cancellation`).
+- third-payload refutations compose with both nested cancellation and labelled
+  re-entrant completion: every partial row retains all three ordered tests
+  before forwarding, while public facades preserve the outer replay frame,
+  sibling cancellation, retained completion, and label leave
+  (`deep_replay_cancellation_checks_all_three_payloads_in_both_partial_rows`,
+  `reentrant_replay_checks_a_late_third_payload_before_labelled_completion`,
+  `service_replays_late_third_payloads_through_nested_facade_cancellation_and_completion`,
+  `service_forwards_a_late_third_payload_through_facade_replay_completion_and_label_leave`).
 
 ## Previously enabled red semantic cases
 
@@ -527,6 +535,7 @@ bridges executable:
 | Finite replay followed by label transfer | `service_replayed_resumption_result_may_transfer_to_an_enclosing_label` |
 | Exact replay through a late refutable forward then generic-label completion, with one protected cleanup | `nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup`, `service_replays_forwarded_multi_payload_operation_then_rejoins_generic_label_completion` |
 | Exact replay forwards after a later refutable payload through a public facade, then cancels a sibling operation | `interprocedural_replay_forwards_after_a_late_payload_then_cancels`, `service_replays_late_payload_forwarding_then_facade_cancellation` |
+| Three-payload partial rows forward only after their final payload, through nested facade cancellation and labelled re-entrant completion | `deep_replay_cancellation_checks_all_three_payloads_in_both_partial_rows`, `reentrant_replay_checks_a_late_third_payload_before_labelled_completion`, `service_replays_late_third_payloads_through_nested_facade_cancellation_and_completion`, `service_forwards_a_late_third_payload_through_facade_replay_completion_and_label_leave` |
 | Cancellation through a public effect facade must retain a move-captured callback's lower-use obligation | `service_rejects_move_capture_cancellation_through_public_facades` |
 | A shared-only closure payload is duplicable across an exact `[2,2]` replay handler through public facades | `service_replays_shared_closure_payloads_across_public_facades` |
 | A custom-`Drop` aggregate survives partial-handler forwarding and is destroyed exactly once when the enclosing `[0,1]` handler cancels the suspended continuation | `service_drops_a_custom_aggregate_once_across_forward_and_cancellation` |

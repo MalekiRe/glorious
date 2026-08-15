@@ -16881,6 +16881,78 @@ fn service_replays_late_payload_forwarding_then_facade_cancellation() {
 }
 
 #[test]
+fn service_replays_late_third_payloads_through_nested_facade_cancellation_and_completion() {
+    // Both partial Console rows accept the first two payloads and refute the
+    // third. The operation must traverse both ordered decision graphs before
+    // the outer exact replayer resumes the provider residual into `write`'s
+    // sibling cancellation; each returned path then crosses completion.
+    let mut request = request(
+        "use bridge::{Console, invoke}; pub fn main() -> i64 { handle { handle { handle invoke(true, 1, 2) { Console::read(true, 1, 0) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(true, 1, 0) with k => k(3) + k(4) } } { value => value + 1; Console::read(_, _, _) with k => k(20) + k(21) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Console, relay}; pub fn invoke(flag: Bool, middle: i64, final: i64) -> i64 / Console { relay(flag, middle, final) }".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Console { [2,2] read(flag: Bool, middle: i64, final: i64) -> i64; [0,1] write(value: i64) -> i64; } pub fn relay(flag: Bool, middle: i64, final: i64) -> i64 / Console { let read = Console::read(flag, middle, final); Console::write(read) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new().compile(request);
+    let outcome = outcome.expect("late third-payload cancellation must cross nested facade frames");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::PatternTest { .. }))
+            .count(),
+        6,
+        "both nested partial rows must test all three payloads: {entry:#?}"
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(
+                instruction,
+                VmInstruction::InstallHandler {
+                    continuation: VmContinuationPolicy::Replay { uses: 2 },
+                    ..
+                }
+            ))
+            .count(),
+        3,
+        "the outer and both partial Console frames retain exact replay budgets: {entry:#?}"
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::Forward))
+            .count(),
+        2,
+        "each partial row must keep its own forwarding edge: {entry:#?}"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Cancel)),
+        "the replayed residual must retain the sibling write cancellation: {entry:#?}"
+    );
+    let verified = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("the three-payload facade cancellation VM program must verify");
+    assert_eq!(verified.fingerprint(), artifact.fingerprint());
+    assert_eq!(artifact.run_i64().unwrap(), 82);
+    assert_eq!(verified.run_i64().unwrap(), 82);
+}
+
+#[test]
 fn service_reentrant_tick_resume_forwards_nested_facade_ask_through_completion() {
     let mut request = request(
         "use bridge::Ask; use bridge::Tick; use bridge::invoke; pub fn main() -> i64 { handle { handle { handle invoke() { Ask::ask(true) with k => k(1) + k(2) } } { value => value + 1; Tick::tick() with k => k(10) + k(20) } } { Ask::ask(_) with k => k(30) + k(40) } }",
@@ -16996,6 +17068,78 @@ fn service_outer_replay_after_inner_label_leave_reenters_effectful_dependency_co
     let outcome = outcome.expect("outer replay must re-enter the retained effectful completion");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 203);
+}
+
+#[test]
+fn service_forwards_a_late_third_payload_through_facade_replay_completion_and_label_leave() {
+    // `Ask::ask(true, 1, 2)` reaches the innermost partial row through the
+    // public facade. Its first two payloads match but the third refutes `0`,
+    // so the suspended residual must Forward to the outer Ask replayer. The
+    // replays cross the Tick completion, leave `done`, and re-enter the
+    // retained effectful Audit completion through the provider facade.
+    let mut request = request(
+        "use bridge::{Ask, Audit, Tick, invoke, record}; pub fn main() -> i64 { handle { handle { label done { handle { handle { handle { handle invoke() { Ask::ask(true, 1, 0) with k => k(1) + k(2) } } { value => value + 1; Tick::tick() with k => k(10) + k(20) } } { Ask::ask(_, _, _) with k => k(30) + k(40) } } { value => transfer done value } } } { value => { let audited = record(value); audited + 100 } } } { Audit::note(_) with k => k(1) + k(2) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Ask, Audit, Tick, audit, relay}; pub fn invoke() -> i64 / {Ask, Tick} { relay() } pub fn record(value: i64) -> i64 / Audit { audit(value) }".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Ask { [2,2] ask(flag: Bool, middle: i64, final: i64) -> i64; } pub effect Tick { [2,2] tick() -> i64; } pub effect Audit { [2,2] note(value: i64) -> i64; } pub fn relay() -> i64 / {Ask, Tick} { let tick = Tick::tick(); let asked = Ask::ask(true, 1, 2); tick + asked } pub fn audit(value: i64) -> i64 / Audit { Audit::note(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("late third-payload forwarding must preserve facade replay and labelled completion");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let instructions = program
+        .functions
+        .values()
+        .flat_map(|function| function.instructions.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::PatternTest { .. }))
+            .count(),
+        3,
+        "every Ask payload must be tested before its partial row can be selected: {program:#?}"
+    );
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|instruction| matches!(
+                instruction,
+                VmInstruction::InstallHandler {
+                    continuation: VmContinuationPolicy::Replay { uses: 2 },
+                    ..
+                }
+            ))
+            .count(),
+        4,
+        "the Ask, Tick, and retained Audit frames must keep exact replay budgets: {program:#?}"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Forward)),
+        "the third-payload miss must retain a real VM forwarding edge: {program:#?}"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Leave { .. })),
+        "the forwarded replay must retain the label leave into the outer completion: {program:#?}"
+    );
+    let verified = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("the three-payload labelled facade replay program must verify");
+    assert_eq!(verified.fingerprint(), artifact.fingerprint());
+    assert_eq!(artifact.run_i64().unwrap(), 203);
+    assert_eq!(verified.run_i64().unwrap(), 203);
 }
 
 #[test]

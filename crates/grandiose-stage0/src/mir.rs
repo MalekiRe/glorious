@@ -20350,12 +20350,29 @@ impl Lowerer<'_> {
         let outer_payloads = payloads(self, outer);
         let middle_payloads = payloads(self, middle_clause);
         let inner_payloads = payloads(self, inner_clause);
+        let inner_tests = inner_clause
+            .patterns
+            .iter()
+            .cloned()
+            .zip(inner_payloads.iter().copied())
+            .map(|(pattern, subject)| {
+                Some((
+                    self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root),
+                    subject,
+                    lower_pattern(pattern)?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let inner_test_count = inner_tests.len();
+        let inner_match_block = MirBlockId(3 + inner_test_count as u32);
+        let forward_block = MirBlockId(inner_match_block.0 + 1);
+        let tail_block = MirBlockId(forward_block.0 + 1);
         let completion_effect_payloads = completion_effect
             .as_ref()
             .map(|clause| payloads(self, clause));
         let audit_payloads = label_cancellation.as_ref().map(|(_, clause)| payloads(self, clause));
         let mut entry = std::mem::take(&mut self.instructions);
-        let label_join_block = MirBlockId(6 + u32::from(label_cancellation.is_some()) * 2);
+        let label_join_block = MirBlockId(tail_block.0 + u32::from(label_cancellation.is_some()) * 2);
         let completion_effect_block =
             MirBlockId(label_join_block.0 + u32::from(completion_effect.is_some()));
         if let Some(clause) = &completion_effect {
@@ -20383,7 +20400,7 @@ impl Lowerer<'_> {
                 payload_destinations: audit_payloads.clone().expect("audit payloads allocated"),
                 resume_type: clause.continuation.as_ref()?.parameter.clone(),
                 continuation: MirContinuationPolicy::Consume,
-                target: MirBlockId(6),
+                target: tail_block,
             });
         }
         for (clause, payloads, target) in [
@@ -20475,13 +20492,6 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
-        let pattern = lower_pattern(inner_clause.patterns.first()?.clone())?;
-        let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
-        let test = vec![MirInstruction::PatternTest {
-            dst: condition,
-            subject: *inner_payloads.first()?,
-            pattern,
-        }];
         let (inner_instructions, inner_result) = arm(self, inner_clause, &inner_payloads)?;
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
@@ -20592,18 +20602,32 @@ impl Lowerer<'_> {
                         value: middle_result,
                     },
                 },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: test,
-                    terminator: MirTerminator::SwitchBool {
-                        condition,
-                        then_target: MirBlockId(4),
-                        then_arguments: vec![],
-                        else_target: MirBlockId(5),
-                        else_arguments: vec![],
-                    },
-                },
+                ];
+                for (index, (condition, subject, pattern)) in inner_tests.into_iter().enumerate() {
+                    let block = MirBlockId(3 + index as u32);
+                    let next = if index + 1 == inner_test_count {
+                        inner_match_block
+                    } else {
+                        MirBlockId(block.0 + 1)
+                    };
+                    blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
+                        parameters: vec![],
+                        instructions: vec![MirInstruction::PatternTest {
+                            dst: condition,
+                            subject,
+                            pattern,
+                        }],
+                        terminator: MirTerminator::SwitchBool {
+                            condition,
+                            then_target: next,
+                            then_arguments: vec![],
+                            else_target: forward_block,
+                            else_arguments: vec![],
+                        },
+                    });
+                }
+                blocks.extend([
                 MirBlock {
                     scope: MirScopeId::ROOT,
                     parameters: vec![],
@@ -20620,7 +20644,7 @@ impl Lowerer<'_> {
                     }],
                     terminator: MirTerminator::Unreachable,
                 },
-                ];
+                ]);
                 if let Some((brand, instructions, value, join)) = audit_leave {
                     blocks.push(MirBlock {
                         scope: MirScopeId::ROOT,
@@ -20629,7 +20653,7 @@ impl Lowerer<'_> {
                         terminator: MirTerminator::Leave {
                             label: MirLabelId::UNASSIGNED,
                             brand,
-                            target: MirBlockId(7),
+                            target: MirBlockId(tail_block.0 + 1),
                             arguments: vec![value],
                             cleanup: MirCleanupPlan {
                                 source_storage_scope: MirSourceStorageScopeId::ROOT,
@@ -20825,9 +20849,7 @@ impl Lowerer<'_> {
             || inner_replay.terminal
             || inner_cancellation.terminal
             || outer_replay.patterns.len() != outer_replay.payload_types.len()
-            || middle_replay.patterns.len() != 1
             || middle_replay.patterns.len() != middle_replay.payload_types.len()
-            || inner_replay.patterns.len() != 1
             || inner_replay.patterns.len() != inner_replay.payload_types.len()
             || inner_cancellation.patterns.len() != inner_cancellation.payload_types.len()
             || !outer_replay.patterns.iter().all(pattern_is_irrefutable)
@@ -20889,6 +20911,32 @@ impl Lowerer<'_> {
             .iter()
             .map(|ty| self.alloc(ty.clone(), root))
             .collect::<Vec<_>>();
+        let middle_tests = middle_replay
+            .patterns
+            .iter()
+            .cloned()
+            .zip(middle_payloads.iter().copied())
+            .map(|(pattern, subject)| {
+                Some((
+                    self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root),
+                    subject,
+                    lower_pattern(pattern)?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let inner_tests = inner_replay
+            .patterns
+            .iter()
+            .cloned()
+            .zip(inner_replay_payloads.iter().copied())
+            .map(|(pattern, subject)| {
+                Some((
+                    self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root),
+                    subject,
+                    lower_pattern(pattern)?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
         let inner_cancellation_payloads = inner_cancellation
             .payload_types
             .iter()
@@ -20897,6 +20945,13 @@ impl Lowerer<'_> {
         let mut entry = std::mem::take(&mut self.instructions);
         let frame_offset = u32::from(completion_effect.is_some());
         let frame_block = |base| MirBlockId(base + frame_offset);
+        let middle_test_block = frame_block(2);
+        let inner_test_block = MirBlockId(middle_test_block.0 + middle_tests.len() as u32);
+        let cancellation_block = MirBlockId(inner_test_block.0 + inner_tests.len() as u32);
+        let middle_match_block = MirBlockId(cancellation_block.0 + 1);
+        let middle_forward_block = MirBlockId(middle_match_block.0 + 1);
+        let inner_match_block = MirBlockId(middle_forward_block.0 + 1);
+        let inner_forward_block = MirBlockId(inner_match_block.0 + 1);
         if let Some(clause) = &completion_effect {
             entry.push(MirInstruction::InstallHandler {
                 site: MirHandlerSiteId::UNASSIGNED,
@@ -20921,7 +20976,7 @@ impl Lowerer<'_> {
             (
                 middle_replay,
                 middle_payloads.clone(),
-                frame_block(2),
+                middle_test_block,
                 MirContinuationPolicy::Replay {
                     uses: exact_replay_uses(&middle_replay.resumption)?,
                 },
@@ -20929,7 +20984,7 @@ impl Lowerer<'_> {
             (
                 inner_replay,
                 inner_replay_payloads.clone(),
-                frame_block(3),
+                inner_test_block,
                 MirContinuationPolicy::Replay {
                     uses: exact_replay_uses(&inner_replay.resumption)?,
                 },
@@ -20937,7 +20992,7 @@ impl Lowerer<'_> {
             (
                 inner_cancellation,
                 inner_cancellation_payloads.clone(),
-                frame_block(4),
+                cancellation_block,
                 MirContinuationPolicy::Consume,
             ),
         ] {
@@ -21044,21 +21099,6 @@ impl Lowerer<'_> {
         };
         let cancellation_instructions = std::mem::take(&mut self.instructions);
 
-        let middle_pattern = lower_pattern(middle_replay.patterns.first()?.clone())?;
-        let middle_condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
-        let middle_test_instructions = vec![MirInstruction::PatternTest {
-            dst: middle_condition,
-            subject: *middle_payloads.first()?,
-            pattern: middle_pattern,
-        }];
-        let inner_pattern = lower_pattern(inner_replay.patterns.first()?.clone())?;
-        let inner_condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
-        let inner_test_instructions = vec![MirInstruction::PatternTest {
-            dst: inner_condition,
-            subject: *inner_replay_payloads.first()?,
-            pattern: inner_pattern,
-        }];
-
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
@@ -21100,37 +21140,61 @@ impl Lowerer<'_> {
                 terminator: MirTerminator::Unreachable,
             });
         }
+        blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: outer_instructions,
+            terminator: MirTerminator::Return { value: outer_value },
+        });
+        for (index, (condition, subject, pattern)) in middle_tests.into_iter().enumerate() {
+            let block = MirBlockId(middle_test_block.0 + index as u32);
+            let next = if index + 1 == middle_replay.patterns.len() {
+                middle_match_block
+            } else {
+                MirBlockId(block.0 + 1)
+            };
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::PatternTest {
+                    dst: condition,
+                    subject,
+                    pattern,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target: next,
+                    then_arguments: vec![],
+                    else_target: middle_forward_block,
+                    else_arguments: vec![],
+                },
+            });
+        }
+        for (index, (condition, subject, pattern)) in inner_tests.into_iter().enumerate() {
+            let block = MirBlockId(inner_test_block.0 + index as u32);
+            let next = if index + 1 == inner_replay.patterns.len() {
+                inner_match_block
+            } else {
+                MirBlockId(block.0 + 1)
+            };
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::PatternTest {
+                    dst: condition,
+                    subject,
+                    pattern,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target: next,
+                    then_arguments: vec![],
+                    else_target: inner_forward_block,
+                    else_arguments: vec![],
+                },
+            });
+        }
         blocks.extend([
-            MirBlock {
-                scope: MirScopeId::ROOT,
-                parameters: vec![],
-                instructions: outer_instructions,
-                terminator: MirTerminator::Return { value: outer_value },
-            },
-            MirBlock {
-                scope: MirScopeId::ROOT,
-                parameters: vec![],
-                instructions: middle_test_instructions,
-                terminator: MirTerminator::SwitchBool {
-                    condition: middle_condition,
-                    then_target: frame_block(5),
-                    then_arguments: vec![],
-                    else_target: frame_block(6),
-                    else_arguments: vec![],
-                },
-            },
-            MirBlock {
-                scope: MirScopeId::ROOT,
-                parameters: vec![],
-                instructions: inner_test_instructions,
-                terminator: MirTerminator::SwitchBool {
-                    condition: inner_condition,
-                    then_target: frame_block(7),
-                    then_arguments: vec![],
-                    else_target: frame_block(8),
-                    else_arguments: vec![],
-                },
-            },
             MirBlock {
                 scope: MirScopeId::ROOT,
                 parameters: vec![],

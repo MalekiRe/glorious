@@ -8190,6 +8190,224 @@ fn interprocedural_replay_forwards_after_a_late_payload_then_cancels() {
 }
 
 #[test]
+fn deep_replay_cancellation_checks_all_three_payloads_in_both_partial_rows() {
+    let source = r#"
+        effect Console {
+            [2, 2] read(flag: Bool, middle: i64, final: i64) -> i64;
+            [0, 1] write(value: i64) -> i64;
+        }
+        pub fn relay(flag: Bool, middle: i64, final: i64) -> i64 / Console {
+            let read = Console::read(flag, middle, final);
+            Console::write(read)
+        }
+        pub fn main() -> i64 {
+            handle {
+                handle {
+                    handle relay(true, 1, 2) {
+                        Console::read(true, 1, 0) with k => k(1) + k(2);
+                        Console::write(_) with _ => 40;
+                    }
+                } {
+                    Console::read(true, 1, 0) with k => k(3) + k(4);
+                }
+            } {
+                value => value + 1;
+                Console::read(_, _, _) with k => k(20) + k(21);
+            }
+        }
+    "#;
+    let package = PackageKey("core-deep-third-payload-cancellation@0.1.0".into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        definition.key,
+        &core,
+        &flow,
+        &std::collections::BTreeMap::new(),
+        Some(&signatures),
+    );
+    let mir = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "deep third-payload replay/cancellation must lower: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    mir.validate().unwrap_or_else(|error| {
+        panic!("deep third-payload replay/cancellation MIR validates: {error}\n{mir:#?}")
+    });
+    assert_eq!(
+        mir.blocks
+            .iter()
+            .filter(|block| block.instructions.iter().any(|instruction| matches!(
+                instruction,
+                MirInstruction::PatternTest { .. }
+            )))
+            .count(),
+        6,
+        "both partial rows must retain an ordered test for each payload: {mir:#?}"
+    );
+    assert_eq!(
+        mir.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| matches!(instruction, MirInstruction::Forward { .. }))
+            .count(),
+        2,
+        "both partial rows must preserve independent forwarding edges: {mir:#?}"
+    );
+    assert!(mir.blocks.iter().any(|block| block
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, MirInstruction::Cancel { .. }))));
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("deep third-payload MIR emits VM");
+    grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
+        .expect("deep third-payload cancellation VM bytecode verifies");
+}
+
+#[test]
+fn reentrant_replay_checks_a_late_third_payload_before_labelled_completion() {
+    let source = r#"
+        effect Ask { [2, 2] ask(flag: Bool, middle: i64, final: i64) -> i64; }
+        effect Tick { [2, 2] tick() -> i64; }
+        effect Audit { [2, 2] note(value: i64) -> i64; }
+        pub fn relay() -> i64 / {Ask, Tick} {
+            let tick = Tick::tick();
+            let asked = Ask::ask(true, 1, 2);
+            tick + asked
+        }
+        pub fn audit(value: i64) -> i64 / Audit { Audit::note(value) }
+        pub fn main() -> i64 {
+            handle {
+                handle {
+                    label done {
+                        handle {
+                            handle {
+                                handle {
+                                    handle relay() {
+                                        Ask::ask(true, 1, 0) with k => k(1) + k(2)
+                                    }
+                                } {
+                                    value => value + 1;
+                                    Tick::tick() with k => k(10) + k(20)
+                                }
+                            } {
+                                Ask::ask(_, _, _) with k => k(30) + k(40)
+                            }
+                        } {
+                            value => transfer done value
+                        }
+                    }
+                } {
+                    value => { let audited = audit(value); audited + 100 }
+                }
+            } {
+                Audit::note(_) with k => k(1) + k(2)
+            }
+        }
+    "#;
+    let package = PackageKey("core-third-payload-reentrant-label@0.1.0".into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        definition.key,
+        &core,
+        &flow,
+        &std::collections::BTreeMap::new(),
+        Some(&signatures),
+    );
+    let mir = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "third-payload reentrant labelled completion must lower: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    mir.validate().unwrap_or_else(|error| {
+        panic!("third-payload reentrant MIR validates: {error}\n{mir:#?}")
+    });
+    assert_eq!(
+        mir.blocks
+            .iter()
+            .filter(|block| block.instructions.iter().any(|instruction| matches!(
+                instruction,
+                MirInstruction::PatternTest { .. }
+            )))
+            .count(),
+        3,
+        "the partial Ask row must retain an ordered test for all three payloads: {mir:#?}"
+    );
+    assert!(mir.blocks.iter().any(|block| block
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, MirInstruction::Forward { .. }))));
+    assert!(mir.blocks.iter().any(|block| matches!(
+        block.terminator,
+        grandiose_stage0::MirTerminator::Leave { .. }
+    )));
+    assert_eq!(
+        mir.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| matches!(
+                instruction,
+                MirInstruction::InstallHandler {
+                    continuation: grandiose_stage0::MirContinuationPolicy::Replay { uses: 2 },
+                    ..
+                }
+            ))
+            .count(),
+        4,
+        "Ask, Tick, and retained Audit replay frames must remain distinct: {mir:#?}"
+    );
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("third-payload labelled MIR emits VM");
+    grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
+        .expect("third-payload labelled completion VM bytecode verifies");
+}
+
+#[test]
 fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
     let core = core_for(
         "core-completion-label-transfer@0.1.0",
