@@ -5856,11 +5856,29 @@ fn service_selects_the_first_matching_finite_resumption_clause() {
 }
 
 #[test]
-fn service_replays_a_bounded_interval_resumption_when_the_static_uses_fit() {
-    let source = "effect Ask { [1,2] ask() -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(); value + 1 } { Ask::ask(k) => k(20) + k(21) } }";
-    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
-    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
+fn service_rejects_deferred_resumption_quantities_at_the_g1_source_boundary() {
+    // Section 10.1 of the branded-environment core specification deliberately
+    // limits source resumptions to `[0,1]` and exact finite `[n,n]` while
+    // branch-sensitive lower/upper-bound accounting remains deferred.  The
+    // quantity and bytecode representations may be general, but accepting
+    // `[1,2]` at this boundary would promise a source semantic the compiler
+    // has not specified how to prove on every path.
+    for quantity in ["[1,2]", "[0,2]", "[1,infinity]"] {
+        let source = format!(
+            "effect Ask {{ {quantity} ask() -> i64; }} pub fn main() -> i64 {{ handle Ask::ask() {{ Ask::ask(k) => k(41) }} }}"
+        );
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+            StageZeroCompiler::new().compile(request(&source))
+        else {
+            panic!("the unsupported {quantity} resumption quantity unexpectedly compiled");
+        };
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G6005"),
+            "missing source-boundary resumption-quantity diagnostic for {quantity}: {diagnostics:#?}"
+        );
+    }
 }
 
 #[test]
