@@ -8668,8 +8668,8 @@ impl Lowerer<'_> {
         };
 
         self.instructions = Vec::new();
-        self.named = boundary_named;
-        self.values = boundary_values;
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
         self.bind_handler_patterns(&operation_clause.patterns, &payloads)?;
         let resumed = self.direct_handler_clause_value(operation_clause)?;
         self.instructions.push(MirInstruction::Resume {
@@ -18465,7 +18465,32 @@ impl Lowerer<'_> {
             }
             _ => root,
         };
-        let (reentrant_root, label_cancellation, label_completion) = match self.body.expression(top_root).kind.clone() {
+        // A label may itself be the protected computation of an ordinary
+        // outer completion. Its leave must rejoin that completion, rather
+        // than turn into a premature function return.
+        let (label_root, retained_outer_completion) = match self.body.expression(top_root).kind.clone() {
+            CoreKind::Completion { computation, clauses } => {
+                let [clause] = clauses.as_slice() else {
+                    return None;
+                };
+                let computation = match self.body.expression(computation).kind.clone() {
+                    CoreKind::Block(values) => {
+                        let (tail, prefix) = values.split_last()?;
+                        if !prefix.is_empty() {
+                            return None;
+                        }
+                        *tail
+                    }
+                    _ => computation,
+                };
+                if !matches!(self.body.expression(computation).kind, CoreKind::Label { .. }) {
+                    return None;
+                }
+                (computation, Some(clause.clone()))
+            }
+            _ => (top_root, None),
+        };
+        let (reentrant_root, label_cancellation, label_completion) = match self.body.expression(label_root).kind.clone() {
             CoreKind::Label { brand, body } => {
                 let label_body = match self.body.expression(body).kind.clone() {
                     CoreKind::Block(values) => {
@@ -18559,6 +18584,9 @@ impl Lowerer<'_> {
             pattern_is_irrefutable(&clause.pattern)
                 && self.contains_label_transfer(clause.body, *brand)
         });
+        let retained_outer_completion_valid = retained_outer_completion
+            .as_ref()
+            .is_none_or(|clause| pattern_is_irrefutable(&clause.pattern));
         if !root_prefix.is_empty()
             || !middle_prefix.is_empty()
             || outer.terminal
@@ -18590,6 +18618,7 @@ impl Lowerer<'_> {
             || self.handler_body_uses_snapshot_alias(inner_clause.body)
             || !label_cancellation_valid
             || !label_completion_valid
+            || !retained_outer_completion_valid
         {
             return None;
         }
@@ -18719,8 +18748,8 @@ impl Lowerer<'_> {
             pattern,
         }];
         let (inner_instructions, inner_result) = arm(self, inner_clause, &inner_payloads)?;
-        self.named = boundary_named;
-        self.values = boundary_values;
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
         let audit_leave = if let Some((brand, clause)) = &label_cancellation {
             self.instructions = Vec::new();
             self.bind_handler_patterns(
@@ -18734,6 +18763,17 @@ impl Lowerer<'_> {
             let instructions = std::mem::take(&mut self.instructions);
             let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
             Some((*brand, instructions, value, join))
+        } else {
+            None
+        };
+        let retained_outer_completion_path = if let Some(clause) = &retained_outer_completion {
+            let (_, _, join) = completion_leave.as_ref()?;
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_completion_clause(clause, *join)?;
+            let value = self.value(clause.body)?;
+            Some((std::mem::take(&mut self.instructions), value))
         } else {
             None
         };
@@ -18850,8 +18890,14 @@ impl Lowerer<'_> {
                     blocks.push(MirBlock {
                         scope: MirScopeId::ROOT,
                         parameters: vec![join],
-                        instructions: vec![],
-                        terminator: MirTerminator::Return { value: join },
+                        instructions: retained_outer_completion_path
+                            .as_ref()
+                            .map_or_else(Vec::new, |(instructions, _)| instructions.clone()),
+                        terminator: MirTerminator::Return {
+                            value: retained_outer_completion_path
+                                .as_ref()
+                                .map_or(join, |(_, value)| *value),
+                        },
                     });
                 }
                 blocks
