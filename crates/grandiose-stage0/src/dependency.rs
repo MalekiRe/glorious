@@ -217,7 +217,8 @@ fn validate(
     // interface (or an unrelated fixity table).
     let mut cycle_member = None;
     let mut incomplete = None;
-    let first_changed = fact.dependencies.iter().find_map(|dependency| {
+    let mut first_changed = None;
+    for dependency in &fact.dependencies {
         let dependency_status = validate(
             dependency,
             facts,
@@ -227,19 +228,26 @@ fn validate(
             visiting,
         );
         match dependency_status {
-            DependencyStatus::Green { .. } => None,
-            DependencyStatus::Red { first_changed, .. } => Some(first_changed),
+            DependencyStatus::Green { .. } => {}
+            DependencyStatus::Red {
+                first_changed: changed,
+                ..
+            } => {
+                first_changed.get_or_insert(changed);
+            }
             DependencyStatus::Cycle { member, .. } => {
                 cycle_member.get_or_insert(member.clone());
-                Some(member)
+                first_changed.get_or_insert(member);
             }
             DependencyStatus::Incomplete { missing } => {
                 incomplete.get_or_insert(missing.clone());
-                Some(missing)
+                first_changed.get_or_insert(missing);
             }
-            DependencyStatus::Cold => Some(dependency.clone()),
+            DependencyStatus::Cold => {
+                first_changed.get_or_insert(dependency.clone());
+            }
         }
-    });
+    }
     let status = if let Some(missing) = incomplete {
         DependencyStatus::Incomplete { missing }
     } else if let Some(member) = cycle_member {
@@ -418,6 +426,34 @@ mod tests {
 
         assert!(matches!(
             ledger.trace(revision(1), &core).unwrap().status,
+            DependencyStatus::Incomplete { missing: found } if found == missing
+        ));
+    }
+
+    #[test]
+    fn incomplete_edges_take_precedence_over_earlier_staged_cycles() {
+        let ledger = DependencyLedger::default();
+        let left = DependencyNode::Core(DefKey(Digest::of_bytes(b"left")));
+        let right = DependencyNode::Mir(DefKey(Digest::of_bytes(b"right")));
+        // Artifact sorts after Mir, so this used to be skipped once the
+        // traversal encountered the Core/Mir cycle first.
+        let missing = DependencyNode::Artifact(PackageKey("missing".into()));
+
+        let mut transaction = ledger.transaction(revision(0), None);
+        transaction.record(
+            left.clone(),
+            Digest::of_bytes(b"left"),
+            vec![right.clone(), missing.clone()],
+        );
+        transaction.record(
+            right,
+            Digest::of_bytes(b"right"),
+            vec![left.clone()],
+        );
+        transaction.commit();
+
+        assert!(matches!(
+            ledger.trace(revision(0), &left).unwrap().status,
             DependencyStatus::Incomplete { missing: found } if found == missing
         ));
     }
