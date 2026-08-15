@@ -13358,6 +13358,165 @@ impl Lowerer<'_> {
         }
     }
 
+    /// Find the first handler in an ordinary strict expression position.
+    /// Handler clauses and closures form their own continuation scopes, so a
+    /// handler within either one is deliberately not an enclosing-expression
+    /// rejoin candidate.
+    fn find_interprocedural_handler(&self, id: CoreId) -> Option<CoreId> {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Handle { .. } => Some(id),
+            CoreKind::Closure { .. } | CoreKind::Completion { .. } => None,
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
+                values
+                    .into_iter()
+                    .find_map(|value| self.find_interprocedural_handler(value))
+            }
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
+                .into_iter()
+                .find_map(|field| self.find_interprocedural_handler(field)),
+            CoreKind::Field { base, .. }
+            | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Let { value: base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
+            | CoreKind::Move(base)
+            | CoreKind::Label { body: base, .. }
+            | CoreKind::Transfer { value: base, .. } => self.find_interprocedural_handler(base),
+            CoreKind::Assign { value, .. } => self.find_interprocedural_handler(value),
+            CoreKind::IntrinsicCall { arguments, .. } | CoreKind::Perform { arguments, .. } => {
+                arguments
+                    .into_iter()
+                    .find_map(|argument| self.find_interprocedural_handler(argument))
+            }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => self.find_interprocedural_handler(callee).or_else(|| {
+                arguments
+                    .into_iter()
+                    .find_map(|argument| self.find_interprocedural_handler(argument))
+            }),
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
+            | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant { .. }
+            | CoreKind::Error => None,
+        }
+    }
+
+    /// Emit precisely the strict work before a nested handler. The handler
+    /// result is later installed in `values`, and normal lowering of the
+    /// complete root reuses this prefix while finishing the remaining path.
+    fn prepare_interprocedural_handler_path(&mut self, id: CoreId, target: CoreId) -> bool {
+        if id == target {
+            return true;
+        }
+        match self.body.expression(id).kind.clone() {
+            CoreKind::Closure { .. } | CoreKind::Completion { .. } => false,
+            CoreKind::Label { body, .. } => self.prepare_interprocedural_handler_path(body, target),
+            CoreKind::Block(values) => {
+                for value in values {
+                    if self.prepare_interprocedural_handler_path(value, target) {
+                        return true;
+                    }
+                    if self.statement(value).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Tuple(values) | CoreKind::Array(values) => {
+                for value in values {
+                    if self.prepare_interprocedural_handler_path(value, target) {
+                        return true;
+                    }
+                    if self.value(value).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+                for field in fields {
+                    if self.prepare_interprocedural_handler_path(field, target) {
+                        return true;
+                    }
+                    if self.value(field).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::IntrinsicCall { operator, arguments }
+                if !matches!(operator.as_str(), "and" | "or") =>
+            {
+                for argument in arguments {
+                    if self.prepare_interprocedural_handler_path(argument, target) {
+                        return true;
+                    }
+                    if self.value(argument).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
+                if self.prepare_interprocedural_handler_path(callee, target) {
+                    return true;
+                }
+                if self.value(callee).is_none() {
+                    return false;
+                }
+                for argument in arguments {
+                    if self.prepare_interprocedural_handler_path(argument, target) {
+                        return true;
+                    }
+                    if self.value(argument).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Perform { arguments, .. } => {
+                for argument in arguments {
+                    if self.prepare_interprocedural_handler_path(argument, target) {
+                        return true;
+                    }
+                    if self.value(argument).is_none() {
+                        return false;
+                    }
+                }
+                false
+            }
+            CoreKind::Handle { .. } => false,
+            CoreKind::Field { base, .. }
+            | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Let { value: base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
+            | CoreKind::Move(base)
+            | CoreKind::Transfer { value: base, .. } => {
+                self.prepare_interprocedural_handler_path(base, target)
+            }
+            CoreKind::Assign { value, .. } => {
+                self.prepare_interprocedural_handler_path(value, target)
+            }
+            CoreKind::IntrinsicCall { .. }
+            | CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
+            | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant { .. }
+            | CoreKind::Error => false,
+        }
+    }
+
     fn contains_label_transfer(&self, id: CoreId, target: crate::LabelBrand) -> bool {
         match &self.body.expression(id).kind {
             CoreKind::Transfer { brand, .. } => *brand == target,
@@ -21987,11 +22146,11 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let (computation, clauses, root_prefix, result_binding, suffix, strict_operand, strict_prefix) = match self.body.expression(root).kind.clone() {
+        let (computation, clauses, root_prefix, result_binding, suffix, strict_operand, strict_prefix, strict_path) = match self.body.expression(root).kind.clone() {
             CoreKind::Handle {
                 computation,
                 clauses,
-            } => (computation, clauses, Vec::new(), None, Vec::new(), None, Vec::new()),
+            } => (computation, clauses, Vec::new(), None, Vec::new(), None, Vec::new(), false),
             CoreKind::Block(values) => {
                 let candidate = values
                     .iter()
@@ -22007,19 +22166,28 @@ impl Lowerer<'_> {
                     });
                 if candidate.is_none() {
                     let (strict_root, prefix) = values.split_last()?;
-                    let (arguments, mut strict_prefix) =
+                    let strict_context =
                         match self.body.expression(*strict_root).kind.clone() {
-                            CoreKind::IntrinsicCall { arguments, .. } => (arguments, Vec::new()),
+                            CoreKind::IntrinsicCall { arguments, .. } => Some((arguments, Vec::new())),
                             CoreKind::Call {
                                 callee, arguments, ..
                             } if !matches!(self.body.expression(callee).kind, CoreKind::Handle { .. }) => {
-                                (arguments, vec![callee])
+                                Some((arguments, vec![callee]))
                             }
-                            _ => return None,
+                            _ => None,
                         };
-                    let handler_index = arguments.iter().position(|argument| {
-                        matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
-                    })?;
+                    let direct_context = strict_context.and_then(|(arguments, strict_prefix)| {
+                        arguments
+                            .iter()
+                            .position(|argument| {
+                                matches!(
+                                    self.body.expression(*argument).kind,
+                                    CoreKind::Handle { .. }
+                                )
+                            })
+                            .map(|handler_index| (arguments, strict_prefix, handler_index))
+                    });
+                    if let Some((arguments, mut strict_prefix, handler_index)) = direct_context {
                     if arguments
                         .iter()
                         .enumerate()
@@ -22050,7 +22218,28 @@ impl Lowerer<'_> {
                         Vec::new(),
                         Some(handler),
                         strict_prefix,
+                        false,
                     )
+                    } else {
+                        let handler = self.find_interprocedural_handler(root)?;
+                        let CoreKind::Handle {
+                            computation,
+                            clauses,
+                        } = self.body.expression(handler).kind.clone()
+                        else {
+                            return None;
+                        };
+                        (
+                            computation,
+                            clauses,
+                            Vec::new(),
+                            None,
+                            Vec::new(),
+                            Some(handler),
+                            Vec::new(),
+                            true,
+                        )
+                    }
                 } else {
                     let (handler_index, handler, result_binding) =
                         candidate.expect("checked above");
@@ -22081,6 +22270,7 @@ impl Lowerer<'_> {
                     values[handler_index + 1..].to_vec(),
                     None,
                     Vec::new(),
+                    false,
                 )
                 }
             }
@@ -22116,6 +22306,7 @@ impl Lowerer<'_> {
                     Vec::new(),
                     Some(handler),
                     arguments[..handler_index].to_vec(),
+                    false,
                 )
             }
             CoreKind::Call {
@@ -22154,9 +22345,29 @@ impl Lowerer<'_> {
                     Vec::new(),
                     Some(handler),
                     strict_prefix,
+                    false,
                 )
             }
-            _ => return None,
+            _ => {
+                let handler = self.find_interprocedural_handler(root)?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(handler).kind.clone()
+                else {
+                    return None;
+                };
+                (
+                    computation,
+                    clauses,
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    Some(handler),
+                    Vec::new(),
+                    true,
+                )
+            }
         };
         let CoreKind::Call {
             callee, arguments, ..
@@ -22219,6 +22430,14 @@ impl Lowerer<'_> {
         // an already-consumed continuation above the cancellation point.
         let mut frames = terminal;
         frames.extend(active.iter().cloned());
+        if strict_path
+            && !self.prepare_interprocedural_handler_path(
+                root,
+                strict_operand.expect("nested handler path supplies an identity"),
+            )
+        {
+            return None;
+        }
         for expression in root_prefix {
             self.statement(expression)?;
         }

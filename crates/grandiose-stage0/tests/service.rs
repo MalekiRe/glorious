@@ -18863,6 +18863,29 @@ fn service_evaluates_terminal_opaque_handler_before_a_later_strict_operand() {
 }
 
 #[test]
+fn service_rejoins_opaque_handler_nested_in_a_record_initializer() {
+    // The handler is not itself the whole initializer: reconstructing the
+    // record after it completes must retain the earlier lexical binding and
+    // evaluate the remaining field exactly once.
+    let source = "effect Signal { [1,1] ping(value: i64) -> i64; } pub struct Pair { left: i64, right: i64 } pub fn relay(value: i64) -> i64 / Signal { Signal::ping(value) } pub fn apply(callback: (i64) -> i64 / Signal, value: i64) -> i64 / Signal { callback(value) } pub fn main() -> i64 { let callback = relay; let pair = Pair { left: handle apply(callback, 40) { Signal::ping(value) with k => k(value) }, right: 1 }; pair.left + pair.right }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_rejoins_terminal_opaque_handler_nested_in_a_record_initializer() {
+    // The terminal arm must re-enter the record construction itself, because
+    // its protected call has no ordinary return edge to do that work.
+    let source = "effect Signal { [1,1] ping(value: i64) -> i64; halt(value: i64) -> !; } pub struct Pair { left: i64, right: i64 } pub fn relay(value: i64) -> i64 / Signal { let ping = Signal::ping(value); Signal::halt(ping) } pub fn apply(callback: (i64) -> i64 / Signal, value: i64) -> i64 / Signal { callback(value) } pub fn main() -> i64 { let callback = relay; let pair = Pair { left: handle apply(callback, 40) { Signal::ping(value) with k => k(value + 2); Signal::halt(value) => value }, right: 1 }; pair.left + pair.right }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through
