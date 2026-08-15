@@ -877,8 +877,8 @@ pub enum VmInstruction {
         left: u32,
         right: u32,
     },
-    /// Exact manifest-bound i64 right shift with a u32 count masked modulo
-    /// 64. This remains distinct from checked source arithmetic.
+    /// Exact manifest-bound i64 right shift with a checked u32 count. Counts
+    /// outside the source width trap rather than being masked modulo 64.
     IntShrI64 {
         dst: u32,
         left: u32,
@@ -897,7 +897,8 @@ pub enum VmInstruction {
         dst: u32,
         value: u32,
     },
-    /// Exact manifest-bound i64 left shift with a u32 wrapping count.
+    /// Exact manifest-bound i64 left shift with a checked u32 count. The
+    /// shifted value wraps within its width only after the count is valid.
     ShlI64 {
         dst: u32,
         value: u32,
@@ -1788,9 +1789,8 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// opcode 117 for manifest-bound wrapping i64-to-u32
 /// conversion, retaining the low two's-complement bits. Schema 57 adds opcode
 /// 116 for manifest-bound checked i64-to-u32 conversion. Schema 56 adds opcode
-/// 114 for manifest-bound i64 left shift with a u32
-/// count and wrapping count semantics. Schema 55 adds opcode 115 for manifest-bound i64 right shift with a u32
-/// count and wrapping count semantics. Schema 54 adds opcode 113 for
+/// 114 for manifest-bound i64 left shift with a u32 count. Schema 55 adds
+/// opcode 115 for manifest-bound i64 right shift with a u32 count. Schema 54 adds opcode 113 for
 /// manifest-bound unary i64 bitwise-not. Schema
 /// 53 adds opcode 112 for manifest-bound i64 bitwise-xor. Schema 52
 /// adds opcode 111 for manifest-bound i64 bitwise-or. Schema 51
@@ -1830,7 +1830,9 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// binding identities, making diagnostic root strings non-semantic. Schema
 /// 82 adds canonical source-storage lifecycle/drop-flag/action witnesses to
 /// every nonlocal Leave, so compact VM cleanup cannot lose its MIR proof.
-pub const STAGE0_VM_SCHEMA: u32 = 82;
+/// Schema 83 makes all generic and frozen integer shifts reject a count at or
+/// beyond the operand width instead of silently masking it.
+pub const STAGE0_VM_SCHEMA: u32 = 83;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2854,6 +2856,17 @@ fn decode_integer_scalar(value: u8) -> Result<ScalarType, VmArtifactError> {
             });
         }
     })
+}
+
+fn integer_scalar_bit_width(scalar: ScalarType) -> u32 {
+    match scalar {
+        ScalarType::U8 | ScalarType::I8 => 8,
+        ScalarType::U16 | ScalarType::I16 => 16,
+        ScalarType::U32 | ScalarType::I32 => 32,
+        ScalarType::U64 | ScalarType::I64 | ScalarType::Usize | ScalarType::Isize => 64,
+        ScalarType::U128 | ScalarType::I128 => 128,
+        _ => unreachable!("integer intrinsic scalar was validated before execution"),
+    }
 }
 
 fn integer_intrinsic_signature(
@@ -10895,6 +10908,12 @@ fn execute_integer_intrinsic(
             message: "integer runtime primitive has the wrong arity",
         });
     }
+    if matches!(primitive, PrimitiveRole::IntShl | PrimitiveRole::IntShr) {
+        let count = expect_u32(integer_argument(arguments, 1, registers)?)?;
+        if count >= integer_scalar_bit_width(scalar) {
+            return Err(VmArtifactError::ArithmeticOverflow);
+        }
+    }
     if matches!(
         primitive,
         PrimitiveRole::IntConvertCheckedToI64
@@ -12983,17 +13002,21 @@ fn execute(
                 ))
             }
             VmInstruction::IntShrI64 { dst, left, right } => {
+                let count = expect_u32(
+                    registers[right as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                if count >= 64 {
+                    return Err(VmArtifactError::ArithmeticOverflow);
+                }
                 registers[dst as usize] = Some(VmValue::I64(
                     expect_i64(
                         registers[left as usize]
                             .as_ref()
                             .expect("verified register"),
                     )?
-                    .wrapping_shr(expect_u32(
-                        registers[right as usize]
-                            .as_ref()
-                            .expect("verified register"),
-                    )?),
+                    .wrapping_shr(count),
                 ))
             }
             VmInstruction::BitOrI64 { dst, left, right } => {
@@ -13017,17 +13040,21 @@ fn execute(
                 )?))
             }
             VmInstruction::ShlI64 { dst, value, count } => {
+                let count = expect_u32(
+                    registers[count as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                if count >= 64 {
+                    return Err(VmArtifactError::ArithmeticOverflow);
+                }
                 registers[dst as usize] = Some(VmValue::I64(
                     expect_i64(
                         registers[value as usize]
                             .as_ref()
                             .expect("verified register"),
                     )?
-                    .wrapping_shl(expect_u32(
-                        registers[count as usize]
-                            .as_ref()
-                            .expect("verified register"),
-                    )?),
+                    .wrapping_shl(count),
                 ))
             }
             VmInstruction::SubI64 { dst, left, right } => {
@@ -16094,17 +16121,21 @@ fn execute_with_arguments(
                 ))
             }
             VmInstruction::IntShrI64 { dst, left, right } => {
+                let count = expect_u32(
+                    registers[*right as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                if count >= 64 {
+                    return Err(VmArtifactError::ArithmeticOverflow);
+                }
                 registers[*dst as usize] = Some(VmValue::I64(
                     expect_i64(
                         registers[*left as usize]
                             .as_ref()
                             .expect("verified register"),
                     )?
-                    .wrapping_shr(expect_u32(
-                        registers[*right as usize]
-                            .as_ref()
-                            .expect("verified register"),
-                    )?),
+                    .wrapping_shr(count),
                 ))
             }
             VmInstruction::BitOrI64 { dst, left, right } => {
@@ -16128,17 +16159,21 @@ fn execute_with_arguments(
                 )?))
             }
             VmInstruction::ShlI64 { dst, value, count } => {
+                let count = expect_u32(
+                    registers[*count as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                if count >= 64 {
+                    return Err(VmArtifactError::ArithmeticOverflow);
+                }
                 registers[*dst as usize] = Some(VmValue::I64(
                     expect_i64(
                         registers[*value as usize]
                             .as_ref()
                             .expect("verified register"),
                     )?
-                    .wrapping_shl(expect_u32(
-                        registers[*count as usize]
-                            .as_ref()
-                            .expect("verified register"),
-                    )?),
+                    .wrapping_shl(count),
                 ))
             }
             VmInstruction::SubI64 { dst, left, right } => {

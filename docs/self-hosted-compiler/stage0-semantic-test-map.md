@@ -106,6 +106,12 @@ coarse. The composite fixtures cover:
   `service_lowers_defaulted_associated_effect_gats_through_vm_handlers`, and
   `service_imports_defaulted_associated_gats_for_local_layouts_and_effect_rows`
   keep the default-selection path executable end to end.
+- generic integer wrappers preserve their operand width through deferred MIR
+  materialization: signed right shift remains arithmetic, unsigned right shift
+  remains logical, and every count at least the operand width traps rather than
+  being masked. `service.rs::generic_integer_shift_wrappers_materialize_signed_unsigned_and_trapping_widths`
+  and `service.rs::manifest_bound_generic_int_shift_left_rejects_an_i64_width_count`
+  cover both generic and frozen source-to-VM paths.
 - exact move-captured closure consumption through local and imported callable
   transfers, including rejection of sequential activation and acceptance of
   mutually exclusive handler-arm transfers.

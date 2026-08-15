@@ -821,7 +821,7 @@ fn i64_shr_u32_round_trips_and_verifier_rejects_type_confusion() {
             VmInstruction::ConstI64 { dst: 0, value: 8 },
             VmInstruction::ConstChar {
                 dst: 1,
-                value: 'A' as u32,
+                value: 1,
             },
             VmInstruction::CharToU32 { dst: 2, value: 1 },
             VmInstruction::IntShrI64 {
@@ -1051,7 +1051,7 @@ fn i64_bit_not_round_trips_and_verifier_rejects_type_confusion() {
 }
 
 #[test]
-fn i64_shift_left_round_trips_with_wrapping_count_and_rejects_count_type_confusion() {
+fn i64_shift_left_rejects_a_width_count_and_rejects_count_type_confusion() {
     let function = VmFunction {
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-shl-vm")),
@@ -1079,13 +1079,10 @@ fn i64_shift_left_round_trips_with_wrapping_count_and_rejects_count_type_confusi
     candidate.fingerprint = candidate.computed_fingerprint();
     let encoded = encode_artifact(&candidate);
     assert_eq!(decode_artifact(&encoded).unwrap(), candidate);
-    assert_eq!(
-        decode_and_verify_artifact(&encoded)
-            .unwrap()
-            .run_i64()
-            .unwrap(),
-        1,
-    );
+    assert!(matches!(
+        decode_and_verify_artifact(&encoded).unwrap().run_i64(),
+        Err(VmArtifactError::ArithmeticOverflow)
+    ));
 
     let mut forged = candidate;
     forged.function.registers[2] = VmType::I64;

@@ -1128,7 +1128,7 @@ fn manifest_bound_generic_int_bit_not_uses_distinct_unary_vm_semantics() {
 }
 
 #[test]
-fn manifest_bound_generic_int_shift_left_uses_wrapping_i64_u32_vm_semantics() {
+fn manifest_bound_generic_int_shift_left_rejects_an_i64_width_count() {
     let mut input = request(
         "fn __g1_char_to_u32(value: char) -> u32 { () } fn __g1_int_shl<T>(value: T, count: u32) -> T { () } pub fn main() -> i64 { __g1_int_shl<i64>(1, __g1_char_to_u32('@')) }",
     );
@@ -1153,7 +1153,10 @@ fn manifest_bound_generic_int_shift_left_uses_wrapping_i64_u32_vm_semantics() {
         .expect("the exact generic shift-left declaration must specialize for frozen i64")
         .artifact
         .expect("build must publish a VM artifact");
-    assert_eq!(artifact.run_i64().unwrap(), 1);
+    assert!(matches!(
+        artifact.run_i64(),
+        Err(VmArtifactError::ArithmeticOverflow)
+    ));
     let program = decode_program(&artifact.canonical_bytes()).unwrap();
     assert!(program.functions.values().any(|function| {
         function
@@ -6926,6 +6929,63 @@ fn manifest_bound_generic_int_bit_and_specializes_u8() {
         .artifact
         .expect("a successful build must publish an artifact");
     assert_eq!(artifact.run_u8().unwrap(), 10);
+}
+
+#[test]
+fn generic_integer_shift_wrappers_materialize_signed_unsigned_and_trapping_widths() {
+    // `shift` itself remains polymorphic, so its MIR initially contains an
+    // `IntGenericIntrinsic`.  Each entry point below forces a distinct
+    // specialization and proves the VM retains the documented integer-width
+    // semantics rather than falling back to the legacy i64-only instructions.
+    let compile = |source: &str| {
+        let mut input = request(source);
+        input.runtime_manifest = Some(RuntimeManifestInput {
+            standard_library: PackageKey("app@0.1.0".into()),
+            host_imports: vec![],
+            selectors: [
+                (PrimitiveRole::IntShr, "__g1_int_shr"),
+                (PrimitiveRole::IntWrappingNeg, "__g1_int_wrapping_neg"),
+            ]
+            .into_iter()
+            .map(|(role, name)| PrimitiveSelector {
+                role,
+                module_path: "crate".into(),
+                name: name.into(),
+            })
+            .collect(),
+        });
+        StageZeroCompiler::new()
+            .compile(input)
+            .expect("generic integer shift wrapper must materialize")
+            .artifact
+            .expect("successful build must publish a VM artifact")
+    };
+
+    let signed = compile(
+        "fn __g1_int_shr<T>(value: T, count: u32) -> T { () } fn __g1_int_wrapping_neg<T>(value: T) -> T { () } \
+         pub fn shift<T>(value: T, count: u32) -> T { __g1_int_shr<T>(move value, move count) } \
+         pub fn negate<T>(value: T) -> T { __g1_int_wrapping_neg<T>(move value) } \
+         pub fn value() -> i8 { 1 } pub fn count() -> u32 { 1 } \
+         pub fn main() -> i8 { shift(negate(value()), count()) }",
+    );
+    assert_eq!(signed.run_i8().unwrap(), -1);
+
+    let unsigned = compile(
+        "fn __g1_int_shr<T>(value: T, count: u32) -> T { () } fn __g1_int_wrapping_neg<T>(value: T) -> T { () } \
+         pub fn shift<T>(value: T, count: u32) -> T { __g1_int_shr<T>(move value, move count) } \
+         pub fn value() -> u8 { 128 } pub fn count() -> u32 { 1 } \
+         pub fn main() -> u8 { shift(value(), count()) }",
+    );
+    assert_eq!(unsigned.run_u8().unwrap(), 64);
+
+    let out_of_range = compile(
+        "fn __g1_int_shr<T>(value: T, count: u32) -> T { () } fn __g1_int_wrapping_neg<T>(value: T) -> T { () } \
+         pub fn shift<T>(value: T, count: u32) -> T { __g1_int_shr<T>(move value, move count) } \
+         pub fn value() -> u8 { 1 } pub fn count() -> u32 { 8 } \
+         pub fn main() -> u8 { shift(value(), count()) }",
+    );
+    let error = out_of_range.run_u8();
+    assert!(matches!(error, Err(VmArtifactError::ArithmeticOverflow)), "{error:?}");
 }
 
 #[test]
