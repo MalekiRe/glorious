@@ -8711,6 +8711,13 @@ impl Elaborator<'_> {
         } else {
             method_arguments.clone()
         };
+        let runtime_method_arguments = if hrtb_method_value {
+            (0..expected_lifetime_binders)
+                .map(|_| GenericArgument::Lifetime(Lifetime::Static))
+                .collect()
+        } else {
+            method_arguments.clone()
+        };
         let assumptions = self.ambient_trait_solver_assumptions();
         let relation = crate::ElaboratedTraitReference {
             definition: trait_definition,
@@ -8758,7 +8765,7 @@ impl Elaborator<'_> {
                 subject = candidate.clone();
                 answer = self.trait_query().select_method_with_assumptions(
                     TraitGoal {
-                        relation,
+                        relation: relation.clone(),
                         subject: subject.clone(),
                     },
                     name,
@@ -8866,19 +8873,35 @@ impl Elaborator<'_> {
                 "qualified trait method value does not match its contextual callable type",
             ));
         }
-        self.check_callable_contract_bounds(*signature.clone(), None, span);
+        // The bound-lifetime signature above proves the HRTB callable itself.
+        // Contract obligations, however, are checked at the concrete VM
+        // instance boundary. Re-selecting with `'static` prevents a bound
+        // region inside an associated effect-row equality from being sent to
+        // ordinary projection normalization, which only has executable
+        // concrete evidence.
+        let contract_signature = if hrtb_method_value {
+            match self.trait_query().select_method_with_assumptions(
+                TraitGoal {
+                    relation,
+                    subject,
+                },
+                name,
+                &runtime_method_arguments,
+                &assumptions,
+            ) {
+                TraitMethodAnswer::Selected { signature, .. } => *signature,
+                _ => *signature.clone(),
+            }
+        } else {
+            *signature.clone()
+        };
+        self.check_callable_contract_bounds(contract_signature, None, span);
         Some(self.alloc(
             CoreKind::TraitMethod {
                 evidence,
                 method,
                 trait_arguments,
-                method_arguments: if hrtb_method_value {
-                    (0..expected_lifetime_binders)
-                        .map(|_| GenericArgument::Lifetime(Lifetime::Static))
-                        .collect()
-                } else {
-                    method_arguments
-                },
+                method_arguments: runtime_method_arguments,
             },
             callable,
             span,

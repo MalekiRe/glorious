@@ -5178,6 +5178,61 @@ fn service_rejects_static_hrtb_method_values_with_overlapping_gat_constrained_bl
 }
 
 #[test]
+fn service_rejects_negative_supertrait_hrtb_static_method_values_with_gat_row_equality() {
+    // Base has positive evidence and its static method carries a generic GAT
+    // row equality. Top explicitly negates the same subject, so extracting
+    // the method through the Top alias must not fall back to Base's positive
+    // implementation and must never emit a VM artifact.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn apply(callback: for<'a> (&'a i64) -> i64 / Trace<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); Trace<i64>::note(result) } pub fn main() -> i64 { handle apply(Capability<i64>::relay) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate { type Effects<'a, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate { fn relay<'a>(value: &'a i64) -> i64 / { <Self as Gate>::Effects<'a, {}> } where Self: Gate<Effects<'a, {}> = {Trace<i64>}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate for i64 { type Effects<'a, e: EffectRow> = {Trace<i64>, | e}; } impl Base<i64> for i64 { fn relay<'a>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, {}> } where i64: Gate<Effects<'a, {}> = {Trace<i64>}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl !Top<i64> for i64 {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("negative Top boundary unexpectedly materialized a static method value");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4169"),
+        "missing negative-boundary static method-value rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_materializes_positive_supertrait_hrtb_static_method_values_with_gat_row_equality() {
+    // The corresponding positive Top evidence remains a separately proven
+    // success case: the GAT equality must normalize under the HRTB rather
+    // than making the static method fallback indiscriminately reject it.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn apply(callback: for<'a> (&'a i64) -> i64 / Trace<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); Trace<i64>::note(result) } pub fn main() -> i64 { handle apply(Capability<i64>::relay) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate { type Effects<'a, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate { fn relay<'a>(value: &'a i64) -> i64 / { <Self as Gate>::Effects<'a, {}> } where Self: Gate<Effects<'a, {}> = {Trace<i64>}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate for i64 { type Effects<'a, e: EffectRow> = {Trace<i64>, | e}; } impl Base<i64> for i64 { fn relay<'a>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, {}> } where i64: Gate<Effects<'a, {}> = {Trace<i64>}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("positive Top GAT-equality static HRTB method value must reach VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
