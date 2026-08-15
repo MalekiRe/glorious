@@ -4991,6 +4991,157 @@ fn verifier_rejects_snapshot_capture_from_a_terminal_handler_frame() {
 }
 
 #[test]
+fn verifier_rejects_resumption_tokens_crossing_direct_call_frames() {
+    let entry = DefKey(Digest::of_bytes(b"snapshot-direct-call-entry"));
+    let sink = DefKey(Digest::of_bytes(b"snapshot-direct-call-sink"));
+    let effect = DefKey(Digest::of_bytes(b"snapshot-direct-call-effect"));
+    let snapshot = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // `CaptureResumption` creates frame-scoped control authority.  Its
+    // callable-shaped type must not let an artifact smuggle that authority
+    // through an ordinary call frame; the executor already rejects it while
+    // rebasing call arguments, so verification must fail before execution.
+    let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, snapshot.clone(), VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                payload_destinations: vec![],
+                resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume,
+                target: 4,
+            },
+            VmInstruction::Perform {
+                dst: 0,
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                arguments: vec![],
+            },
+            VmInstruction::UninstallHandler,
+            VmInstruction::Return { value: 0 },
+            VmInstruction::CaptureResumption { dst: 1 },
+            VmInstruction::ConstI64 { dst: 2, value: 42 },
+            VmInstruction::Call {
+                dst: 3,
+                callee: sink,
+                arguments: vec![1],
+            },
+            VmInstruction::Cancel,
+            VmInstruction::Return { value: 3 },
+        ],
+    };
+    let sink_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: sink,
+        captures: 0,
+        parameters: 1,
+        registers: vec![snapshot, VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 1, value: 0 },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(entry, entry_function), (sink, sink_function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"snapshot-direct-call-program-fingerprint"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    assert!(matches!(
+        verify_vm_program(program),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&bytes),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
+fn verifier_rejects_resumption_tokens_masquerading_as_indirect_callees() {
+    let entry = DefKey(Digest::of_bytes(b"snapshot-indirect-callee-entry"));
+    let effect = DefKey(Digest::of_bytes(b"snapshot-indirect-callee-effect"));
+    let snapshot = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // A resumption's ABI is deliberately callable-shaped. `CallIndirect`
+    // must nevertheless reject it: only `ResumeSnapshot` carries the frame
+    // provenance needed to restore the captured continuation safely.
+    let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64, snapshot, VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                payload_destinations: vec![],
+                resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume,
+                target: 4,
+            },
+            VmInstruction::Perform {
+                dst: 0,
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                arguments: vec![],
+            },
+            VmInstruction::UninstallHandler,
+            VmInstruction::Return { value: 0 },
+            VmInstruction::CaptureResumption { dst: 1 },
+            VmInstruction::ConstI64 { dst: 2, value: 42 },
+            VmInstruction::CallIndirect {
+                dst: 3,
+                callee: 1,
+                arguments: vec![2],
+            },
+            VmInstruction::Cancel,
+            VmInstruction::Return { value: 3 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(entry, entry_function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"snapshot-indirect-callee-program-fingerprint"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    assert!(matches!(
+        verify_vm_program(program),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&bytes),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
 fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
     let effect = DefKey(Digest::of_bytes(b"forged-snapshot-effect"));
     let continuation = VmType::Callable {

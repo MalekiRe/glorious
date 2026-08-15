@@ -8913,6 +8913,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::Call { dst, arguments, .. } => {
                 for &argument in arguments {
                     read(&states, argument)?;
+                    verify_call_frame_control_transfer(&states, argument)?;
                 }
                 write(&mut states, *dst)?
             }
@@ -9006,6 +9007,13 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 arguments,
             } => {
                 read(&states, *callee)?;
+                // A captured resumption is callable-shaped but is not an
+                // ordinary function value. It may be invoked only through
+                // `ResumeSnapshot`, which proves the originating handler
+                // frame remains active.
+                if states.resumptions[*callee as usize] {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
                 let VmType::Callable {
                     parameters, result, ..
                 } = register_type(function, *callee)?
@@ -9020,6 +9028,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }
                 for (parameter, argument) in parameters.iter().zip(arguments) {
                     read(&states, *argument)?;
+                    verify_call_frame_control_transfer(&states, *argument)?;
                     let found = register_type(function, *argument)?;
                     if parameter != &found {
                         return Err(VmArtifactError::TypeMismatch {
@@ -9148,6 +9157,27 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     } else {
         Err(VmArtifactError::NoReturn)
     }
+}
+
+/// Ordinary call frames are independent dynamic activations.  A lexical
+/// label or captured resumption can retain a target in the current activation,
+/// but it cannot be transported through a direct or ordinary indirect call:
+/// doing so would either leak that target or defer rejection until runtime's
+/// value rebasing.  Dynamic label invocation itself is handled above as the
+/// exceptional `CallIndirect` label case, never as a frame argument.
+fn verify_call_frame_control_transfer(
+    states: &VerifierState,
+    register: u32,
+) -> Result<(), VmArtifactError> {
+    if states.labels[register as usize] {
+        return Err(VmArtifactError::InvalidLabelContract {
+            message: "ordinary call arguments cannot transport a lexical label",
+        });
+    }
+    if states.resumptions[register as usize] {
+        return Err(VmArtifactError::HandlerResumeUnavailable);
+    }
+    Ok(())
 }
 
 /// Validate the effect-identity metadata that survives into bytecode.
