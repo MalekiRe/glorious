@@ -18465,18 +18465,38 @@ impl Lowerer<'_> {
             }
             _ => root,
         };
-        let (reentrant_root, label_cancellation) = match self.body.expression(top_root).kind.clone() {
+        let (reentrant_root, label_cancellation, label_completion) = match self.body.expression(top_root).kind.clone() {
             CoreKind::Label { brand, body } => {
-                let (protected, clauses, prefix) = self.lexical_handle(body)?;
-                if !prefix.is_empty() {
-                    return None;
-                }
-                let [clause] = clauses.as_slice() else {
-                    return None;
+                let label_body = match self.body.expression(body).kind.clone() {
+                    CoreKind::Block(values) => {
+                        let (tail, prefix) = values.split_last()?;
+                        if !prefix.is_empty() {
+                            return None;
+                        }
+                        *tail
+                    }
+                    _ => body,
                 };
-                (protected, Some((brand, clause.clone())))
+                match self.body.expression(label_body).kind.clone() {
+                    CoreKind::Completion { computation, clauses } => {
+                        let [clause] = clauses.as_slice() else {
+                            return None;
+                        };
+                        (computation, None, Some((brand, clause.clone())))
+                    }
+                    _ => {
+                        let (protected, clauses, prefix) = self.lexical_handle(body)?;
+                        if !prefix.is_empty() {
+                            return None;
+                        }
+                        let [clause] = clauses.as_slice() else {
+                            return None;
+                        };
+                        (protected, Some((brand, clause.clone())), None)
+                    }
+                }
             }
-            _ => (root, None),
+            _ => (root, None, None),
         };
         let (completion, outer_clauses, root_prefix) = self.lexical_handle(reentrant_root)?;
         let completion = match self.body.expression(completion).kind.clone() {
@@ -18535,6 +18555,10 @@ impl Lowerer<'_> {
                 && self.contains_label_transfer(clause.body, *brand)
                 && !self.handler_body_uses_snapshot_alias(clause.body)
         });
+        let label_completion_valid = label_completion.as_ref().is_none_or(|(brand, clause)| {
+            pattern_is_irrefutable(&clause.pattern)
+                && self.contains_label_transfer(clause.body, *brand)
+        });
         if !root_prefix.is_empty()
             || !middle_prefix.is_empty()
             || outer.terminal
@@ -18565,6 +18589,7 @@ impl Lowerer<'_> {
             || self.handler_body_uses_snapshot_alias(middle_clause.body)
             || self.handler_body_uses_snapshot_alias(inner_clause.body)
             || !label_cancellation_valid
+            || !label_completion_valid
         {
             return None;
         }
@@ -18646,6 +18671,16 @@ impl Lowerer<'_> {
         if label_cancellation.is_some() {
             entry.push(MirInstruction::UninstallHandler);
         }
+        let completion_leave = if let Some((brand, clause)) = &label_completion {
+            self.instructions = Vec::new();
+            self.bind_completion_clause(clause, completed)?;
+            let value = self.lower_label_transfer_path(clause.body, *brand)?;
+            entry.extend(std::mem::take(&mut self.instructions));
+            let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
+            Some((*brand, value, join))
+        } else {
+            None
+        };
 
         let arm = |lowerer: &mut Self,
                    clause: &CoreHandlerClause,
@@ -18717,7 +18752,25 @@ impl Lowerer<'_> {
                     scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
-                    terminator: MirTerminator::Return { value: completed },
+                    terminator: completion_leave.as_ref().map_or(
+                        MirTerminator::Return { value: completed },
+                        |(brand, value, _)| MirTerminator::Leave {
+                            label: MirLabelId::UNASSIGNED,
+                            brand: *brand,
+                            target: MirBlockId(if label_cancellation.is_some() { 8 } else { 6 }),
+                            arguments: vec![*value],
+                            cleanup: MirCleanupPlan {
+                                source_storage_scope: MirSourceStorageScopeId::ROOT,
+                                target_storage_scope: MirSourceStorageScopeId::ROOT,
+                                moved_paths: vec![],
+                                moved_places: self.leave_cleanup.moved_places.clone(),
+                                active_loans: self.leave_cleanup.active_loans.clone(),
+                                drop_flags: vec![],
+                                actions: vec![],
+                                protected_values: vec![],
+                            },
+                        },
+                    ),
                 },
                 MirBlock {
                     scope: MirScopeId::ROOT,
@@ -18786,6 +18839,14 @@ impl Lowerer<'_> {
                             },
                         },
                     });
+                    blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
+                        parameters: vec![join],
+                        instructions: vec![],
+                        terminator: MirTerminator::Return { value: join },
+                    });
+                }
+                if let Some((_, _, join)) = completion_leave {
                     blocks.push(MirBlock {
                         scope: MirScopeId::ROOT,
                         parameters: vec![join],

@@ -12179,6 +12179,33 @@ fn service_reentrant_completion_cancels_to_label_through_nested_facades() {
 }
 
 #[test]
+fn service_outer_completion_leaves_after_reentrant_forwarded_replay_through_facades() {
+    // Each Tick replay reaches the refutable inner Ask row, forwards its
+    // pending continuation to the outer Ask replayer, and only then finishes
+    // the enclosing computation. The outer normal-completion arm leaves the
+    // label, abandoning its remaining replay and forwarded-frame suffix.
+    let mut request = request(
+        "use bridge::Ask; use bridge::Tick; use bridge::invoke; pub fn main() -> i64 { label done { handle { handle { handle { handle invoke() { Ask::ask(true) with k => k(1) + k(2) } } { value => value + 1; Tick::tick() with k => k(10) + k(20) } } { Ask::ask(_) with k => k(30) + k(40) } } { value => transfer done value } } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Ask, Tick, relay}; pub fn invoke() -> i64 / {Ask, Tick} { relay() }"
+            .as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Ask { [2,2] ask(value: Bool) -> i64; } pub effect Tick { [2,2] tick() -> i64; } pub fn relay() -> i64 / {Ask, Tick} { let tick = Tick::tick(); let asked = Ask::ask(false); tick + asked }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("outer completion leave must abandon forwarded replay state");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
 fn service_links_private_helpers_reached_from_specialized_dependency_generics() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(
