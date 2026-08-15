@@ -10628,6 +10628,134 @@ fn service_rejects_private_generic_effects_through_three_package_diamond_facades
 }
 
 #[test]
+fn service_keeps_same_spelled_generic_diamond_facades_provider_distinct_through_vm() {
+    // The providers deliberately publish the same source spellings.  The
+    // facade aliases make both visible to the root, which must retain their
+    // declaration identities rather than unify by text while selecting GAT
+    // rows and dispatching each generic effect.
+    let root = "use left_facade::{Capability as LeftCapability, Trace as LeftTrace}; use right_facade::{Capability as RightCapability, Trace as RightTrace}; pub struct LeftPacket { value: <i64 as LeftCapability<i64>>::Item<i64> } pub struct RightPacket { value: <i64 as RightCapability<i64>>::Item<i64> } pub fn left_worker() -> i64 / LeftTrace<i64> { let packet = LeftPacket { value: LeftCapability<i64>::relay(0, 41) }; LeftTrace<i64>::note(packet.value) } pub fn right_worker() -> i64 / RightTrace<i64> { let packet = RightPacket { value: RightCapability<i64>::relay(0, 41) }; RightTrace<i64>::note(packet.value) } pub fn left_value() -> i64 { handle left_worker() { LeftTrace<i64>::note(value) with k => k(value + 1) } } pub fn right_value() -> i64 { handle right_worker() { RightTrace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { left_value() + right_value() }";
+    let provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } effect Hidden<T> { [1,1] hide(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {}";
+    let mut request = request(root);
+    for (package, source) in [
+        ("alpha-core@0.1.0", provider),
+        ("beta-core@0.1.0", provider),
+        (
+            "left-facade@0.1.0",
+            "pub use alpha_core::{Child as Capability, Trace};",
+        ),
+        (
+            "right-facade@0.1.0",
+            "pub use beta_core::{Child as Capability, Trace};",
+        ),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("same-spelled provider identities must remain distinct through the VM");
+    let mut reordered = request;
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("provider identity cannot depend on source enumeration");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 86);
+    assert_eq!(second.run_i64().unwrap(), 86);
+}
+
+#[test]
+fn service_reports_same_spelled_distinct_provider_diamond_aliases_as_ambiguous() {
+    let mut request = request(
+        "use left_facade::*; use right_facade::*; pub fn worker() -> i64 / Trace<i64> { Capability<i64>::relay(0, 41) } pub fn main() -> i64 { 0 }",
+    );
+    let provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> i64 / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {}";
+    for (package, source) in [
+        ("alpha-core@0.1.0", provider),
+        ("beta-core@0.1.0", provider),
+        (
+            "left-facade@0.1.0",
+            "pub use alpha_core::{Child as Capability, Trace};",
+        ),
+        (
+            "right-facade@0.1.0",
+            "pub use beta_core::{Child as Capability, Trace};",
+        ),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let mut reordered = request.clone();
+    reordered.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request)
+    else {
+        panic!("same-spelled aliases from distinct providers unexpectedly resolved");
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(second)) =
+        StageZeroCompiler::new().compile(reordered)
+    else {
+        panic!("source ordering changed provider-identity ambiguity into success");
+    };
+    assert!(
+        first.iter().any(|diagnostic| diagnostic.code == "G3314"),
+        "missing provider-identity ambiguity diagnostic: {first:#?}"
+    );
+    assert_eq!(first, second, "provider-identity ambiguity must be canonical");
+}
+
+#[test]
+fn service_rejects_private_same_spelled_generic_effect_reexports_in_a_provider_diamond() {
+    let mut request = request("pub fn main() -> i64 { 42 }");
+    let private_provider = "effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Effects<U>: EffectRow; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; } impl Child<i64> for i64 {}";
+    let public_provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Effects<U>: EffectRow; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; } impl Child<i64> for i64 {}";
+    for (package, source) in [
+        ("alpha-core@0.1.0", private_provider),
+        ("beta-core@0.1.0", public_provider),
+        (
+            "left-facade@0.1.0",
+            "pub use alpha_core::{Child as Capability, Trace};",
+        ),
+        (
+            "right-facade@0.1.0",
+            "pub use beta_core::{Child as Capability, Trace};",
+        ),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let mut reordered = request.clone();
+    reordered.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request)
+    else {
+        panic!("a public provider unexpectedly authorized a private same-spelled reexport");
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(second)) =
+        StageZeroCompiler::new().compile(reordered)
+    else {
+        panic!("source ordering changed private reexport rejection into success");
+    };
+    assert!(
+        first.iter().any(|diagnostic| diagnostic.code == "G3317"),
+        "missing private provider authority diagnostic: {first:#?}"
+    );
+    assert_eq!(first, second, "private provider diagnostics must be canonical");
+}
+
+#[test]
 fn service_materializes_reachable_generic_dependency_callables() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(

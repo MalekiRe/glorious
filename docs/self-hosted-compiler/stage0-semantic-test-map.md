@@ -168,6 +168,13 @@ coarse. The composite fixtures cover:
   artifacts under source reordering, and rejects the same diamond if its
   effect remains private (`service_executes_three_package_diamond_gat_effect_facades_canonically`,
   `service_rejects_private_generic_effects_through_three_package_diamond_facades`).
+- two provider packages may use the same generic trait/effect spelling without
+  sharing an identity. Explicit facade aliases preserve both identities through
+  GAT selection and VM execution; dual globs instead produce canonical effect
+  ambiguity, and a public provider never authorizes an identically spelled
+  private provider re-export (`service_keeps_same_spelled_generic_diamond_facades_provider_distinct_through_vm`,
+  `service_reports_same_spelled_distinct_provider_diamond_aliases_as_ambiguous`,
+  `service_rejects_private_same_spelled_generic_effect_reexports_in_a_provider_diamond`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and
