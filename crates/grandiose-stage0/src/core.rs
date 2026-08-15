@@ -10934,8 +10934,21 @@ impl Elaborator<'_> {
                     &binding.name,
                     &item_arguments,
                 );
-            if !matches!(answer, TraitEffectRowProjectionAnswer::Normalized { row, .. } if row == value)
-            {
+            let proves_binding = match answer {
+                TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
+                    // A selected outer GAT can itself expose another selected
+                    // effect-row projection.  Its concrete subject may carry
+                    // the caller's open row binder, which is safe to retain
+                    // but not concrete enough for the raw solver result to
+                    // close. Follow only the selectable projection boundary
+                    // used by callable signatures before comparing the
+                    // equality witness.
+                    self.normalize_selectable_effect_row(row)
+                        == self.normalize_selectable_effect_row(value)
+                }
+                _ => false,
+            };
+            if !proves_binding {
                 self.error(
                     span,
                     "G4143",

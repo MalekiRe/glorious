@@ -5412,6 +5412,85 @@ fn service_rejects_negative_nested_alias_hrtb_static_method_values_with_open_row
 }
 
 #[test]
+fn service_forwards_nested_selected_effect_rows_through_aliased_generic_callable_values() {
+    // Gate::Effects resolves to Seed::Inner rather than directly to a row.
+    // The nested selected projection must retain the caller's `e` tail while
+    // the callable value crosses two public aliases and a generic forwarder.
+    let mut request = request(
+        "use facade::{Callback, Gateway as Capability, Trace}; pub fn selected<e: EffectRow>() -> Callback<i64, e> { Capability<i64>::relay } pub fn forward<e: EffectRow>(callback: Callback<i64, e>) -> i64 / {Trace<i64>, | e} { let value = 41; let result = callback(&value, value); Trace<i64>::note(result) } pub fn relay_to_caller<e: EffectRow>() -> i64 / {Trace<i64>, | e} { forward(selected<e>()) } pub fn main() -> i64 { handle relay_to_caller<{}>() { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use middle::{First as Gateway, Trace}; pub type Callback<U, E: EffectRow> = middle::Callback<U, E>;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("middle@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as First, Gate, Trace}; pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> };".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Seed<T> { type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Seed<i64> for i64 { type Inner<'a, U, e: EffectRow> = {Trace<U>, | e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
+    ));
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("nested selected effect rows must retain their forwarding tail");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(request)
+        .expect("source ordering must not perturb nested selected effect rows");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_nested_selected_effect_rows_with_an_incompatible_forwarding_tail() {
+    // `selected<e>` is valid on its own, but once its nested GAT row is
+    // called from a function declaring a distinct `f` tail, the effect must
+    // not be silently admitted. This is the negative side of retaining an
+    // open selected tail at the callable boundary.
+    let mut request = request(
+        "use facade::{Callback, Gateway as Capability, Trace}; pub fn selected<e: EffectRow>() -> Callback<i64, e> { Capability<i64>::relay } pub fn mismatch<e: EffectRow, f: EffectRow>() -> i64 / {Trace<i64>, | f} { let callback = selected<e>(); let value = 41; callback(&value, value) } pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use middle::{First as Gateway, Trace}; pub type Callback<U, E: EffectRow> = middle::Callback<U, E>;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("middle@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as First, Gate, Trace}; pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> };".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Seed<T> { type Inner<'a, U, e: EffectRow>: EffectRow; } pub trait Gate<T>: Seed<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Seed<i64> for i64 { type Inner<'a, U, e: EffectRow> = {Trace<U>, | e}; } impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = { <i64 as Seed<i64>>::Inner<'a, U, e> }; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("incompatible nested selected effect-row tails unexpectedly entered VM emission");
+    };
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        ["G7007", "G4155"],
+        "unexpected incompatible-tail diagnostics: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
