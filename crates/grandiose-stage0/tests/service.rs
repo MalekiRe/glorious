@@ -8498,6 +8498,91 @@ fn service_dynamic_label_rejoin_completion_returns_a_closure_without_stale_capab
 }
 
 #[test]
+fn service_dynamic_label_rejoin_returns_a_shared_reference_closure() {
+    // The returned closure borrows a caller-owned outer value immutably. The
+    // dynamic label crosses the nested Ask frames, then the completion closes
+    // over both that shared borrow and the rejoined result.
+    let source = r#"
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub fn make(outer: &i64) -> () -> i64 {
+            handle {
+                @done: i64 {
+                    let exit = @done;
+                    handle {
+                        handle {
+                            let answer = Ask::ask(1);
+                            exit(answer + 1)
+                        } {
+                            Ask::ask(0) with k => k(0),
+                        }
+                    } {
+                        Ask::ask(value) with k => k(41),
+                    }
+                }
+            } {
+                value => () -> i64 { *outer + value },
+            }
+        }
+        pub fn main() -> i64 {
+            let outer = 100;
+            let callback = make(&outer);
+            callback()
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 142);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 142);
+}
+
+#[test]
+fn service_vm_rejects_unique_reference_closure_escape_across_dynamic_label_rejoin() {
+    let source = r#"
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub fn make(outer: &mut i64) -> () -> i64 {
+            handle {
+                @done: i64 {
+                    let exit = @done;
+                    handle {
+                        handle {
+                            let answer = Ask::ask(1);
+                            exit(answer + 1)
+                        } {
+                            Ask::ask(0) with k => k(0),
+                        }
+                    } {
+                        Ask::ask(value) with k => k(41),
+                    }
+                }
+            } {
+                value => () -> i64 { *outer = *outer + value; *outer },
+            }
+        }
+        pub fn main() -> i64 {
+            let outer = 100;
+            let callback = make(&mut outer);
+            callback()
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert!(matches!(
+        artifact.run_i64(),
+        Err(grandiose_stage0::VmArtifactError::UnsupportedEscapingUniqueReference)
+    ));
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert!(matches!(
+        decoded.run_i64(),
+        Err(grandiose_stage0::VmArtifactError::UnsupportedEscapingUniqueReference)
+    ));
+}
+
+#[test]
 fn service_rejects_a_resumption_closure_escaping_through_a_dynamic_label() {
     // This would return a callable-shaped value, but that callable retains
     // the one-shot continuation after the label has abandoned its handler.
