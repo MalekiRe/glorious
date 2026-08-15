@@ -4108,6 +4108,92 @@ fn service_selects_defaulted_nominal_drop_through_recursive_facade_revisions() {
     assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
 }
 
+#[test]
+fn service_preserves_hrtb_associated_nominal_partial_moves_through_closure_revisions() {
+    // `Callback` is higher-ranked even though Family's selected Item does not
+    // retain the region at runtime. Its move-only packet crosses an indirect
+    // call into a closure, then a shared reborrow of one field survives the
+    // disjoint partial move of the other. Selecting the conditional Drop
+    // implementation in a later provider revision must make that same
+    // projected nominal opaque before any artifact/cache product is published.
+    let root = "use facade::{Callback, Packet, Token, relay}; pub fn apply(callback: Callback) -> i64 { let returned = callback(Packet<Token> { head: Token {}, tail: 2 }); let closure = () -> i64 { move returned.head; returned.tail + 40 }; closure() } pub fn main() -> i64 { apply(relay) }";
+    let provider = "pub trait Mark: Use<[0, 0]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<'a, T> = Packet<T>; } impl Family for i64 {} pub type Callback = for<'a> (<i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token>; pub fn make<'a, T>(value: T) -> <i64 as Family>::Item<'a, T> { Packet<T> { head: value, tail: 2 } } pub fn relay<'a>(value: <i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token> { value }";
+    let selected = format!("{provider} impl Use<[0, 0]> for Token {{}} impl Mark for Token {{}}");
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Callback, Packet, Token, relay};".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@1.0.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+
+    let mut ordered = world(provider);
+    let artifact = StageZeroCompiler::new()
+        .compile(ordered.clone())
+        .expect("unselected HRTB associated nominal must preserve disjoint partial movement")
+        .artifact
+        .unwrap();
+    ordered.sources.reverse();
+    let reordered = StageZeroCompiler::new()
+        .compile(ordered)
+        .expect("source order must preserve HRTB projected partial movement")
+        .artifact
+        .unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("HRTB associated nominal partial-move artifact must decode");
+    assert_eq!(artifact.canonical_bytes(), reordered.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered.run_i64().unwrap(), 42);
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cache = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let trace = compiler
+        .dependency_trace(parent, &facade)
+        .expect("legal HRTB associated nominal facade must freeze");
+    let rejected_world = world(&selected);
+    let rejected = compiler
+        .import_revision(rejected_world.clone(), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(rejected).unwrap())
+        .expect_err("selected Drop must reject a partial move through the HRTB projection");
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4188"),
+        "selected HRTB projected Drop is missing G4188: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cache);
+    assert!(compiler.dependency_traces(rejected).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace));
+    let mut reordered_rejection = rejected_world;
+    reordered_rejection.sources.reverse();
+    assert_eq!(
+        error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(reordered_rejection)
+            .expect_err("source order cannot admit selected projected Drop movement")
+            .diagnostics()
+    );
+    assert_eq!(
+        compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(),
+        parent_artifact.canonical_bytes()
+    );
+}
+
 /// Exercise the ordinary service path for the source-level shape that reaches
 /// a handler, a partial aggregate move, and a nonlocal lexical exit together.
 /// The Core test inspects the intermediate frozen MIR; this companion proves

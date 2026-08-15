@@ -97,6 +97,12 @@ coarse. The composite fixtures cover:
   whole-value cleanup execution
   (`typed_core_materializes_defaulted_nominal_items_before_partial_move_analysis`,
   `service_selects_defaulted_nominal_drop_through_recursive_facade_revisions`);
+- an HRTB associated nominal callback result can carry a move-only field into
+  a captured closure. Its unselected conditional Drop keeps a disjoint field
+  move executable through Core/MIR/VM and decoded bytecode, while a facade
+  revision selecting Drop rejects that exact projected partial move without
+  publishing cache or trace products
+  (`service_preserves_hrtb_associated_nominal_partial_moves_through_closure_revisions`);
 - the absence of compiler-known control/arithmetic variants in `CoreKind`;
 - a small independent evaluator/verified-VM differential for branded label
   execution;
