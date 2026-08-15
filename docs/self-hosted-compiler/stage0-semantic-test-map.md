@@ -375,6 +375,14 @@ coarse. The composite fixtures cover:
   recursive const, and overlapping-impl revisions roll back without publishing
   derived interfaces (`typed_core_selects_inherited_associated_consts_for_nominal_arithmetic`,
   `service_rolls_back_const_hrtb_supertrait_cycles_before_publication`).
+- a negative implementation of the requesting child trait remains authoritative
+  before inherited type, effect-row, or const selection follows its parent
+  edge. Direct solver and Core checks cover the three projections together;
+  an aliased HRTB callback then proves the positive path reaches the VM while
+  refuted and mixed-polarity revisions cannot publish traces or cache misses
+  (`negative_child_trait_refutes_inherited_type_effect_and_const_projections`,
+  `typed_core_refutes_negative_child_inherited_type_effect_and_const_projections`,
+  `service_keeps_negative_child_inherited_projections_authoritative_through_alias_revisions`).
 - a public dependency facade preserves inherited associated effect-GAT
   evidence through a named `for<'a>` callback: the declaration-owned lifetime
   is selectable, its concrete row reaches handler lowering and verified VM

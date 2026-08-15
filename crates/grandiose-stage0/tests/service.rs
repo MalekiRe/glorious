@@ -5229,6 +5229,125 @@ fn service_executes_reexported_hrtb_inherited_effect_gats_through_vm_handlers() 
 }
 
 #[test]
+fn service_keeps_negative_child_inherited_projections_authoritative_through_alias_revisions() {
+    // The provider's public callback reaches Parent's type and effect items
+    // through Child, and the application uses Child's inherited constant for
+    // a nominal layout.  This makes the facade an end-to-end VM test of all
+    // three inherited projection kinds, including a higher-ranked callback.
+    let root = "use facade::{Callback, Gateway as Capability, Trace, relay}; pub struct Witness<n: u32> { value: i64 } pub fn apply(callback: Callback) -> i64 / Trace { let value = 40; let result = callback(&value); let witness = Witness<<i64 as Capability<i64>>::Width> { value: 1 }; Trace::note(result + witness.value) } pub fn main() -> i64 { handle apply(relay) { Trace::note(value) with k => k(value + 1) } }";
+    let provider = "pub effect Trace { [1,1] note(value: i64) -> i64; } pub trait Parent<T> { const Width: u32; type Item; type Effects: EffectRow; } pub trait Child<T>: Parent<T> {} pub struct WidthWitness<n: u32> { value: i64 } impl Parent<i64> for i64 { const Width = 7; type Item = i64; type Effects = {Trace}; } impl Child<i64> for i64 {} pub type ProjectedWitness = WidthWitness<<i64 as Child<i64>>::Width>; pub type Callback = for<'a> (&'a i64) -> <i64 as Child<i64>>::Item / { <i64 as Child<i64>>::Effects }; pub fn relay<'a>(value: &'a i64) -> <i64 as Child<i64>>::Item / { <i64 as Child<i64>>::Effects } { *value }";
+    let refuted = provider.replacen(
+        "impl Child<i64> for i64 {}",
+        "impl !Child<i64> for i64 {}",
+        1,
+    );
+    let overlapping = format!("{provider} impl !Child<i64> for i64 {{}}");
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Callback, Child as Gateway, Trace, relay};".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@1.0.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+
+    let mut reordered = world(provider);
+    let artifact = StageZeroCompiler::new()
+        .compile(reordered.clone())
+        .expect("selected inherited facade projections must reach the VM")
+        .artifact
+        .unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("source ordering must preserve selected inherited facade projections")
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered_artifact.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let trace = compiler
+        .dependency_trace(parent, &facade)
+        .expect("the legal alias facade must have a frozen trace");
+
+    let rejected_world = world(&refuted);
+    let rejected = compiler
+        .import_revision(rejected_world.clone(), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(rejected).unwrap())
+        .expect_err("a negative Child impl must refute inherited facade projections");
+    for expected in [
+        "associated type projection",
+        "associated effect-row projection",
+        "associated const projection",
+    ] {
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| {
+                    diagnostic.message.contains(expected)
+                        && diagnostic
+                            .message
+                            .contains("refuted by a negative implementation")
+                }),
+            "missing {expected}: {:#?}",
+            error.diagnostics()
+        );
+    }
+    assert_eq!(compiler.interface_cache_stats(), cached, "refuted revision published cache state");
+    assert!(compiler.dependency_traces(rejected).is_empty(), "refuted revision published traces");
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()));
+    let mut rejected_reordered = rejected_world;
+    rejected_reordered.sources.reverse();
+    assert_eq!(
+        error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(rejected_reordered)
+            .expect_err("source ordering cannot bypass a negative Child impl")
+            .diagnostics()
+    );
+    assert_eq!(
+        compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(),
+        parent_artifact.canonical_bytes()
+    );
+
+    let overlap_cached = compiler.interface_cache_stats();
+    let overlapping_revision = compiler.import_revision(world(&overlapping), Some(parent)).unwrap();
+    let overlap = compiler
+        .compile_session(&compiler.open_session(overlapping_revision).unwrap())
+        .expect_err("positive and negative Child impls must remain incoherent through aliases");
+    assert!(
+        overlap.diagnostics().iter().any(|diagnostic| diagnostic.code == "G3406"),
+        "missing mixed-polarity Child coherence rejection: {:#?}",
+        overlap.diagnostics()
+    );
+    assert_eq!(
+        compiler.interface_cache_stats().misses,
+        overlap_cached.misses,
+        "overlap revision materialized a new cached interface"
+    );
+    assert!(compiler.dependency_traces(overlapping_revision).is_empty(), "overlap revision published traces");
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace));
+}
+
+#[test]
 fn service_executes_recursive_defaulted_hrtb_supertrait_gats_through_vm() {
     // Both public GAT defaults recursively project through a second default
     // on the selected parent implementation. `Gateway` exposes only the

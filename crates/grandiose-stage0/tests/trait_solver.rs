@@ -293,6 +293,34 @@ fn supertrait_method_and_associated_items_follow_canonical_instantiated_edges() 
 }
 
 #[test]
+fn negative_child_trait_refutes_inherited_type_effect_and_const_projections() {
+    let (interface, signatures) = signatures(
+        "trait Parent<T> { type Item; type Effects: EffectRow; const Width: u32; } trait Child<U>: Parent<U> {} impl Parent<i64> for i64 { type Item = i64; type Effects = {}; const Width = 7; } impl !Child<i64> for i64 {}",
+    );
+    let child = key(&interface, "Child");
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: child,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+        subject: Type::Scalar(ScalarType::I64),
+    };
+    let mut solver = TraitSolver::new(&signatures);
+    assert!(matches!(
+        solver.normalize_associated_type(goal.clone(), "Item"),
+        TraitProjectionAnswer::Refuted { .. }
+    ));
+    assert!(matches!(
+        solver.normalize_associated_effect_row_application(goal.clone(), "Effects", &[]),
+        TraitEffectRowProjectionAnswer::Refuted { .. }
+    ));
+    assert!(matches!(
+        solver.normalize_associated_const(goal, "Width", ConstKind::U32),
+        TraitConstProjectionAnswer::Refuted { .. }
+    ));
+}
+
+#[test]
 fn method_selection_uses_lexical_where_bounds_for_generic_impl_candidates() {
     let (interface, signatures) = signatures(
         "trait Gate {} trait Parent { fn identity(value: Self) -> Self; } impl<T> Parent for T where T: Gate { fn identity(value: T) -> T { value } }",

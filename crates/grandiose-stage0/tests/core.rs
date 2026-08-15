@@ -539,6 +539,33 @@ fn typed_core_selects_inherited_associated_consts_for_nominal_arithmetic() {
 }
 
 #[test]
+fn typed_core_refutes_negative_child_inherited_type_effect_and_const_projections() {
+    // `Child` inherits all three items from Parent.  Its negative impl must
+    // remain authoritative at each Core boundary rather than allowing the
+    // selected Parent implementation to provide a back door.
+    let core = core_for(
+        "core-negative-inherited-projections@0.1.0",
+        "effect Trace { note() -> i64; } trait Parent<T> { const Width: u32; type Item; type Effects: EffectRow; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { const Width = 7; type Item = i64; type Effects = {Trace}; } impl !Child<i64> for i64 {} struct Witness<n: u32> { value: i64 } pub fn main() -> <i64 as Child<i64>>::Item / { <i64 as Child<i64>>::Effects } { let witness = Witness<<i64 as Child<i64>>::Width> { value: 42 }; witness.value }",
+    );
+    let messages = core
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    for expected in [
+        "associated type projection is refuted by a negative implementation",
+        "associated effect-row projection is refuted by a negative implementation",
+        "associated constant projection is refuted by a negative implementation",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "missing {expected}: {:#?}",
+            core.diagnostics
+        );
+    }
+}
+
+#[test]
 fn typed_core_materializes_defaulted_nominal_items_before_partial_move_analysis() {
     let source = "struct Token {} struct Packet<T> { head: T, tail: i64 } trait Mark: Use<[0, 0]> {} impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } trait Family { type Item<T> = Packet<T>; } impl Family for i64 {} fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
     let core = core_for("core-defaulted-nominal-partial-move@0.1.0", source);

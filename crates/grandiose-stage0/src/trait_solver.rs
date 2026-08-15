@@ -978,6 +978,23 @@ impl TraitSolver {
         {
             return TraitProjectionAnswer::NoSolution;
         }
+        // An inherited item is still being requested through `goal`'s
+        // trait.  Check that boundary before following a supertrait edge:
+        // otherwise `impl !Child for T` could be bypassed by an unrelated
+        // `impl Parent for T` that supplies `Child`'s inherited item.
+        let requested = if scoped_hrtb_item_arguments {
+            self.solve_scoped_hrtb(goal.clone())
+        } else {
+            self.solve(goal.clone())
+        };
+        match requested {
+            TraitAnswer::Refuted { evidence } => {
+                return TraitProjectionAnswer::Refuted { evidence };
+            }
+            TraitAnswer::Ambiguous => return TraitProjectionAnswer::Ambiguous,
+            TraitAnswer::Overflow => return TraitProjectionAnswer::Overflow,
+            TraitAnswer::Proven { .. } | TraitAnswer::NoSolution => {}
+        }
         let goal = match self.find_associated_item_goal(
             &goal,
             name,
@@ -1268,6 +1285,16 @@ impl TraitSolver {
         name: &str,
         expected: crate::ConstKind,
     ) -> TraitConstProjectionAnswer {
+        // Preserve the requested trait's negative evidence before selecting
+        // the ancestor that declares this inherited constant.
+        match self.solve(goal.clone()) {
+            TraitAnswer::Refuted { evidence } => {
+                return TraitConstProjectionAnswer::Refuted { evidence };
+            }
+            TraitAnswer::Ambiguous => return TraitConstProjectionAnswer::Ambiguous,
+            TraitAnswer::Overflow => return TraitConstProjectionAnswer::Overflow,
+            TraitAnswer::Proven { .. } | TraitAnswer::NoSolution => {}
+        }
         let goal = match self.find_associated_item_goal(
             &goal,
             name,
@@ -1406,6 +1433,21 @@ impl TraitSolver {
                     .any(generic_argument_contains_escaping_hrtb))
         {
             return TraitEffectRowProjectionAnswer::NoSolution;
+        }
+        // As with associated types, a supertrait declaration does not erase
+        // negative evidence for the trait through which the row was named.
+        let requested = if scoped_hrtb_item_arguments {
+            self.solve_scoped_hrtb(goal.clone())
+        } else {
+            self.solve(goal.clone())
+        };
+        match requested {
+            TraitAnswer::Refuted { evidence } => {
+                return TraitEffectRowProjectionAnswer::Refuted { evidence };
+            }
+            TraitAnswer::Ambiguous => return TraitEffectRowProjectionAnswer::Ambiguous,
+            TraitAnswer::Overflow => return TraitEffectRowProjectionAnswer::Overflow,
+            TraitAnswer::Proven { .. } | TraitAnswer::NoSolution => {}
         }
         let goal = match self.find_associated_item_goal(
             &goal,
