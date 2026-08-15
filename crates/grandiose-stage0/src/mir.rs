@@ -7890,7 +7890,9 @@ impl MirProgram {
 /// generic placeholder could be interpreted. Check all frozen type witnesses,
 /// not only local registers: aggregate layouts, patterns, handler frames,
 /// host ABI records, and capture environments are independently consumed by
-/// MIR/VM verification.
+/// MIR/VM verification. Elided regions are local borrow witnesses whose
+/// identity is intentionally erased by the VM, so they are not placeholders
+/// requiring instance substitution.
 fn materialized_instance_retains_generic_placeholder(function: &MirFunction) -> bool {
     type_retains_generic_placeholder(&function.result)
         || function
@@ -7929,10 +7931,8 @@ fn type_retains_generic_placeholder(value: &Type) -> bool {
         Type::Reference {
             lifetime, referent, ..
         } => {
-            matches!(
-                lifetime,
-                crate::Lifetime::Generic(_) | crate::Lifetime::Elided
-            ) || type_retains_generic_placeholder(referent)
+            matches!(lifetime, crate::Lifetime::Generic(_))
+                || type_retains_generic_placeholder(referent)
         }
         Type::Callable {
             parameters,
@@ -7954,12 +7954,14 @@ fn generic_argument_retains_generic_placeholder(value: &GenericArgument) -> bool
     match value {
         GenericArgument::Type(value) => type_retains_generic_placeholder(value),
         GenericArgument::EffectRow(value) => effect_row_retains_generic_placeholder(value),
-        GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Elided)
+        GenericArgument::Lifetime(crate::Lifetime::Generic(_))
         | GenericArgument::ConstU32Expr(_)
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => true,
-        GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Bound { .. })
+        GenericArgument::Lifetime(
+            crate::Lifetime::Static | crate::Lifetime::Elided | crate::Lifetime::Bound { .. },
+        )
         | GenericArgument::ConstU32(_)
         | GenericArgument::ConstQuantity(_) => false,
     }

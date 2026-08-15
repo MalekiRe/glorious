@@ -8813,17 +8813,14 @@ impl Elaborator<'_> {
         ) else {
             return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
         };
-        let values = supplied
-            .into_iter()
-            .map(|value| self.expression(value))
-            .collect::<Vec<_>>();
-        let Some(receiver) = values.first().copied() else {
+        let Some((receiver_source, remaining_arguments)) = supplied.split_first() else {
             return Some(self.fail(
                 span,
                 "G4168",
                 "qualified trait method call requires a receiver argument",
             ));
         };
+        let receiver = self.expression(*receiver_source);
         let subject = self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
         let method_arguments = if operation_arguments.is_empty() {
             self.inferred_method_generic_arguments(&method_generic_kinds)
@@ -8905,6 +8902,12 @@ impl Elaborator<'_> {
                 ));
             }
         };
+        let parameters = signature
+            .parameters
+            .iter()
+            .cloned()
+            .map(|parameter| self.normalize_concrete_type_projections(parameter))
+            .collect::<Vec<_>>();
         let effects = self.normalize_concrete_effect_row(signature.effects.clone());
         let callee = self.alloc(
             CoreKind::TraitMethod {
@@ -8915,13 +8918,26 @@ impl Elaborator<'_> {
             },
             Type::Callable {
                 lifetime_binders: 0,
-                parameters: signature.parameters.clone(),
+                parameters: parameters.clone(),
                 result: Box::new(signature.result.clone()),
                 effects,
                 invocation: signature.invocation,
             },
             span,
         );
+        let mut values = vec![receiver];
+        for (index, argument) in remaining_arguments.iter().enumerate() {
+            let value = match parameters.get(index + 1) {
+                Some(parameter) => {
+                    let value = self.expression_expected(*argument, Some(parameter.clone()));
+                    let actual = self.expressions[value.0 as usize].ty.clone();
+                    let _ = self.inference.unify(parameter.clone(), actual);
+                    value
+                }
+                None => self.expression(*argument),
+            };
+            values.push(value);
+        }
         let call = self.call(callee, values, span);
         self.check_callable_contract_bounds(*signature.clone(), None, span);
         Some(call)

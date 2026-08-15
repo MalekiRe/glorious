@@ -4230,6 +4230,17 @@ fn service_imports_hrtb_associated_effect_gat_callback_contracts_through_vm() {
 }
 
 #[test]
+fn service_inherits_hrtb_gat_callback_methods_across_dependency_traits() {
+    let dependency = "pub trait Parent<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<U>(receiver: Self, callback: for<'a> (<Self as Parent<T>>::Item<'a>) -> <Self as Parent<T>>::Item<'a> / { <Self as Parent<T>>::Effects<'a> }, marker: U) -> i64; } pub trait Child<T>: Parent<T> {} pub struct Value {} impl Parent<Value> for Value { type Item<'a> = &'a i64; type Effects<'a> = {}; fn apply<U>(receiver: Self, callback: for<'a> (<Self as Parent<Value>>::Item<'a>) -> <Self as Parent<Value>>::Item<'a> / { <Self as Parent<Value>>::Effects<'a> }, marker: U) -> i64 { let value = 41; let result = callback(&value); *result + 1 } } impl Child<Value> for Value {}";
+    let root = "use dependency::Child; use dependency::Value; pub fn identity<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 { Child<Value>::apply<i64>(Value {}, identity, 0) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(root, "dependency@0.1.0", dependency))
+        .expect("inherited dependency HRTB GAT method must materialize");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_executes_hrtb_closures_with_lifetime_gat_projections() {
     let source = "trait Family { type Item<'a>; } struct Value {} impl Family for Value { type Item<'a> = &'a i64; } pub fn apply(callback: for<'a> (<Value as Family>::Item<'a>) -> <Value as Family>::Item<'a>) -> i64 { let value = 41; let result = callback(&value); *result + 1 } pub fn main() -> i64 { apply({ value => value }) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
