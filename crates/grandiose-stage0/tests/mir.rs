@@ -9,7 +9,7 @@ use grandiose_stage0::{
     MirLabelId, MirLocal, MirLocalDecl, MirMovePathData, MirMovePathId, MirMovePathTables,
     MirOperationId, MirPattern, MirPatternField, MirPerformSiteId, MirPlaceBindingData,
     MirPlaceBindingId, MirProgram, MirResumptionSiteId, MirScopeId, MirSourceStorageScopeId,
-    MirTerminator, MirTraitMethodInstance, MoveFact, Mutability, PlaceBindingId,
+    MirTerminator, MirTerminatorOperand, MirTraitMethodInstance, MoveFact, Mutability, PlaceBindingId,
     PlaceBindingOrigin, Quantity, ScalarType, Type, VmArtifactError, emit_vm, emit_vm_program,
     optimize_mir, verify_vm,
 };
@@ -1697,6 +1697,89 @@ fn checked_mir_editor_redirects_edges_transactionally() {
             .is_err()
     );
     assert_eq!(rejected.finish(), original);
+}
+
+#[test]
+fn checked_mir_editor_replaces_typed_terminator_operands_transactionally() {
+    let mut original = graph();
+    original.locals.push(local(Type::Scalar(ScalarType::Bool)));
+    original.parameters.push(MirLocal(5));
+    let mut editor = MirEditor::open(original.clone()).unwrap();
+
+    let condition = editor
+        .replace_terminator_operand(
+            MirBlockId(0),
+            MirTerminatorOperand::Condition,
+            MirLocal(5),
+        )
+        .unwrap();
+    assert_eq!(
+        condition,
+        MirAnalysisInvalidation::USES
+            | MirAnalysisInvalidation::FLOW
+            | MirAnalysisInvalidation::VALUES
+            | MirAnalysisInvalidation::COST
+    );
+    let edge_argument = editor
+        .replace_terminator_operand(
+            MirBlockId(0),
+            MirTerminatorOperand::EdgeArgument {
+                edge: MirEdge::Then,
+                index: 0,
+            },
+            MirLocal(2),
+        )
+        .unwrap();
+    assert_eq!(edge_argument, condition);
+    let returned = editor
+        .replace_terminator_operand(
+            MirBlockId(1),
+            MirTerminatorOperand::ReturnValue,
+            MirLocal(1),
+        )
+        .unwrap();
+    assert_eq!(returned, condition);
+    assert!(matches!(
+        editor.finish().blocks[0].terminator,
+        MirTerminator::SwitchBool {
+            condition: MirLocal(5),
+            ref then_arguments,
+            ..
+        } if then_arguments == &vec![MirLocal(2)]
+    ));
+
+    let mut rejected = MirEditor::open(original.clone()).unwrap();
+    assert!(rejected
+        .replace_terminator_operand(
+            MirBlockId(0),
+            MirTerminatorOperand::EdgeArgument {
+                edge: MirEdge::Then,
+                index: 1,
+            },
+            MirLocal(2),
+        )
+        .is_err());
+    assert_eq!(
+        rejected.finish(),
+        original.clone().with_frozen_operation_arena()
+    );
+
+    let mut rejected_type = MirEditor::open(original.clone()).unwrap();
+    assert!(rejected_type
+        .replace_terminator_operand(
+            MirBlockId(0),
+            MirTerminatorOperand::EdgeArgument {
+                edge: MirEdge::Then,
+                index: 0,
+            },
+            MirLocal(0),
+        )
+        .is_err());
+    assert_eq!(
+        rejected_type.finish(),
+        original.with_frozen_operation_arena(),
+        "a rejected type-changing phi payload must not leak into the MIR body"
+    );
 }
 
 #[test]

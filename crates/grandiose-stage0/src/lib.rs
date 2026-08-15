@@ -91,6 +91,7 @@ pub use mir::{
     MirOperationId, MirOptimizationReport, MirPattern, MirPatternField, MirPerformSiteData,
     MirPerformSiteId, MirPlaceBindingData, MirPlaceBindingId, MirProgram, MirResumptionSiteData,
     MirResumptionSiteId, MirResumptionSiteKind, MirScopeData, MirScopeId, MirTerminator,
+    MirTerminatorOperand,
     MirTraitMethodInstance, optimize as optimize_mir,
 };
 pub use mir_storage::{

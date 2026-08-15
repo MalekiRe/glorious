@@ -381,6 +381,22 @@ pub enum MirEdge {
     Leave,
 }
 
+/// A typed mutable local slot in a terminator.  CFG transformations often
+/// preserve the terminator's control shape while changing one incoming phi
+/// payload or branch condition; representing those slots explicitly keeps
+/// that edit within the checked MIR transaction boundary.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MirTerminatorOperand {
+    /// The boolean discriminant of a `SwitchBool` terminator.
+    Condition,
+    /// The returned value of a `Return` terminator.
+    ReturnValue,
+    /// One argument carried by a selected successor edge.  The edge selector
+    /// prevents callers from accidentally treating a branch payload as a
+    /// return value or another successor's phi input.
+    EdgeArgument { edge: MirEdge, index: u32 },
+}
+
 /// Stable body-local identity for one executable MIR instruction.  Like block
 /// identities, operation IDs are never recycled: deleting an instruction
 /// leaves a tombstone so diagnostics, analysis worklists, and a later edit
@@ -2045,6 +2061,42 @@ impl MirEditor {
         Ok(invalidation)
     }
 
+    /// Replace one local operand in a terminator without changing its control
+    /// shape.  This is deliberately narrower than [`Self::replace_terminator`]
+    /// so passes that merely rewrite a phi input or branch discriminant retain
+    /// precise invalidation and cannot accidentally retarget an edge.
+    pub fn replace_terminator_operand(
+        &mut self,
+        block: MirBlockId,
+        operand: MirTerminatorOperand,
+        replacement: MirLocal,
+    ) -> Result<MirAnalysisInvalidation, String> {
+        let before = self
+            .function
+            .blocks
+            .get(block.0 as usize)
+            .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?
+            .terminator
+            .clone();
+        let mut after = before.clone();
+        replace_terminator_operand(&mut after, operand, replacement)?;
+        let invalidation = terminator_replacement_invalidation(&before, &after);
+        self.transaction(invalidation, |function| {
+            let terminator = &mut function
+                .blocks
+                .get_mut(block.0 as usize)
+                .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?
+                .terminator;
+            replace_terminator_operand(terminator, operand, replacement)?;
+            // This is a no-op for ordinary operand edits today, but retaining
+            // the synchronization boundary means any future control-bearing
+            // terminator operand cannot bypass frozen label metadata.
+            synchronize_terminator_control(function, block)?;
+            Ok(())
+        })?;
+        Ok(invalidation)
+    }
+
     /// Redirect exactly one typed successor edge.  The target's argument
     /// contract and all frozen control identities are checked as one
     /// transaction, so an invalid attempt never leaves a partially rewired
@@ -2466,6 +2518,78 @@ fn redirect_terminator_edge(
             Ok(())
         }
         _ => Err("MIR edge selector does not match the source terminator".into()),
+    }
+}
+
+fn replace_terminator_operand(
+    terminator: &mut MirTerminator,
+    operand: MirTerminatorOperand,
+    replacement: MirLocal,
+) -> Result<(), String> {
+    match (terminator, operand) {
+        (MirTerminator::SwitchBool { condition, .. }, MirTerminatorOperand::Condition) => {
+            *condition = replacement;
+            Ok(())
+        }
+        (MirTerminator::Return { value }, MirTerminatorOperand::ReturnValue) => {
+            *value = replacement;
+            Ok(())
+        }
+        (
+            MirTerminator::Goto { arguments, .. },
+            MirTerminatorOperand::EdgeArgument {
+                edge: MirEdge::Goto,
+                index,
+            },
+        )
+        | (
+            MirTerminator::Leave { arguments, .. },
+            MirTerminatorOperand::EdgeArgument {
+                edge: MirEdge::Leave,
+                index,
+            },
+        ) => {
+            let argument = arguments.get_mut(index as usize).ok_or_else(|| {
+                format!("MIR edge argument index {index} is outside the selected edge")
+            })?;
+            *argument = replacement;
+            Ok(())
+        }
+        (
+            MirTerminator::SwitchBool { then_arguments, .. },
+            MirTerminatorOperand::EdgeArgument {
+                edge: MirEdge::Then,
+                index,
+            },
+        ) => {
+            let argument = then_arguments.get_mut(index as usize).ok_or_else(|| {
+                format!("MIR edge argument index {index} is outside the selected edge")
+            })?;
+            *argument = replacement;
+            Ok(())
+        }
+        (
+            MirTerminator::SwitchBool { else_arguments, .. },
+            MirTerminatorOperand::EdgeArgument {
+                edge: MirEdge::Else,
+                index,
+            },
+        ) => {
+            let argument = else_arguments.get_mut(index as usize).ok_or_else(|| {
+                format!("MIR edge argument index {index} is outside the selected edge")
+            })?;
+            *argument = replacement;
+            Ok(())
+        }
+        (_, MirTerminatorOperand::EdgeArgument { .. }) => {
+            Err("MIR edge selector does not match the source terminator".into())
+        }
+        (_, MirTerminatorOperand::Condition) => {
+            Err("MIR condition operand does not match the source terminator".into())
+        }
+        (_, MirTerminatorOperand::ReturnValue) => {
+            Err("MIR return operand does not match the source terminator".into())
+        }
     }
 }
 
