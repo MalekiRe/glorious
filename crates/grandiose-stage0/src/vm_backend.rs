@@ -8913,7 +8913,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::Call { dst, arguments, .. } => {
                 for &argument in arguments {
                     read(&states, argument)?;
-                    verify_call_frame_control_transfer(&states, argument)?;
+                    verify_call_frame_resumption_transfer(&states, argument)?;
                 }
                 write(&mut states, *dst)?
             }
@@ -9028,7 +9028,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }
                 for (parameter, argument) in parameters.iter().zip(arguments) {
                     read(&states, *argument)?;
-                    verify_call_frame_control_transfer(&states, *argument)?;
+                    verify_call_frame_resumption_transfer(&states, *argument)?;
                     let found = register_type(function, *argument)?;
                     if parameter != &found {
                         return Err(VmArtifactError::TypeMismatch {
@@ -9159,21 +9159,14 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     }
 }
 
-/// Ordinary call frames are independent dynamic activations.  A lexical
-/// label or captured resumption can retain a target in the current activation,
-/// but it cannot be transported through a direct or ordinary indirect call:
-/// doing so would either leak that target or defer rejection until runtime's
-/// value rebasing.  Dynamic label invocation itself is handled above as the
-/// exceptional `CallIndirect` label case, never as a frame argument.
-fn verify_call_frame_control_transfer(
+/// A captured resumption is frame-scoped control authority, not an ordinary
+/// callable argument. A lexical label, by contrast, deliberately supports
+/// generic facade calls: the executor restores its captured caller frame on
+/// invocation. Only resumptions are forbidden at ordinary call boundaries.
+fn verify_call_frame_resumption_transfer(
     states: &VerifierState,
     register: u32,
 ) -> Result<(), VmArtifactError> {
-    if states.labels[register as usize] {
-        return Err(VmArtifactError::InvalidLabelContract {
-            message: "ordinary call arguments cannot transport a lexical label",
-        });
-    }
     if states.resumptions[register as usize] {
         return Err(VmArtifactError::HandlerResumeUnavailable);
     }
