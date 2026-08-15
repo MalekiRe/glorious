@@ -3755,6 +3755,25 @@ impl MirLowering {
         // ordinary callee. Give it a runtime token and a typed rejoin block
         // before generic value lowering sees the lexical scope as erased.
         if let Some(function) = lowerer
+            .lower_root_first_class_label_partial_forward_one_shot_handler(
+                body.root,
+                parameters.clone(),
+            )
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) = lowerer
             .lower_root_first_class_label_one_shot_handler(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -11371,6 +11390,286 @@ impl Lowerer<'_> {
     /// records the target as a VM token and the token invocation unwinds back
     /// to this typed rejoin block.
     ///
+    /// A first-class label may also cross an inner partial handler before it
+    /// is resumed by an outer exact-one-shot handler.  The partial frame is
+    /// retained in the forwarded continuation's `above` suffix.  Its failed
+    /// pattern therefore must `Forward`, while the dynamic label call made by
+    /// the restored computation abandons both handler frames at once.
+    fn lower_root_first_class_label_partial_forward_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let label = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => root,
+            CoreKind::Block(values) => values.last().copied().filter(|value| {
+                matches!(self.body.expression(*value).kind, CoreKind::Label { .. })
+            })?,
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            unreachable!("label selection was checked above");
+        };
+        let CoreKind::Block(label_values) = self.body.expression(body).kind.clone() else {
+            return None;
+        };
+        let (outer_handle, label_prefix) = label_values.split_last()?;
+        let CoreKind::Handle {
+            computation: outer_computation,
+            clauses: outer_clauses,
+        } = self.body.expression(*outer_handle).kind.clone()
+        else {
+            return None;
+        };
+        let inner_handle = match self.body.expression(outer_computation).kind.clone() {
+            CoreKind::Handle { .. } => outer_computation,
+            CoreKind::Block(values) => values.last().copied().filter(|value| {
+                matches!(self.body.expression(*value).kind, CoreKind::Handle { .. })
+            })?,
+            _ => return None,
+        };
+        let CoreKind::Handle {
+            computation: inner_computation,
+            clauses: inner_clauses,
+        } = self.body.expression(inner_handle).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Block(computation_values) =
+            self.body.expression(inner_computation).kind.clone()
+        else {
+            return None;
+        };
+        let (continuation, computation_prefix) = computation_values.split_last()?;
+        let [performed_binding] = computation_prefix else {
+            return None;
+        };
+        let CoreKind::Let {
+            name: performed_name,
+            value: performed,
+        } = self.body.expression(*performed_binding).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+            ..
+        } = self.body.expression(performed).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Call { callee, .. } = self.body.expression(*continuation).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Local(callee_name) = self.body.expression(callee).kind.clone() else {
+            return None;
+        };
+        if !label_prefix.iter().any(|id| {
+            matches!(
+                self.body.expression(*id).kind,
+                CoreKind::Let { ref name, value }
+                    if name == &callee_name
+                        && matches!(self.body.expression(value).kind, CoreKind::LabelValue { brand: found } if found == brand)
+            )
+        }) {
+            return None;
+        }
+        let outer_matches = outer_clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let inner_matches = inner_clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let ([outer], [inner]) = (outer_matches.as_slice(), inner_matches.as_slice()) else {
+            return None;
+        };
+        let CoreHandlerResumption::Explicit {
+            quantity: outer_quantity,
+            ..
+        } = outer.resumption
+        else {
+            return None;
+        };
+        let CoreHandlerResumption::Explicit {
+            quantity: inner_quantity,
+            ..
+        } = inner.resumption
+        else {
+            return None;
+        };
+        if outer_quantity != crate::quantity::Quantity::ONCE
+            || inner_quantity != crate::quantity::Quantity::ONCE
+            || outer.patterns.len() != argument_ids.len()
+            || inner.patterns.len() != argument_ids.len()
+            || !outer.patterns.iter().all(pattern_is_irrefutable)
+            || inner.patterns.iter().all(pattern_is_irrefutable)
+            || self.handler_body_uses_snapshot_alias(outer.body)
+            || self.handler_body_uses_snapshot_alias(inner.body)
+        {
+            return None;
+        }
+        // A partial frame must really be partial. This preserves the only
+        // legal fall-through edge as a dynamic `Forward`, never as an
+        // accidental normal completion of the inner handler.
+        if inner.patterns.iter().all(pattern_is_irrefutable) {
+            return None;
+        }
+
+        let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
+        self.label_values.insert(brand, (MirBlockId(1), join));
+        for expression in label_prefix {
+            self.statement(*expression)?;
+        }
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        let outer_payloads = outer
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), performed))
+            .collect::<Vec<_>>();
+        let inner_payloads = inner
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), performed))
+            .collect::<Vec<_>>();
+        let result = self.alloc(self.body.expression(performed).ty.clone(), performed);
+        self.instructions.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
+            effect: outer.effect.definition,
+            effect_arguments: outer.effect.arguments.clone(),
+            operation: outer.operation,
+            payload_destinations: outer_payloads.clone(),
+            resume_type: self.body.expression(performed).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(2),
+        });
+        self.instructions.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
+            effect: inner.effect.definition,
+            effect_arguments: inner.effect.arguments.clone(),
+            operation: inner.operation,
+            payload_destinations: inner_payloads.clone(),
+            resume_type: self.body.expression(performed).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(3),
+        });
+        self.instructions.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
+            dst: result,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        self.named.insert(performed_name, result);
+        self.values.insert(*performed_binding, result);
+        self.value(*continuation)?;
+        // This synthetic fallthrough is retained exclusively for verifier
+        // state: a real `Label<T>` invocation jumps to the rejoin block.
+        self.instructions.push(MirInstruction::UninstallHandler);
+        self.instructions.push(MirInstruction::UninstallHandler);
+        let entry_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(&outer.patterns, &outer_payloads)?;
+        let outer_resumed = self.direct_handler_clause_value(outer)?;
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: outer_resumed,
+        });
+        let outer_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.bind_handler_patterns(&inner.patterns, &inner_payloads)?;
+        let inner_resumed = self.direct_handler_clause_value(inner)?;
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: inner_resumed,
+        });
+        let inner_instructions = std::mem::take(&mut self.instructions);
+        let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), performed);
+        let pattern = lower_pattern(inner.patterns[0].clone())?;
+        self.label_values.remove(&brand);
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: outer_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: condition,
+                        subject: inner_payloads[0],
+                        pattern,
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: MirBlockId(4),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(5),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: inner_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
+        })
+    }
+
     /// This is the smallest handler-stack extension for a first-class label
     /// called by the continuation restored from a one-shot operation.  The
     /// label is minted before `InstallHandler`, so its VM token records the

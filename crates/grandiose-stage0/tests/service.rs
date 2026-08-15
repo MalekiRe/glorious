@@ -8109,6 +8109,35 @@ fn service_dynamic_label_call_abandons_a_resumption_return() {
 }
 
 #[test]
+fn service_dynamic_label_call_leaves_a_nested_partial_handler_forwarding_chain() {
+    // The inner partial handler declines `ask(1)` and forwards it to the
+    // outer one-shot handler. Resuming the outer frame restores that inner
+    // handler above it; the label was captured before either installation, so
+    // invoking it must abandon both frames and rejoin with 42.
+    let source = r#"
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub fn main() -> i64 {
+            @done: i64 {
+                let exit = @done;
+                handle {
+                    handle {
+                        let answer = Ask::ask(1);
+                        exit(answer + 1)
+                    } {
+                        Ask::ask(0) with k => k(0),
+                    }
+                } {
+                    Ask::ask(value) with k => k(41),
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_allows_an_immediately_invoked_closure_to_capture_a_resumption() {
     let source = r#"
         effect Ask { [1, 1] ask() -> i64; }
