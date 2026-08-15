@@ -2114,6 +2114,61 @@ fn service_generic_facade_label_rejoins_after_multi_payload_forwarding() {
 }
 
 #[test]
+fn service_generic_label_forward_cancellation_cleans_protected_multi_payload_scope() {
+    // ask(true, 1) passes the first inner pattern then fails the second, so
+    // the partial row forwards to the outer cancellation arm. Its generic
+    // label call leaves the scope owning Probe; that protected value must be
+    // dropped exactly once before the rejoined completion observes `count`.
+    let root = r#"
+        use facade::escape;
+        effect Ask { [0, 1] ask(flag: Bool, value: i64) -> i64; }
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0, 1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> {
+            drop(&mut self) -> { *self.target = *self.target + 1; }
+        }
+        pub fn main() -> i64 {
+            let count = 40;
+            handle {
+                @outer: i64 {
+                    @inner: i64 {
+                        let probe = Probe { target: &mut count };
+                        handle {
+                            handle Ask::ask(true, 1) {
+                                Ask::ask(true, 0) with k => k(0),
+                            }
+                        } {
+                            Ask::ask(flag, value) with _ => escape(@inner, value + 41),
+                        }
+                    }
+                }
+            } {
+                value => count + value + 100,
+            }
+        }
+    "#;
+    let mut input = request(root);
+    input.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::escape;".as_slice(),
+    ));
+    input.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn escape<L>(destination: L, value: i64) -> ! where L: Label<i64> { destination(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(input)
+        .expect("forwarded cancellation must retain cleanup through a generic label call");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 183);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.run_i64().unwrap(), 183);
+}
+
+#[test]
 fn service_accepts_symbolic_structural_const_layout_contracts() {
     let source = "pub struct Tag<n: u32> {} pub fn identity<n: u32>(value: Tag<n + 1>) -> Tag<1 + n> { value } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new()

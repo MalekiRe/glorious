@@ -12132,9 +12132,12 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let completion_root = match self.body.expression(root).kind.clone() {
-            CoreKind::Block(values) => values.last().copied().unwrap_or(root),
-            _ => root,
+        let (completion_root, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                (*last, prefix.to_vec())
+            }
+            _ => (root, Vec::new()),
         };
         let CoreKind::Completion {
             computation: completion_computation,
@@ -12227,7 +12230,11 @@ impl Lowerer<'_> {
         let CoreHandlerResumption::Explicit { quantity, .. } = inner.resumption else {
             return None;
         };
-        if quantity != crate::quantity::Quantity::ONCE {
+        // The forwarded inner arm invokes its continuation exactly once.
+        // `[0, 1]` is therefore as sound here as `[1, 1]`: the outer arm may
+        // cancel its own continuation after the `Forward`, while the inner
+        // frame still consumes the one continuation use it actually makes.
+        if !quantity.contains(crate::quantity::Quantity::ONCE) {
             return None;
         }
         let mut selected = None;
@@ -12243,6 +12250,15 @@ impl Lowerer<'_> {
             }
         }
         let brand = selected?;
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        // The dynamic label may skip every nested label/handler frame, but
+        // the completion remains outside those lexical scopes.  Keep the
+        // outer environment so the rejoin can destroy values introduced by
+        // the labels before it evaluates the completion arm.
+        let outer_label_named = self.named.clone();
+        let outer_label_values = self.values.clone();
         let join = self.alloc(self.body.expression(root_label).ty.clone(), CoreId(u32::MAX));
         self.label_values.insert(brand, (MirBlockId(1), join));
         let token = self.alloc(
@@ -12317,6 +12333,9 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
+        self.cleanup_scope_bindings(&outer_label_named, Some(join))?;
+        self.named = outer_label_named.clone();
+        self.values = outer_label_values.clone();
         self.bind_completion_clause(completion, join)?;
         let completed = self.value(completion.body)?;
         let completion_instructions = std::mem::take(&mut self.instructions);

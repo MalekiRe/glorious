@@ -68,6 +68,8 @@ coarse. The composite fixtures cover:
   facade transfer, and the enclosing normal-completion rejoin;
 - ordered multi-payload refutable forwarding preserves every successful
   prefix test before a later mismatch reaches the generic-label rejoin;
+- a forwarded cancellation through that generic-label rejoin drops its
+  protected lexical payload once before the completion observes outer state;
 - source-defined control names and contextual delayed blocks selected by `Fn`
   constraints rather than compiler-known names;
 - fresh callable/environment brands, sealed `RunsIn` evidence, the canonical
