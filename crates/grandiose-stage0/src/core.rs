@@ -2929,7 +2929,65 @@ impl TypedBody {
         // post-hoc assertion.  In particular, a result such as
         // `(i64 -> i64, Array<i64>)` supplies the parameter type of a compact
         // closure and the element type of an empty array nested in the body.
-        let root = elaborator.expression_expected(body.root, expected_result.clone());
+        // Every named callable introduces an implicit lexical label bearing
+        // its own name.  The label brand is static proof identity owned by
+        // the definition; each invocation still gets its own runtime leave
+        // target during MIR lowering.  Install it before elaborating the
+        // body so `@function_name(value)` resolves exactly like a compact
+        // lexical label, while nested closures remain unable to capture it.
+        let implicit_label = definition
+            .name
+            .clone()
+            .filter(|name| {
+                body.expressions.iter().any(|expression| {
+                    matches!(
+                        &expression.kind,
+                        ExprKind::Transfer { name: target, .. } if target == name
+                    )
+                })
+            })
+            .map(|name| {
+                let result = expected_result
+                    .clone()
+                    .unwrap_or_else(|| elaborator.inference.fresh());
+                let brand = LabelBrand {
+                    owner: definition.key,
+                    label: elaborator.next_label,
+                };
+                elaborator.next_label += 1;
+                elaborator.active_labels.push(ActiveLabel {
+                    name,
+                    brand,
+                    result: result.clone(),
+                });
+                (brand, result)
+            });
+        let body_root = elaborator.expression_expected(body.root, expected_result.clone());
+        let root = if let Some((brand, result)) = implicit_label {
+            let _active = elaborator
+                .active_labels
+                .pop()
+                .expect("implicit callable label must outlive its body");
+            let body_type = elaborator.expressions[body_root.0 as usize].ty.clone();
+            let mut transfers = Vec::new();
+            collect_transfer_brands(&elaborator.expressions, body_root, &mut transfers);
+            let rejoined_by_own_transfer = transfers.into_iter().any(|target| target == brand);
+            let label_type = if matches!(body_type, Type::Never) && !rejoined_by_own_transfer {
+                Type::Never
+            } else {
+                result
+            };
+            elaborator.alloc(
+                CoreKind::Label {
+                    brand,
+                    body: body_root,
+                },
+                label_type,
+                definition.span,
+            )
+        } else {
+            body_root
+        };
         if let Some(expected) = expected_result {
             let actual = elaborator.expressions[root.0 as usize].ty.clone();
             if elaborator
