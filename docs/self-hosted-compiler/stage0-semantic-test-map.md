@@ -378,6 +378,11 @@ coarse. The composite fixtures cover:
   recursive const, and overlapping-impl revisions roll back without publishing
   derived interfaces (`typed_core_selects_inherited_associated_consts_for_nominal_arithmetic`,
   `service_rolls_back_const_hrtb_supertrait_cycles_before_publication`).
+- an opaque callback can simultaneously select defaulted supertrait type GAT,
+  effect-row GAT, and const contracts. Its legal facade executes through the
+  VM, while recursive-const and mixed-polarity provider revisions preserve the
+  prior artifact and publish neither cache changes nor dependency traces
+  (`service_rolls_back_defaulted_supertrait_callback_contract_revisions`).
 - a Child-named projection first requires Child evidence; Parent evidence alone
   cannot select its inherited type, effect-row, or const. A negative Child
   implementation remains equally authoritative. Direct solver and Core checks

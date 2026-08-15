@@ -17692,6 +17692,101 @@ fn service_rolls_back_mixed_polarity_hrtb_effect_rows_through_recursive_facades(
 }
 
 #[test]
+fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
+    // The public callback is opaque at the root, while its parameter, result,
+    // effect row, and layout-bearing const all select Base defaults through
+    // Top.  Revisions that refute Top or make the selected const recursive
+    // must fail transactionally: neither may reuse the legal facade or VM
+    // product left by the prior revision.
+    let root = "use facade::{Callback, Gateway as Capability, Trace}; pub struct Witness<n: u32> { value: i64 } pub fn forward() -> Callback { Capability<i64>::relay } pub fn apply(callback: Callback) -> i64 / Trace<7, i64> { let value = 34; let witness = Witness<<i64 as Capability<i64>>::Width> { value: 7 }; Trace<7, i64>::note(callback(&value) + witness.value) } pub fn main() -> i64 { handle apply(forward()) { Trace<7, i64>::note(value) with k => k(value + 1) } }";
+    let provider = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Base<T> { const Width: u32; type Item<'a, n: u32> = i64; type Effects<'a, n: u32>: EffectRow = {Trace<n, <Self as Base<T>>::Item<'a, n>>}; fn relay<'a>(value: &'a i64) -> <Self as Base<T>>::Item<'a, <Self as Base<T>>::Width> / { <Self as Base<T>>::Effects<'a, <Self as Base<T>>::Width> }; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} pub type Callback = for<'a> (&'a i64) -> <i64 as Top<i64>>::Item<'a, <i64 as Top<i64>>::Width> / { <i64 as Top<i64>>::Effects<'a, <i64 as Top<i64>>::Width> }; impl Base<i64> for i64 { const Width = 7; fn relay<'a>(value: &'a i64) -> <i64 as Base<i64>>::Item<'a, <i64 as Base<i64>>::Width> / { <i64 as Base<i64>>::Effects<'a, <i64 as Base<i64>>::Width> } { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}";
+    let recursive = provider.replacen(
+        "const Width = 7",
+        "const Width = <i64 as Base<i64>>::Width",
+        1,
+    );
+    let mixed = format!("{provider} impl !Top<i64> for i64 {{}}");
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Callback, Top as Gateway, Trace};".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@1.0.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+
+    let mut ordered = world(provider);
+    let artifact = StageZeroCompiler::new()
+        .compile(ordered.clone())
+        .expect("selected defaulted supertrait callback contract must execute")
+        .artifact
+        .unwrap();
+    ordered.sources.reverse();
+    let reordered = StageZeroCompiler::new()
+        .compile(ordered)
+        .expect("source order must not perturb the defaulted callback contract")
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let trace = compiler
+        .dependency_trace(parent, &facade)
+        .expect("legal callback facade must freeze before revisions");
+
+    for (label, candidate, code) in [
+        ("recursive const", recursive.as_str(), "G4157"),
+        ("mixed polarity", mixed.as_str(), "G3406"),
+    ] {
+        let cache = compiler.interface_cache_stats();
+        let rejected_world = world(candidate);
+        let rejected = compiler
+            .import_revision(rejected_world.clone(), Some(parent))
+            .unwrap();
+        let error = compiler
+            .compile_session(&compiler.open_session(rejected).unwrap())
+            .expect_err("invalid defaulted callback revision must not publish");
+        assert!(
+            error.diagnostics().iter().any(|diagnostic| diagnostic.code == code),
+            "{label} revision missing {code}: {:#?}",
+            error.diagnostics()
+        );
+        assert_eq!(compiler.interface_cache_stats(), cache, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()));
+        let mut reordered = rejected_world;
+        reordered.sources.reverse();
+        assert_eq!(
+            error.diagnostics(),
+            StageZeroCompiler::new()
+                .compile(reordered)
+                .expect_err("source order cannot admit an invalid callback revision")
+                .diagnostics(),
+            "{label} diagnostics must be canonical"
+        );
+        assert_eq!(
+            compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(),
+            parent_artifact.canonical_bytes(),
+            "{label} revision disturbed the legal executable artifact"
+        );
+    }
+}
+
+#[test]
 fn recursive_public_facade_globs_deduplicate_the_same_callable_alias_identity() {
     // Every imported spelling below ultimately names the provider declaration.
     // A module SCC must therefore not turn identical public aliases into a
