@@ -673,6 +673,40 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
         "an i64 register must not be accepted as a Text byte-length result"
     );
 
+    let mut bytes_from_array = graph();
+    bytes_from_array
+        .locals
+        .push(local(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))));
+    bytes_from_array
+        .blocks[0]
+        .instructions
+        .push(MirInstruction::BytesFromArrayMove {
+            dst: MirLocal(1),
+            value: MirLocal(5),
+        });
+    assert!(
+        bytes_from_array
+            .validate()
+            .is_err_and(|error| error.contains("Bytes-from-array result")),
+        "an i64 register must not be accepted as a Bytes-from-array result"
+    );
+
+    let mut bytes_to_array = graph();
+    bytes_to_array.locals.push(local(Type::Scalar(ScalarType::Bytes)));
+    bytes_to_array
+        .blocks[0]
+        .instructions
+        .push(MirInstruction::BytesToArray {
+            dst: MirLocal(1),
+            value: MirLocal(5),
+        });
+    assert!(
+        bytes_to_array
+            .validate()
+            .is_err_and(|error| error.contains("Array<u8> result")),
+        "an i64 register must not be accepted as a Bytes-to-array result"
+    );
+
     let mut array_size = graph();
     let i64 = Type::Scalar(ScalarType::I64);
     array_size.locals.push(local(Type::Reference {

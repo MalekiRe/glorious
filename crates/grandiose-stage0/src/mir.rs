@@ -7040,6 +7040,32 @@ impl MirFunction {
                 self.require_scalar_locals(&[*dst], ScalarType::Usize, "Bytes length result")?;
                 self.require_scalar_locals(&[*value], ScalarType::Bytes, "Bytes length input")?;
             }
+            MirInstruction::BytesFromArrayMove { dst, value } => {
+                self.require_scalar_locals(
+                    &[*dst],
+                    ScalarType::Bytes,
+                    "Bytes-from-array result",
+                )?;
+                self.validate_local_type(
+                    *value,
+                    &Type::Array(Box::new(Type::Scalar(ScalarType::U8))),
+                    "Bytes-from-array conversion",
+                    "an owned Array<u8> input",
+                )?;
+            }
+            MirInstruction::BytesToArray { dst, value } => {
+                self.validate_local_type(
+                    *dst,
+                    &Type::Array(Box::new(Type::Scalar(ScalarType::U8))),
+                    "Bytes-to-array conversion",
+                    "an Array<u8> result",
+                )?;
+                self.require_scalar_locals(
+                    &[*value],
+                    ScalarType::Bytes,
+                    "Bytes-to-array input",
+                )?;
+            }
             MirInstruction::BytesConcat { dst, left, right } => {
                 self.require_scalar_locals(&[*dst, *left, *right], ScalarType::Bytes, "Bytes concatenation")?;
             }
