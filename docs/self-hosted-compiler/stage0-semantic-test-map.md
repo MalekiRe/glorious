@@ -113,6 +113,12 @@ coarse. The composite fixtures cover:
   required `G4190` rejection rather than retaining a cyclic provisional
   interface (`service_executes_recursive_module_facade_gat_effect_contracts_through_vm`,
   `service_rejects_unselected_recursive_module_facade_gat_effect_contracts`).
+- callable type aliases retain braced associated effect-row projections in
+  their header rather than being cut off as declaration bodies. A reciprocal
+  module facade can therefore export a generic GAT callback alias, select the
+  inherited trait method as its indirect value, and execute the handler path
+  in the VM (`scanner_keeps_braced_callable_effect_rows_inside_type_alias_headers`,
+  `service_executes_recursive_facade_gat_callback_aliases_through_vm`).
 - effect declaration visibility across dependency-package boundaries, including
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate

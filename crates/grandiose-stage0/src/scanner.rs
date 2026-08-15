@@ -300,14 +300,20 @@ impl Scanner<'_> {
                         .expect("matched delimiter is significant")
                         + 1;
                 }
-                // A braced callable effect row is part of a function header,
-                // not its body.  The scanner need not understand effect-row
-                // members: a preceding `/` is the unambiguous structural
-                // delimiter, and the lossless delimiter map skips the row.
+                // A braced callable effect row is part of a callable header,
+                // not its body.  This includes a callable type alias such as
+                // `type Callback = () -> T / {Trace};`: aliases have no body
+                // at all, so treating the row as one truncates the target
+                // before header parsing. The scanner need not understand
+                // effect-row members: a preceding `/` is the unambiguous
+                // structural delimiter, and the lossless delimiter map skips
+                // the row.
                 TokenKind::Punctuation('{')
                     if matches!(
                         kind,
-                        DeclarationKind::Function | DeclarationKind::HostImport
+                        DeclarationKind::Function
+                            | DeclarationKind::HostImport
+                            | DeclarationKind::TypeAlias
                     ) && self.significant.get(cursor.saturating_sub(1)).is_some_and(
                         |previous| {
                             self.lexed.tokens[*previous].kind == TokenKind::Operator

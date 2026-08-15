@@ -10874,6 +10874,24 @@ fn service_rejects_unselected_recursive_module_facade_gat_effect_contracts() {
 }
 
 #[test]
+fn service_executes_recursive_facade_gat_callback_aliases_through_vm() {
+    // The callback alias is declared in the reciprocal module, so its generic
+    // row projection crosses both the module SCC and alias normalization
+    // before a selected trait method becomes an indirect VM callable.
+    let root = "pub mod left; pub mod right; use left::*; use right::Callback; pub fn apply(callback: Callback<i64>) -> i64 / Trace<i64> { callback(0, 41) } pub fn main() -> i64 { handle apply(Capability<i64>::relay) { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let left = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<e: EffectRow, U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U>, | e }; } pub use crate::right::Child as Capability;";
+    let right = "pub use crate::left::{Parent, Trace}; pub trait Child<T>: Parent<T> {} pub use crate::right::Child as Capability; pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> }; impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<e: EffectRow, U>(receiver: i64, value: U) -> i64 / {Trace<U>, | e} { Trace<U>::note(value) } } impl Child<i64> for i64 {}";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            root,
+            &[("src/left/left.glorious", left), ("src/right/right.glorious", right)],
+        ))
+        .expect("a recursive facade callback alias must materialize into the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_aliased_reexported_generic_trait_gats_without_an_impl() {
     // The implementation-contract normalizer is allowed to reduce only after
     // selection.  A facade alias does not manufacture the missing parent

@@ -45,6 +45,19 @@ fn scanner_rejects_an_unterminated_declaration_structurally() {
 }
 
 #[test]
+fn scanner_keeps_braced_callable_effect_rows_inside_type_alias_headers() {
+    let scan = scan("effect Trace { note() -> i64; } type Callback = () -> i64 / {Trace}; pub fn main() -> i64 { 0 }");
+    assert!(scan.diagnostics.is_empty(), "{:#?}", scan.diagnostics);
+    assert_eq!(scan.declarations.len(), 3);
+    assert_eq!(scan.declarations[1].kind, DeclarationKind::TypeAlias);
+    assert!(
+        scan.declarations[1].body.is_none(),
+        "a type alias effect row must not be misclassified as a body"
+    );
+    assert_eq!(scan.declarations[2].kind, DeclarationKind::Function);
+}
+
+#[test]
 fn scanner_keeps_constant_initializers_as_lazy_expression_body_ranges() {
     let package = PackageKey("scanner-const@0.1.0".into());
     let source = "const answer: i64 = 40 + 2;";
