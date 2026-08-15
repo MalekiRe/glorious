@@ -7055,6 +7055,50 @@ impl MirFunction {
                     )?;
                 }
             }
+            MirInstruction::IntGenericIntrinsic {
+                dst,
+                primitive,
+                arguments,
+            } => {
+                let Some((parameters, result)) = primitive.integer_scalar_signature(ScalarType::I64) else {
+                    return Err("MIR generic integer primitive has an invalid ABI".into());
+                };
+                if arguments.len() != parameters.len() {
+                    return Err("MIR generic integer primitive has the wrong arity".into());
+                }
+                let Some(first) = arguments.first() else {
+                    return Err("MIR generic integer primitive has no scalar operand".into());
+                };
+                let Type::Generic(generic) = self.local_type(*first)? else {
+                    return Err(
+                        "MIR generic integer primitive requires a generic scalar operand".into(),
+                    );
+                };
+                let expected_result = if result == ScalarType::I64 {
+                    Type::Generic(*generic)
+                } else {
+                    Type::Scalar(result)
+                };
+                self.validate_local_type(
+                    *dst,
+                    &expected_result,
+                    "generic integer primitive",
+                    "the primitive result type",
+                )?;
+                for (argument, parameter) in arguments.iter().zip(parameters) {
+                    let expected = if parameter == ScalarType::I64 {
+                        Type::Generic(*generic)
+                    } else {
+                        Type::Scalar(parameter)
+                    };
+                    self.validate_local_type(
+                        *argument,
+                        &expected,
+                        "generic integer primitive",
+                        "the primitive operand type",
+                    )?;
+                }
+            }
             MirInstruction::TextByteLen { dst, value } => {
                 self.require_scalar_locals(&[*dst], ScalarType::Usize, "Text byte length result")?;
                 self.require_scalar_locals(&[*value], ScalarType::Text, "Text byte length input")?;

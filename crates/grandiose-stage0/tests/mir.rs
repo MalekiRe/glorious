@@ -727,6 +727,39 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
         "a Bool register must not be accepted as an i64 integer-leaf operand"
     );
 
+    let mut generic_integer_result = graph();
+    generic_integer_result.locals.push(local(Type::Generic(0)));
+    generic_integer_result.blocks[0]
+        .instructions
+        .push(MirInstruction::IntGenericIntrinsic {
+            dst: MirLocal(5),
+            primitive: PrimitiveRole::IntEqual,
+            arguments: vec![MirLocal(5), MirLocal(5)],
+        });
+    assert!(
+        generic_integer_result
+            .validate()
+            .is_err_and(|error| error.contains("primitive result type")),
+        "a generic integer comparison must retain its fixed u32 result type"
+    );
+
+    let mut generic_integer_operand = graph();
+    generic_integer_operand.locals.push(local(Type::Generic(0)));
+    generic_integer_operand.locals.push(local(Type::Scalar(ScalarType::U32)));
+    generic_integer_operand.blocks[0]
+        .instructions
+        .push(MirInstruction::IntGenericIntrinsic {
+            dst: MirLocal(5),
+            primitive: PrimitiveRole::IntWrappingAdd,
+            arguments: vec![MirLocal(5), MirLocal(6)],
+        });
+    assert!(
+        generic_integer_operand
+            .validate()
+            .is_err_and(|error| error.contains("primitive operand type")),
+        "generic integer operands must use one materialization placeholder"
+    );
+
     let mut text = graph();
     text.locals.push(local(Type::Scalar(ScalarType::Text)));
     text.blocks[0]
