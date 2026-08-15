@@ -3447,9 +3447,32 @@ pub fn optimize(function: MirFunction) -> Result<(MirFunction, MirOptimizationRe
             break;
         }
     }
+    // Distinct predecessor registers may still carry one proven literal.
+    // Materialize that literal at the target rather than selecting an
+    // arbitrary predecessor register; this preserves the typed parallel-edge
+    // contract while removing the redundant phi transport itself.
+    while let Some((block, parameter, value, predecessors)) =
+        constant_phi_candidate(&editor.function)
+    {
+        if simplify_constant_phi(&mut editor, block, parameter, value, &predecessors).is_ok() {
+            report.eliminated_phis += 1;
+        } else {
+            break;
+        }
+    }
     let function = editor.finish();
     function.validate()?;
     Ok((function, report))
+}
+
+fn dynamic_entry_blocks(function: &MirFunction) -> BTreeSet<MirBlockId> {
+    function
+        .control
+        .labels
+        .iter()
+        .map(|label| label.destination)
+        .chain(function.control.handlers.iter().map(|handler| handler.target))
+        .collect()
 }
 
 /// Return one simplifiable block parameter together with all incoming typed
@@ -3459,13 +3482,7 @@ pub fn optimize(function: MirFunction) -> Result<(MirFunction, MirOptimizationRe
 fn trivial_phi_candidate(
     function: &MirFunction,
 ) -> Option<(MirBlockId, usize, MirLocal, Vec<(MirBlockId, MirEdge)>)> {
-    let dynamic_entries = function
-        .control
-        .labels
-        .iter()
-        .map(|label| label.destination)
-        .chain(function.control.handlers.iter().map(|handler| handler.target))
-        .collect::<BTreeSet<_>>();
+    let dynamic_entries = dynamic_entry_blocks(function);
     for (block_index, block_data) in function.blocks.iter().enumerate() {
         let block = MirBlockId(block_index as u32);
         if block == function.entry
@@ -3501,6 +3518,80 @@ fn trivial_phi_candidate(
         }
     }
     None
+}
+
+fn constant_phi_candidate(
+    function: &MirFunction,
+) -> Option<(MirBlockId, usize, Constant, Vec<(MirBlockId, MirEdge)>)> {
+    let entries = block_entry_constants(function);
+    let dynamic_entries = dynamic_entry_blocks(function);
+    for (block_index, block_data) in function.blocks.iter().enumerate() {
+        let block = MirBlockId(block_index as u32);
+        if block == function.entry
+            || function.control.tombstoned_blocks.contains(&block)
+            || dynamic_entries.contains(&block)
+        {
+            continue;
+        }
+        let predecessors = ordinary_predecessor_edges(function, block);
+        if predecessors.is_empty() {
+            continue;
+        }
+        for (parameter_index, &parameter) in block_data.parameters.iter().enumerate() {
+            let mut value = None;
+            let mut all_agree = true;
+            for &(predecessor, edge) in &predecessors {
+                let Some(entry) = entries.get(predecessor.0 as usize).cloned().flatten() else {
+                    all_agree = false;
+                    break;
+                };
+                let (_, exit, _) = fold_block(
+                    function.blocks[predecessor.0 as usize].instructions.clone(),
+                    entry,
+                );
+                let Some(argument) = edge_arguments(
+                    &function.blocks[predecessor.0 as usize].terminator,
+                    edge,
+                )
+                .and_then(|arguments| arguments.get(parameter_index))
+                else {
+                    all_agree = false;
+                    break;
+                };
+                let Some(incoming) = exit.get(argument).cloned() else {
+                    all_agree = false;
+                    break;
+                };
+                match &value {
+                    Some(previous) if previous != &incoming => {
+                        all_agree = false;
+                        break;
+                    }
+                    Some(_) => {}
+                    None => value = Some(incoming),
+                }
+            }
+            let Some(value) = value else {
+                continue;
+            };
+            if all_agree && constant_matches_local(function, parameter, &value) {
+                return Some((block, parameter_index, value, predecessors));
+            }
+        }
+    }
+    None
+}
+
+fn constant_matches_local(function: &MirFunction, local: MirLocal, value: &Constant) -> bool {
+    let expected = match value {
+        Constant::I64(_) => Type::Scalar(crate::types::ScalarType::I64),
+        Constant::F32(_) => Type::Scalar(crate::types::ScalarType::F32),
+        Constant::F64(_) => Type::Scalar(crate::types::ScalarType::F64),
+        Constant::Bool(_) => Type::Scalar(crate::types::ScalarType::Bool),
+        Constant::Char(_) => Type::Scalar(crate::types::ScalarType::Char),
+        Constant::Text(_) => Type::Scalar(crate::types::ScalarType::Text),
+    };
+    function.local_type(local).is_ok_and(|actual| actual == &expected)
 }
 
 fn ordinary_predecessor_edges(
@@ -3619,14 +3710,57 @@ fn simplify_trivial_phi(
     })
 }
 
+fn simplify_constant_phi(
+    editor: &mut MirEditor,
+    block: MirBlockId,
+    parameter_index: usize,
+    value: Constant,
+    predecessors: &[(MirBlockId, MirEdge)],
+) -> Result<(), String> {
+    editor.transaction(MirAnalysisInvalidation::ALL, |function| {
+        let parameter = *function
+            .blocks
+            .get(block.0 as usize)
+            .and_then(|block| block.parameters.get(parameter_index))
+            .ok_or_else(|| "MIR constant phi parameter no longer exists".to_owned())?;
+        if !constant_matches_local(function, parameter, &value) {
+            return Err("MIR constant phi type changed during simplification".into());
+        }
+        let instruction = constant_instruction(parameter, Some(&value))
+            .ok_or_else(|| "MIR constant phi has no materializable value".to_owned())?;
+        let block_data = function
+            .blocks
+            .get_mut(block.0 as usize)
+            .ok_or_else(|| format!("MIR constant phi block {} is absent", block.0))?;
+        block_data.parameters.remove(parameter_index);
+        block_data.instructions.insert(0, instruction);
+        function.control.operations.relocate_block_from(block, 0, 1);
+        function.control.operations.allocate(MirOperationData {
+            block,
+            instruction_index: 0,
+        });
+        for &(predecessor, edge) in predecessors {
+            let arguments = edge_arguments_mut(
+                &mut function
+                    .blocks
+                    .get_mut(predecessor.0 as usize)
+                    .ok_or_else(|| {
+                        format!("MIR constant phi predecessor {} is absent", predecessor.0)
+                    })?
+                    .terminator,
+                edge,
+            )?;
+            if arguments.get(parameter_index).is_none() {
+                return Err("MIR constant phi predecessor lost its argument".into());
+            }
+            arguments.remove(parameter_index);
+        }
+        Ok(())
+    })
+}
+
 fn ordinary_phi_use_region(function: &MirFunction, start: MirBlockId) -> BTreeSet<MirBlockId> {
-    let dynamic_entries = function
-        .control
-        .labels
-        .iter()
-        .map(|label| label.destination)
-        .chain(function.control.handlers.iter().map(|handler| handler.target))
-        .collect::<BTreeSet<_>>();
+    let dynamic_entries = dynamic_entry_blocks(function);
     let mut region = BTreeSet::new();
     let mut pending = VecDeque::from([start]);
     while let Some(block) = pending.pop_front() {
