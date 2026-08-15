@@ -4022,6 +4022,7 @@ fn service_rejects_partial_move_when_a_conditional_drop_impl_is_selected() {
 fn service_selects_conditional_drop_through_generic_nominal_facades() {
     let moving_root = "use facade::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
     let cleanup_root = "use facade::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet; 42 }";
+    let handler_cleanup_root = "use facade::{make, Token}; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let packet = make<Token>(Token {}); handle Tick::tick() { Tick::tick() with _ => { move packet; 42 } } }";
     let provider = "pub trait Mark: Use<[0, 0]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T>; } impl Family for i64 { type Item<T> = Packet<T>; } pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } }";
     let selected = format!("{provider} impl Use<[0, 0]> for Token {{}} impl Mark for Token {{}}");
     let world = |root: &str, provider: &str| {
@@ -4040,6 +4041,9 @@ fn service_selects_conditional_drop_through_generic_nominal_facades() {
 
     let cleanup = StageZeroCompiler::new().compile(world(cleanup_root, &selected)).expect("selected conditional Drop permits whole-value transfer and must lower its cleanup into the VM").artifact.unwrap();
     assert_eq!(cleanup.run_i64().unwrap(), 42);
+
+    let handler_cleanup = StageZeroCompiler::new().compile(world(handler_cleanup_root, &selected)).expect("selected conditional Drop must retain whole-value cleanup through a handler capture").artifact.unwrap();
+    assert_eq!(handler_cleanup.run_i64().unwrap(), 42);
 
     let compiler = StageZeroCompiler::new();
     let parent = compiler.import_revision(world(moving_root, provider), None).unwrap();
