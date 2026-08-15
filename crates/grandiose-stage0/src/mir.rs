@@ -3754,6 +3754,22 @@ impl MirLowering {
         // use the static `Leave` probe below: its transfer executes in an
         // ordinary callee. Give it a runtime token and a typed rejoin block
         // before generic value lowering sees the lexical scope as erased.
+        if let Some(function) = lowerer
+            .lower_root_first_class_label_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer.lower_root_first_class_label(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -11354,6 +11370,191 @@ impl Lowerer<'_> {
     /// its join; a first-class label deliberately does not, so execution
     /// records the target as a VM token and the token invocation unwinds back
     /// to this typed rejoin block.
+    ///
+    /// This is the smallest handler-stack extension for a first-class label
+    /// called by the continuation restored from a one-shot operation.  The
+    /// label is minted before `InstallHandler`, so its VM token records the
+    /// outer handler depth; after `Resume`, calling it abandons the protected
+    /// continuation instead of returning through the handler clause.
+    fn lower_root_first_class_label_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let label = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => root,
+            CoreKind::Block(values) => values.last().copied().filter(|value| {
+                matches!(self.body.expression(*value).kind, CoreKind::Label { .. })
+            })?,
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            unreachable!("label selection was checked above");
+        };
+        let CoreKind::Block(label_values) = self.body.expression(body).kind.clone() else {
+            return None;
+        };
+        let (handled, label_prefix) = label_values.split_last()?;
+        let CoreKind::Handle {
+            computation,
+            clauses,
+        } = self.body.expression(*handled).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Block(computation_values) = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let (continuation, computation_prefix) = computation_values.split_last()?;
+        let [CoreId(_)] = computation_prefix else {
+            return None;
+        };
+        let performed_binding = computation_prefix[0];
+        let CoreKind::Let {
+            name: performed_name,
+            value: performed,
+        } = self.body.expression(performed_binding).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+            ..
+        } = self.body.expression(performed).kind.clone()
+        else {
+            return None;
+        };
+        // The terminal continuation must be an indirect call through a label
+        // capability established in this lexical body. This keeps direct
+        // `transfer` lowering and ordinary callable calls on their existing
+        // paths.
+        let CoreKind::Call { callee, .. } = self.body.expression(*continuation).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Local(callee_name) = self.body.expression(callee).kind.clone() else {
+            return None;
+        };
+        if !label_prefix.iter().any(|id| {
+            matches!(
+                self.body.expression(*id).kind,
+                CoreKind::Let { ref name, value }
+                    if name == &callee_name
+                        && matches!(self.body.expression(value).kind, CoreKind::LabelValue { brand: found } if found == brand)
+            )
+        }) {
+            return None;
+        }
+        let matching = clauses
+            .iter()
+            .filter(|clause| {
+                !clause.terminal && clause.effect == effect && clause.operation == operation
+            })
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        let CoreHandlerResumption::Explicit { quantity, .. } = clause.resumption else {
+            return None;
+        };
+        if quantity != crate::quantity::Quantity::ONCE
+            || clause.patterns.len() != argument_ids.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+            || self.handler_body_uses_snapshot_alias(clause.body)
+        {
+            return None;
+        }
+
+        let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
+        self.label_values.insert(brand, (MirBlockId(1), join));
+        for expression in label_prefix {
+            self.statement(*expression)?;
+        }
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let arguments = argument_ids
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        let payload_destinations = argument_ids
+            .iter()
+            .map(|argument| self.alloc(self.body.expression(*argument).ty.clone(), *argument))
+            .collect::<Vec<_>>();
+        let result = self.alloc(self.body.expression(performed).ty.clone(), performed);
+        self.instructions.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payload_destinations.clone(),
+            resume_type: self.body.expression(performed).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(2),
+        });
+        self.instructions.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
+            dst: result,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        self.named.insert(performed_name, result);
+        self.values.insert(performed_binding, result);
+        self.value(*continuation)?;
+        // The dynamic label never falls through at runtime, but retaining the
+        // canonical uninstall on the verifier's ordinary indirect-call edge
+        // proves that no handler frame can escape that synthetic path.
+        self.instructions.push(MirInstruction::UninstallHandler);
+        let entry_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        let resumed = self.direct_handler_clause_value(clause)?;
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: resumed,
+        });
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        self.label_values.remove(&brand);
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
+        })
+    }
+
     fn lower_root_first_class_label(
         &mut self,
         root: CoreId,

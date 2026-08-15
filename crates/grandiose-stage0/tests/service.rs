@@ -7909,6 +7909,31 @@ fn service_resumption_result_may_transfer_to_an_enclosing_label() {
 }
 
 #[test]
+fn service_dynamic_label_call_abandons_a_resumption_return() {
+    // `done` is captured as a first-class `Label<i64>` before the handler is
+    // installed, then called by the resumed computation. That call is a
+    // nonlocal jump, not a normal return from `k`: it must abandon the
+    // restored protected continuation and the inner handler.
+    let source = r#"
+        effect Ask { [1, 1] ask() -> i64; }
+        pub fn main() -> i64 {
+            @done: i64 {
+                let exit = @done;
+                handle {
+                    let answer = Ask::ask();
+                    exit(answer + 1)
+                } {
+                    Ask::ask() with k => k(41),
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_allows_an_immediately_invoked_closure_to_capture_a_resumption() {
     let source = r#"
         effect Ask { [1, 1] ask() -> i64; }
