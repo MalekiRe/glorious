@@ -4126,6 +4126,63 @@ fn dynamic_label_call_abandons_replay_return_frames() {
 }
 
 #[test]
+fn verifier_rejects_dynamic_label_rejoin_that_leaks_a_retained_facade() {
+    let owner = DefKey(Digest::of_bytes(b"dynamic-label-facade-owner"));
+    let facade = DefKey(Digest::of_bytes(b"dynamic-label-facade-effect"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // The label is minted inside the facade, so the rejoin deliberately
+    // retains that frame. Returning directly from the target is malformed:
+    // valid lowering must run the facade's UninstallHandler after completion.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![label, VmType::I64, VmType::Unit],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect: facade,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 5,
+                },
+                VmInstruction::MakeLabel {
+                    dst: 0,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 4,
+                    destination: 1,
+                },
+                VmInstruction::ConstI64 { dst: 1, value: 42 },
+                VmInstruction::CallIndirect {
+                    dst: 2,
+                    callee: 0,
+                    arguments: vec![1],
+                },
+                VmInstruction::Return { value: 1 },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"dynamic-label-facade-leak-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerStillActive)
+    ));
+}
+
+#[test]
 fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,

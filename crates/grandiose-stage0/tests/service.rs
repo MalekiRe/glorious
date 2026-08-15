@@ -8295,6 +8295,97 @@ fn service_dynamic_label_completion_effect_rejoins_through_enclosing_facade() {
 }
 
 #[test]
+fn service_rejects_dynamic_label_completion_facades_outside_the_one_shot_irrefutable_subset() {
+    // These shapes intentionally resemble the supported dynamic-label facade,
+    // but neither can safely use its synthetic one-shot rejoin. Each must
+    // stop at checked handler lowering rather than produce a malformed scope
+    // tree or an artifact with an active handler at return.
+    let hostile_facades = [
+        (
+            "replay facade",
+            r#"
+            effect Ask { [1, 1] ask(value: i64) -> i64; }
+            effect Audit { [2, 2] audit(value: i64) -> i64; }
+            pub fn main() -> i64 {
+                handle {
+                    handle {
+                        @done: i64 {
+                            let exit = @done;
+                            handle {
+                                handle { let answer = Ask::ask(1); exit(answer + 1) }
+                                { Ask::ask(0) with k => k(0), }
+                            } { Ask::ask(value) with k => k(41), }
+                        }
+                    } { value => Audit::audit(value), }
+                } { Audit::audit(value) with k => k(value + 100) + k(value + 101), }
+            }
+        "#,
+            "G6005",
+        ),
+        (
+            "discarding facade",
+            r#"
+            effect Ask { [1, 1] ask(value: i64) -> i64; }
+            effect Audit { [0, 1] audit(value: i64) -> i64; }
+            pub fn main() -> i64 {
+                handle {
+                    handle {
+                        @done: i64 {
+                            let exit = @done;
+                            handle {
+                                handle { let answer = Ask::ask(1); exit(answer + 1) }
+                                { Ask::ask(0) with k => k(0), }
+                            } { Ask::ask(value) with k => k(41), }
+                        }
+                    } { value => Audit::audit(value), }
+                } { Audit::audit(_) => 142, }
+            }
+        "#,
+            "G6005",
+        ),
+        (
+            "refutable facade",
+            r#"
+            effect Ask { [1, 1] ask(value: i64) -> i64; }
+            effect Audit { [1, 1] audit(value: i64) -> i64; }
+            pub fn main() -> i64 {
+                handle {
+                    handle {
+                        @done: i64 {
+                            let exit = @done;
+                            handle {
+                                handle { let answer = Ask::ask(1); exit(answer + 1) }
+                                { Ask::ask(0) with k => k(0), }
+                            } { Ask::ask(value) with k => k(41), }
+                        }
+                    } { value => Audit::audit(value), }
+                } {
+                    Audit::audit(0) with k => k(0),
+                    Audit::audit(value) with k => k(value + 100),
+                }
+            }
+        "#,
+            "G6005",
+        ),
+    ];
+    for (shape, source, expected_code) in hostile_facades {
+        let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+            StageZeroCompiler::new().compile(request(source))
+        else {
+            panic!("unsupported {shape} dynamic-label facade unexpectedly compiled");
+        };
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.code == expected_code),
+            "expected {expected_code} for {shape}, got: {diagnostics:#?}"
+        );
+        assert!(
+            !diagnostics.iter().any(|diagnostic| diagnostic.code == "G7010"),
+            "unsupported facade must not form malformed handler scopes: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
 fn service_allows_an_immediately_invoked_closure_to_capture_a_resumption() {
     let source = r#"
         effect Ask { [1, 1] ask() -> i64; }
