@@ -16,10 +16,11 @@ use crate::{
     DefinitionIndex, DependencyNode, DependencyTrace, DiagnosticClass, Digest, ElaboratedHeader,
     ElaboratedInterface, EscapeFlow, FixityTable, GenericArgument, InputError, InstanceGraph,
     InstanceKey, InstanceLimits, InstanceRoot, MirFunction, MirInstance, MirInstruction,
-    MirLowering, MirProgram, ModuleGraph, ParsedHeader, PlaceFlow, PrimitiveRole, PublicationGuard,
-    RequestSession, RetentionReport, RevisionError, RevisionId, Severity, SourceSpan, Span,
-    TraitConstProjectionAnswer, TraitGoal, TraitSolver, TrustedRuntimeManifest, Type, TypedBody,
-    UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key, verify_vm_program,
+    MirLowering, MirProgram, ModuleGraph, PackageKey, ParsedHeader, PlaceFlow, PrimitiveRole,
+    PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId, Severity,
+    SourceSpan, Span, TraitConstProjectionAnswer, TraitGoal, TraitSolver, TrustedRuntimeManifest,
+    Type, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key,
+    verify_vm_program,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -463,6 +464,214 @@ pub struct CompilationOutcome {
     pub bootstrap_manifest: Option<BootstrapManifest>,
     /// Deterministic executable-instance discovery evidence.
     pub instance_graph: Option<InstanceGraph>,
+}
+
+/// The immutable product of one successfully elaborated body.  This is kept
+/// private deliberately: consumers below this boundary receive only a body
+/// that has crossed the body session's publication gate, never the mutable
+/// parser/elaboration scratch that created it.
+#[derive(Debug)]
+struct PublishedBody {
+    definition: DefKey,
+    is_constant: bool,
+    valid: bool,
+    core: TypedBody,
+    flow: PlaceFlow,
+}
+
+/// Request-local owner for one package's demanded body work.
+///
+/// A package session borrows the request's immutable snapshot and controls,
+/// but owns only package-local mutable staging.  It intentionally does not
+/// own source bytes, interfaces, or an interner: those remain immutable
+/// database products.  Dropping an unfinished package session discards all
+/// staged bodies, so no partial package product can escape a failed request.
+#[derive(Debug)]
+struct PackageSession<'request> {
+    request: &'request RequestSession,
+    package: PackageKey,
+    demanded_bodies: BTreeSet<DefKey>,
+    staged_bodies: Vec<PublishedBody>,
+}
+
+impl<'request> PackageSession<'request> {
+    fn new(request: &'request RequestSession, package: PackageKey) -> Self {
+        Self {
+            request,
+            package,
+            demanded_bodies: BTreeSet::new(),
+            staged_bodies: Vec::new(),
+        }
+    }
+
+    /// Open the sole mutable owner for a body.  The `&mut self` borrow makes
+    /// it impossible to open two active sessions for the same package through
+    /// this API, and `demanded_bodies` makes accidental duplicate admission an
+    /// explicit compiler invariant rather than silent duplicate publication.
+    fn open_body(
+        &mut self,
+        definition: DefKey,
+        is_constant: bool,
+        syntax: BodySyntax,
+    ) -> BodySession<'_, 'request> {
+        let inserted = self.demanded_bodies.insert(definition);
+        assert!(
+            inserted,
+            "body `{definition:?}` was admitted twice by package `{}`",
+            self.package.0,
+        );
+        BodySession {
+            package: self,
+            definition,
+            is_constant,
+            syntax,
+        }
+    }
+
+    fn finish(mut self) -> Vec<PublishedBody> {
+        // The worklist is a deterministic set.  Sort the staged result too,
+        // so later instance discovery never acquires source traversal order
+        // as an accidental semantic input.
+        self.staged_bodies.sort_by_key(|body| body.definition);
+        self.staged_bodies
+    }
+}
+
+/// Affine mutable owner for one body elaboration.
+///
+/// It owns transient syntax and receives the Typed Core/PlaceFlow scratch at
+/// publication.  Consuming `self` in [`Self::publish`] is the only path that
+/// transfers a body product to its package session; normal Rust destruction
+/// rolls back an incomplete body by dropping its scratch instead.
+#[must_use = "a body session must publish its completed body or be dropped to roll back scratch"]
+struct BodySession<'package, 'request> {
+    package: &'package mut PackageSession<'request>,
+    definition: DefKey,
+    is_constant: bool,
+    syntax: BodySyntax,
+}
+
+impl BodySession<'_, '_> {
+    fn syntax(&self) -> &BodySyntax {
+        &self.syntax
+    }
+
+    /// Stage a complete immutable body product.  The checkpoint happens
+    /// before mutation of package staging, so cancellation/resource failure
+    /// cannot publish this body even to request-local staging.  The enclosing
+    /// request transaction remains the sole external publication boundary.
+    fn publish(self, valid: bool, core: TypedBody, flow: PlaceFlow) -> Result<(), ServiceError> {
+        self.package.request.checkpoint(1)?;
+        self.package.staged_bodies.push(PublishedBody {
+            definition: self.definition,
+            is_constant: self.is_constant,
+            valid,
+            core,
+            flow,
+        });
+        Ok(())
+    }
+}
+
+/// Affine owner for MIR publication staging.
+///
+/// `MirLowering` keeps its detailed local arenas internally, while this
+/// context owns every package-level mutable product that survives an
+/// individual lowering call: the deterministic function table and constant
+/// roots.  A function crosses this boundary only after the lowerer and the
+/// optimizer have both returned a validated immutable product.  Dropping the
+/// context abandons the entire staged MIR set.
+#[derive(Debug, Default)]
+struct LoweringContext {
+    functions: BTreeMap<DefKey, MirFunction>,
+    constants: BTreeSet<DefKey>,
+}
+
+impl LoweringContext {
+    fn stage_root(&mut self, definition: DefKey, is_constant: bool, function: MirFunction) {
+        if is_constant {
+            self.constants.insert(definition);
+        }
+        self.functions.insert(definition, function);
+    }
+
+    /// Return the just-published product when its identity is fresh.  A
+    /// collision remains a diagnostic at the caller so one malformed body
+    /// cannot silently replace an earlier staged function.
+    fn stage_lifted(&mut self, definition: DefKey, function: MirFunction) -> Option<&MirFunction> {
+        if self.functions.insert(definition, function).is_some() {
+            None
+        } else {
+            self.functions.get(&definition)
+        }
+    }
+
+    fn function(&self, definition: DefKey) -> &MirFunction {
+        self.functions
+            .get(&definition)
+            .expect("a staged MIR function must remain owned by its lowering context")
+    }
+
+    fn finish(self) -> (BTreeMap<DefKey, MirFunction>, BTreeSet<DefKey>) {
+        (self.functions, self.constants)
+    }
+}
+
+#[derive(Debug)]
+enum EmissionFailure {
+    Emit(String),
+    UnauthorizedCapability(String),
+    Verify(String),
+}
+
+/// Affine owner for the final VM-artifact construction boundary.
+///
+/// This session owns the selected reachable program and the mutable candidate
+/// artifact until verification succeeds.  Its only success path consumes the
+/// session and returns a frozen VM image; all failure paths drop the candidate
+/// without publication.
+#[derive(Debug)]
+struct EmissionSession {
+    program: MirProgram,
+    runtime_manifest: Option<TrustedRuntimeManifest>,
+}
+
+impl EmissionSession {
+    fn new(program: MirProgram, runtime_manifest: Option<TrustedRuntimeManifest>) -> Self {
+        Self {
+            program,
+            runtime_manifest,
+        }
+    }
+
+    fn mir_dependencies(&self) -> Vec<DependencyNode> {
+        self.program
+            .functions
+            .keys()
+            .copied()
+            .map(DependencyNode::Mir)
+            .collect()
+    }
+
+    fn emit(
+        self,
+        capability_granted: impl Fn(&str) -> bool,
+    ) -> Result<VerifiedVmProgram, EmissionFailure> {
+        let mut candidate = emit_vm_program(&self.program)
+            .map_err(|error| EmissionFailure::Emit(format!("{error:?}")))?;
+        if let Some(capability) = candidate
+            .host_capabilities
+            .iter()
+            .find(|capability| !capability_granted(capability))
+        {
+            return Err(EmissionFailure::UnauthorizedCapability(capability.clone()));
+        }
+        if let Some(manifest) = &self.runtime_manifest {
+            candidate.runtime_manifest = Some(manifest.digest);
+            candidate.fingerprint = candidate.computed_fingerprint();
+        }
+        verify_vm_program(candidate).map_err(|error| EmissionFailure::Verify(format!("{error:?}")))
+    }
 }
 #[derive(Debug)]
 pub enum ServiceError {
@@ -1161,13 +1370,23 @@ impl StageZeroCompiler {
             return Err(failed(input_fingerprint, diagnostics, &source_lengths));
         }
         let entry = entry.key;
-        let mut functions = BTreeMap::new();
-        let mut constants = BTreeSet::new();
+        let mut lowering = LoweringContext::default();
         // Bodies are elaborated before any MIR lowering. This keeps every
         // lowering request rooted in one immutable package world and gives
         // static handler specialization read-only access to direct callee
         // Core products without reopening source or consulting host state.
-        let mut body_products = Vec::<(DefKey, bool, bool, TypedBody, PlaceFlow)>::new();
+        // One request may demand bodies from several packages.  Keep their
+        // mutable staging separate even though this Stage0 implementation
+        // still consumes the resulting immutable products in one later
+        // instance-discovery pass.
+        let mut package_sessions = graphs
+            .keys()
+            .cloned()
+            .map(|package| {
+                let session = PackageSession::new(session, package.clone());
+                (package, session)
+            })
+            .collect::<BTreeMap<_, _>>();
         for node in graphs.values().flat_map(|graph| graph.modules.values()) {
             session.checkpoint(1)?;
             let Some(source) = snapshot
@@ -1337,6 +1556,11 @@ impl StageZeroCompiler {
                 } else {
                     BodySyntax::parse(&lexed, text, body_range)
                 };
+                let body_session = package_sessions
+                    .get_mut(&node.key.package)
+                    .expect("every module graph has a request-local package session")
+                    .open_body(declaration.key, is_constant, body);
+                let body = body_session.syntax();
                 dependencies.record(
                     DependencyNode::Body(declaration.key),
                     body_fingerprint(&body),
@@ -1463,7 +1687,7 @@ impl StageZeroCompiler {
                     core.semantic_fingerprint(),
                     core_dependencies,
                 );
-                body_products.push((declaration.key, is_constant, valid, core, flow));
+                body_session.publish(valid, core, flow)?;
             }
             for implementation in node
                 .interface
@@ -1502,8 +1726,13 @@ impl StageZeroCompiler {
                         // invent a body contract during recovery.
                         continue;
                     };
-                    let body = BodySyntax::parse(&lexed, text, body_range);
                     let method_key = implementation_method_key(implementation.key, &method.name);
+                    let body = BodySyntax::parse(&lexed, text, body_range);
+                    let body_session = package_sessions
+                        .get_mut(&node.key.package)
+                        .expect("every module graph has a request-local package session")
+                        .open_body(method_key, false, body);
+                    let body = body_session.syntax();
                     dependencies.record(
                         DependencyNode::Body(method_key),
                         body_fingerprint(&body),
@@ -1626,13 +1855,17 @@ impl StageZeroCompiler {
                         core.semantic_fingerprint(),
                         core_dependencies,
                     );
-                    body_products.push((method_key, false, valid, core, flow));
+                    body_session.publish(valid, core, flow)?;
                 }
             }
         }
+        let body_products = package_sessions
+            .into_values()
+            .flat_map(PackageSession::finish)
+            .collect::<Vec<_>>();
         let typed_bodies = body_products
             .iter()
-            .map(|(definition, _, _, core, _)| (*definition, core.clone()))
+            .map(|body| (body.definition, body.core.clone()))
             .collect::<BTreeMap<_, _>>();
         // Demand-discover the executable spine before lowering.  This is not
         // monomorphization: it records only concrete callable identities and
@@ -1841,7 +2074,14 @@ impl StageZeroCompiler {
                 instance_dependencies,
             );
         }
-        for (definition, is_constant, valid, core, flow) in body_products {
+        for PublishedBody {
+            definition,
+            is_constant,
+            valid,
+            core,
+            flow,
+        } in body_products
+        {
             session.checkpoint(1)?;
             if !valid {
                 continue;
@@ -1868,15 +2108,12 @@ impl StageZeroCompiler {
                         continue;
                     }
                 };
-                if is_constant {
-                    constants.insert(definition);
-                }
                 dependencies.record(
                     DependencyNode::Mir(definition),
                     mir_fingerprint(&mir),
                     vec![DependencyNode::Core(definition)],
                 );
-                functions.insert(definition, mir);
+                lowering.stage_root(definition, is_constant, mir);
                 for (lifted_definition, lifted) in lowered.lifted {
                     let lifted = match crate::mir::optimize(lifted) {
                         Ok((mir, _)) => mir,
@@ -1888,15 +2125,13 @@ impl StageZeroCompiler {
                             continue;
                         }
                     };
-                    if functions.insert(lifted_definition, lifted).is_some() {
+                    if lowering.stage_lifted(lifted_definition, lifted).is_none() {
                         diagnostics.push(CompileDiagnostic::invariant(
                             "G7009",
                             "lifted callable identity collided with another function",
                         ));
                     } else {
-                        let lifted = functions
-                            .get(&lifted_definition)
-                            .expect("lifted function was inserted");
+                        let lifted = lowering.function(lifted_definition);
                         dependencies.record(
                             DependencyNode::Mir(lifted_definition),
                             mir_fingerprint(lifted),
@@ -1906,6 +2141,7 @@ impl StageZeroCompiler {
                 }
             }
         }
+        let (mut functions, constants) = lowering.finish();
         let instances = match materialize_concrete_instances(
             &mut functions,
             &instance_graph,
@@ -1965,61 +2201,41 @@ impl StageZeroCompiler {
                 .expect("reachable function count fits in request work budget")
                 .saturating_add(1),
         )?;
-        let mut candidate = emit_vm_program(&program).map_err(|error| {
-            failed(
-                input_fingerprint,
-                vec![CompileDiagnostic::invariant(
-                    "G7004",
-                    format!("VM emission rejected MIR: {error:?}"),
-                )],
-                &source_lengths,
-            )
-        })?;
-        // Emission derives the declaration list from actual HostCall edges,
-        // not the request's broader grant set.  Recheck the subset at the
-        // artifact boundary so a future MIR producer cannot smuggle a host
-        // instruction past the source authorization pass above.
-        if let Some(capability) = candidate.host_capabilities.iter().find(|capability| {
-            !snapshot
-                .world()
-                .capability_manifest
-                .iter()
-                .any(|grant| grant == *capability)
-        }) {
-            return Err(failed(
-                input_fingerprint,
-                vec![CompileDiagnostic::verification(
-                    "G7033",
-                    format!(
-                        "emitted host capability `{capability}` is not granted by the request manifest"
+        let emission = EmissionSession::new(program, runtime_manifest.clone());
+        let artifact_dependencies = emission.mir_dependencies();
+        let artifact = emission
+            .emit(|capability| {
+                snapshot
+                    .world()
+                    .capability_manifest
+                    .iter()
+                    .any(|grant| grant == capability)
+            })
+            .map_err(|error| {
+                let diagnostic = match error {
+                    EmissionFailure::Emit(error) => CompileDiagnostic::invariant(
+                        "G7004",
+                        format!("VM emission rejected MIR: {error}"),
                     ),
-                )],
-                &source_lengths,
-            ));
-        }
-        if let Some(manifest) = &runtime_manifest {
-            candidate.runtime_manifest = Some(manifest.digest);
-            candidate.fingerprint = candidate.computed_fingerprint();
-        }
-        let artifact = verify_vm_program(candidate).map_err(|error| {
-            failed(
-                input_fingerprint,
-                vec![CompileDiagnostic::verification(
-                    "G7005",
-                    format!("VM verification rejected emitted artifact: {error:?}"),
-                )],
-                &source_lengths,
-            )
-        })?;
+                    EmissionFailure::UnauthorizedCapability(capability) => {
+                        CompileDiagnostic::verification(
+                            "G7033",
+                            format!(
+                                "emitted host capability `{capability}` is not granted by the request manifest"
+                            ),
+                        )
+                    }
+                    EmissionFailure::Verify(error) => CompileDiagnostic::verification(
+                        "G7005",
+                        format!("VM verification rejected emitted artifact: {error}"),
+                    ),
+                };
+                failed(input_fingerprint, vec![diagnostic], &source_lengths)
+            })?;
         dependencies.record(
             DependencyNode::Artifact(snapshot.world().root_package.clone()),
             artifact.fingerprint(),
-            program
-                .functions
-                .keys()
-                .copied()
-                .map(DependencyNode::Mir)
-                .collect(),
+            artifact_dependencies,
         );
         session.checkpoint(1)?;
         let bootstrap_manifest = match &snapshot.world().mode {

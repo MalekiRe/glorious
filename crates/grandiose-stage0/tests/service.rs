@@ -8538,6 +8538,51 @@ fn bootstrap_stage_rejects_a_nonconvergent_expected_artifact() {
 }
 
 #[test]
+fn bootstrap_convergence_failure_discards_emission_session_staging() {
+    // The mismatch is diagnosed only after MIR selection, VM emission, and
+    // verification.  It is therefore the strongest observable rollback
+    // witness for the EmissionSession boundary: no package/interface or
+    // artifact dependency product may publish from that abandoned request.
+    let compiler = StageZeroCompiler::new();
+    let mut nonconvergent = request("pub fn main() -> i64 { 42 }");
+    nonconvergent.build.compiler = Digest::of_bytes(b"emission-session-rollback");
+    nonconvergent.mode = CompilationMode::Bootstrap(BootstrapStage {
+        ordinal: 2,
+        producer: Digest::of_bytes(b"emission-session-rollback"),
+        optimization_level: 2,
+        limits: BootstrapLimits::new(4, 16 * 1024),
+        expected_artifact: Some(Digest::of_bytes(b"emission-session-rollback")),
+    });
+    let failed_revision = compiler.import_revision(nonconvergent, None).unwrap();
+    let failed_session = compiler.open_session(failed_revision).unwrap();
+    let error = compiler.compile_session(&failed_session).unwrap_err();
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G7012")
+    );
+    assert!(compiler.dependency_traces(failed_revision).is_empty());
+    assert_eq!(compiler.interface_cache_stats().hits, 0);
+    assert_eq!(compiler.interface_cache_stats().misses, 0);
+
+    // A later request must start from fresh staging and publish normally.
+    let succeeding_revision = compiler
+        .import_revision(request("pub fn main() -> i64 { 42 }"), None)
+        .unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(succeeding_revision)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
 fn bootstrap_manifest_rejects_mismatched_codegen_even_when_artifacts_match() {
     let mut first = request("pub fn main() -> i64 { 42 }");
     first.build.compiler = Digest::of_bytes(b"seed");
