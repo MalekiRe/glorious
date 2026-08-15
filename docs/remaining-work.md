@@ -26,9 +26,9 @@ retained below but scheduled after the core language and tooling tranche.
 - extend the implemented typed `BlockId`/block-kind and `MirOperationId`
   checked editors, transactional block/operation tombstones, persistent
   local/place arenas, and frozen typed control-site tables (labels, handlers,
-  performances, and resumptions) to persistent typed arenas for move paths
-  and remaining source-storage scope artifacts; frozen bodies now publish the
-  full lexical label/handler scope tree and scope-aware handler candidates;
+  performances, and resumptions) to the remaining source-storage scope
+  artifacts; frozen bodies now publish typed move-path/binding tables, the
+  full lexical label/handler scope tree, and scope-aware handler candidates;
 - migrate the remaining edge redirection, block splitting/merging, operand,
   and terminator replacement paths through the checked editor (NormalizeCfg
   unreachable deletion and same-block scalar-`Move` removal are checked and
