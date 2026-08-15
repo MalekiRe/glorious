@@ -6467,7 +6467,7 @@ fn service_materializes_all_selected_items_through_recursive_generic_supertrait_
 
 #[test]
 fn service_executes_shared_gat_hrtb_reborrows_through_facades() {
-    let legal = "use facade::{relay, Callback}; pub fn apply(callback: Callback) -> i64 { let value = 41; let shared = &value; let closure = () -> i64 { *callback(shared) + 1 }; closure() } pub fn main() -> i64 { apply(relay) }";
+    let legal = "use facade::{relay, Callback}; effect Tick { [0,1] tick() -> i64; } pub fn apply(callback: Callback) -> i64 { let value = 41; let shared = &value; let closure = () -> i64 { *callback(shared) + 1 }; handle Tick::tick() { Tick::tick() with _ => closure() } } pub fn main() -> i64 { apply(relay) }";
     let provider = "pub trait Gate { type Item<'a>; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a>; impl Gate for i64 { type Item<'a> = &'a i64; } pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> { value }";
     let world = |root: &str| {
         let mut input = request(root);
