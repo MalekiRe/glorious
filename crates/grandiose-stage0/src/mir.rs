@@ -3854,10 +3854,10 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
-        // A skipped lazy branch is outside every handler's dynamic extent.
-        // Claim short-circuit roots before handler probes so an unreachable
-        // handler need not be lowered merely to prove it is not executed.
-        if lowerer.root_short_circuit_has_statically_skipped_branch(body.root)
+        // A statically determined lazy branch has a fixed dynamic extent.
+        // Claim it before generic handler probes so an unreachable branch is
+        // not lowered, while a selected handler can own the whole result.
+        if lowerer.root_short_circuit_has_literal_left(body.root)
             && let Some(function) = lowerer.lower_root_short_circuit(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
@@ -14128,7 +14128,7 @@ impl Lowerer<'_> {
             blocks,
         })
     }
-    fn root_short_circuit_has_statically_skipped_branch(&self, root: CoreId) -> bool {
+    fn root_short_circuit_has_literal_left(&self, root: CoreId) -> bool {
         let expression = match self.body.expression(root).kind.clone() {
             CoreKind::IntrinsicCall { .. } => root,
             CoreKind::Block(values) => match values.last() {
@@ -14146,8 +14146,7 @@ impl Lowerer<'_> {
             return false;
         };
         match (operator.as_str(), &self.body.expression(*left).kind) {
-            ("and", CoreKind::Literal(value)) => value == "false",
-            ("or", CoreKind::Literal(value)) => value == "true",
+            ("and" | "or", CoreKind::Literal(value)) => value == "true" || value == "false",
             _ => false,
         }
     }
@@ -14222,6 +14221,17 @@ impl Lowerer<'_> {
                     terminator: MirTerminator::Return { value: result },
                 }],
             });
+        }
+        // When a literal selects the lazy right branch, the entire boolean
+        // expression is observationally that branch. Reuse the dynamic
+        // interprocedural handler lowering after the block prefix has been
+        // emitted, rather than trying to lower `and`/`or` eagerly around a
+        // resumable frame.
+        if matches!(self.body.expression(left).kind, CoreKind::Literal(ref value)
+            if (operator == "and" && value == "true") || (operator == "or" && value == "false"))
+            && matches!(self.body.expression(right).kind, CoreKind::Handle { .. })
+        {
+            return self.lower_root_interprocedural_one_shot_handler(right, parameters);
         }
         let condition = self.value(left)?;
         let skipped = self.alloc(bool_ty.clone(), root);
