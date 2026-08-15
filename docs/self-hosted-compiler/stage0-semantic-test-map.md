@@ -218,6 +218,10 @@ coarse. The composite fixtures cover:
   arm for every cloned residual path, with fresh completion binders rather
   than a once-only wrapper around the initial performance
   (`service_replays_each_finite_resumption_through_deep_normal_completion`).
+  The dynamic facade path extends that guarantee through two refutable
+  partial-handler forwards and an imported cancellation: each outer replay
+  closes the inactive inner frames before selecting the completion arm
+  (`service_replays_nested_facade_cancellation_through_outer_normal_completion`).
   Existing service cases separately cover closure/handler captures
   (`service_move_captures_aggregate_roots_for_partial_closure_moves` and
   `service_joins_partial_aggregate_move_captures_across_handler_arms`), while

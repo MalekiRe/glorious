@@ -10581,6 +10581,31 @@ fn service_replays_through_two_partial_facade_handlers_before_nested_cancellatio
 }
 
 #[test]
+fn service_replays_nested_facade_cancellation_through_outer_normal_completion() {
+    // Each outer replay enters the imported relay through the public facade,
+    // forwards across both refutable inner handlers, then reaches the inner
+    // cancellation arm. The outer normal-completion clause must run once per
+    // replayed path, after the cancellation unwinds the inactive lower frames.
+    let mut request = request(
+        "use bridge::Console; use bridge::invoke; pub fn main() -> i64 { handle { handle { handle invoke(false) { Console::read(true) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(true) with k => k(3) + k(4) } } { value => value + 1; Console::read(_) with k => k(20) + k(21) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Console, relay}; pub fn invoke(value: Bool) -> i64 / Console { relay(value) }".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Console { [2,2] read(value: Bool) -> i64; [0,1] write(value: i64) -> i64; } pub fn relay(value: Bool) -> i64 / Console { let read = Console::read(value); Console::write(read) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new().compile(request);
+    let outcome = outcome.expect("completion must run after each replayed facade cancellation");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 82);
+}
+
+#[test]
 fn service_links_private_helpers_reached_from_specialized_dependency_generics() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(

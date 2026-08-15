@@ -18424,7 +18424,37 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let (middle, outer, root_prefix) = self.lexical_handle(root)?;
+        // A normal-completion arm around the outer handler belongs to every
+        // replayed residual path.  Peel it before recognizing the deep frame
+        // graph, then re-enter it after the inner cancellation has removed
+        // the inactive replay frames below it.
+        let (completion_root, leading_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Block(values) => {
+                let (tail, prefix) = values.split_last()?;
+                (*tail, prefix.to_vec())
+            }
+            _ => (root, Vec::new()),
+        };
+        let (handled, completion) = match self.body.expression(completion_root).kind.clone() {
+            CoreKind::Completion {
+                computation,
+                clauses,
+            } => (computation, Some(clauses)),
+            _ => (completion_root, None),
+        };
+        let completion = match completion {
+            Some(clauses) => {
+                let [clause] = clauses.as_slice() else {
+                    return None;
+                };
+                if !pattern_is_irrefutable(&clause.pattern) {
+                    return None;
+                }
+                Some(clause.clone())
+            }
+            None => None,
+        };
+        let (middle, outer, handler_prefix) = self.lexical_handle(handled)?;
         let (inner, middle_clauses, middle_prefix) = self.lexical_handle(middle)?;
         let (computation, inner_clauses, inner_prefix) = self.lexical_handle(inner)?;
         if outer.len() != 1 || middle_clauses.len() != 1 || inner_clauses.len() != 2 {
@@ -18503,14 +18533,18 @@ impl Lowerer<'_> {
         {
             return None;
         }
-        for expression in root_prefix {
-            self.statement(expression)?;
+        for expression in leading_prefix.iter().chain(handler_prefix.iter()) {
+            self.statement(*expression)?;
         }
         let arguments = arguments
             .into_iter()
             .map(|argument| self.value(argument))
             .collect::<Option<Vec<_>>>()?;
-        let result = self.alloc(self.body.expression(root).ty.clone(), root);
+        // Keep the protected computation result distinct from the enclosing
+        // completion result. A completion can be evaluated only after the
+        // handler frames have been removed, both on the ordinary call edge
+        // and on a cancellation returned to an outer replay.
+        let result = self.alloc(self.body.expression(computation).ty.clone(), root);
         let outer_payloads = outer_replay
             .payload_types
             .iter()
@@ -18599,6 +18633,17 @@ impl Lowerer<'_> {
 
         let boundary_named = self.named.clone();
         let boundary_values = self.values.clone();
+        let normal_result = if let Some(completion) = &completion {
+            self.instructions = Vec::new();
+            self.bind_completion_clause(completion, result)?;
+            let completed = self.value(completion.body)?;
+            entry.extend(std::mem::take(&mut self.instructions));
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            completed
+        } else {
+            result
+        };
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
@@ -18626,6 +18671,12 @@ impl Lowerer<'_> {
         for _ in 0..3 {
             self.instructions.push(MirInstruction::UninstallHandler);
         }
+        let cancellation_result = if let Some(completion) = &completion {
+            self.bind_completion_clause(completion, cancellation_value)?;
+            self.value(completion.body)?
+        } else {
+            cancellation_value
+        };
         let cancellation_instructions = std::mem::take(&mut self.instructions);
 
         let middle_pattern = lower_pattern(middle_replay.patterns.first()?.clone())?;
@@ -18682,7 +18733,9 @@ impl Lowerer<'_> {
                     scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
-                    terminator: MirTerminator::Return { value: result },
+                    terminator: MirTerminator::Return {
+                        value: normal_result,
+                    },
                 },
                 MirBlock {
                     scope: MirScopeId::ROOT,
@@ -18719,7 +18772,7 @@ impl Lowerer<'_> {
                     parameters: vec![],
                     instructions: cancellation_instructions,
                     terminator: MirTerminator::Return {
-                        value: cancellation_value,
+                        value: cancellation_result,
                     },
                 },
                 MirBlock {
