@@ -13002,6 +13002,11 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
 fn generic_argument_is_selectable_effect_projection(value: &GenericArgument) -> bool {
     generic_argument_is_concrete(value)
         || matches!(value, GenericArgument::Lifetime(Lifetime::Generic(_)))
+        // The selected trait head is still required to be concrete. A type
+        // item argument owned by this declaration therefore cannot choose an
+        // implementation; it is merely substituted into the already selected
+        // associated row (for example `<i64 as Gate>::Effects<'a, T>`).
+        || matches!(value, GenericArgument::Type(Type::Generic(_)))
         || matches!(
             value,
             GenericArgument::EffectRow(EffectRow {
