@@ -270,6 +270,13 @@ coarse. The composite fixtures cover:
   is rejected, then independently freeze the repaired provider identity and
   updated VM result without cache or diagnostic leakage
   (`service_isolates_parallel_cyclic_facades_across_versioned_provider_worlds`).
+- a three-version cyclic package facade may export same-named generic GAT
+  traits, effects, callable aliases, and fixity/trait pairs. Its public v0.1
+  provider executes, a v0.2 split across private and independently named
+  providers fails only during authority/identity resolution without publishing
+  products, and a repaired v0.3 provider yields new provider traces and
+  canonical VM bytes with no stale diagnostics
+  (`service_recovers_three_version_cyclic_alias_slice_without_stale_publication`).
 - two package facades may each contain a public module re-export cycle. When
   both ultimately expose one provider, aliases deduplicate to that identity;
   when they expose same-spelled distinct providers, both generic callback/GAT
