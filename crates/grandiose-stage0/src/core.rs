@@ -4985,9 +4985,20 @@ impl Elaborator<'_> {
                     &projection.name,
                     &projection.item_arguments,
                 ) {
-                TraitEffectRowProjectionAnswer::Normalized { row, .. } if row.tail.is_none() => {
+                TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
+                    let tails_compatible = match (&result.tail, &row.tail) {
+                        (None, _) | (_, None) => true,
+                        (Some(left), Some(right)) => left == right,
+                    };
+                    if !tails_compatible {
+                        unresolved.push(projection);
+                        continue;
+                    }
                     result.effects.extend(row.effects);
                     projections.extend(row.projections);
+                    if result.tail.is_none() {
+                        result.tail = row.tail;
+                    }
                 }
                 _ => unresolved.push(projection),
             }
@@ -8698,22 +8709,47 @@ impl Elaborator<'_> {
         // the former with fresh bound lifetimes while proving the value, then
         // retain a concrete `'static` instance for VM lowering just as named
         // HRTB function values do.
+        let hrtb_lifetime_slots = method_generic_kinds
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, kind)| {
+                matches!(kind, crate::GenericKind::Lifetime).then_some(slot)
+            })
+            .collect::<Vec<_>>();
         let hrtb_method_value = operation_arguments.is_empty()
             && expected_lifetime_binders > 0
-            && method_generic_kinds.len() == expected_lifetime_binders as usize
-            && method_generic_kinds
-                .iter()
-                .all(|kind| matches!(kind, crate::GenericKind::Lifetime));
+            && hrtb_lifetime_slots.len() == expected_lifetime_binders as usize;
         let selection_method_arguments = if hrtb_method_value {
-            (0..expected_lifetime_binders)
-                .map(|index| GenericArgument::Lifetime(Lifetime::Bound { depth: 0, index }))
+            method_arguments
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(slot, argument)| {
+                    hrtb_lifetime_slots
+                        .iter()
+                        .position(|lifetime_slot| *lifetime_slot == slot)
+                        .map(|index| {
+                            GenericArgument::Lifetime(Lifetime::Bound {
+                                depth: 0,
+                                index: index as u32,
+                            })
+                        })
+                        .unwrap_or(argument)
+                })
                 .collect()
         } else {
             method_arguments.clone()
         };
         let runtime_method_arguments = if hrtb_method_value {
-            (0..expected_lifetime_binders)
-                .map(|_| GenericArgument::Lifetime(Lifetime::Static))
+            method_arguments
+                .iter()
+                .cloned()
+                .enumerate()
+                .map(|(slot, argument)| {
+                    hrtb_lifetime_slots.contains(&slot).then_some(
+                        GenericArgument::Lifetime(Lifetime::Static),
+                    ).unwrap_or(argument)
+                })
                 .collect()
         } else {
             method_arguments.clone()
@@ -12654,6 +12690,20 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
 fn generic_argument_is_selectable_effect_projection(value: &GenericArgument) -> bool {
     generic_argument_is_concrete(value)
         || matches!(value, GenericArgument::Lifetime(Lifetime::Generic(_)))
+        || matches!(
+            value,
+            GenericArgument::EffectRow(EffectRow {
+                effects,
+                projections,
+                tail: Some(crate::EffectTail::Generic(_)),
+            }) if projections.is_empty()
+                && effects.iter().all(|effect| {
+                    effect
+                        .arguments
+                        .iter()
+                        .all(generic_argument_is_selectable_effect_projection)
+                })
+        )
 }
 
 fn literal_type(text: &str) -> Type {

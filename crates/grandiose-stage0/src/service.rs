@@ -2438,7 +2438,7 @@ fn materialize_concrete_instances(
         specialized.definition = executable;
         let body_arguments = materialization_body_arguments(&key, signatures)?;
         specialize_mir_local_types(&mut specialized, &body_arguments);
-        normalize_materialized_associated_consts(&mut specialized, signatures)?;
+        normalize_materialized_associated_projections(&mut specialized, signatures)?;
         materialize_deferred_scalar_operations(&mut specialized)?;
         register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
         targets.insert(key.clone(), executable);
@@ -2645,7 +2645,7 @@ fn materialize_lifted_callable_instances(
             })?;
             specialized.definition = target;
             specialize_mir_local_types(&mut specialized, body_arguments);
-            normalize_materialized_associated_consts(&mut specialized, signatures)?;
+            normalize_materialized_associated_projections(&mut specialized, signatures)?;
             materialize_deferred_scalar_operations(&mut specialized)?;
             register_specialized_nominal_copy_descriptors(&mut specialized, signatures);
             functions.insert(target, specialized);
@@ -3464,13 +3464,14 @@ fn specialize_generic_argument(
     }
 }
 
-/// A generic source body can legitimately retain `<T as Trait>::CONST` until
-/// its direct-call instance fixes `T`. Resolve those delayed const projections
-/// after ordinary binder substitution and before the clone becomes executable
-/// MIR. This is deliberately a separate pass from source elaboration: using
-/// the original template arguments here would select the wrong implementation
-/// for a concrete instance.
-fn normalize_materialized_associated_consts(
+/// A generic source body can legitimately retain an associated projection
+/// until its direct-call instance fixes the implementation subject. Resolve
+/// delayed const and effect-row projections after ordinary binder substitution
+/// and before the clone becomes executable MIR. This is deliberately a
+/// separate pass from source elaboration: using the original template
+/// arguments here would select the wrong implementation for a concrete
+/// instance.
+fn normalize_materialized_associated_projections(
     function: &mut MirFunction,
     signatures: &ElaboratedInterface,
 ) -> Result<(), String> {
@@ -3672,7 +3673,13 @@ fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result
                 .map(|parameter| normalize_materialized_type(parameter, solver))
                 .collect::<Result<_, _>>()?,
             result: Box::new(normalize_materialized_type(result, solver)?),
-            effects: normalize_materialized_effect_row(effects, solver)?,
+            // A materialized callable is an executable signature, rather
+            // than a declaration-owned symbolic contract.  In particular a
+            // GAT effect row selected for a `for<'a>` callback must be
+            // reduced while that callback's binder is live; otherwise the
+            // VM sees the projection in the function header but the selected
+            // row in its MakeCallable witness.
+            effects: normalize_materialized_effect_row(effects, solver, *lifetime_binders)?,
             invocation: *invocation,
         },
         value => value.clone(),
@@ -3682,8 +3689,9 @@ fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result
 fn normalize_materialized_effect_row(
     value: &crate::EffectRow,
     solver: &mut TraitSolver,
+    lifetime_binders: u32,
 ) -> Result<crate::EffectRow, String> {
-    Ok(crate::EffectRow {
+    let row = crate::EffectRow {
         effects: value
             .effects
             .iter()
@@ -3722,7 +3730,17 @@ fn normalize_materialized_effect_row(
             .collect::<Result<_, String>>()?,
         tail: value.tail,
     }
-    .canonicalized())
+    .canonicalized();
+    // Keep an unresolved row symbolic so the source checker remains the
+    // authority for diagnostics. Materialized concrete selections, however,
+    // must agree with their lowered callable witnesses.
+    Ok(if lifetime_binders == 0 {
+        solver.normalize_effect_row(row.clone()).unwrap_or(row)
+    } else {
+        solver
+            .normalize_effect_row_in_hrtb(row.clone(), lifetime_binders)
+            .unwrap_or(row)
+    })
 }
 
 fn normalize_materialized_generic_argument(
@@ -3734,7 +3752,7 @@ fn normalize_materialized_generic_argument(
             value, solver,
         )?)),
         GenericArgument::EffectRow(value) => Ok(GenericArgument::EffectRow(
-            normalize_materialized_effect_row(value, solver)?,
+            normalize_materialized_effect_row(value, solver, 0)?,
         )),
         GenericArgument::ConstProjection { .. } => {
             normalize_materialized_const_projection(value.clone(), solver)

@@ -5233,6 +5233,70 @@ fn service_materializes_positive_supertrait_hrtb_static_method_values_with_gat_r
 }
 
 #[test]
+fn service_forwards_open_rows_from_hrtb_static_method_gat_equalities_through_aliases() {
+    // The static method binds both a lifetime and an effect-row generic. Its
+    // GAT equality keeps that row open inside `forward`; selection must use
+    // the unique Top evidence through the alias without closing `e` early.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::{Gate, Trace}; pub fn forward<e: EffectRow>() -> for<'a> (&'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } { Capability<i64>::relay } pub fn apply(callback: for<'a> (&'a i64) -> i64 / Trace<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); Trace<i64>::note(result) } pub fn main() -> i64 { handle apply(forward<{}>()) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Gate, Top as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate { type Effects<'a, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate { fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <Self as Gate>::Effects<'a, e> } where Self: Gate<Effects<'a, e> = {Trace<i64>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate for i64 { type Effects<'a, e: EffectRow> = {Trace<i64>, | e}; } impl Base<i64> for i64 { fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } where i64: Gate<Effects<'a, e> = {Trace<i64>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl !Top<i64> for u64 {}".as_slice(),
+    ));
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("open-row HRTB static method value must retain the GAT equality");
+    let second = StageZeroCompiler::new()
+        .compile(request)
+        .expect("open-row HRTB static method value must materialize deterministically");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_ambiguous_open_row_hrtb_static_method_values_through_aliases() {
+    // The row remains generic while the method value is checked, but the
+    // receiver-less extraction still needs one concrete Top dictionary. Two
+    // positive subjects prove the same aliased relation, so materialization
+    // must stop before it could arbitrarily normalize either GAT row.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Gate; pub fn forward<e: EffectRow>() -> for<'a> (&'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } { Capability<i64>::relay } pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Gate, Top as Gateway};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub trait Gate { type Effects<'a, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate { fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <Self as Gate>::Effects<'a, e> } where Self: Gate<Effects<'a, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate for i64 { type Effects<'a, e: EffectRow> = {| e}; } impl Gate for u64 { type Effects<'a, e: EffectRow> = {| e}; } impl Base<i64> for i64 { fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } where i64: Gate<Effects<'a, e> = {| e}> { *value } } impl Base<i64> for u64 { fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <u64 as Gate>::Effects<'a, e> } where u64: Gate<Effects<'a, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Middle<i64> for u64 where u64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl Top<i64> for u64 where u64: Middle<i64> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("ambiguous open-row static method value unexpectedly entered VM emission");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4169"),
+        "missing ambiguous open-row static method-value rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",

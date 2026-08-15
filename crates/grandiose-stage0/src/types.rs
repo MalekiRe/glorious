@@ -1139,6 +1139,33 @@ impl InferContext {
                 self.bind_effect(variable, EffectRow::closed_instances(left_only))?;
                 Ok(left)
             }
+            // A method-local effect-row hole may be inferred from an
+            // enclosing declaration's open row binder. This is the row-kinded
+            // counterpart of binding an ordinary type hole to a generic
+            // parameter: the generic tail remains symbolic, while the hole
+            // records any concrete effects needed to align the two rows.
+            (Some(EffectTail::Infer(variable)), Some(EffectTail::Generic(generic))) => {
+                self.bind_effect(
+                    variable,
+                    EffectRow {
+                        effects: right_only,
+                        projections: vec![],
+                        tail: Some(EffectTail::Generic(generic)),
+                    },
+                )?;
+                Ok(right)
+            }
+            (Some(EffectTail::Generic(generic)), Some(EffectTail::Infer(variable))) => {
+                self.bind_effect(
+                    variable,
+                    EffectRow {
+                        effects: left_only,
+                        projections: vec![],
+                        tail: Some(EffectTail::Generic(generic)),
+                    },
+                )?;
+                Ok(left)
+            }
             (Some(EffectTail::Infer(variable)), Some(EffectTail::Infer(other)))
                 if variable == other =>
             {
