@@ -5180,6 +5180,20 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
             definition: program.entry,
         });
     }
+    // The program map key is the executable identity used by direct calls,
+    // capability reachability, and dynamic label restoration. A host that
+    // assembles CandidateVmProgram directly must not be able to associate it
+    // with a differently branded function body; the decoder already keys
+    // wire functions by their embedded definition.
+    if program
+        .functions
+        .iter()
+        .any(|(key, function)| *key != function.definition)
+    {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "program function map key does not match definition",
+        });
+    }
     let declared = program
         .host_capabilities
         .iter()

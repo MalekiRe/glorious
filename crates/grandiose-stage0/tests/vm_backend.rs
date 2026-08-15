@@ -3153,6 +3153,47 @@ fn verifier_rejects_storage_death_while_a_borrow_remains_live() {
 }
 
 #[test]
+fn verifier_rejects_program_map_keys_that_disagree_with_function_identity() {
+    let entry = DefKey(Digest::of_bytes(b"forged-program-map-entry"));
+    let embedded = DefKey(Digest::of_bytes(b"forged-program-embedded-definition"));
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: embedded,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(entry, function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"forged-program-map-key-fingerprint"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    assert!(matches!(
+        verify_vm_program(program),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "program function map key does not match definition"
+        })
+    ));
+    // The wire format carries only the embedded identity, so decoding repairs
+    // the map key and leaves the forged entry missing; it is rejected before
+    // program execution either way.
+    assert!(matches!(
+        decode_and_verify_program(&bytes),
+        Err(VmArtifactError::MissingFunction { definition }) if definition == entry
+    ));
+}
+
+#[test]
 fn program_envelope_rejects_truncation_and_function_count_amplification_before_allocation() {
     let entry = DefKey(Digest::of_bytes(b"program-decode-limit-entry"));
     let function = VmFunction {
