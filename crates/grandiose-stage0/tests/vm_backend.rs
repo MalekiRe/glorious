@@ -4935,7 +4935,11 @@ fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can
 fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
     let owner = DefKey(Digest::of_bytes(b"nested-shared-capture-owner"));
     let entry = DefKey(Digest::of_bytes(b"nested-shared-capture-entry"));
-    let closure = DefKey(Digest::of_bytes(b"nested-shared-capture-closure"));
+    let closure = DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable".as_slice(),
+        owner.0.as_bytes().as_slice(),
+        0_u32.to_le_bytes().as_slice(),
+    ]));
     let facade = DefKey(Digest::of_bytes(b"nested-shared-capture-facade"));
     let shared = VmType::Reference {
         unique: false,
@@ -4956,6 +4960,7 @@ fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
     let environment = VmCaptureEnvironment {
         owner,
         callable: 0,
+        instance: None,
         captures: vec![VmCapture {
             mode: VmCaptureMode::Move,
             ty: array.clone(),
@@ -6746,6 +6751,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
     let environment = VmCaptureEnvironment {
         owner: brand.owner,
         callable: brand.callable.0,
+        instance: None,
         captures: vec![VmCapture {
             mode: VmCaptureMode::Move,
             ty: VmType::I64,
@@ -6806,6 +6812,136 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         42
     );
 
+    // The lexical environment brand is an executable provenance witness, not
+    // merely capture-layout metadata.  Even a sibling whose body and ABI are
+    // byte-for-byte compatible cannot be substituted for this source lift.
+    let sibling = DefKey(Digest::of_bytes(b"callable-environment-sibling"));
+    let mut forged_target = valid.clone();
+    let mut sibling_function = forged_target.functions.remove(&callable).unwrap();
+    sibling_function.definition = sibling;
+    forged_target.functions.insert(sibling, sibling_function);
+    let instruction = &mut forged_target
+        .functions
+        .get_mut(&entry)
+        .unwrap()
+        .instructions[1];
+    let VmInstruction::MakeCallable { callee, .. } = instruction else {
+        panic!("expected callable construction")
+    };
+    *callee = sibling;
+    let environment = forged_target
+        .callable_environments
+        .remove(&callable)
+        .unwrap();
+    forged_target
+        .callable_environments
+        .insert(sibling, environment);
+    forged_target.fingerprint = forged_target.computed_fingerprint();
+    let forged_target_bytes = encode_program(&forged_target);
+    assert!(matches!(
+        verify_vm_program(forged_target),
+        Err(VmArtifactError::InvalidCallableEnvironment {
+            message: "callable environment brand does not authenticate target"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&forged_target_bytes),
+        Err(VmArtifactError::InvalidCallableEnvironment {
+            message: "callable environment brand does not authenticate target"
+        })
+    ));
+
+    // Generic lifted bodies use a distinct key derived from the enclosing
+    // instance.  The witness accepts that canonical materialization but
+    // rejects a descriptor whose instance is changed in both the producer
+    // and registry, closing the serialized cross-function spoofing path.
+    let instance = Digest::of_bytes(b"callable-environment-generic-instance");
+    let materialized = DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable-instance-v1".as_slice(),
+        instance.as_bytes().as_slice(),
+        callable.0.as_bytes().as_slice(),
+    ]));
+    let mut materialized_program = valid.clone();
+    let mut materialized_function = materialized_program.functions.remove(&callable).unwrap();
+    materialized_function.definition = materialized;
+    materialized_program
+        .functions
+        .insert(materialized, materialized_function);
+    let instruction = &mut materialized_program
+        .functions
+        .get_mut(&entry)
+        .unwrap()
+        .instructions[1];
+    let VmInstruction::MakeCallable {
+        callee,
+        environment: Some(environment),
+        ..
+    } = instruction
+    else {
+        panic!("expected sealed callable construction")
+    };
+    *callee = materialized;
+    environment.instance = Some(instance);
+    let mut environment = materialized_program
+        .callable_environments
+        .remove(&callable)
+        .unwrap();
+    environment.instance = Some(instance);
+    materialized_program
+        .callable_environments
+        .insert(materialized, environment);
+    materialized_program.fingerprint = materialized_program.computed_fingerprint();
+    let materialized_bytes = encode_program(&materialized_program);
+    assert_eq!(
+        verify_vm_program(materialized_program.clone())
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+    assert_eq!(
+        decode_and_verify_program(&materialized_bytes)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+
+    let mut forged_instance = materialized_program;
+    let forged_instance_digest = Digest::of_bytes(b"forged-callable-environment-instance");
+    let instruction = &mut forged_instance
+        .functions
+        .get_mut(&entry)
+        .unwrap()
+        .instructions[1];
+    let VmInstruction::MakeCallable {
+        environment: Some(environment),
+        ..
+    } = instruction
+    else {
+        panic!("expected sealed callable construction")
+    };
+    environment.instance = Some(forged_instance_digest);
+    forged_instance
+        .callable_environments
+        .get_mut(&materialized)
+        .unwrap()
+        .instance = Some(forged_instance_digest);
+    forged_instance.fingerprint = forged_instance.computed_fingerprint();
+    let forged_instance_bytes = encode_program(&forged_instance);
+    assert!(matches!(
+        verify_vm_program(forged_instance),
+        Err(VmArtifactError::InvalidCallableEnvironment {
+            message: "callable environment brand does not authenticate target"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&forged_instance_bytes),
+        Err(VmArtifactError::InvalidCallableEnvironment {
+            message: "callable environment brand does not authenticate target"
+        })
+    ));
+
     let mut orphan_registry = valid.clone();
     let orphan_owner = DefKey(Digest::of_bytes(b"orphan-callable-environment-owner"));
     let orphan = DefKey(Digest::of_parts([
@@ -6818,6 +6954,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         VmCaptureEnvironment {
             owner: orphan_owner,
             callable: 0,
+            instance: None,
             captures: vec![],
         },
     );

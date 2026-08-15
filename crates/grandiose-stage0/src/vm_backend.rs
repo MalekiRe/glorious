@@ -109,6 +109,11 @@ pub struct VmCapture {
 pub struct VmCaptureEnvironment {
     pub owner: DefKey,
     pub callable: u32,
+    /// The enclosing generic instance for a materialized lifted callable.
+    /// `None` denotes the canonical, source-lifted body.  This witness binds
+    /// a descriptor's lexical brand to exactly one executable identity rather
+    /// than allowing an ABI-compatible sibling body to be substituted.
+    pub instance: Option<Digest>,
     pub captures: Vec<VmCapture>,
 }
 
@@ -1858,9 +1863,12 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// binding identities, making diagnostic root strings non-semantic. Schema
 /// 82 adds canonical source-storage lifecycle/drop-flag/action witnesses to
 /// every nonlocal Leave, so compact VM cleanup cannot lose its MIR proof.
+/// Schema 85 binds every sealed callable environment to either its canonical
+/// source lift or an explicit enclosing-instance witness, so a decoded
+/// closure descriptor cannot redirect to an ABI-compatible sibling body.
 /// Schema 83 makes all generic and frozen integer shifts reject a count at or
 /// beyond the operand width instead of silently masking it.
-pub const STAGE0_VM_SCHEMA: u32 = 84;
+pub const STAGE0_VM_SCHEMA: u32 = 85;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2735,23 +2743,46 @@ pub fn emit_program(program: &MirProgram) -> Result<CandidateVmProgram, VmArtifa
         .map_err(|_| VmArtifactError::MissingFunction {
             definition: program.entry,
         })?;
-    let specialized_lifted_targets = program
-        .specialized_lifted_target_owners()
-        .map_err(|_| VmArtifactError::MissingFunction {
-            definition: program.entry,
-        })?
-        .into_keys()
+    let specialized_lifted_target_owners =
+        program.specialized_lifted_target_owners().map_err(|_| {
+            VmArtifactError::MissingFunction {
+                definition: program.entry,
+            }
+        })?;
+    let specialized_lifted_targets = specialized_lifted_target_owners
+        .keys()
+        .copied()
         .collect::<BTreeSet<_>>();
-    let functions = program
+    let mut functions = program
         .functions
         .iter()
         .map(|(definition, function)| {
             Ok((
                 *definition,
-                emit_with_specialized_lifted_targets(function, &specialized_lifted_targets)?.function,
+                emit_with_specialized_lifted_targets(function, &specialized_lifted_targets)?
+                    .function,
             ))
         })
         .collect::<Result<BTreeMap<_, _>, VmArtifactError>>()?;
+    // A generic lifted body receives a materialized executable key. Preserve
+    // the enclosing instance fingerprint alongside its lexical environment
+    // so independently decoded bytecode can recompute that key instead of
+    // trusting the instruction's `callee` field as an advisory pointer.
+    for function in functions.values_mut() {
+        for instruction in &mut function.instructions {
+            let VmInstruction::MakeCallable {
+                callee,
+                environment: Some(environment),
+                ..
+            } = instruction
+            else {
+                continue;
+            };
+            environment.instance = specialized_lifted_target_owners
+                .get(callee)
+                .map(|owner| owner.fingerprint());
+        }
+    }
     let host_capabilities = reachable_host_capabilities(program.entry, &functions);
     let mut callable_environments = BTreeMap::new();
     for function in functions.values() {
@@ -3347,6 +3378,7 @@ fn encode_capture_environment(value: Option<&VmCaptureEnvironment>, output: &mut
             output.push(1);
             output.extend_from_slice(&value.owner.0.as_bytes());
             output.extend_from_slice(&value.callable.to_le_bytes());
+            encode_optional_digest(value.instance, output);
             output.extend_from_slice(&(value.captures.len() as u64).to_le_bytes());
             for capture in &value.captures {
                 output.push(match capture.mode {
@@ -3619,6 +3651,7 @@ impl<'a> Decoder<'a> {
             1 => {
                 let owner = self.def_key()?;
                 let callable = self.u32()?;
+                let instance = self.optional_digest()?;
                 let count = self.count("callable environment captures", MAX_DECODE_REGISTERS)?;
                 let mut captures = Vec::with_capacity(count);
                 for _ in 0..count {
@@ -3640,6 +3673,7 @@ impl<'a> Decoder<'a> {
                 Ok(Some(VmCaptureEnvironment {
                     owner,
                     callable,
+                    instance,
                     captures,
                 }))
             }
@@ -5248,6 +5282,11 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
         });
     }
     for (callee, environment) in &program.callable_environments {
+        if callable_environment_target(environment) != *callee {
+            return Err(VmArtifactError::InvalidCallableEnvironment {
+                message: "callable environment brand does not authenticate target",
+            });
+        }
         let Some(target) = program.functions.get(callee) else {
             return Err(VmArtifactError::MissingFunction {
                 definition: *callee,
@@ -5430,6 +5469,29 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
         }
     }
     Ok(VerifiedVmProgram { program })
+}
+
+/// Derive the only executable identity a sealed closure environment may
+/// construct.  The normal lift is keyed by its source owner/callable brand;
+/// a concrete generic enclosing instance derives a second key from that same
+/// source lift and its frozen instance fingerprint.  Keeping this derivation
+/// at the artifact boundary prevents a serialized descriptor from naming an
+/// arbitrary ABI-compatible function body.
+fn callable_environment_target(environment: &VmCaptureEnvironment) -> DefKey {
+    let callable = environment.callable.to_le_bytes();
+    let source = DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable".as_slice(),
+        environment.owner.0.as_bytes().as_slice(),
+        callable.as_slice(),
+    ]));
+    match environment.instance {
+        None => source,
+        Some(instance) => DefKey(Digest::of_parts([
+            b"grandiose-stage0-lifted-callable-instance-v1".as_slice(),
+            instance.as_bytes().as_slice(),
+            source.0.as_bytes().as_slice(),
+        ])),
+    }
 }
 
 /// Conservative executable reachability for artifact declarations. A direct
@@ -6680,6 +6742,7 @@ fn lower_instruction(
                     Ok(VmCaptureEnvironment {
                         owner: environment.brand.owner,
                         callable: environment.brand.callable.0,
+                        instance: None,
                         captures: environment
                             .captures
                             .iter()
