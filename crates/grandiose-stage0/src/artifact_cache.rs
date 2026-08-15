@@ -8,8 +8,8 @@
 //! canonical VM decoding, and independent verifier proof all succeed.
 
 use std::{
-    fs,
-    io,
+    fs::{self, File},
+    io::{self, Read},
     path::{Path, PathBuf},
     sync::Mutex,
 };
@@ -101,7 +101,10 @@ impl PersistentArtifactCache {
     /// unavailable cache data is an optimization miss, never a compiler error.
     pub fn load(&self, world: &NormalizedInputWorld) -> Option<VerifiedVmProgram> {
         let path = self.entry_path(world.fingerprint);
-        let metadata = match fs::metadata(&path) {
+        // Inspect the directory entry itself rather than following a cache
+        // symlink. A cache record is untrusted input, not authority to read a
+        // file elsewhere in the host filesystem.
+        let metadata = match fs::symlink_metadata(&path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 self.record(|stats| stats.misses += 1);
@@ -112,14 +115,29 @@ impl PersistentArtifactCache {
                 return None;
             }
         };
-        if !metadata.is_file() || metadata.len() > self.max_entry_bytes {
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() > self.max_entry_bytes
+        {
             self.record(|stats| stats.rejected += 1);
             return None;
         }
-        let Ok(bytes) = fs::read(&path) else {
+        let Ok(file) = File::open(&path) else {
             self.record(|stats| stats.rejected += 1);
             return None;
         };
+        // Do not trust a size observed before opening the file: a hostile
+        // cache writer can replace or extend it between metadata and read.
+        // `take` caps allocation and I/O even in that race, while one extra
+        // byte distinguishes an exactly-at-limit entry from an oversized one.
+        let mut bytes = Vec::new();
+        let limit = self.max_entry_bytes.saturating_add(1);
+        if file.take(limit).read_to_end(&mut bytes).is_err()
+            || u64::try_from(bytes.len()).is_ok_and(|length| length > self.max_entry_bytes)
+        {
+            self.record(|stats| stats.rejected += 1);
+            return None;
+        }
         let Some(program) = decode_entry(&bytes, world.fingerprint) else {
             self.record(|stats| stats.rejected += 1);
             return None;
@@ -334,6 +352,40 @@ mod tests {
                 stores: 1,
             }
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn persistent_artifact_cache_rejects_entries_larger_than_its_streaming_limit() {
+        let directory = temporary_directory();
+        let world = request("pub fn main() -> i64 { 42 }").normalize().unwrap();
+        let limit = ENVELOPE_BYTES as u64;
+        let cache = PersistentArtifactCache::with_max_entry_bytes(&directory, limit);
+        fs::write(
+            cache.entry_path(world.fingerprint),
+            vec![0_u8; usize::try_from(limit + 1).unwrap()],
+        )
+        .unwrap();
+
+        assert!(cache.load(&world).is_none());
+        assert_eq!(cache.stats().rejected, 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_artifact_cache_rejects_symlinked_entries_before_opening_them() {
+        use std::os::unix::fs::symlink;
+
+        let directory = temporary_directory();
+        let world = request("pub fn main() -> i64 { 42 }").normalize().unwrap();
+        let external = directory.join("outside-cache-record");
+        fs::write(&external, b"not a cache entry").unwrap();
+        let cache = PersistentArtifactCache::new(&directory);
+        symlink(&external, cache.entry_path(world.fingerprint)).unwrap();
+
+        assert!(cache.load(&world).is_none());
+        assert_eq!(cache.stats().rejected, 1);
         fs::remove_dir_all(directory).unwrap();
     }
 }
