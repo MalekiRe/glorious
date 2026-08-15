@@ -12056,6 +12056,134 @@ fn service_rejects_private_provider_authority_through_cross_package_module_reexp
 }
 
 #[test]
+fn service_distinguishes_provider_identities_through_parallel_package_module_cycles() {
+    let root = "use left_facade::{Capability as LeftCapability, Trace as LeftTrace}; use right_facade::{Capability as RightCapability, Trace as RightTrace}; pub struct LeftPacket { value: <i64 as LeftCapability<i64>>::Item<i64> } pub struct RightPacket { value: <i64 as RightCapability<i64>>::Item<i64> } pub fn left_worker() -> i64 / LeftTrace<i64> { let packet = LeftPacket { value: LeftCapability<i64>::relay(0, 41) }; LeftTrace<i64>::note(packet.value) } pub fn right_worker() -> i64 / RightTrace<i64> { let packet = RightPacket { value: RightCapability<i64>::relay(0, 41) }; RightTrace<i64>::note(packet.value) } pub fn left_value() -> i64 { handle left_worker() { LeftTrace<i64>::note(value) with k => k(value + 1) } } pub fn right_value() -> i64 { handle right_worker() { RightTrace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { left_value() + right_value() }";
+    let public_provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let private_provider = "effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let world = |providers: Vec<(&str, &str)>, left_alias: &str, right_alias: &str| {
+        let mut input = request(root);
+        for (package, source) in providers {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                source.as_bytes(),
+            ));
+        }
+        for (package, alias) in [
+            ("left-facade@0.1.0", left_alias),
+            ("right-facade@0.1.0", right_alias),
+        ] {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                b"pub mod mirror; pub use crate::mirror::*;".as_slice(),
+            ));
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/mirror/mirror.glorious").unwrap(),
+                format!(
+                    "pub use crate::*; pub use {alias}::{{Callback, Child as Capability, Trace}};"
+                )
+                .into_bytes(),
+            ));
+        }
+        input
+    };
+
+    let compiler = StageZeroCompiler::new();
+    let same = world(
+        vec![("semantic-core@0.1.0", public_provider)],
+        "semantic_core",
+        "semantic_core",
+    );
+    let parent = compiler.import_revision(same.clone(), None).unwrap();
+    let same_artifact = compiler
+        .compile_revision(parent)
+        .expect("parallel facade module cycles may share one provider identity")
+        .artifact
+        .unwrap();
+    assert_eq!(same_artifact.run_i64().unwrap(), 86);
+    let same_provider = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("semantic-core@0.1.0".into()),
+        path: "crate".into(),
+    });
+    for package in ["left-facade@0.1.0", "right-facade@0.1.0"] {
+        let trace = compiler
+            .dependency_trace(
+                parent,
+                &DependencyNode::Interface(ModuleKey {
+                    package: PackageKey(package.into()),
+                    path: "crate::mirror".into(),
+                }),
+            )
+            .expect("every facade mirror must freeze one interface");
+        assert!(trace.dependencies.contains(&same_provider));
+    }
+    let mut reordered = same;
+    reordered.sources.reverse();
+    let same_reordered = compiler.import_revision(reordered, Some(parent)).unwrap();
+    assert_eq!(same_reordered, parent);
+    let reordered_artifact = compiler
+        .compile_revision(same_reordered)
+        .unwrap()
+        .artifact
+        .unwrap();
+    assert_eq!(same_artifact.fingerprint(), reordered_artifact.fingerprint());
+    assert_eq!(same_artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+
+    let distinct = world(
+        vec![
+            ("alpha-core@0.1.0", public_provider),
+            ("beta-core@0.1.0", public_provider),
+        ],
+        "alpha_core",
+        "beta_core",
+    );
+    let child = compiler.import_revision(distinct, Some(parent)).unwrap();
+    let distinct_artifact = compiler
+        .compile_revision(child)
+        .expect("same-spelled distinct providers must remain independently usable")
+        .artifact
+        .unwrap();
+    assert_eq!(distinct_artifact.run_i64().unwrap(), 86);
+    assert_ne!(same_artifact.fingerprint(), distinct_artifact.fingerprint());
+    assert_ne!(same_artifact.canonical_bytes(), distinct_artifact.canonical_bytes());
+
+    let private = world(
+        vec![
+            ("alpha-core@0.1.0", public_provider),
+            ("beta-core@0.1.0", private_provider),
+        ],
+        "alpha_core",
+        "beta_core",
+    );
+    let cached = compiler.interface_cache_stats();
+    let private_child = compiler.import_revision(private, Some(child)).unwrap();
+    let session = compiler.open_session(private_child).unwrap();
+    let error = compiler
+        .compile_session(&session)
+        .expect_err("a private provider cannot leak through its cyclic public facade");
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "private provider authority must retain its public-import rejection: {:#?}",
+        error.diagnostics()
+    );
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G4111"),
+        "private visibility fallout must not turn into a provider-fixity ambiguity: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached);
+    assert!(compiler.dependency_traces(private_child).is_empty());
+}
+
+#[test]
 fn service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping() {
     let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
     let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";

@@ -250,6 +250,13 @@ coarse. The composite fixtures cover:
   public facade, and failure rolls back every staged package product
   (`service_executes_cross_package_public_module_reexport_cycles_with_one_generic_provider_identity`,
   `service_rejects_private_provider_authority_through_cross_package_module_reexport_cycles`).
+- two package facades may each contain a public module re-export cycle. When
+  both ultimately expose one provider, aliases deduplicate to that identity;
+  when they expose same-spelled distinct providers, both generic callback/GAT
+  paths remain independently callable and produce a different canonical
+  artifact. A private distinct provider remains blocked through its own cycle
+  without publishing staged cache products
+  (`service_distinguishes_provider_identities_through_parallel_package_module_cycles`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and
