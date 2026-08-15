@@ -382,6 +382,12 @@ coarse. The composite fixtures cover:
   checked, so the selected callback row reaches direct calls and the verified
   VM rather than remaining an opaque interface projection
   (`service_imports_hrtb_associated_effect_gat_callback_contracts_through_vm`).
+- an open generic effect-row tail remains a caller-owned projection in Core
+  under its HRTB binder, while a reciprocal public-module facade can select it
+  for VM execution. A contradictory negative implementation is rejected as
+  mixed-polarity coherence before revision-local cache or interface traces are
+  published (`typed_core_freezes_open_hrtb_effect_rows_selected_by_a_positive_trait_impl`,
+  `service_rolls_back_mixed_polarity_hrtb_effect_rows_through_recursive_facades`).
 - concrete lifetime-GAT projections can be selected beneath an HRTB callback
   binder without treating that rigid item argument as an escaped solver goal;
   the normalized borrowed item flows through a compact closure, dereference,

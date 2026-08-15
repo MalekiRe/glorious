@@ -16655,6 +16655,47 @@ fn recursive_row_generic_hrtb_callable_aliases_are_order_independent_and_execute
 }
 
 #[test]
+fn service_rolls_back_mixed_polarity_hrtb_effect_rows_through_recursive_facades() {
+    // The callback's row is both higher-ranked and open. Its provider trait is
+    // reached through a reciprocal public-module facade, so positive/negative
+    // coherence must be settled before either the callback interface or any
+    // revision-local cache/trace product can be published.
+    let root = "pub mod left; pub mod right; use left::{Callback, Capability, Trace}; pub fn forward<e: EffectRow>() -> Callback<e> { Capability::relay } pub fn apply(callback: Callback<{}>) -> i64 / Trace<i64> { let value = 41; Trace<i64>::note(callback(&value)) } pub fn main() -> i64 { handle apply(forward<{}>()) { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let left = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate { type Effects<'a, e: EffectRow>: EffectRow; fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <Self as Gate>::Effects<'a, e> } where Self: Gate<Effects<'a, e> = {Trace<i64>, | e}>; } pub use crate::right::{Callback, Top as Capability};";
+    let right = "pub use crate::left::{Gate, Trace}; pub trait Top: Gate {} pub type Callback<E: EffectRow> = for<'a> (&'a i64) -> i64 / { <i64 as Gate>::Effects<'a, E> }; impl Gate for i64 { type Effects<'a, e: EffectRow> = {Trace<i64>, | e}; fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } where i64: Gate<Effects<'a, e> = {Trace<i64>, | e}> { *value } } impl Top for i64 where i64: Gate {}";
+    let negative = format!("{right} impl !Top for i64 {{}}");
+    let world = |right: &str| request_with_logical_sources(root, &[("src/left/left.glorious", left), ("src/right/right.glorious", right)]);
+
+    let mut reordered = world(right);
+    let artifact = StageZeroCompiler::new().compile(reordered.clone()).expect("a selected open HRTB effect-row callback must traverse its recursive facade").artifact.unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new().compile(reordered).expect("source order cannot perturb recursive HRTB facade materialization").artifact.unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(right), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let left_node = DependencyNode::Interface(ModuleKey { package: PackageKey("app@0.1.0".into()), path: "crate::left".into() });
+    let right_node = DependencyNode::Interface(ModuleKey { package: PackageKey("app@0.1.0".into()), path: "crate::right".into() });
+    let left_trace = compiler.dependency_trace(parent, &left_node).expect("legal left recursive facade must be frozen");
+    let right_trace = compiler.dependency_trace(parent, &right_node).expect("legal right recursive facade must be frozen");
+    let rejected_world = world(&negative);
+    let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+    let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("a contradictory negative impl cannot enter the HRTB facade");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G3406"), "mixed-polarity recursive facade missing coherence rejection: {:#?}", error.diagnostics());
+    assert_eq!(compiler.interface_cache_stats(), cached, "rejected polarity revision published cache state");
+    assert!(compiler.dependency_traces(rejected).is_empty(), "rejected polarity revision published traces");
+    assert_eq!(compiler.dependency_trace(parent, &left_node), Some(left_trace));
+    assert_eq!(compiler.dependency_trace(parent, &right_node), Some(right_trace));
+    let mut reordered = rejected_world;
+    reordered.sources.reverse();
+    assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source ordering cannot admit contradictory recursive facade evidence").diagnostics());
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
+}
+
+#[test]
 fn recursive_public_facade_globs_deduplicate_the_same_callable_alias_identity() {
     // Every imported spelling below ultimately names the provider declaration.
     // A module SCC must therefore not turn identical public aliases into a

@@ -465,6 +465,29 @@ fn typed_core_normalizes_concrete_associated_effect_rows_on_method_values() {
 }
 
 #[test]
+fn typed_core_freezes_open_hrtb_effect_rows_selected_by_a_positive_trait_impl() {
+    let core = core_for(
+        "core-positive-hrtb-effect-row-selection@0.1.0",
+        "effect Trace<T> { [1,1] note(value: T) -> i64; } trait Gate { type Effects<'a, e: EffectRow>: EffectRow; fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <Self as Gate>::Effects<'a, e> } where Self: Gate<Effects<'a, e> = {Trace<i64>, | e}>; } trait Top: Gate {} type Callback<E: EffectRow> = for<'a> (&'a i64) -> i64 / { <i64 as Gate>::Effects<'a, E> }; impl Gate for i64 { type Effects<'a, e: EffectRow> = {Trace<i64>, | e}; fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } where i64: Gate<Effects<'a, e> = {Trace<i64>, | e}> { *value } } impl Top for i64 where i64: Gate {} pub fn main<e: EffectRow>() -> Callback<e> { Top::relay }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(matches!(core.expression(core.root).ty, Type::Callable { lifetime_binders: 1, .. }));
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::TraitMethod { .. }
+                if matches!(
+                    &expression.ty,
+                    Type::Callable { lifetime_binders: 1, effects, .. }
+                        if effects.effects.is_empty()
+                            && effects.projections.len() == 1
+                            && matches!(effects.projections[0].item_arguments.as_slice(), [GenericArgument::Lifetime(Lifetime::Bound { .. }), GenericArgument::EffectRow(EffectRow { tail: Some(EffectTail::Generic(0)), .. })])
+                )
+        )
+    }), "Core must retain the selected HRTB row and its caller-owned generic tail: {:#?}", core.expressions);
+}
+
+#[test]
 fn typed_core_accepts_generic_subtrait_impls_proven_by_their_where_contract() {
     let core = core_for(
         "core-generic-supertrait-where@0.1.0",
