@@ -9,8 +9,9 @@
 use grandiose_stage0::{
     BodySyntax, CompilationMode, CompilationRequest, CompilerBuildIdentity, DeclarationScan,
     DefinitionIndex, Digest, ElaboratedInterface, FileKey, InterfaceSet, LexedFile, LogicalPath,
-    MirCleanupAction, MirFunction, MirInstruction, MirLocal, MirLowering, MirTerminator,
-    PackageKey, PlaceBindingOrigin, PlaceFlow, SourceInput, StageZeroCompiler, TypedBody,
+    emit_vm, MirCleanupAction, MirFunction, MirInstruction, MirLocal, MirLowering,
+    MirTerminator, PackageKey, PlaceBindingOrigin, PlaceFlow, SourceInput, StageZeroCompiler,
+    TypedBody, VmInstruction, VmStorageErasureAction, VmStorageErasureWitness,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -480,13 +481,60 @@ fn source_assignment_leave_emits_reverse_storage_dead_cleanup_after_move_and_rei
             "each source owner must be terminally cleaned, then disarmed, then StorageDead: {cleanup:#?}"
         );
     }
+    let published = compile_main(source)
+        .artifact
+        .expect("assigned lexical leave must publish an artifact");
     assert_eq!(
-        compile_main(source)
-            .artifact
-            .expect("assigned lexical leave must publish an artifact")
+        published
             .run_i64()
             .expect("assigned lexical leave must execute"),
         42
+    );
+    let artifact = emit_vm(&function)
+        .expect("the validated source-storage Leave must lower to a VM artifact");
+    let witness = artifact
+        .function
+        .instructions
+        .iter()
+        .find_map(|instruction| match instruction {
+            VmInstruction::Leave { cleanup, .. } => Some(&cleanup.storage_erasure),
+            _ => None,
+        })
+        .expect("source Leave must retain a VM storage-erasure witness");
+    let VmStorageErasureWitness::Verified {
+        storages, actions, ..
+    } = witness
+    else {
+        panic!("source-lowered Leave must carry a checked storage witness");
+    };
+    let mut expected_storage_ids = expected.iter().map(|binding| binding.0).collect::<Vec<_>>();
+    expected_storage_ids.sort_unstable();
+    assert_eq!(
+        storages.iter().map(|storage| storage.binding).collect::<Vec<_>>(),
+        expected_storage_ids,
+        "VM storage descriptors must canonically preserve every exited source owner"
+    );
+    assert_eq!(
+        storages
+            .iter()
+            .map(|storage| storage.value_register)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        storages.len(),
+        "source owners must retain distinct VM value registers"
+    );
+    let vm_terminal = actions
+        .iter()
+        .filter_map(|action| match action {
+            VmStorageErasureAction::Destroy { storage }
+            | VmStorageErasureAction::Protect { storage, .. } => Some(*storage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vm_terminal,
+        expected.iter().map(|binding| binding.0).collect::<Vec<_>>(),
+        "VM witness must preserve reverse terminal cleanup order from source MIR"
     );
 }
 
