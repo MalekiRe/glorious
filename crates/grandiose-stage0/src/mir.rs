@@ -3568,6 +3568,56 @@ impl MirFunction {
                     })?;
             }
         }
+        for (index, perform) in self.control.performs.iter().enumerate() {
+            let mut previous = None;
+            for candidate in &perform.handler_candidates {
+                if previous.is_some_and(|previous| previous <= candidate.0) {
+                    return Err(format!(
+                        "MIR perform site {index} has non-canonical handler candidates"
+                    ));
+                }
+                previous = Some(candidate.0);
+                let handler = self
+                    .control
+                    .handlers
+                    .get(candidate.0 as usize)
+                    .ok_or_else(|| {
+                        format!(
+                            "MIR perform site {index} references absent handler candidate {}",
+                            candidate.0
+                        )
+                    })?;
+                if handler.effect != perform.effect
+                    || handler.effect_arguments != perform.effect_arguments
+                    || handler.operation != perform.operation
+                {
+                    return Err(format!(
+                        "MIR perform site {index} has an incompatible handler candidate {}",
+                        candidate.0
+                    ));
+                }
+            }
+        }
+        for (index, resumption) in self.control.resumptions.iter().enumerate() {
+            let Some(handler) = resumption.originating_handler else {
+                continue;
+            };
+            let handler = self
+                .control
+                .handlers
+                .get(handler.0 as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "MIR resumption site {index} references absent originating handler {}",
+                        handler.0
+                    )
+                })?;
+            if handler.target != resumption.block {
+                return Err(format!(
+                    "MIR resumption site {index} is outside its originating handler body"
+                ));
+            }
+        }
         let mut seen_labels = vec![false; self.control.labels.len()];
         let mut seen_handlers = vec![false; self.control.handlers.len()];
         let mut seen_performs = vec![false; self.control.performs.len()];

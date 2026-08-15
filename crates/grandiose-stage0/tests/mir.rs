@@ -716,11 +716,25 @@ fn emitted_mir_cannot_resume_past_an_active_nested_handler_frame() {
         .validate()
         .expect("freezing publishes a self-consistent control table");
     let mut table_forgery = forged.clone();
-    table_forgery.control.performs[0].operation = 99;
+    table_forgery.control.performs[0].block = MirBlockId(1);
     assert!(
         table_forgery
             .validate()
             .is_err_and(|error| error.contains("disagrees with frozen control table"))
+    );
+    let mut candidate_forgery = forged.clone();
+    candidate_forgery.control.performs[0].handler_candidates = vec![MirHandlerSiteId(1)];
+    assert!(
+        candidate_forgery
+            .validate()
+            .is_err_and(|error| error.contains("incompatible handler candidate"))
+    );
+    let mut resumption_forgery = forged.clone();
+    resumption_forgery.control.resumptions[0].originating_handler = Some(MirHandlerSiteId(1));
+    assert!(
+        resumption_forgery
+            .validate()
+            .is_err_and(|error| error.contains("outside its originating handler body"))
     );
     let artifact = emit_vm(&forged).expect("well-formed structural MIR emits");
     assert!(matches!(
