@@ -124,6 +124,11 @@ pub struct DefinitionIndex {
     type_generic_defaults: BTreeMap<DefKey, Vec<Option<GenericArgument>>>,
     trait_generic_arities: BTreeMap<DefKey, u32>,
     trait_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
+    /// Source-shaped supertrait edges are retained just long enough to extend
+    /// the declaration index with inherited associated-item contracts.  Core
+    /// and the tabled solver still own evidence selection; this index only
+    /// supplies item binder kinds while a projection is being elaborated.
+    trait_supertrait_paths: BTreeMap<DefKey, Vec<Vec<String>>>,
     associated_type_generic_kinds: BTreeMap<(DefKey, String), Vec<GenericKind>>,
     /// Associated structural constants are declaration-owned contracts just
     /// like associated type binders.  Implementation headers need the kind
@@ -308,6 +313,14 @@ impl DefinitionIndex {
                         .insert(definition.key, header.generics.len() as u32);
                     self.trait_generic_kinds
                         .insert(definition.key, header.generics.kinds());
+                    self.trait_supertrait_paths.insert(
+                        definition.key,
+                        header
+                            .supertraits
+                            .iter()
+                            .map(|reference| reference.path.clone())
+                            .collect(),
+                    );
                     for item in &header.associated_types {
                         self.associated_type_generic_kinds
                             .insert((definition.key, item.name.clone()), item.generics.kinds());
@@ -401,6 +414,57 @@ impl DefinitionIndex {
             roots.sort();
             roots.dedup();
         }
+        // Projection parsing needs an associated item's binder kinds before
+        // trait solving can select the parent implementation.  Flatten only
+        // declaration contracts through supertrait edges here; the actual
+        // parent identity, substitutions, ambiguity, and evidence remain the
+        // responsibility of TraitSolver's instantiated lookup.
+        let traits = self.trait_generic_arities.keys().copied().collect::<Vec<_>>();
+        for definition in traits {
+            for (name, kinds) in
+                self.inherited_associated_type_kinds(definition, &mut BTreeSet::new())
+            {
+                self.associated_type_generic_kinds
+                    .entry((definition, name))
+                    .or_insert(kinds);
+            }
+        }
+    }
+
+    fn inherited_associated_type_kinds(
+        &self,
+        definition: DefKey,
+        active: &mut BTreeSet<DefKey>,
+    ) -> BTreeMap<String, Vec<GenericKind>> {
+        if !active.insert(definition) {
+            return BTreeMap::new();
+        }
+        let mut items = self
+            .associated_type_generic_kinds
+            .iter()
+            .filter_map(|((owner, name), kinds)| {
+                (*owner == definition).then(|| (name.clone(), kinds.clone()))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let requester = self.owners.get(&definition);
+        if let (Some(requester), Some(supertraits)) =
+            (requester, self.trait_supertrait_paths.get(&definition))
+        {
+            for path in supertraits {
+                let ResolutionState::Resolved(parent) = self.resolve_path(
+                    DefinitionNamespace::Trait,
+                    requester,
+                    path,
+                ) else {
+                    continue;
+                };
+                for (name, kinds) in self.inherited_associated_type_kinds(parent, active) {
+                    items.entry(name).or_insert(kinds);
+                }
+            }
+        }
+        active.remove(&definition);
+        items
     }
 
     pub fn resolve(&self, namespace: DefinitionNamespace, name: &str) -> ResolutionState {

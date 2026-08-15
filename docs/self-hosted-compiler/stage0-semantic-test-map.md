@@ -121,6 +121,11 @@ coarse. The composite fixtures cover:
   `service_lowers_defaulted_associated_effect_gats_through_vm_handlers`, and
   `service_imports_defaulted_associated_gats_for_local_layouts_and_effect_rows`
   keep the default-selection path executable end to end.
+- inherited associated-item contracts carry their own GAT binder kinds through
+  a dependency interface before supertrait evidence is selected. A subtrait
+  projection may therefore drive a concrete layout and an outward handler row,
+  while an inherited method uses the same instantiated parent edge
+  (`service_materializes_inherited_gat_types_effect_rows_and_methods_through_vm`).
 - generic integer wrappers preserve their operand width through deferred MIR
   materialization: signed right shift remains arithmetic, unsigned right shift
   remains logical, and every count at least the operand width traps rather than

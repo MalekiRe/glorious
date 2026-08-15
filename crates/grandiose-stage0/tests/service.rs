@@ -4690,6 +4690,20 @@ fn service_lowers_defaulted_associated_effect_gats_through_vm_handlers() {
 }
 
 #[test]
+fn service_materializes_inherited_gat_types_effect_rows_and_methods_through_vm() {
+    // `Child` owns none of these items.  Selection must walk its instantiated
+    // Parent edge consistently for the method, the layout-bearing GAT, and
+    // the handler-visible associated effect row.
+    let dependency = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay(value: T) -> T; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = U; type Effects<U> = {Trace<U>}; fn relay(value: i64) -> i64 { value } } impl Child<i64> for i64 {}";
+    let root = "use dependency::Child; use dependency::Trace; pub struct Packet { value: <i64 as Child<i64>>::Item<i64> } pub fn worker() -> i64 / { <i64 as Child<i64>>::Effects<i64> } { let packet = Packet { value: Child<i64>::relay(41) }; Trace<i64>::note(packet.value) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(root, "dependency@0.1.0", dependency))
+        .expect("inherited associated items must materialize through the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_imports_defaulted_associated_gats_for_local_layouts_and_effect_rows() {
     // Interface serialization must retain generic defaults.  The consumer owns
     // the impl heads, omits both associated definitions, and then needs the
