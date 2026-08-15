@@ -150,6 +150,16 @@ pub struct MirControlTables {
     pub operations: MirOperationArena,
 }
 
+/// One lexical frame while the raw CFG is frozen.  These markers are only a
+/// construction aid: the finished artifact retains their dense `MirScopeId`
+/// tree, while the marker uses the exact typed control-site identity rather
+/// than a source spelling or block-number convention.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum MirScopeEntry {
+    Label(MirLabelId),
+    Handler(MirHandlerSiteId),
+}
+
 impl Default for MirControlTables {
     fn default() -> Self {
         Self {
@@ -3708,11 +3718,9 @@ impl MirFunction {
     pub fn with_frozen_control_tables(mut self) -> Self {
         let mut control = MirControlTables::default();
         let mut labels = BTreeMap::<crate::LabelBrand, MirLabelId>::new();
-        let mut handlers_by_target = BTreeMap::<MirBlockId, MirHandlerSiteId>::new();
 
         for (block_index, block) in self.blocks.iter_mut().enumerate() {
             let block_id = MirBlockId(block_index as u32);
-            let scope = block.scope;
             for instruction in &mut block.instructions {
                 match instruction {
                     MirInstruction::MakeLabel {
@@ -3725,7 +3733,7 @@ impl MirFunction {
                             let id = MirLabelId(control.labels.len() as u32);
                             control.labels.push(MirLabelData {
                                 brand: *brand,
-                                scope,
+                                scope: MirScopeId::ROOT,
                                 destination: *target,
                                 call_destination: true,
                             });
@@ -3746,7 +3754,7 @@ impl MirFunction {
                         let id = MirHandlerSiteId(control.handlers.len() as u32);
                         control.handlers.push(MirHandlerSiteData {
                             block: block_id,
-                            scope,
+                            scope: MirScopeId::ROOT,
                             effect: *effect,
                             effect_arguments: effect_arguments.clone(),
                             operation: *operation,
@@ -3754,7 +3762,6 @@ impl MirFunction {
                             resume_type: resume_type.clone(),
                             continuation: *continuation,
                         });
-                        handlers_by_target.entry(*target).or_insert(id);
                         *site = id;
                     }
                     _ => {}
@@ -3762,105 +3769,10 @@ impl MirFunction {
             }
         }
 
-        for (block_index, block) in self.blocks.iter_mut().enumerate() {
-            let block_id = MirBlockId(block_index as u32);
-            let scope = block.scope;
-            let originating_handler = handlers_by_target.get(&block_id).copied();
-            for instruction in &mut block.instructions {
-                match instruction {
-                    MirInstruction::Perform {
-                        site,
-                        effect,
-                        effect_arguments,
-                        operation,
-                        ..
-                    } => {
-                        let id = MirPerformSiteId(control.performs.len() as u32);
-                        let handler_candidates = control
-                            .handlers
-                            .iter()
-                            .enumerate()
-                            .rev()
-                            .filter_map(|(index, handler)| {
-                                (handler.effect == *effect
-                                    && handler.effect_arguments == *effect_arguments
-                                    && handler.operation == *operation)
-                                    .then_some(MirHandlerSiteId(index as u32))
-                            })
-                            .collect();
-                        control.performs.push(MirPerformSiteData {
-                            block: block_id,
-                            scope,
-                            effect: *effect,
-                            effect_arguments: effect_arguments.clone(),
-                            operation: *operation,
-                            handler_candidates,
-                        });
-                        *site = id;
-                    }
-                    MirInstruction::CaptureResumption { site, .. } => {
-                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
-                        control.resumptions.push(MirResumptionSiteData {
-                            block: block_id,
-                            scope,
-                            kind: MirResumptionSiteKind::Capture,
-                            originating_handler,
-                        });
-                        *site = id;
-                    }
-                    MirInstruction::Resume { site, .. } => {
-                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
-                        control.resumptions.push(MirResumptionSiteData {
-                            block: block_id,
-                            scope,
-                            kind: MirResumptionSiteKind::Resume,
-                            originating_handler,
-                        });
-                        *site = id;
-                    }
-                    MirInstruction::ResumeReturn { site, .. } => {
-                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
-                        control.resumptions.push(MirResumptionSiteData {
-                            block: block_id,
-                            scope,
-                            kind: MirResumptionSiteKind::ResumeReturn,
-                            originating_handler,
-                        });
-                        *site = id;
-                    }
-                    MirInstruction::ResumeSnapshot { site, .. } => {
-                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
-                        control.resumptions.push(MirResumptionSiteData {
-                            block: block_id,
-                            scope,
-                            kind: MirResumptionSiteKind::ResumeSnapshot,
-                            originating_handler,
-                        });
-                        *site = id;
-                    }
-                    MirInstruction::Forward { site } => {
-                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
-                        control.resumptions.push(MirResumptionSiteData {
-                            block: block_id,
-                            scope,
-                            kind: MirResumptionSiteKind::Forward,
-                            originating_handler,
-                        });
-                        *site = id;
-                    }
-                    MirInstruction::Cancel { site } => {
-                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
-                        control.resumptions.push(MirResumptionSiteData {
-                            block: block_id,
-                            scope,
-                            kind: MirResumptionSiteKind::Cancel,
-                            originating_handler,
-                        });
-                        *site = id;
-                    }
-                    _ => {}
-                }
-            }
+        // `Leave` may be the only executable witness of a label (a label
+        // need not be materialized as a first-class value), so allocate its
+        // typed identity before deriving the lexical CFG contexts.
+        for block in &mut self.blocks {
             if let MirTerminator::Leave {
                 label,
                 brand,
@@ -3872,13 +3784,55 @@ impl MirFunction {
                     let id = MirLabelId(control.labels.len() as u32);
                     control.labels.push(MirLabelData {
                         brand: *brand,
-                        scope,
+                        scope: MirScopeId::ROOT,
                         destination: *target,
                         call_destination: false,
                     });
                     id
                 });
                 *label = id;
+            }
+        }
+
+        let contexts = lexical_scope_contexts(&self.blocks, self.entry);
+        let handler_bodies = control
+            .handlers
+            .iter()
+            .enumerate()
+            .map(|(index, handler)| (handler.target, MirHandlerSiteId(index as u32)))
+            .collect::<BTreeMap<_, _>>();
+        let mut scope_ids = BTreeMap::<Vec<MirScopeEntry>, MirScopeId>::new();
+        scope_ids.insert(vec![], MirScopeId::ROOT);
+        for context in contexts.values() {
+            intern_lexical_scope_context(context, &mut control.scopes, &mut scope_ids);
+        }
+        for (block_index, block) in self.blocks.iter_mut().enumerate() {
+            let block_id = MirBlockId(block_index as u32);
+            let mut context = contexts.get(&block_id).cloned().unwrap_or_default();
+            block.scope =
+                intern_lexical_scope_context(&context, &mut control.scopes, &mut scope_ids);
+            for instruction in &mut block.instructions {
+                freeze_control_instruction(
+                    instruction,
+                    block_id,
+                    &mut context,
+                    &mut control,
+                    &mut scope_ids,
+                    handler_bodies.get(&block_id).copied(),
+                );
+            }
+            if let MirTerminator::Leave { label, .. } = &block.terminator {
+                let id = *label;
+                if let Some(position) = context
+                    .iter()
+                    .rposition(|entry| *entry == MirScopeEntry::Label(id))
+                {
+                    control.labels[id.0 as usize].scope = intern_lexical_scope_context(
+                        &context[..=position],
+                        &mut control.scopes,
+                        &mut scope_ids,
+                    );
+                }
             }
         }
         self.control = control;
@@ -4079,6 +4033,7 @@ impl MirFunction {
         let mut seen_resumptions = vec![false; self.control.resumptions.len()];
         for (block_index, block) in self.blocks.iter().enumerate() {
             let block_id = MirBlockId(block_index as u32);
+            let mut scope = block.scope;
             for instruction in &block.instructions {
                 match instruction {
                     MirInstruction::MakeLabel {
@@ -4092,7 +4047,7 @@ impl MirFunction {
                         })?;
                         if entry.brand != *brand
                             || entry.destination != *target
-                            || entry.scope != block.scope
+                            || !scope_enters_label(&self.control, entry.scope, scope, *label)
                         {
                             return Err(
                                 "MIR label instruction disagrees with frozen control table".into(),
@@ -4103,6 +4058,7 @@ impl MirFunction {
                         {
                             return Err("MIR non-call label has multiple materializations".into());
                         }
+                        scope = entry.scope;
                     }
                     MirInstruction::InstallHandler {
                         site,
@@ -4122,7 +4078,7 @@ impl MirFunction {
                                 )
                             })?;
                         if entry.block != block_id
-                            || entry.scope != block.scope
+                            || !scope_enters_handler(&self.control, entry.scope, scope, *site)
                             || entry.effect != *effect
                             || entry.effect_arguments != *effect_arguments
                             || entry.operation != *operation
@@ -4138,6 +4094,7 @@ impl MirFunction {
                         if std::mem::replace(&mut seen_handlers[site.0 as usize], true) {
                             return Err("MIR handler site is wired more than once".into());
                         }
+                        scope = entry.scope;
                     }
                     MirInstruction::Perform {
                         site,
@@ -4154,7 +4111,7 @@ impl MirFunction {
                                 )
                             })?;
                         if entry.block != block_id
-                            || entry.scope != block.scope
+                            || entry.scope != scope
                             || entry.effect != *effect
                             || entry.effect_arguments != *effect_arguments
                             || entry.operation != *operation
@@ -4164,9 +4121,27 @@ impl MirFunction {
                                     .into(),
                             );
                         }
+                        if entry.handler_candidates
+                            != lexical_handler_candidates(
+                                &self.control,
+                                scope,
+                                *effect,
+                                effect_arguments,
+                                *operation,
+                            )
+                        {
+                            return Err(
+                                "MIR perform site disagrees with lexical handler candidates".into(),
+                            );
+                        }
                         if std::mem::replace(&mut seen_performs[site.0 as usize], true) {
                             return Err("MIR perform site is wired more than once".into());
                         }
+                    }
+                    MirInstruction::UninstallHandler => {
+                        scope = scope_after_uninstall(&self.control, scope).ok_or_else(|| {
+                            "MIR uninstall handler escapes the lexical scope tree".to_owned()
+                        })?;
                     }
                     instruction @ (MirInstruction::CaptureResumption { site, .. }
                     | MirInstruction::Resume { site, .. }
@@ -4199,10 +4174,7 @@ impl MirFunction {
                             MirInstruction::Cancel { .. } => MirResumptionSiteKind::Cancel,
                             _ => unreachable!("resumption match is exhaustive"),
                         };
-                        if entry.block != block_id
-                            || entry.scope != block.scope
-                            || entry.kind != kind
-                        {
+                        if entry.block != block_id || entry.scope != scope || entry.kind != kind {
                             return Err(
                                 "MIR resumption instruction disagrees with frozen control table"
                                     .into(),
@@ -4229,7 +4201,7 @@ impl MirFunction {
                     .ok_or_else(|| format!("MIR leave references absent label {}", label.0))?;
                 if entry.brand != *brand
                     || entry.destination != *target
-                    || entry.scope != block.scope
+                    || !scope_is_ancestor(&self.control, entry.scope, scope)
                 {
                     return Err("MIR leave disagrees with frozen control table".into());
                 }
@@ -4631,6 +4603,326 @@ impl MirFunction {
             MirTerminator::Unreachable => Ok(()),
         }
     }
+}
+
+fn lexical_scope_contexts(
+    blocks: &[MirBlock],
+    entry: MirBlockId,
+) -> BTreeMap<MirBlockId, Vec<MirScopeEntry>> {
+    let mut contexts = BTreeMap::new();
+    let mut pending = VecDeque::new();
+    if (entry.0 as usize) < blocks.len() {
+        contexts.insert(entry, vec![]);
+        pending.push_back(entry);
+    }
+    while let Some(block_id) = pending.pop_front() {
+        let Some(block) = blocks.get(block_id.0 as usize) else {
+            continue;
+        };
+        let mut context = contexts.get(&block_id).cloned().unwrap_or_default();
+        for instruction in &block.instructions {
+            match instruction {
+                MirInstruction::MakeLabel { label, .. } => {
+                    context.push(MirScopeEntry::Label(*label));
+                }
+                MirInstruction::InstallHandler { site, target, .. } => {
+                    context.push(MirScopeEntry::Handler(*site));
+                    merge_lexical_context(&mut contexts, &mut pending, *target, &context);
+                }
+                MirInstruction::UninstallHandler => {
+                    if let Some(index) = context
+                        .iter()
+                        .rposition(|entry| matches!(entry, MirScopeEntry::Handler(_)))
+                    {
+                        context.truncate(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        match &block.terminator {
+            MirTerminator::Goto { target, .. } => {
+                merge_lexical_context(&mut contexts, &mut pending, *target, &context)
+            }
+            MirTerminator::SwitchBool {
+                then_target,
+                else_target,
+                ..
+            } => {
+                merge_lexical_context(&mut contexts, &mut pending, *then_target, &context);
+                merge_lexical_context(&mut contexts, &mut pending, *else_target, &context);
+            }
+            MirTerminator::Leave { label, target, .. } => {
+                let exit = context
+                    .iter()
+                    .rposition(|entry| *entry == MirScopeEntry::Label(*label))
+                    .map(|index| context[..index].to_vec())
+                    .unwrap_or_default();
+                merge_lexical_context(&mut contexts, &mut pending, *target, &exit);
+            }
+            MirTerminator::Return { .. } | MirTerminator::Unreachable => {}
+        }
+    }
+    contexts
+}
+
+fn merge_lexical_context(
+    contexts: &mut BTreeMap<MirBlockId, Vec<MirScopeEntry>>,
+    pending: &mut VecDeque<MirBlockId>,
+    block: MirBlockId,
+    incoming: &[MirScopeEntry],
+) {
+    let Some(existing) = contexts.get_mut(&block) else {
+        contexts.insert(block, incoming.to_vec());
+        pending.push_back(block);
+        return;
+    };
+    let common = existing
+        .iter()
+        .zip(incoming)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common < existing.len() {
+        existing.truncate(common);
+        pending.push_back(block);
+    }
+}
+
+fn intern_lexical_scope_context(
+    context: &[MirScopeEntry],
+    scopes: &mut Vec<MirScopeData>,
+    ids: &mut BTreeMap<Vec<MirScopeEntry>, MirScopeId>,
+) -> MirScopeId {
+    if let Some(id) = ids.get(context) {
+        return *id;
+    }
+    let (last, parent_context) = context
+        .split_last()
+        .expect("the root scope context is interned before child scopes");
+    let parent = intern_lexical_scope_context(parent_context, scopes, ids);
+    let id = MirScopeId(scopes.len() as u32);
+    scopes.push(MirScopeData {
+        parent: Some(parent),
+        entered_label: match last {
+            MirScopeEntry::Label(label) => Some(*label),
+            MirScopeEntry::Handler(_) => None,
+        },
+        entered_handler: match last {
+            MirScopeEntry::Label(_) => None,
+            MirScopeEntry::Handler(handler) => Some(*handler),
+        },
+    });
+    ids.insert(context.to_vec(), id);
+    id
+}
+
+fn lexical_handler_candidates(
+    control: &MirControlTables,
+    scope: MirScopeId,
+    effect: DefKey,
+    effect_arguments: &[crate::GenericArgument],
+    operation: u32,
+) -> Vec<MirHandlerSiteId> {
+    let mut candidates = Vec::new();
+    let mut current = Some(scope);
+    while let Some(scope) = current {
+        let Some(data) = control.scopes.get(scope.0 as usize) else {
+            break;
+        };
+        if let Some(site) = data.entered_handler
+            && let Some(handler) = control.handlers.get(site.0 as usize)
+            && handler.effect == effect
+            && handler.effect_arguments == effect_arguments
+            && handler.operation == operation
+        {
+            candidates.push(site);
+        }
+        current = data.parent;
+    }
+    candidates
+}
+
+fn scope_enters_label(
+    control: &MirControlTables,
+    child: MirScopeId,
+    parent: MirScopeId,
+    label: MirLabelId,
+) -> bool {
+    control
+        .scopes
+        .get(child.0 as usize)
+        .is_some_and(|scope| scope.parent == Some(parent) && scope.entered_label == Some(label))
+}
+
+fn scope_enters_handler(
+    control: &MirControlTables,
+    child: MirScopeId,
+    parent: MirScopeId,
+    handler: MirHandlerSiteId,
+) -> bool {
+    control
+        .scopes
+        .get(child.0 as usize)
+        .is_some_and(|scope| scope.parent == Some(parent) && scope.entered_handler == Some(handler))
+}
+
+fn scope_after_uninstall(control: &MirControlTables, scope: MirScopeId) -> Option<MirScopeId> {
+    let mut current = scope;
+    loop {
+        let data = control.scopes.get(current.0 as usize)?;
+        if data.entered_handler.is_some() {
+            return data.parent;
+        }
+        current = data.parent?;
+    }
+}
+
+fn scope_is_ancestor(control: &MirControlTables, ancestor: MirScopeId, scope: MirScopeId) -> bool {
+    let mut current = Some(scope);
+    while let Some(id) = current {
+        if id == ancestor {
+            return true;
+        }
+        current = control
+            .scopes
+            .get(id.0 as usize)
+            .and_then(|data| data.parent);
+    }
+    false
+}
+
+fn freeze_control_instruction(
+    instruction: &mut MirInstruction,
+    block: MirBlockId,
+    context: &mut Vec<MirScopeEntry>,
+    control: &mut MirControlTables,
+    scope_ids: &mut BTreeMap<Vec<MirScopeEntry>, MirScopeId>,
+    originating_handler: Option<MirHandlerSiteId>,
+) {
+    match instruction {
+        MirInstruction::MakeLabel { label, .. } => {
+            context.push(MirScopeEntry::Label(*label));
+            control.labels[label.0 as usize].scope =
+                intern_lexical_scope_context(context, &mut control.scopes, scope_ids);
+        }
+        MirInstruction::InstallHandler { site, .. } => {
+            context.push(MirScopeEntry::Handler(*site));
+            control.handlers[site.0 as usize].scope =
+                intern_lexical_scope_context(context, &mut control.scopes, scope_ids);
+        }
+        MirInstruction::UninstallHandler => {
+            if let Some(index) = context
+                .iter()
+                .rposition(|entry| matches!(entry, MirScopeEntry::Handler(_)))
+            {
+                context.truncate(index);
+            }
+        }
+        MirInstruction::Perform {
+            site,
+            effect,
+            effect_arguments,
+            operation,
+            ..
+        } => {
+            let scope = intern_lexical_scope_context(context, &mut control.scopes, scope_ids);
+            let id = MirPerformSiteId(control.performs.len() as u32);
+            control.performs.push(MirPerformSiteData {
+                block,
+                scope,
+                effect: *effect,
+                effect_arguments: effect_arguments.clone(),
+                operation: *operation,
+                handler_candidates: lexical_handler_candidates(
+                    control,
+                    scope,
+                    *effect,
+                    effect_arguments,
+                    *operation,
+                ),
+            });
+            *site = id;
+        }
+        MirInstruction::CaptureResumption { site, .. } => freeze_resumption_site(
+            site,
+            MirResumptionSiteKind::Capture,
+            block,
+            context,
+            control,
+            scope_ids,
+            originating_handler,
+        ),
+        MirInstruction::Resume { site, .. } => freeze_resumption_site(
+            site,
+            MirResumptionSiteKind::Resume,
+            block,
+            context,
+            control,
+            scope_ids,
+            originating_handler,
+        ),
+        MirInstruction::ResumeReturn { site, .. } => freeze_resumption_site(
+            site,
+            MirResumptionSiteKind::ResumeReturn,
+            block,
+            context,
+            control,
+            scope_ids,
+            originating_handler,
+        ),
+        MirInstruction::ResumeSnapshot { site, .. } => freeze_resumption_site(
+            site,
+            MirResumptionSiteKind::ResumeSnapshot,
+            block,
+            context,
+            control,
+            scope_ids,
+            originating_handler,
+        ),
+        MirInstruction::Forward { site } => freeze_resumption_site(
+            site,
+            MirResumptionSiteKind::Forward,
+            block,
+            context,
+            control,
+            scope_ids,
+            originating_handler,
+        ),
+        MirInstruction::Cancel { site } => freeze_resumption_site(
+            site,
+            MirResumptionSiteKind::Cancel,
+            block,
+            context,
+            control,
+            scope_ids,
+            originating_handler,
+        ),
+        _ => {}
+    }
+}
+
+fn freeze_resumption_site(
+    site: &mut MirResumptionSiteId,
+    kind: MirResumptionSiteKind,
+    block: MirBlockId,
+    context: &[MirScopeEntry],
+    control: &mut MirControlTables,
+    scope_ids: &mut BTreeMap<Vec<MirScopeEntry>, MirScopeId>,
+    originating_handler: Option<MirHandlerSiteId>,
+) {
+    let id = MirResumptionSiteId(control.resumptions.len() as u32);
+    control.resumptions.push(MirResumptionSiteData {
+        block,
+        scope: intern_lexical_scope_context(context, &mut control.scopes, scope_ids),
+        kind,
+        // A resumption belongs to the handler clause CFG entered through its
+        // explicit target, not merely to an active protected frame. Nested
+        // setup code may execute under several frames before it reaches a
+        // clause, so using the nearest lexical frame here would forge a
+        // handler-body provenance that the existing verifier rejects.
+        originating_handler,
+    });
+    *site = id;
 }
 
 fn validate_nominal_copy_descriptors(

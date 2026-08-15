@@ -1206,13 +1206,14 @@ boundary:
   to derive all edge-transfer-temporary lists directly and thereby remove the
   seeded-bytecode-anchor completion step.
 - **Not yet realized.** `Store`/`StorageLive`/`StorageDead` statements,
-  persistent typed arenas for frozen move paths and fully elaborated lexical
-  scopes, multi-scope lexical export (the explicit root scope is published
-  today), and frontend-emitted drop flags (branch post-states must agree at
-  source level). Places and locals already have typed arenas; frozen typed
-  control tables publish label, handler, performance, and resumption
-  identities. Typed `BlockId`/`BlockKind` and `MirOperationId` checked editors
-  now perform transactional tombstoned deletion and precisely invalidated
+  persistent typed arenas for frozen move paths and source-storage scopes,
+  multi-scope lexical export for cleanup, and frontend-emitted drop flags
+  (branch post-states must agree at source level). Places and locals already
+  have typed arenas; frozen typed control tables publish label, handler,
+  performance, and resumption identities. Freezing derives the full lexical
+  label/handler scope tree and validates innermost-first handler candidates.
+  Typed `BlockId`/`BlockKind` and `MirOperationId` checked editors now perform
+  transactional tombstoned deletion and precisely invalidated
   block/instruction mutation, and canonical resource limits fail structurally
   before optimization. Reusable, deterministic checked analyses
   now provide predecessors, reachability/RPO, dominators, natural loops and

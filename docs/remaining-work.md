@@ -27,8 +27,8 @@ retained below but scheduled after the core language and tooling tranche.
   checked editors, transactional block/operation tombstones, persistent
   local/place arenas, and frozen typed control-site tables (labels, handlers,
   performances, and resumptions) to persistent typed arenas for move paths
-  and full multi-scope lexical scope elaboration (the explicit root scope is
-  published with each frozen body);
+  and remaining source-storage scope artifacts; frozen bodies now publish the
+  full lexical label/handler scope tree and scope-aware handler candidates;
 - migrate the remaining edge redirection, block splitting/merging, operand,
   and terminator replacement paths through the checked editor (NormalizeCfg
   unreachable deletion and same-block scalar-`Move` removal are checked and

@@ -744,6 +744,138 @@ fn emitted_mir_cannot_resume_past_an_active_nested_handler_frame() {
 }
 
 #[test]
+fn frozen_control_tables_build_nested_label_and_handler_scopes() {
+    let owner = DefKey(Digest::of_bytes(b"scope-owner"));
+    let effect = DefKey(Digest::of_bytes(b"scope-effect"));
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let label_value = Type::Callable {
+        lifetime_binders: 0,
+        parameters: vec![i64_ty.clone()],
+        result: Box::new(Type::Never),
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+    };
+    let frozen = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: owner,
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(label_value),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+        ],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::MakeLabel {
+                        label: MirLabelId::UNASSIGNED,
+                        dst: MirLocal(0),
+                        brand: grandiose_stage0::LabelBrand { owner, label: 0 },
+                        target: MirBlockId(3),
+                        destination: MirLocal(1),
+                    },
+                    MirInstruction::InstallHandler {
+                        site: MirHandlerSiteId::UNASSIGNED,
+                        effect,
+                        effect_arguments: vec![],
+                        operation: 0,
+                        payload_destinations: vec![],
+                        resume_type: Type::Scalar(ScalarType::I64),
+                        continuation: MirContinuationPolicy::Consume,
+                        target: MirBlockId(1),
+                    },
+                    MirInstruction::InstallHandler {
+                        site: MirHandlerSiteId::UNASSIGNED,
+                        effect,
+                        effect_arguments: vec![],
+                        operation: 0,
+                        payload_destinations: vec![],
+                        resume_type: Type::Scalar(ScalarType::I64),
+                        continuation: MirContinuationPolicy::Consume,
+                        target: MirBlockId(2),
+                    },
+                    MirInstruction::Perform {
+                        site: MirPerformSiteId::UNASSIGNED,
+                        dst: MirLocal(2),
+                        effect,
+                        effect_arguments: vec![],
+                        operation: 0,
+                        arguments: vec![],
+                    },
+                    MirInstruction::UninstallHandler,
+                    MirInstruction::UninstallHandler,
+                ],
+                terminator: MirTerminator::Return { value: MirLocal(2) },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(2) },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(2) },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(1)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(1) },
+            },
+        ],
+    }
+    .with_frozen_control_tables();
+
+    frozen.validate().unwrap();
+    assert_eq!(frozen.control.scopes.len(), 4);
+    let label_scope = frozen.control.labels[0].scope;
+    let outer_scope = frozen.control.handlers[0].scope;
+    let inner_scope = frozen.control.handlers[1].scope;
+    assert_eq!(
+        frozen.control.scopes[label_scope.0 as usize].parent,
+        Some(MirScopeId::ROOT)
+    );
+    assert_eq!(
+        frozen.control.scopes[label_scope.0 as usize].entered_label,
+        Some(MirLabelId(0))
+    );
+    assert_eq!(
+        frozen.control.scopes[outer_scope.0 as usize].parent,
+        Some(label_scope)
+    );
+    assert_eq!(
+        frozen.control.scopes[outer_scope.0 as usize].entered_handler,
+        Some(MirHandlerSiteId(0))
+    );
+    assert_eq!(
+        frozen.control.scopes[inner_scope.0 as usize].parent,
+        Some(outer_scope)
+    );
+    assert_eq!(frozen.control.performs[0].scope, inner_scope);
+    assert_eq!(
+        frozen.control.performs[0].handler_candidates,
+        vec![MirHandlerSiteId(1), MirHandlerSiteId(0)]
+    );
+
+    let mut forged = frozen.clone();
+    forged.control.performs[0].handler_candidates = vec![MirHandlerSiteId(1)];
+    assert!(
+        forged
+            .validate()
+            .is_err_and(|error| error.contains("lexical handler candidates"))
+    );
+}
+
+#[test]
 fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes() {
     let mut nested_local = graph();
     nested_local.locals[1].ty = Type::Array(Box::new(Type::Tuple(vec![Type::Infer(InferVar(9))])));
