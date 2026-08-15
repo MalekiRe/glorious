@@ -360,6 +360,12 @@ coarse. The composite fixtures cover:
   completed consistently in source signatures and record construction before
   VM execution; non-trailing defaults are rejected
   (`service_applies_trailing_const_generic_defaults_to_nominal_layouts`).
+- inherited defaulted associated `u32` and `Quantity` constants can jointly
+  parameterize an HRTB GAT used as the element/result of an indirect callback:
+  a structural width expression reaches nominal construction and `Array`
+  materialization, then canonical VM decode. A recursive selected width is
+  rejected transactionally without changing the legal facade cache, trace, or
+  artifact (`service_materializes_const_quantity_gat_arrays_through_hrtb_facade_revisions`).
 - defaulted generic associated types and associated effect rows through source
   layout construction, outward-effect checking, handler lowering, VM execution,
   and dependency-interface serialization. The selected local impl may omit both

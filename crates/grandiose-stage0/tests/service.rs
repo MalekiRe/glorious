@@ -6357,6 +6357,95 @@ fn service_executes_generic_supertrait_selected_const_hrtb_facades() {
 }
 
 #[test]
+fn service_materializes_const_quantity_gat_arrays_through_hrtb_facade_revisions() {
+    // The callback's array element and result are one selected GAT. Its
+    // lifetime, structural-width expression, and quantity argument all come
+    // from inherited associated defaults. This forces those identities across
+    // generic nominal layout, an indirect HRTB call, MIR, and VM decode.
+    let root = "use facade::{Callback, Carrier, Gateway as Capability, relay}; pub fn apply(callback: Callback) -> i64 { let input = Carrier<<i64 as Capability<i64>>::Width, <i64 as Capability<i64>>::Budget, i64> { value: 41 }; let returned = callback([input]); returned.value + 1 } pub fn main() -> i64 { apply(relay) }";
+    let provider = "pub struct Carrier<n: u32, q: Quantity, T> { value: T } pub trait Base<T> { const Width: u32 = 1 + 6; const Budget: Quantity = [1, 1]; type Item<'a, n: u32, q: Quantity> = Carrier<n, q, T>; type Effects<'a, n: u32, q: Quantity>: EffectRow = {}; } pub trait Top<T>: Base<T> {} pub type Element<'a> = <i64 as Top<i64>>::Item<'a, <i64 as Top<i64>>::Width, <i64 as Top<i64>>::Budget>; pub type Callback = for<'a> (Array<Element<'a>>) -> Element<'a> / { <i64 as Top<i64>>::Effects<'a, <i64 as Top<i64>>::Width, <i64 as Top<i64>>::Budget> }; impl Base<i64> for i64 {} impl Top<i64> for i64 where i64: Base<i64> {} pub fn relay<'a>(value: Array<Element<'a>>) -> Element<'a> / { <i64 as Top<i64>>::Effects<'a, <i64 as Top<i64>>::Width, <i64 as Top<i64>>::Budget> } { Carrier<1 + 6, [1, 1], i64> { value: 41 } }";
+    let recursive = provider.replacen(
+        "const Width: u32 = 1 + 6",
+        "const Width: u32 = <i64 as Base<i64>>::Width",
+        1,
+    );
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Callback, Carrier, Top as Gateway, relay};".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@1.0.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+
+    let mut ordered = world(provider);
+    let artifact = StageZeroCompiler::new()
+        .compile(ordered.clone())
+        .expect("const/quantity GAT array callback must materialize")
+        .artifact
+        .unwrap();
+    ordered.sources.reverse();
+    let reordered = StageZeroCompiler::new()
+        .compile(ordered)
+        .expect("source order must preserve const/quantity GAT array materialization")
+        .artifact
+        .unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("const/quantity GAT array callback artifact must decode");
+    assert_eq!(artifact.fingerprint(), reordered.fingerprint());
+    assert_eq!(artifact.canonical_bytes(), reordered.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered.run_i64().unwrap(), 42);
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cache = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let trace = compiler
+        .dependency_trace(parent, &facade)
+        .expect("legal const/quantity facade must freeze");
+    let rejected_world = world(&recursive);
+    let rejected = compiler
+        .import_revision(rejected_world.clone(), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(rejected).unwrap())
+        .expect_err("recursive selected width must not reuse the array callback facade");
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4157"),
+        "missing recursive selected-width rejection: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cache);
+    assert!(compiler.dependency_traces(rejected).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace));
+    let mut reordered_rejection = rejected_world;
+    reordered_rejection.sources.reverse();
+    assert_eq!(
+        error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(reordered_rejection)
+            .expect_err("source order cannot normalize a recursive width")
+            .diagnostics()
+    );
+    assert_eq!(
+        compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(),
+        parent_artifact.canonical_bytes()
+    );
+}
+
+#[test]
 fn service_rejects_generic_supertrait_selected_const_cycles_canonically() {
     let root = "use facade::Callback; pub fn accept(callback: Callback) -> i64 { let value = 41; callback(0, &value) } pub fn main() -> i64 { 0 }";
     let provider = "pub effect Trace<n: u32> { [1,1] note(value: i64) -> i64; } pub trait Seed<T> { const Base: u32; } pub trait Parent<T>: Seed<T> { const Width: u32; type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; } pub trait Child<T>: Parent<T> {} pub type Callback = for<'a> (i64, &'a i64) -> <i64 as Child<i64>>::Item<'a, <i64 as Child<i64>>::Width> / { <i64 as Child<i64>>::Effects<'a, <i64 as Child<i64>>::Width> }; impl<T> Seed<T> for i64 { const Base = <i64 as Seed<T>>::Base; } impl<T> Parent<T> for i64 where i64: Seed<T> { const Width = <i64 as Seed<T>>::Base; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n>}; } impl<T> Child<T> for i64 where i64: Parent<T> {}";
