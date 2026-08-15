@@ -1,33 +1,91 @@
-# Stage-0 semantic test map
+# Stage-0 semantic coverage gate
 
-This is the executable-coverage map for the Rust Stage-0 compiler's language
-semantics.  It is derived from the test plans in chapters 13 through 20 of
-the self-hosted compiler compendium.  A row names a small set of deliberately
-composite tests; it does not require a separate test for every wording in the
-specification.
+This directory defines the executable language-semantics gate for the Rust
+Stage-0 compiler. The normative source is the generation-1 core specification
+in `glorious-branded-environment-core-spec.md`; optimizer breadth, compiler
+service lifecycle behavior, and self-hosting convergence remain separate gates.
 
-The map excludes optimizer breadth, compiler-service operations, and
-self-hosting convergence.  Those are not language-semantics acceptance
-criteria for Stage-0.
+## Authoritative inventory
 
-## Existing semantic acceptance coverage
+`stage0-semantic-inventory.tsv` is the machine-readable source of truth. It has
+one row for every explicit normative rule in the core specification's three
+acceptance sections:
+
+- 22 conformance requirements from section 19;
+- 18 safety invariants from section 17;
+- 8 required rejection examples from section 18.
+
+Every row records a stable rule ID, the requirement, one or more enabled executable
+tests, and their current state:
+
+- `anchor`: an existing passing test is the coverage witness;
+- `red`: an enabled conformance test specifies required behavior that is not
+  yet implemented or has not yet been demonstrated green by the Stage-0 suite.
+
+Composite tests are intentional. One carefully constructed source program can
+cover several mutually dependent rules more faithfully than isolated syntax
+micro-tests. A rule may share an anchor with another rule, but no rule may be
+left without an executable witness.
+
+The `semantic_conformance` integration target—rooted at
+`crates/grandiose-stage0/tests/semantic_conformance.rs` with focused modules in
+`crates/grandiose-stage0/tests/semantic_conformance/`—enforces the inventory:
+
+1. the exact 48-rule normative set is present with no duplicate IDs;
+2. every row points to an existing `#[test]` function;
+3. no mapped test is ignored;
+4. every new `semantic_*` conformance test is mapped back to at least one
+   normative rule.
+
+This makes omission itself a test failure. Adding, deleting, renaming, or
+ignoring a conformance anchor requires an explicit inventory update.
+
+## Existing semantic acceptance anchors
+
+The rule inventory composes the following established suites rather than
+replacing them.
 
 | Compendium chapter | Combined executable coverage |
 | --- | --- |
-| 13. Types, normalization, inference | `types.rs`: `unification_is_occurs_checked_and_zonks_body_local_uncertainty`, `occurs_checks_cover_callable_effect_and_nominal_generic_edges`, `open_effect_rows_unify_without_becoming_type_holes`, and the canonical-fingerprint tests cover inference, normalization, kind separation, effect rows, `Never`, and canonicalization. |
-| 14. Generics, traits, associated items, GATs, HRTBs, consts | `trait_solver.rs`: the tabled-generic, HRTB, associated-projection, recursive-normalization, and mixed-kind tests; `coherence.rs`: overlap/orphan/negative-head tests; `service.rs`: `service_materializes_generic_trait_methods_with_associated_type_and_const_layouts`, `service_lowers_concrete_associated_effect_gats_through_vm_handlers`, and `service_opens_higher_ranked_callback_lifetimes_without_leaking_them`. |
-| 15. Effects, handlers, resumptions, cancellation | `service.rs`: `service_composes_generic_effects_closures_and_finite_replay_across_a_call`, deep residual-stack/replay tests, ordered multi-operation matrix tests, cancellation tests, generic-effect frame tests, and the enabled red conformance cases below. |
-| 16. Quantitative ownership | `quantity.rs`: `quantities_distinguish_sequence_exclusive_branches_and_replay` and `principal_use_intervals_accept_only_contained_actual_use`; `service.rs`: callable lower-bound, branch-hull, cancellation, and resumption-replay obligation tests. |
-| 17. Regions, lifetimes, borrowing, reborrowing | `core.rs`: PlaceFlow loan/projection/reborrow/escape tests; `service.rs`: unique-reference writeback, nested projection reborrow, NLL through handlers and labels, HRTB leak, and effect-payload escape tests. |
-| 18. Callables, captures, brands, environments, refinements | `core.rs`: closure brand/capture/refinement tests; `service.rs`: closure invocation, move capture, callable aggregate, handler payload, and replayed-capture tests, plus the enabled red capture cases below. |
-| 19. Typed Core | `core.rs`: frozen-call/effect provenance, Core validation, structural-control, label, pattern, host-primitive, and semantic-fingerprint tests. |
-| 20. PlaceFlow | `core.rs`: root/projected place, initialization, partial move, branch join, loan, cleanup, and continuation-snapshot tests; `mir.rs`: independently forged-MIR validation tests. |
+| 13. Types, normalization, inference | `types.rs`: occurs checking, zonking, kind separation, open effect-row unification, `Never`, structural constants, and canonical fingerprints. |
+| 14. Generics, traits, associated items, GATs, HRTBs, consts | `trait_solver.rs`, `coherence.rs`, and the service materialization tests cover tabled selection, associated normalization, overlap, orphan rules, mixed generic kinds, and higher-ranked contracts. |
+| 15. Effects, handlers, resumptions, cancellation | `service.rs`: deep handlers, residual-stack restoration, ordered pattern matrices, generic effect identity, finite replay, terminal operations, cancellation, and the enabled composite red cases. |
+| 16. Quantitative ownership | `quantity.rs`, `useflow.rs` consumers, and service tests cover interval algebra, branch hulls, callable lower bounds, replay multiplication, escape transfer, and cancellation obligations. |
+| 17. Regions, lifetimes, borrowing, reborrowing | `core.rs` PlaceFlow fixtures and service tests cover projected loans, unique writeback, NLL, reborrowing, HRTBs, variance, escape, and handler/label boundaries. |
+| 18. Callables, captures, brands, environments, refinements | `core.rs` and `service.rs` cover closure brands, sealed capture layouts, shared/unique/move modes, callable aggregates, handler payloads, replayed captures, and refinement scopes. |
+| 19. Typed Core | `core.rs` covers frozen call/effect provenance, Core validation, labels, structural patterns, host primitives, inference sealing, and semantic fingerprints. |
+| 20. PlaceFlow and executable lowering | `core.rs` and `mir.rs` cover initialization, partial moves, branch joins, loans, cleanup plans, continuation snapshots, forged-MIR rejection, VM verification, and execution. |
 
-## Enabled red semantic conformance cases
+## Newly explicit cross-cutting conformance cases
 
-These tests are intentionally enabled.  They define required language behavior
-that the current implementation rejects or misexecutes; the normal Stage-0
-service suite remains red until they pass.
+The rule-level suite adds coverage where chapter-level references were too
+coarse. The composite fixtures cover:
+
+- canonical keywordless callable declarations, result/effect omission, compact
+  labels, implicit function labels, and recursive activation freshness;
+- labels as generic diverging callables and label-indexed protocol identity;
+- source-defined control names and contextual delayed blocks selected by `Fn`
+  constraints rather than compiler-known names;
+- fresh callable/environment brands, sealed `RunsIn` evidence, the canonical
+  empty environment, ordinary shared/unique/move access, and the absence of a
+  receiver-mode enum;
+- `Available<E>` creation and release restrictions plus unforgeability of all
+  compiler-generated relations;
+- principal `Use` restriction, structural interval intersection, and the G1
+  ban on restricted-use memoized globals;
+- custom `Drop` eligibility, exactly-once cleanup, nonlocal cleanup, opacity to
+  partial moves/deconstruction, and the prohibition on effects or label
+  transfer from a destructor;
+- the absence of compiler-known control/arithmetic variants in `CoreKind`;
+- a small independent evaluator/verified-VM differential for branded label
+  execution;
+- source-oriented diagnostics for label/environment escape;
+- one-shot over-resume, multi-shot unique-borrow capture, and multi-shot active
+  label capture.
+
+## Previously enabled red semantic cases
+
+The established service suite also keeps these implementation gaps enabled:
 
 | Missing semantic behavior | Test |
 | --- | --- |
@@ -44,7 +102,14 @@ service suite remains red until they pass.
 
 ## Acceptance condition
 
-Semantic acceptance requires every test above to pass, with no ignored
-semantic-conformance tests.  New language semantics must either extend one of
-the listed composite fixtures or add a new mapped fixture before being called
-implemented.
+The 100% language-semantics gate is green only when all of the following hold:
+
+```text
+cargo test -p grandiose-stage0 --test semantic_conformance
+cargo test -p grandiose-stage0
+```
+
+Every inventory row must remain mapped to an enabled test, every mapped test
+must pass, and the ordinary Stage-0 suite must remain green. New normative
+semantics must add or extend an executable anchor and update the inventory in
+the same change; prose-only claims never count as coverage.
