@@ -2290,6 +2290,20 @@ fn placeflow_tracks_nested_partial_moves_and_respects_projection_loans() {
         "nested move path was not retained for aggregate cleanup: {:#?}",
         flow.moved_places
     );
+    assert_eq!(flow.move_paths.len(), 3, "{:#?}", flow.move_paths);
+    assert_eq!(flow.move_paths[0].parent, None);
+    assert_eq!(flow.move_paths[0].root, "outer");
+    assert_eq!(flow.move_paths[0].field, None);
+    assert_eq!(
+        flow.move_paths[1].parent,
+        Some(grandiose_stage0::MovePathId(0))
+    );
+    assert_eq!(flow.move_paths[1].field, Some(0));
+    assert_eq!(
+        flow.move_paths[2].parent,
+        Some(grandiose_stage0::MovePathId(1))
+    );
+    assert_eq!(flow.move_paths[2].field, Some(0));
 
     let disjoint_loan = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.right; move pair.left; loan; 0 }";
     let flow = flow_for("core-partial-move-disjoint-loan@0.1.0", disjoint_loan);
