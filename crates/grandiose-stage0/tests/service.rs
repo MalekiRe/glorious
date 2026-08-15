@@ -5148,6 +5148,36 @@ fn service_materializes_unique_hrtb_static_method_values_with_defaulted_gats_and
 }
 
 #[test]
+fn service_rejects_static_hrtb_method_values_with_overlapping_gat_constrained_blankets() {
+    // The exact `i64` implementation and the blanket implementation both
+    // apply: `i64` proves `Gate` with precisely the row required by the
+    // blanket's GAT equality. Static method-value extraction cannot treat the
+    // exact head as unique merely because the other candidate is generic.
+    let mut request = request(
+        "use bridge::Gateway as Capability; pub fn apply(callback: for<'a> (&'a i64) -> i64 / Trace<7, i64>) -> i64 / Trace<7, i64> { let value = 41; callback(&value) } pub fn main() -> i64 { apply(Capability<i64>::relay) }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Gate { type Effects<'a>: EffectRow; } pub trait Base<T> { type Effects<'a>: EffectRow = {Trace<7, i64>}; fn relay<'a>(value: &'a i64) -> i64 / { <Self as Base<T>>::Effects<'a> } where Self: Gate<Effects<'static> = {Trace<7, i64>}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate for i64 { type Effects<'a> = {Trace<7, i64>}; } impl Base<i64> for i64 { fn relay<'a>(value: &'a i64) -> i64 / {Trace<7, i64>} where i64: Gate<Effects<'static> = {Trace<7, i64>}> { *value } } impl<U> Base<i64> for U where U: Gate { fn relay<'a>(value: &'a i64) -> i64 / {Trace<7, i64>} where U: Gate<Effects<'static> = {Trace<7, i64>}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("overlapping GAT-constrained blanket unexpectedly entered VM emission");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G3404"),
+        "missing overlapping GAT-constrained blanket coherence rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
