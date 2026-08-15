@@ -250,6 +250,14 @@ coarse. The composite fixtures cover:
   public facade, and failure rolls back every staged package product
   (`service_executes_cross_package_public_module_reexport_cycles_with_one_generic_provider_identity`,
   `service_rejects_private_provider_authority_through_cross_package_module_reexport_cycles`).
+- a public package module cycle may split generic trait, effect, callable, and
+  operator-fixity aliases across its members. Every alias-bearing interface
+  retains its provider dependency and executes in the VM; replacing that
+  provider with private trait/effect contracts rejects the entire child world
+  without producing a public operator ambiguity, preserves the public parent
+  traces and cache state, and reports canonical diagnostics under source
+  reordering
+  (`service_rolls_back_private_alias_exports_through_public_package_module_cycles`).
 - two package facades may each contain a public module re-export cycle. When
   both ultimately expose one provider, aliases deduplicate to that identity;
   when they expose same-spelled distinct providers, both generic callback/GAT

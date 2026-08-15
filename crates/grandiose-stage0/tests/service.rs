@@ -12113,6 +12113,120 @@ fn service_rejects_private_provider_authority_through_cross_package_module_reexp
 }
 
 #[test]
+fn service_rolls_back_private_alias_exports_through_public_package_module_cycles() {
+    let root = "use cycle_facade::*; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn call(callback: Relay<i64>) -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Audit<i64> { let packet = Packet { value: call(Capability<i64>::relay) }; Audit<i64>::note(packet.value) } pub fn effect_value() -> i64 { handle worker() { Audit<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let public_provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let private_provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let world = |provider: &str| {
+        let mut input = request(root);
+        for (package, path, source) in [
+            ("semantic-core@0.1.0", "src/lib.glorious", provider),
+            (
+                "cycle-facade@0.1.0",
+                "src/lib.glorious",
+                "pub mod api; pub mod bridge; pub use crate::api::*; pub use crate::bridge::*;",
+            ),
+            (
+                "cycle-facade@0.1.0",
+                "src/api/api.glorious",
+                "pub use crate::bridge::*; pub use semantic_core::{Child as Capability, Trace as Audit};",
+            ),
+            (
+                "cycle-facade@0.1.0",
+                "src/bridge/bridge.glorious",
+                "pub use crate::api::*; pub use semantic_core::{Callback as Relay, Combine as Operator}; pub use semantic_core::*;",
+            ),
+        ] {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse(path).unwrap(),
+                source.as_bytes(),
+            ));
+        }
+        input
+    };
+
+    let compiler = StageZeroCompiler::new();
+    let public = world(public_provider);
+    let parent = compiler.import_revision(public, None).unwrap();
+    let artifact = compiler
+        .compile_revision(parent)
+        .expect("public cyclic aliases must retain generic traits, effects, and fixity authority")
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 52);
+    let provider_interface = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("semantic-core@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let mut published = Vec::new();
+    for path in ["crate", "crate::api", "crate::bridge"] {
+        let interface = DependencyNode::Interface(ModuleKey {
+            package: PackageKey("cycle-facade@0.1.0".into()),
+            path: path.into(),
+        });
+        let trace = compiler
+            .dependency_trace(parent, &interface)
+            .expect("every public module-cycle member must publish one sealed interface");
+        assert!(
+            trace.dependencies.contains(&provider_interface),
+            "{path} must retain the generic provider identity behind its aliases"
+        );
+        published.push((interface, trace));
+    }
+    let cached = compiler.interface_cache_stats();
+
+    let private = world(private_provider);
+    let child = compiler.import_revision(private.clone(), Some(parent)).unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(child).unwrap())
+        .expect_err("private trait/effect aliases cannot cross a public module cycle");
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "cyclic facade authority must reject a private alias export: {:#?}",
+        error.diagnostics()
+    );
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G4111"),
+        "private cyclic aliases must not become a public operator ambiguity: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(
+        compiler.interface_cache_stats(),
+        cached,
+        "a private cyclic alias branch must not publish or perturb cache products"
+    );
+    assert!(
+        compiler.dependency_traces(child).is_empty(),
+        "a failed cyclic alias world must roll back every staged interface trace"
+    );
+    for (interface, trace) in published {
+        assert_eq!(
+            compiler.dependency_trace(parent, &interface),
+            Some(trace),
+            "the failed child must not overwrite a public parent interface"
+        );
+    }
+
+    let mut reordered_private = private;
+    reordered_private.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reordered_private)
+        .expect_err("source order cannot authorize private cyclic aliases");
+    assert_eq!(
+        error.diagnostics(),
+        second.diagnostics(),
+        "private cyclic alias diagnostics must be canonical under source reordering"
+    );
+}
+
+#[test]
 fn service_distinguishes_provider_identities_through_parallel_package_module_cycles() {
     let root = "use left_facade::{Capability as LeftCapability, Trace as LeftTrace}; use right_facade::{Capability as RightCapability, Trace as RightTrace}; pub struct LeftPacket { value: <i64 as LeftCapability<i64>>::Item<i64> } pub struct RightPacket { value: <i64 as RightCapability<i64>>::Item<i64> } pub fn left_worker() -> i64 / LeftTrace<i64> { let packet = LeftPacket { value: LeftCapability<i64>::relay(0, 41) }; LeftTrace<i64>::note(packet.value) } pub fn right_worker() -> i64 / RightTrace<i64> { let packet = RightPacket { value: RightCapability<i64>::relay(0, 41) }; RightTrace<i64>::note(packet.value) } pub fn left_value() -> i64 { handle left_worker() { LeftTrace<i64>::note(value) with k => k(value + 1) } } pub fn right_value() -> i64 { handle right_worker() { RightTrace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { left_value() + right_value() }";
     let public_provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
