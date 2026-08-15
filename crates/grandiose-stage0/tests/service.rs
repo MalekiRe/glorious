@@ -5588,6 +5588,48 @@ fn service_rejects_mutual_generic_supertrait_selected_const_cycles_canonically()
 }
 
 #[test]
+fn service_bounds_recursive_supertrait_and_generic_overlap_revisions() {
+    let root = "use facade::{Callback, Gateway, Trace}; pub fn apply(callback: Callback) -> i64 / Trace<7, i64> { let value = 41; let result = callback(0, &value); Trace<7, i64>::note(result) } pub fn main() -> i64 { handle apply(Gateway<i64>::relay) { Trace<7, i64>::note(value) with resume => resume(value) } }";
+    let legal = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Root<T> { const Width: u32; type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; } pub trait Left<T>: Root<T> + Right<T> { fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Root<T>>::Effects<'a, <Self as Root<T>>::Width> }; } pub trait Right<T>: Root<T> {} pub type Callback = for<'a> (i64, &'a i64) -> i64 / { <i64 as Left<i64>>::Effects<'a, <i64 as Left<i64>>::Width> }; impl<T> Root<T> for i64 { const Width = 7; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n, i64>}; } impl<T> Right<T> for i64 {} impl<T> Left<T> for i64 where i64: Right<T> { fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Root<T>>::Effects<'a, <Self as Root<T>>::Width> } { marker; *value } }";
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Left as Gateway, Trace};".as_slice()));
+        input.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+        input
+    };
+    let mut reordered = world(legal);
+    let first = StageZeroCompiler::new().compile(reordered.clone()).expect("acyclic generic supertraits must materialize").artifact.unwrap();
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new().compile(reordered).expect("source order must preserve acyclic generic supertraits").artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 41);
+    assert_eq!(second.run_i64().unwrap(), 41);
+
+    let recursive = legal.replace("pub trait Right<T>: Root<T> {}", "pub trait Right<T>: Root<T> + Left<T> {}");
+    let overlap = format!("{legal} impl Root<i64> for i64 {{ const Width = 7; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {{Trace<n, i64>}}; }}");
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(legal), None).unwrap();
+    let artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey { package: PackageKey("facade@0.1.0".into()), path: "crate".into() });
+    let trace = compiler.dependency_trace(parent, &facade).expect("legal facade interface must be frozen");
+    for (label, provider, code) in [("recursive", recursive.as_str(), "G4175"), ("overlap", overlap.as_str(), "G3404")] {
+        let rejected_world = world(provider);
+        let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+        let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("illegal trait revision must not publish");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{label} revision missing {code}: {:#?}", error.diagnostics());
+        assert_eq!(compiler.interface_cache_stats(), cached, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()), "{label} revision disturbed legal traces");
+        let mut reordered = rejected_world;
+        reordered.sources.reverse();
+        assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source order cannot admit illegal trait revisions").diagnostics(), "{label} diagnostics must be canonical");
+    }
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), artifact.canonical_bytes());
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,
