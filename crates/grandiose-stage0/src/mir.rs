@@ -4691,12 +4691,32 @@ impl MirFunction {
             });
             *local = Some(id);
         }
-        // Materialize the existing frozen lifecycle contract at the first
-        // executable program point. Parameters are already initialized by
-        // the call ABI; every mapped non-parameter source slot begins dead
-        // and therefore receives an explicit `StorageLive` before any direct
-        // definition or `Store` can make it readable.
+        // Every executable source owner receives one compiler-created drop
+        // flag.  An ordinary source assignment is not a raw register
+        // overwrite: the old owner is first conditionally disarmed, then the
+        // replacement initializes the exact same storage and rearms it. This
+        // makes assignment after a whole move and replacement of an
+        // initialized owner explicit without asking the VM to infer lifetime
+        // from a register number.
         let parameter_locals = self.parameters.iter().copied().collect::<BTreeSet<_>>();
+        let mut storage_flags = BTreeMap::new();
+        for local in storage.binding_locals.iter().flatten().copied() {
+            storage_flags.entry(local).or_insert_with(|| {
+                let flag = MirLocal(
+                    u32::try_from(self.locals.len()).expect("MIR local arena overflow"),
+                );
+                self.locals.push(MirLocalDecl {
+                    ty: Type::Scalar(crate::types::ScalarType::Bool),
+                    source: CoreId(u32::MAX),
+                });
+                flag
+            });
+        }
+
+        // Materialize the frozen lifecycle contract at the first executable
+        // program point. Parameters are initialized by the call ABI; every
+        // mapped non-parameter source slot begins dead and receives
+        // `StorageLive` before any direct definition can make it readable.
         let lives = storage
             .binding_locals
             .iter()
@@ -4710,11 +4730,73 @@ impl MirFunction {
                     })
             })
             .collect::<Vec<_>>();
-        if !lives.is_empty() {
+        let mut initial_flags = storage_flags
+            .iter()
+            .map(|(local, flag)| MirInstruction::SetDropFlag {
+                flag: *flag,
+                value: parameter_locals.contains(local),
+            })
+            .collect::<Vec<_>>();
+        initial_flags.extend(lives);
+        if !initial_flags.is_empty() {
             let entry = self.entry.0 as usize;
             if let Some(block) = self.blocks.get_mut(entry) {
-                block.instructions.splice(0..0, lives);
+                block.instructions.splice(0..0, initial_flags);
             }
+        }
+
+        for block in &mut self.blocks {
+            let mut rewritten = Vec::with_capacity(block.instructions.len());
+            for instruction in std::mem::take(&mut block.instructions) {
+                if let MirInstruction::Store { dst, .. } = &instruction {
+                    let dst = *dst;
+                    if let Some(flag) = storage_flags.get(&dst) {
+                        // Flags are mutable compiler state cells. Clear the
+                        // old arm before destroying so the following store
+                        // always publishes the new initialization fact.
+                        rewritten.push(MirInstruction::SetDropFlag {
+                            flag: *flag,
+                            value: false,
+                        });
+                        rewritten.push(MirInstruction::DestroyIf {
+                            local: dst,
+                            flag: *flag,
+                        });
+                    }
+                    rewritten.push(instruction);
+                    if let Some(flag) = storage_flags.get(&dst) {
+                        rewritten.push(MirInstruction::SetDropFlag {
+                            flag: *flag,
+                            value: true,
+                        });
+                    }
+                    continue;
+                }
+
+                let destination = destination(&instruction);
+                let moved = match instruction {
+                    MirInstruction::Move { src, .. } => Some(src),
+                    _ => None,
+                };
+                rewritten.push(instruction);
+                if let Some(destination) = destination {
+                    if let Some(flag) = storage_flags.get(&destination) {
+                        rewritten.push(MirInstruction::SetDropFlag {
+                            flag: *flag,
+                            value: true,
+                        });
+                    }
+                }
+                if let Some(source) = moved {
+                    if let Some(flag) = storage_flags.get(&source) {
+                        rewritten.push(MirInstruction::SetDropFlag {
+                            flag: *flag,
+                            value: false,
+                        });
+                    }
+                }
+            }
+            block.instructions = rewritten;
         }
         self.control.source_storage = storage;
         self
@@ -4965,8 +5047,12 @@ impl MirFunction {
                     }
                     MirInstruction::InstallHandler { .. } => inputs.clear(),
                     MirInstruction::StorageLive { .. } => inputs.clear(),
+                    MirInstruction::StorageDead { .. } => inputs.clear(),
                     MirInstruction::SetDropFlag { flag, .. } => {
                         inputs.retain(|local| local != flag);
+                    }
+                    MirInstruction::DestroyIf { local, .. } => {
+                        inputs.retain(|candidate| candidate != local);
                     }
                     _ => {}
                 }
