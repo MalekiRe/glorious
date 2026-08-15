@@ -257,6 +257,13 @@ coarse. The composite fixtures cover:
   artifact. A private distinct provider remains blocked through its own cycle
   without publishing staged cache products
   (`service_distinguishes_provider_identities_through_parallel_package_module_cycles`).
+- parallel cyclic facades preserve provider identity even when the providers
+  share all generic trait, effect, and public operator-fixity names. The
+  shared and distinct public worlds have stable but different VM artifacts;
+  a private branch rejects its facade imports without leaking into public
+  operator grouping, rolls back cache products, and reports the same
+  diagnostics under source reordering
+  (`service_seals_generic_fixity_identity_through_parallel_package_module_cycles`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and
