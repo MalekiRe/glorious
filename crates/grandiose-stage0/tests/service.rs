@@ -10850,6 +10850,80 @@ fn service_executes_generic_authorized_reexport_diamond_with_operator_fixity() {
 }
 
 #[test]
+fn service_executes_multilevel_callable_alias_effect_row_and_fixity_facades() {
+    let root = "use top_facade::*; pub fn call(callback: Callback<i64>) -> i64 / Trace<i64> { callback(0, 41) } pub fn effect_value() -> i64 { handle call(relay) { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let provider = "pub infixr 30 **; pub trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub type Callback<U> = (i64, U) -> i64 / {Trace<U>}; pub fn relay<U>(receiver: i64, value: U) -> i64 / Trace<U> { Trace<U>::note(value) }";
+    let mut request = request(root);
+    for (package, source) in [
+        ("semantic-core@0.1.0", provider),
+        ("middle-facade@0.1.0", "pub use semantic_core::*;"),
+        ("top-facade@0.1.0", "pub use middle_facade::*;"),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("multilevel facades must retain callable aliases, rows, and fixities");
+    let mut reordered = request;
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("multilevel facade artifacts must not depend on source enumeration");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 51);
+    assert_eq!(second.run_i64().unwrap(), 51);
+}
+
+#[test]
+fn service_rejects_partial_multilevel_operator_reexports_before_grouping() {
+    let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
+    let provider = "pub infixr 30 **; trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub type Callback<U> = (i64, U) -> i64 / {Trace<U>};";
+    for (package, source) in [
+        ("semantic-core@0.1.0", provider),
+        (
+            "middle-facade@0.1.0",
+            "pub use semantic_core::Combine; pub use semantic_core::*;",
+        ),
+        ("top-facade@0.1.0", "pub use middle_facade::*;"),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let mut reordered = request.clone();
+    reordered.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request)
+    else {
+        panic!("a private operator trait unexpectedly reached expression grouping");
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(second)) =
+        StageZeroCompiler::new().compile(reordered)
+    else {
+        panic!("source ordering changed partial operator authority into success");
+    };
+    assert!(
+        first.iter().any(|diagnostic| diagnostic.code == "G3317"),
+        "missing partial operator re-export authority diagnostic: {first:#?}"
+    );
+    assert!(
+        first.iter().all(|diagnostic| diagnostic.code == "G3317"),
+        "partial authority must fail before body grouping diagnostics: {first:#?}"
+    );
+    assert_eq!(first, second, "partial re-export diagnostics must be canonical");
+}
+
+#[test]
 fn service_reports_distinct_provider_reexported_fixities_canonically() {
     let mut request = request("use left_facade::*; use right_facade::*; pub fn main() -> i64 { 1 ** 2 }");
     let alpha = "pub infixl 30 **; pub trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left + right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Capability<T> { type Effects<U>: EffectRow; } impl Capability<i64> for i64 { type Effects<U> = {Trace<U>}; }";

@@ -182,6 +182,12 @@ coarse. The composite fixtures cover:
   private generic effect or trait re-export (`service_executes_generic_authorized_reexport_diamond_with_operator_fixity`,
   `service_reports_distinct_provider_reexported_fixities_canonically`,
   `service_rejects_private_generic_reexports_despite_public_operator_authority`).
+- a public callable type alias retains its braced generic effect row through
+  two dependency facades together with an imported fixity/trait pair, yielding
+  a source-order-stable executable artifact. If the trait is private while the
+  fixity stays public, exported-interface authority fails before body grouping
+  (`service_executes_multilevel_callable_alias_effect_row_and_fixity_facades`,
+  `service_rejects_partial_multilevel_operator_reexports_before_grouping`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and
