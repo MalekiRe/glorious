@@ -10348,6 +10348,28 @@ fn service_links_private_generic_nested_handler_replay_bodies_from_dependencies(
 }
 
 #[test]
+fn service_restores_nested_replay_contexts_through_dependency_facade_bodies() {
+    let mut request = request(
+        "use bridge::Tick; use bridge::relay; pub fn main() -> i64 { handle relay(41) { Tick::tick() with k => k(0) + k(1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Tick, relay};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"effect Ask<T> { [2,2] ask(value: T) -> T; } pub effect Tick { [2,2] tick() -> i64; } fn leaf<T>(value: T) -> T / Ask<T> { Ask<T>::ask(value) } pub fn relay(value: i64) -> i64 / Tick { handle leaf<i64>(value) { Ask<i64>::ask(found) with k => { Tick::tick(); k(found) + k(found + 1) } } }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("nested replay frames must retain the private generic dependency body");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 166);
+}
+
+#[test]
 fn service_executes_local_generic_nested_handler_replay_with_an_outer_effect() {
     let outcome = StageZeroCompiler::new()
         .compile(request(

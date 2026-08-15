@@ -127,6 +127,11 @@ coarse. The composite fixtures cover:
   handler frames; the local and dependency-private-helper cases execute this
   control shape (`service_executes_local_generic_nested_handler_replay_with_an_outer_effect`,
   `service_links_private_generic_nested_handler_replay_bodies_from_dependencies`).
+- nested exact replay remains compositional across a public dependency facade:
+  an exported outer operation replays an inner handler clause twice, each
+  inner path replays a dependency-private generic operation twice, and every
+  clause return restores its own dynamic program context
+  (`service_restores_nested_replay_contexts_through_dependency_facade_bodies`).
 - imported reference lifetime relations through a local closure and handler,
   including rejection of a closure escape after the imported call.
 - whole-referent `move *reference` retains its direct unique-reference handle
