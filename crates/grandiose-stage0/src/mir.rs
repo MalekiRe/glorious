@@ -4429,6 +4429,7 @@ pub struct MirTraitMethodInstance {
     pub evidence: DefKey,
     pub trait_arguments: Vec<GenericArgument>,
     pub method_arguments: Vec<GenericArgument>,
+    pub deferred: Option<crate::core::DeferredTraitMethod>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirDiagnostic {
@@ -11810,6 +11811,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: result,
                 callee,
@@ -11818,6 +11820,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -12035,6 +12038,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: result,
                 callee,
@@ -12043,6 +12047,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -12285,6 +12290,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: result,
                 callee,
@@ -12293,6 +12299,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -16183,6 +16190,7 @@ impl Lowerer<'_> {
                 method,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => self.instructions.push(MirInstruction::Call {
                 dst: call_result,
                 callee: method,
@@ -16191,6 +16199,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -16509,6 +16518,7 @@ impl Lowerer<'_> {
                 method,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => self.instructions.push(MirInstruction::Call {
                 dst: call_result,
                 callee: method,
@@ -16517,6 +16527,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -20629,6 +20640,7 @@ impl Lowerer<'_> {
                         method,
                         trait_arguments,
                         method_arguments,
+                        deferred,
                     } => MirInstruction::Call {
                         dst: inner_result,
                         callee: method,
@@ -20637,6 +20649,7 @@ impl Lowerer<'_> {
                             evidence,
                             trait_arguments,
                             method_arguments,
+                            deferred,
                         }),
                         arguments,
                     },
@@ -21362,6 +21375,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: performed,
                 callee,
@@ -21370,6 +21384,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -21568,6 +21583,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: result,
                 callee,
@@ -21576,6 +21592,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -21763,6 +21780,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: performed,
                 callee,
@@ -21771,6 +21789,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -22201,6 +22220,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: performed,
                 callee,
@@ -22209,6 +22229,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -22506,6 +22527,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: result,
                 callee,
@@ -22514,6 +22536,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -22830,6 +22853,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: result,
                 callee,
@@ -22838,6 +22862,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -24967,6 +24992,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => entry.push(MirInstruction::Call {
                 dst: call_result,
                 callee,
@@ -24975,6 +25001,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 arguments,
             }),
@@ -26995,6 +27022,7 @@ impl Lowerer<'_> {
                 method: callee,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => self.instructions.push(MirInstruction::MakeCallable {
                 dst,
                 callee,
@@ -27004,6 +27032,7 @@ impl Lowerer<'_> {
                     evidence,
                     trait_arguments,
                     method_arguments,
+                    deferred,
                 }),
                 environment: None,
             }),
@@ -29344,6 +29373,7 @@ impl Lowerer<'_> {
                         method: callee,
                         trait_arguments,
                         method_arguments,
+                        deferred,
                     } => self.instructions.push(MirInstruction::Call {
                         dst,
                         callee,
@@ -29352,6 +29382,7 @@ impl Lowerer<'_> {
                             evidence,
                             trait_arguments,
                             method_arguments,
+                            deferred,
                         }),
                         arguments,
                     }),

@@ -2059,6 +2059,7 @@ impl StageZeroCompiler {
                     &source_lengths,
                 )
             })?;
+        let mut instance_trait_solver = TraitSolver::new(&signatures);
         while let Some(caller) = instance_graph.pop_pending() {
             let Some(body) = typed_bodies.get(&caller.callable) else {
                 continue;
@@ -2156,6 +2157,7 @@ impl StageZeroCompiler {
                         method,
                         trait_arguments,
                         method_arguments,
+                        deferred,
                     }) => {
                         let trait_arguments = trait_arguments
                             .iter()
@@ -2169,9 +2171,44 @@ impl StageZeroCompiler {
                                 specialize_generic_argument(argument, caller.arguments())
                             })
                             .collect::<Vec<_>>();
+                        let (evidence, method) = if let Some(deferred) = deferred {
+                            let relation = crate::ElaboratedTraitReference {
+                                definition: deferred.relation.definition,
+                                arguments: deferred
+                                    .relation
+                                    .arguments
+                                    .iter()
+                                    .map(|argument| {
+                                        specialize_generic_argument(argument, caller.arguments())
+                                    })
+                                    .collect(),
+                            };
+                            let subject =
+                                specialize_type(&deferred.subject, caller.arguments());
+                            match instance_trait_solver.select_method(
+                                TraitGoal { relation, subject },
+                                &deferred.name,
+                                &method_arguments,
+                            ) {
+                                crate::TraitMethodAnswer::Selected {
+                                    evidence, method, ..
+                                } => (evidence, method),
+                                // A source template can retain open binders;
+                                // it is not executable until an outer caller
+                                // materializes a closed instance.
+                                crate::TraitMethodAnswer::NoSolution
+                                | crate::TraitMethodAnswer::Ambiguous
+                                | crate::TraitMethodAnswer::Overflow
+                                | crate::TraitMethodAnswer::Refuted { .. }
+                                | crate::TraitMethodAnswer::MissingMethod { .. }
+                                | crate::TraitMethodAnswer::MethodArity { .. } => continue,
+                            }
+                        } else {
+                            (*evidence, *method)
+                        };
                         trait_method_instance_key(
-                            *evidence,
-                            *method,
+                            evidence,
+                            method,
                             &trait_arguments,
                             &method_arguments,
                             trait_receiver.as_ref(),
@@ -2510,6 +2547,46 @@ fn materialize_concrete_instances(
                     } => (callee, generic_arguments, trait_instance),
                     _ => continue,
                 };
+                if let Some(deferred) = trait_instance
+                    .as_ref()
+                    .and_then(|instance| instance.deferred.clone())
+                {
+                    let mut solver = TraitSolver::new(signatures);
+                    match solver.select_method(
+                        TraitGoal {
+                            relation: deferred.relation,
+                            subject: deferred.subject,
+                        },
+                        &deferred.name,
+                        &trait_instance
+                            .as_ref()
+                            .expect("deferred trait method has an instance")
+                            .method_arguments,
+                    ) {
+                        crate::TraitMethodAnswer::Selected {
+                            evidence, method, ..
+                        } => {
+                            let instance = trait_instance
+                                .as_mut()
+                                .expect("deferred trait method has an instance");
+                            instance.evidence = evidence;
+                            instance.deferred = None;
+                            *callee = method;
+                        }
+                        // An unmaterialized generic source template cannot
+                        // select an implementation yet. It is retained only
+                        // as a diagnostic template and never reaches the VM.
+                        crate::TraitMethodAnswer::NoSolution
+                        | crate::TraitMethodAnswer::Ambiguous
+                        | crate::TraitMethodAnswer::Overflow
+                        | crate::TraitMethodAnswer::Refuted { .. }
+                        | crate::TraitMethodAnswer::MissingMethod { .. }
+                        | crate::TraitMethodAnswer::MethodArity { .. } => {
+                            *trait_instance = None;
+                            continue;
+                        }
+                    }
+                }
                 if trait_instance.is_some() {
                     let (evidence, trait_arguments, method_arguments) = {
                         let instance = trait_instance
@@ -3114,6 +3191,15 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
                     .iter()
                     .map(|argument| specialize_generic_argument(argument, arguments))
                     .collect();
+                if let Some(deferred) = &mut instance.deferred {
+                    deferred.relation.arguments = deferred
+                        .relation
+                        .arguments
+                        .iter()
+                        .map(|argument| specialize_generic_argument(argument, arguments))
+                        .collect();
+                    deferred.subject = specialize_type(&deferred.subject, arguments);
+                }
             }
         }
     }

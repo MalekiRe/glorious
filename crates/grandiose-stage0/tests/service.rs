@@ -20337,6 +20337,26 @@ fn service_infers_trait_generic_arguments_for_operator_dispatch() {
 }
 
 #[test]
+fn service_materializes_operator_dispatch_from_a_generic_where_bound() {
+    let source = r#"
+        infixl 40 **;
+        trait Choose { **(left: Self, right: Self) -> Self; }
+        impl Choose for i64 {
+            **(left: i64, right: i64) -> i64 { right }
+        }
+        pub fn select<T>(left: T, right: T) -> T where T: Choose {
+            left ** right
+        }
+        pub fn main() -> i64 { select(1, 42) }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a generic trait-bound operator must materialize concrete evidence");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_selects_prefix_trait_operators_and_preserves_callable_contracts() {
     let source = r#"
         prefix 80 ~;

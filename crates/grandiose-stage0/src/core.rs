@@ -10,7 +10,7 @@ use crate::{
     resolution::{DefinitionIndex, ResolutionState, ScopeMap},
     signature::{
         CallableSignature, ElaboratedEffect, ElaboratedHeader, ElaboratedInterface,
-        ElaboratedNominalLayout, HostImport,
+        ElaboratedNominalLayout, ElaboratedTraitReference, HostImport,
     },
     source::Span,
     trait_solver::{
@@ -527,6 +527,11 @@ pub enum CoreKind {
         method: DefKey,
         trait_arguments: Vec<GenericArgument>,
         method_arguments: Vec<GenericArgument>,
+        /// A lexical trait proof establishes the declaration contract, but
+        /// has no concrete implementation identity until this generic body
+        /// is instantiated.  The placeholder keys above keep ordinary Core
+        /// identity operations total; MIR replaces them before execution.
+        deferred: Option<DeferredTraitMethod>,
     },
     /// An evaluated top-level value is lowered as a zero-argument function.
     /// Its outward type may be generalized, so retain the use-site
@@ -655,6 +660,16 @@ pub enum CoreKind {
     Deref(CoreId),
     Move(CoreId),
     Error,
+}
+
+/// A trait method call justified by an enclosing `where` bound.  This is not
+/// runtime dictionary data: it is a frozen selection request resolved once
+/// the surrounding callable's instance arguments are concrete.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeferredTraitMethod {
+    pub relation: ElaboratedTraitReference,
+    pub subject: Type,
+    pub name: String,
 }
 impl CoreKind {
     /// Return the explicit nominal callable identity carried by executable
@@ -1278,12 +1293,20 @@ impl CoreFingerprintEncoder<'_> {
                 method,
                 trait_arguments,
                 method_arguments,
+                deferred,
             } => {
                 self.bytes(b"trait-method");
                 self.debug(evidence);
                 self.debug(method);
                 self.generic_arguments(trait_arguments);
                 self.generic_arguments(method_arguments);
+                if let Some(deferred) = deferred {
+                    self.bytes(b"deferred-trait-method");
+                    self.debug(&deferred.relation.definition);
+                    self.generic_arguments(&deferred.relation.arguments);
+                    self.ty(&deferred.subject);
+                    self.bytes(deferred.name.as_bytes());
+                }
             }
             CoreKind::Constant {
                 definition,
@@ -6914,6 +6937,7 @@ impl Elaborator<'_> {
             CoreKind::TraitMethod {
                 trait_arguments,
                 method_arguments,
+                deferred,
                 ..
             } => {
                 *trait_arguments = trait_arguments
@@ -6926,6 +6950,16 @@ impl Elaborator<'_> {
                     .cloned()
                     .map(|argument| self.zonk_generic_argument(argument, span))
                     .collect();
+                if let Some(deferred) = deferred {
+                    deferred.relation.arguments = deferred
+                        .relation
+                        .arguments
+                        .iter()
+                        .cloned()
+                        .map(|argument| self.zonk_generic_argument(argument, span))
+                        .collect();
+                    deferred.subject = self.zonk_type(deferred.subject.clone(), span);
+                }
             }
             CoreKind::Perform {
                 effect,
@@ -8787,6 +8821,85 @@ impl Elaborator<'_> {
                 }
             }
         }
+        // A generic declaration may promise the operator through an ambient
+        // where-bound (`T: Less`) before any concrete implementation can be
+        // selected.  Its method contract is still a declaration fact, so
+        // type-check against that now and retain a deferred selection request
+        // for instance materialization.  Concrete candidates above always
+        // win: lexical evidence must not displace an already-selected impl.
+        if selected.is_empty() {
+            let visible_traits = self
+                .index
+                .visible_definitions(DefinitionNamespace::Trait, self.module)
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>();
+            let mut deferred = Vec::new();
+            for goal in self.ambient_trait_solver_assumptions() {
+                if goal.subject != subject || !visible_traits.contains(&goal.relation.definition) {
+                    continue;
+                }
+                let Some(method_generic_kinds) = self
+                    .trait_query()
+                    .method_generic_kinds(&goal.relation, &operator)
+                else {
+                    continue;
+                };
+                let method_arguments =
+                    self.inferred_method_generic_arguments(&method_generic_kinds);
+                let Some(signature) = self.trait_query().declared_method_signature(
+                    goal.clone(),
+                    &operator,
+                    &method_arguments,
+                ) else {
+                    continue;
+                };
+                deferred.push((
+                    DeferredTraitMethod {
+                        relation: goal.relation.clone(),
+                        subject: goal.subject.clone(),
+                        name: operator.clone(),
+                    },
+                    goal.relation.arguments,
+                    method_arguments,
+                    signature,
+                ));
+            }
+            match deferred.len() {
+                1 => {
+                    let (deferred, trait_arguments, method_arguments, signature) =
+                        deferred.pop().expect("one deferred operator method");
+                    let placeholder = Self::deferred_trait_method_placeholder(&deferred);
+                    let callee = self.alloc(
+                        CoreKind::TraitMethod {
+                            evidence: placeholder,
+                            method: placeholder,
+                            trait_arguments,
+                            method_arguments,
+                            deferred: Some(deferred),
+                        },
+                        Type::Callable {
+                            lifetime_binders: 0,
+                            parameters: signature.parameters.clone(),
+                            result: Box::new(signature.result.clone()),
+                            effects: signature.effects.clone(),
+                            invocation: signature.invocation,
+                        },
+                        span,
+                    );
+                    let call = self.call(callee, values, span);
+                    self.check_callable_contract_bounds(signature, None, span);
+                    return call;
+                }
+                2.. => {
+                    return self.fail(
+                        span,
+                        "G4117",
+                        "operator trait implementation is ambiguous",
+                    );
+                }
+                0 => {}
+            }
+        }
         let (evidence, method, trait_arguments, method_arguments, signature) = match selected.len()
         {
             1 => selected.pop().expect("one selected operator method"),
@@ -8816,6 +8929,7 @@ impl Elaborator<'_> {
                 method,
                 trait_arguments,
                 method_arguments,
+                deferred: None,
             },
             Type::Callable {
                 lifetime_binders: 0,
@@ -8829,6 +8943,18 @@ impl Elaborator<'_> {
         let call = self.call(callee, values, span);
         self.check_callable_contract_bounds(*signature, None, span);
         call
+    }
+
+    fn deferred_trait_method_placeholder(deferred: &DeferredTraitMethod) -> DefKey {
+        let arguments = canonical_generic_arguments_encoding(&deferred.relation.arguments);
+        let subject = canonical_type_encoding(&deferred.subject);
+        DefKey(Digest::of_parts([
+            b"grandiose-stage0-deferred-trait-method-v1".as_slice(),
+            deferred.relation.definition.0.as_bytes().as_slice(),
+            arguments.as_slice(),
+            subject.as_slice(),
+            deferred.name.as_bytes(),
+        ]))
     }
     /// Recover the concrete callable shape promised by an intrinsic `Fn`
     /// bound on one parameter of a direct generic call.  The ordinary
@@ -9449,6 +9575,7 @@ impl Elaborator<'_> {
                 method,
                 trait_arguments,
                 method_arguments: runtime_method_arguments,
+                deferred: None,
             },
             callable,
             span,
@@ -9606,6 +9733,7 @@ impl Elaborator<'_> {
                 method,
                 trait_arguments,
                 method_arguments,
+                deferred: None,
             },
             Type::Callable {
                 lifetime_binders: 0,

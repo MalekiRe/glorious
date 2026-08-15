@@ -569,6 +569,43 @@ impl TraitSolver {
         }
     }
 
+    /// Instantiate the declaration-owned method contract for a trait goal
+    /// without selecting an implementation.  Generic bodies may rely on a
+    /// lexical `T: Trait` proof before `T` is concrete; their call sites need
+    /// this interface contract now and defer implementation selection until
+    /// instance materialization closes the binders.
+    pub fn declared_method_signature(
+        &self,
+        goal: TraitGoal,
+        name: &str,
+        arguments: &[GenericArgument],
+    ) -> Option<CallableSignature> {
+        let goal = match self.method_goal(goal, name) {
+            Ok(goal) => goal,
+            Err(_) => return None,
+        };
+        let trait_header = self.traits.get(&goal.relation.definition)?;
+        let method = trait_header.methods.get(name)?;
+        if !generic_arguments_match_kinds(arguments, &method.generic_kinds) {
+            return None;
+        }
+        let mut substitution = ImplementationSubstitution::default();
+        substitution
+            .types
+            .insert(TRAIT_SELF_GENERIC, goal.subject.clone());
+        for (index, argument) in goal.relation.arguments.into_iter().enumerate() {
+            install_item_argument(&mut substitution, index as u32, argument);
+        }
+        for (offset, argument) in arguments.iter().cloned().enumerate() {
+            install_item_argument(
+                &mut substitution,
+                trait_header.generics + offset as u32,
+                argument,
+            );
+        }
+        Some(substitute_callable_signature(method, &substitution))
+    }
+
     fn supertrait_goals(&self, goal: &TraitGoal) -> Vec<TraitGoal> {
         let Some(trait_header) = self.traits.get(&goal.relation.definition) else {
             return vec![];

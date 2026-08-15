@@ -1380,6 +1380,7 @@ fn typed_core_validation_rejects_inference_hidden_in_trait_method_metadata() {
                     variable: ConstInferVar(5),
                     kind: ConstKind::U32,
                 }],
+                deferred: None,
             },
             ty: Type::Callable {
                 lifetime_binders: 0,

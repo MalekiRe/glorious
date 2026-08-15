@@ -1627,6 +1627,7 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
                     variable: ConstInferVar(3),
                     kind: ConstKind::U32,
                 }],
+                deferred: None,
             }),
             arguments: vec![],
         });
