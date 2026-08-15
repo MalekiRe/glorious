@@ -5039,6 +5039,32 @@ fn service_rejects_mixed_polarity_three_level_defaulted_method_values_through_al
 }
 
 #[test]
+fn service_forwards_open_rows_from_inherited_hrtb_gat_method_values_to_handlers() {
+    // The method value is inherited through two public supertrait edges. Its
+    // associated row default retains `e` open under an HRTB; `forward` then
+    // carries that exact row to the outer handler, which instantiates it at
+    // the call site. No stage may prematurely close or erase `e`.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn forward<e: EffectRow>(callback: (i64) -> i64 / {Trace<i64>, | e}) -> i64 / {Trace<i64>, | e} { let result = callback(41); Trace<i64>::note(result) } pub fn main() -> i64 { handle forward<{}>(Capability<i64>::relay) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Base<T> { type Item<'a, e: EffectRow> = i64; type Effects<'a, e: EffectRow>: EffectRow = {Trace<i64>, | e}; fn relay(value: i64) -> i64 / { <Self as Base<T>>::Effects<'static, {}> }; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Base<i64> for i64 { fn relay(value: i64) -> i64 / { <i64 as Base<i64>>::Effects<'static, {}> } { value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("inherited HRTB method values must forward their open defaulted rows");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
