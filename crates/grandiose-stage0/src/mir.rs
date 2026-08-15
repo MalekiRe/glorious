@@ -17877,11 +17877,17 @@ impl Lowerer<'_> {
         })
     }
 
-    /// Lower a closed multi-operation caller frame with both a one-shot
-    /// resumption arm and a cancellation arm. This retains the normal VM call
-    /// boundary: resuming one operation may run the imported callee until it
-    /// performs the later operation, whose clause then cancels only that
-    /// later suspended frame.
+    /// Lower a closed multi-operation caller frame with resumptive and
+    /// cancellation arms. This retains the normal VM call boundary: resuming
+    /// one operation may run the imported callee until it performs the later
+    /// operation, whose clause then cancels only that later suspended frame.
+    ///
+    /// Exact finite replay uses the same frame topology as a one-shot arm,
+    /// but each direct continuation call becomes `ResumeReturn`. The replay
+    /// frame remains independently suspended until its exact budget is met;
+    /// this is what permits a shared closure payload to cross a normal facade
+    /// call, replay an earlier operation, and then reach a later cancellation
+    /// without duplicating a non-shared capture.
     fn lower_root_interprocedural_mixed_consuming_handler(
         &mut self,
         root: CoreId,
@@ -17939,16 +17945,17 @@ impl Lowerer<'_> {
                 }
             )
         };
+        let replay = |clause: &CoreHandlerClause| exact_replay_uses(&clause.resumption).is_some();
         if active.len() < 2
             || active.iter().any(|clause| {
                 clause.patterns.len() != clause.payload_types.len()
                     || !clause.patterns.iter().all(pattern_is_irrefutable)
                     || clause.continuation.is_none()
                     || self.handler_body_uses_snapshot_alias(clause.body)
-                    || (!cancellation(clause) && !one_shot(clause))
+                    || (!cancellation(clause) && !one_shot(clause) && !replay(clause))
             })
             || !active.iter().any(cancellation)
-            || !active.iter().any(one_shot)
+            || !active.iter().any(|clause| one_shot(clause) || replay(clause))
         {
             return None;
         }
@@ -17997,7 +18004,9 @@ impl Lowerer<'_> {
                     .expect("mixed consuming arm has a frozen continuation contract")
                     .parameter
                     .clone(),
-                continuation: MirContinuationPolicy::Consume,
+                continuation: exact_replay_uses(&clause.resumption)
+                    .map(|uses| MirContinuationPolicy::Replay { uses })
+                    .unwrap_or(MirContinuationPolicy::Consume),
                 target: MirBlockId((index + 1) as u32),
             });
         }
@@ -18053,17 +18062,18 @@ impl Lowerer<'_> {
             self.values = boundary_values.clone();
             self.bind_handler_patterns(&clause.patterns, payloads)?;
             let discarded = cancellation(clause);
+            let replayed = replay(clause);
             let value = if discarded {
                 self.value(clause.body)?
             } else {
                 self.direct_handler_clause_value(clause)?
             };
-            if discarded {
+            if discarded || replayed {
                 self.instructions.push(MirInstruction::Cancel {
                     site: MirResumptionSiteId::UNASSIGNED,
                 });
                 // A resumed earlier operation leaves its now-inactive frame
-                // below this selected cancellation frame. Closing the
+                // below this selected cancellation/replay frame. Closing the
                 // handler expression must pop those lexical frames before
                 // this arm returns its final value.
                 for _ in 0..index {
@@ -18079,7 +18089,7 @@ impl Lowerer<'_> {
                 scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: std::mem::take(&mut self.instructions),
-                terminator: if discarded {
+                terminator: if discarded || replayed {
                     MirTerminator::Return { value }
                 } else {
                     MirTerminator::Unreachable

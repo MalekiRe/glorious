@@ -15665,13 +15665,14 @@ fn service_rejects_duplicated_move_capture_through_public_facades_deterministica
 }
 
 #[test]
-fn service_replay_of_shared_closure_payloads_across_public_facades_is_pending_mir_support() {
-    // RED: shared captures are duplicable, so `[2,2]` replay is legal under the
-    // quantitative rules.  This covers the same facade/payload route as the
-    // green cancellation test, but the current general MIR lowerer has not
-    // yet materialized this multi-operation closure-payload frame graph.
+fn service_replays_shared_closure_payloads_across_public_facades() {
+    // Shared captures are duplicable, so `[2,2]` replay is legal under the
+    // quantitative rules. This crosses the same facade/payload route as the
+    // green cancellation test. Each replay reaches the `[0,1]` cancellation
+    // arm (and therefore contributes 40); the visible `+ 3` distinguishes
+    // two replayed paths from a single cancellation.
     let mut input = request(
-        "use bridge::Console; use bridge::invoke; pub fn main() -> i64 { let seed = 39; let callback = () -> i64 { seed + 1 }; handle invoke(callback) { Console::read(k) => k(1) + k(2), Console::stop(_, _) => 40 } }",
+        "use bridge::Console; use bridge::invoke; pub fn main() -> i64 { let seed = 39; let callback = () -> i64 { seed + 1 }; handle invoke(callback) { Console::read(k) => k(1) + k(2) + 3, Console::stop(_, _) => 40 } }",
     );
     input.sources.push(SourceInput::new(
         PackageKey("bridge@0.1.0".into()),
@@ -15689,6 +15690,28 @@ fn service_replay_of_shared_closure_payloads_across_public_facades_is_pending_mi
     assert_eq!(artifact.run_i64().unwrap(), 83);
     let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
     assert_eq!(decoded.run_i64().unwrap(), 83);
+
+    // The structural handler frame is replay-safe only because the payload
+    // closure has a shared capture. Replacing it with an exact callable
+    // capture must remain a front-end G5011 rejection rather than reaching
+    // this lowerer as a silently duplicated environment.
+    let mut moved = request(
+        "use bridge::Console; use bridge::invoke; pub fn add_one(value: i64) -> i64 { value + 1 } pub fn run(function: (i64) -> i64) -> i64 { let callback = () -> i64 { move function(41) }; handle invoke(callback) { Console::read(k) => k(1) + k(2) + 3, Console::stop(_, _) => 40 } } pub fn main() -> i64 { run(add_one) }",
+    );
+    moved.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Console, relay}; pub fn invoke(callback: () -> i64) -> i64 / Console { relay(callback) }".as_slice(),
+    ));
+    moved.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Console { [2,2] read() -> i64; [0,1] stop(callback: () -> i64) -> i64; } pub fn relay(callback: () -> i64) -> i64 / Console { let read = Console::read(); Console::stop(callback) + read }".as_slice(),
+    ));
+    let error = StageZeroCompiler::new()
+        .compile(moved)
+        .expect_err("replay must not duplicate a move-captured facade payload");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5011"));
 }
 
 #[test]
