@@ -1028,7 +1028,7 @@ impl InferContext {
             .collect()
     }
 
-    fn unify_generic_arguments(
+    pub(crate) fn unify_generic_arguments(
         &mut self,
         left: Vec<GenericArgument>,
         right: Vec<GenericArgument>,

@@ -4481,7 +4481,7 @@ impl Elaborator<'_> {
     }
 
     fn canonical_bool_literal_variant(
-        &self,
+        &mut self,
         expected: Option<&Type>,
         literal: &str,
     ) -> Option<(DefKey, Vec<GenericArgument>, u32)> {
@@ -4501,7 +4501,41 @@ impl Elaborator<'_> {
             .signatures
             .instantiate_enum_variant_generic(*definition, arguments, name)
             .ok()?;
-        (fields == vec![Type::Unit]).then(|| (*definition, arguments.clone(), variant))
+        let [field] = fields.as_slice() else {
+            return None;
+        };
+        // `if` and `else` begin with a polymorphic `Result<A, E>` contract.
+        // A scalar predicate is the canonical `Result<(), ()>` carrier, so
+        // contextual conversion must be able to infer those fresh slots. Use
+        // a speculative inference context: an enum with only one unit-shaped
+        // arm must not leave a partial `A = ()` binding behind when its other
+        // arm proves it is not the Bool carrier.
+        let mut inference = self.inference.clone();
+        if inference.unify(field.clone(), Type::Unit).is_err() {
+            return None;
+        }
+        let other = match literal {
+            "true" => "false",
+            "false" => "true",
+            _ => return None,
+        };
+        let other_name = match other {
+            "true" => "Ok",
+            "false" => "Err",
+            _ => unreachable!("canonical Boolean literals are finite"),
+        };
+        let (_, other_fields) = self
+            .signatures
+            .instantiate_enum_variant_generic(*definition, arguments, other_name)
+            .ok()?;
+        let [other_field] = other_fields.as_slice() else {
+            return None;
+        };
+        if inference.unify(other_field.clone(), Type::Unit).is_err() {
+            return None;
+        }
+        self.inference = inference;
+        Some((*definition, arguments.clone(), variant))
     }
 
     /// A primitive comparison yields the VM scalar predicate, while the
@@ -9075,6 +9109,14 @@ impl Elaborator<'_> {
                 self.recovered = true;
             }
         }
+        // Value arguments do not necessarily determine every declaration
+        // generic.  A recursive generic function can carry (for example) a
+        // label payload `B` and callback row `e` solely in its where-clause:
+        // `L: Label<B>, F: Fn<..., Effects = e>`.  When the same lexical
+        // evidence is in scope, its associated contracts are the precise
+        // source of those substitutions.  Leaving the fresh slots unresolved
+        // would reject a well-typed recursive forwarding call at sealing.
+        self.infer_direct_call_contract_from_ambient_bounds(callee);
         // Arguments may have just fixed a generic return type. Publish that
         // concrete result to the enclosing expression now: otherwise a
         // subsequent scalar operator observes a stale inference variable and
@@ -11585,6 +11627,116 @@ impl Elaborator<'_> {
             return;
         };
         self.check_callable_contract_bounds(signature, Some(&actual_arguments), span);
+    }
+
+    /// Infer direct-call generics that appear only in frozen where-clause
+    /// evidence from an exactly matching lexical bound.  Ordinary parameter
+    /// inference deliberately cannot discover `B` in `L: Label<B>` or the
+    /// row binder in a callable `Effects` equality because neither inhabits
+    /// the runtime value representation of `L` or `F`.
+    fn infer_direct_call_contract_from_ambient_bounds(&mut self, callee: CoreId) {
+        let (definition, arguments) = match &self.expressions[callee.0 as usize].kind {
+            CoreKind::Function {
+                definition,
+                arguments,
+                ..
+            } => (*definition, arguments.clone()),
+            _ => return,
+        };
+        let Ok(signature) = self
+            .signatures
+            .instantiate_callable_generic(definition, &arguments)
+        else {
+            return;
+        };
+        let ambient_bounds = self.ambient_where_bounds.clone();
+        let ambient_type_bindings = self.ambient_callable_type_bindings.clone();
+        let ambient_effect_bindings = self.ambient_callable_effect_bindings.clone();
+        for (subject, relation) in &signature.where_bounds {
+            let subject = self.inference.zonk(subject.clone()).unwrap_or_else(|_| subject.clone());
+            let matches = ambient_bounds
+                .iter()
+                .filter(|(ambient_subject, ambient_relation)| {
+                    ambient_relation.definition == relation.definition
+                        && ambient_relation.arguments.len() == relation.arguments.len()
+                        && self
+                            .inference
+                            .zonk(ambient_subject.clone())
+                            .is_ok_and(|ambient_subject| ambient_subject == subject)
+                })
+                .collect::<Vec<_>>();
+            let [(matched_subject, matched_relation)] = matches.as_slice() else {
+                continue;
+            };
+            let matched_subject = (*matched_subject).clone();
+            let matched_relation = (*matched_relation).clone();
+            let _ = self.inference.unify_generic_arguments(
+                relation.arguments.clone(),
+                matched_relation.arguments.clone(),
+            );
+            for binding in signature.where_associated_type_bindings.clone() {
+                if binding.relation.definition != relation.definition
+                    || !self
+                        .inference
+                        .zonk(binding.subject.clone())
+                        .is_ok_and(|binding_subject| binding_subject == subject)
+                {
+                    continue;
+                }
+                let mut candidate = None;
+                for ambient in &ambient_type_bindings {
+                    if ambient.name != binding.name
+                        || ambient.item_generic_kinds != binding.item_generic_kinds
+                        || ambient.relation != matched_relation
+                        || !self
+                            .inference
+                            .zonk(ambient.subject.clone())
+                            .is_ok_and(|ambient_subject| ambient_subject == matched_subject)
+                    {
+                        continue;
+                    }
+                    if candidate.replace(ambient).is_some() {
+                        candidate = None;
+                        break;
+                    }
+                }
+                if let Some(ambient) = candidate {
+                    let _ = self.inference.unify(binding.value, ambient.value.clone());
+                }
+            }
+            for binding in signature.where_associated_effect_bindings.clone() {
+                if binding.relation.definition != relation.definition
+                    || !self
+                        .inference
+                        .zonk(binding.subject.clone())
+                        .is_ok_and(|binding_subject| binding_subject == subject)
+                {
+                    continue;
+                }
+                let mut candidate = None;
+                for ambient in &ambient_effect_bindings {
+                    if ambient.name != binding.name
+                        || ambient.item_generic_kinds != binding.item_generic_kinds
+                        || ambient.relation != matched_relation
+                        || !self
+                            .inference
+                            .zonk(ambient.subject.clone())
+                            .is_ok_and(|ambient_subject| ambient_subject == matched_subject)
+                    {
+                        continue;
+                    }
+                    if candidate.replace(ambient).is_some() {
+                        candidate = None;
+                        break;
+                    }
+                }
+                if let Some(ambient) = candidate {
+                    let _ = self
+                        .inference
+                        .constrain_effect_subset(binding.value, ambient.value.clone());
+                }
+            }
+        }
     }
 
     /// Verify the whole frozen callable contract after argument inference has

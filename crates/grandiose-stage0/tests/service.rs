@@ -20392,6 +20392,77 @@ fn service_lifts_primitive_comparisons_from_result_completion_arms() {
 }
 
 #[test]
+fn service_infers_recursive_generics_from_ambient_label_and_fn_contracts() {
+    let source = r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        pub fn if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E>
+        where F: Fn<(), Output = B>, A: Use<[0, 0]> {
+            handle condition {
+                Result::Ok(_) => Result::Ok(body()),
+                Result::Err(error) => Result::Err(error)
+            }
+        }
+        pub fn else<A, E, F>(value: Result<A, E>, fallback: F) -> A
+        where F: Fn<(), Output = A>, E: Use<[0, 0]> {
+            handle value {
+                Result::Ok(result) => result,
+                Result::Err(_) => fallback()
+            }
+        }
+        pub fn step<L, A, B, F, e: EffectRow>(
+            current: usize,
+            end: usize,
+            accumulator: A,
+            exit: L,
+            condition: Result<(), ()>,
+            body: F
+        ) -> A
+        where L: Label<B>,
+        F: Fn<(A, usize, L), Output=A, Effects={| e}>,
+        F: Use<[0, 0]> {
+            if(condition) {
+                step(current, end, body(accumulator, current, exit), exit, condition, body)
+            } else {
+                accumulator
+            }
+        }
+        pub fn main() -> i64 { 42 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("recursive calls must infer generics carried only by ambient contracts");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_infers_the_boolean_result_carrier_for_polymorphic_if() {
+    let source = r#"
+        enum Result<T, E> { Ok(T), Err(E) }
+        pub fn if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E>
+        where F: Fn<(), Output = B>, A: Use<[0, 0]> {
+            handle condition {
+                Result::Ok(_) => Result::Ok(body()),
+                Result::Err(error) => Result::Err(error)
+            }
+        }
+        pub fn else<A, E, F>(value: Result<A, E>, fallback: F) -> A
+        where F: Fn<(), Output = A>, E: Use<[0, 0]> {
+            handle value {
+                Result::Ok(result) => result,
+                Result::Err(_) => fallback()
+            }
+        }
+        pub fn main() -> i64 { if(1 < 2) { 42 } else { 0 } }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a primitive predicate must infer if's Result<(), ()> carrier");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_selects_prefix_trait_operators_and_preserves_callable_contracts() {
     let source = r#"
         prefix 80 ~;
