@@ -1974,7 +1974,12 @@ fn capture_environment_error(
     if environment.brand.callable != callable {
         return Some("Typed Core closure environment brand belongs to another callable".into());
     }
-    let Type::Callable { effects, .. } = callable_ty else {
+    let Type::Callable {
+        lifetime_binders,
+        effects,
+        ..
+    } = callable_ty
+    else {
         return Some("Typed Core closure lacks a callable type for its RunsIn evidence".into());
     };
     if !environment.runs_in.sealed
@@ -1986,7 +1991,12 @@ fn capture_environment_error(
             "Typed Core closure has forged or incomplete RunsIn environment evidence".into(),
         );
     }
-    if environment.runs_in.effects != *effects {
+    let body_effects = if *lifetime_binders == 0 {
+        effects.clone()
+    } else {
+        open_hrtb_callable_body_effect_row(effects.clone(), 0)
+    };
+    if environment.runs_in.effects != body_effects {
         return Some(
             "Typed Core RunsIn evidence does not match the closure effect contract".into(),
         );
@@ -4542,7 +4552,7 @@ impl Elaborator<'_> {
         let parameter_count = parameters.len();
         let expected_callable = expected.as_ref().and_then(|expected| {
             let Type::Callable {
-                lifetime_binders: _,
+                lifetime_binders,
                 parameters,
                 result,
                 effects,
@@ -4566,11 +4576,16 @@ impl Elaborator<'_> {
                 .map(|parameter| open_hrtb_callable_body_type(parameter, 0))
                 .collect::<Vec<_>>();
             let body_result = open_hrtb_callable_body_type((**result).clone(), 0);
+            let body_effects = if *lifetime_binders == 0 {
+                effects.clone()
+            } else {
+                open_hrtb_callable_body_effect_row(effects.clone(), 0)
+            };
             Some((
                 expected.clone(),
                 body_parameters,
                 body_result,
-                effects.clone(),
+                body_effects,
                 *invocation,
             ))
         });
@@ -11726,6 +11741,99 @@ fn open_hrtb_callable_body_type(value: Type, binder_depth: u32) -> Type {
             result: Box::new(open_hrtb_callable_body_type(*result, binder_depth + 1)),
             effects,
             invocation,
+        },
+        value => value,
+    }
+}
+
+/// The effect counterpart of [`open_hrtb_callable_body_type`]. Associated
+/// effect-row projections retain lifetime arguments in their identity, so
+/// opening only references would leave a bound universe in `RunsIn` metadata
+/// even though the closure body itself has caller-local regions.
+pub(crate) fn open_hrtb_callable_body_effect_row(
+    value: EffectRow,
+    binder_depth: u32,
+) -> EffectRow {
+    EffectRow {
+        effects: value
+            .effects
+            .into_iter()
+            .map(|effect| EffectInstance {
+                definition: effect.definition,
+                arguments: effect
+                    .arguments
+                    .into_iter()
+                    .map(|argument| open_hrtb_callable_body_generic_argument(argument, binder_depth))
+                    .collect(),
+            })
+            .collect(),
+        projections: value
+            .projections
+            .into_iter()
+            .map(|projection| crate::types::EffectRowProjection {
+                subject: Box::new(open_hrtb_callable_body_type(
+                    *projection.subject,
+                    binder_depth,
+                )),
+                trait_definition: projection.trait_definition,
+                trait_arguments: projection
+                    .trait_arguments
+                    .into_iter()
+                    .map(|argument| {
+                        open_hrtb_callable_body_generic_argument(argument, binder_depth)
+                    })
+                    .collect(),
+                name: projection.name,
+                item_generic_kinds: projection.item_generic_kinds,
+                item_arguments: projection
+                    .item_arguments
+                    .into_iter()
+                    .map(|argument| {
+                        open_hrtb_callable_body_generic_argument(argument, binder_depth)
+                    })
+                    .collect(),
+            })
+            .collect(),
+        tail: value.tail,
+    }
+    .canonicalized()
+}
+
+fn open_hrtb_callable_body_generic_argument(
+    value: GenericArgument,
+    binder_depth: u32,
+) -> GenericArgument {
+    match value {
+        GenericArgument::Type(value) => {
+            GenericArgument::Type(open_hrtb_callable_body_type(value, binder_depth))
+        }
+        GenericArgument::EffectRow(value) => {
+            GenericArgument::EffectRow(open_hrtb_callable_body_effect_row(value, binder_depth))
+        }
+        GenericArgument::Lifetime(Lifetime::Bound { depth, .. }) if depth == binder_depth => {
+            GenericArgument::Lifetime(Lifetime::Elided)
+        }
+        GenericArgument::Lifetime(Lifetime::Bound { depth, index }) if depth > binder_depth => {
+            GenericArgument::Lifetime(Lifetime::Bound {
+                depth: depth - 1,
+                index,
+            })
+        }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(open_hrtb_callable_body_type(*subject, binder_depth)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|argument| open_hrtb_callable_body_generic_argument(argument, binder_depth))
+                .collect(),
+            name,
+            kind,
         },
         value => value,
     }

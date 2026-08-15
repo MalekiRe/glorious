@@ -218,7 +218,16 @@ impl Analyzer<'_> {
                     && environment.runs_in.post_states == environment.post_states
                     && matches!(
                         &expression.ty,
-                        Type::Callable { effects, .. } if environment.runs_in.effects == *effects
+                        Type::Callable { lifetime_binders, effects, .. }
+                            if environment.runs_in.effects
+                                == if *lifetime_binders == 0 {
+                                    effects.clone()
+                                } else {
+                                    crate::core::open_hrtb_callable_body_effect_row(
+                                        effects.clone(),
+                                        0,
+                                    )
+                                }
                     );
                 if !runs_in_matches {
                     self.error(

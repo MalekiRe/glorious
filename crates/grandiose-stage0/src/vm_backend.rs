@@ -2828,18 +2828,31 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
                 .collect::<Result<Vec<_>, _>>()?,
         }),
         Type::Callable {
+            lifetime_binders,
             parameters,
             result,
             effects,
             ..
-        } => Ok(VmType::Callable {
-            parameters: parameters
-                .iter()
-                .map(vm_type)
-                .collect::<Result<Vec<_>, _>>()?,
-            result: Box::new(vm_type(result)?),
-            effects: Box::new(vm_effect_row(effects)?),
-        }),
+        } => {
+            // A callable value owns its HRTB binder. Bytecode deliberately
+            // has no region universe, so lower that callable's effect
+            // metadata under the same opening used for its lifted body.
+            // Retaining the raw row would preserve `Bound` lifetime arguments
+            // in a VM effect identity after the source binder ceased to exist.
+            let effects = if *lifetime_binders == 0 {
+                effects.clone()
+            } else {
+                crate::core::open_hrtb_callable_body_effect_row(effects.clone(), 0)
+            };
+            Ok(VmType::Callable {
+                parameters: parameters
+                    .iter()
+                    .map(vm_type)
+                    .collect::<Result<Vec<_>, _>>()?,
+                result: Box::new(vm_type(result)?),
+                effects: Box::new(vm_effect_row(&effects)?),
+            })
+        }
         Type::Reference {
             mutability,
             referent,

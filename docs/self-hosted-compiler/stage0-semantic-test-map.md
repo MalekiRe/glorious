@@ -141,6 +141,11 @@ coarse. The composite fixtures cover:
   their universal value type remains frozen while the lifted closure body uses
   caller-local regions, and an invoked reference result reaches the VM
   (`service_executes_contextual_hrtb_closure_values_through_reference_calls`).
+- an HRTB closure's `RunsIn` proof and VM callable ABI open lifetime arguments
+  nested in an associated effect-row projection together with its reference
+  contract; the concrete projection is exercised through an indirect callback
+  call and verified VM execution
+  (`service_executes_hrtb_closures_with_concrete_associated_effect_projections`).
 - generic integer wrappers preserve their operand width through deferred MIR
   materialization: signed right shift remains arithmetic, unsigned right shift
   remains logical, and every count at least the operand width traps rather than
