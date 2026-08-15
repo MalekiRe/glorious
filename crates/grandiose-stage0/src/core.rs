@@ -9462,9 +9462,20 @@ impl Elaborator<'_> {
                 "effect operation argument count does not match its declaration",
             ));
         }
+        // Effect operation signatures cross package facades just like callable
+        // signatures.  Normalize concrete associated items before using the
+        // payload contract as an expression expectation; otherwise a payload
+        // constructed as `Packet<i64>` cannot satisfy the equivalent frozen
+        // `Packet<<i64 as FacadedTrait>::Item>` operation parameter.
+        let parameters = operation
+            .parameters
+            .iter()
+            .cloned()
+            .map(|parameter| self.normalize_selectable_type_projections(parameter))
+            .collect::<Vec<_>>();
         let values = arguments
             .into_iter()
-            .zip(&operation.parameters)
+            .zip(&parameters)
             .map(|(argument, expected)| {
                 let argument = self.expression_expected(argument, Some(expected.clone()));
                 let actual = self.expressions[argument.0 as usize].ty.clone();
@@ -9489,7 +9500,7 @@ impl Elaborator<'_> {
         self.check_effect_instance(&instance, Some(operation_index), span);
         let reference_contract = callable_reference_origin_from_contract(
             self.signatures,
-            &operation.parameters,
+            &parameters,
             &operation.result,
         );
         let reference_shape =
@@ -9498,7 +9509,7 @@ impl Elaborator<'_> {
             CoreKind::Perform {
                 effect: instance,
                 operation: operation_index,
-                payload_types: operation.parameters.clone(),
+                payload_types: parameters,
                 arguments: values,
                 terminal: operation.terminal,
                 reference_origin: reference_contract.clone(),
