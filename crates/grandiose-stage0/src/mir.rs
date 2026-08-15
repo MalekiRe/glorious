@@ -4812,6 +4812,7 @@ impl MirFunction {
             let block = &self.blocks[index];
             live.extend(block.parameters.iter().copied());
             let mut unique_loans = BTreeMap::<MirLocal, MirLocal>::new();
+            let mut aborts = false;
             for instruction in &block.instructions {
                 let destination = destination(instruction);
                 let mut inputs = references(instruction);
@@ -4855,6 +4856,19 @@ impl MirFunction {
                 if let Some(destination) = destination {
                     live.insert(destination);
                 }
+                // `Abort` terminates the worker immediately.  The compact
+                // MIR form deliberately retains the enclosing block
+                // terminator for structural compatibility, but that
+                // terminator and any following instructions are unreachable
+                // at runtime and must not demand an initialized result of
+                // the never-returning primitive.
+                if matches!(instruction, MirInstruction::Abort) {
+                    aborts = true;
+                    break;
+                }
+            }
+            if aborts {
+                continue;
             }
             let mut check_edge = |target: MirBlockId,
                                   arguments: &[MirLocal]|

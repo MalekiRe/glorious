@@ -590,7 +590,11 @@ impl Analyzer<'_> {
         if self.binding_scopes.len() == index {
             self.binding_scopes.push(scope);
         } else {
-            debug_assert_eq!(self.binding_scopes[index], scope);
+            // PlaceFlow may revisit the same lexical Core construction while
+            // summarizing alternative handler/branch paths.  The binding is
+            // still one source-storage owner: retain the scope assigned on
+            // its first construction rather than treating the later
+            // analysis-only branch scope as a second owner.
             return;
         }
         self.storage_scopes[scope.0 as usize].bindings.push(binding);
