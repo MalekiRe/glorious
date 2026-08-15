@@ -17928,6 +17928,57 @@ fn service_rolls_back_mixed_polarity_hrtb_effect_rows_through_recursive_facades(
 }
 
 #[test]
+fn service_rolls_back_projected_open_row_facades_after_overlapping_operation_dispatch() {
+    // `Callback<E>` keeps a caller-owned open tail, while `forward` closes it
+    // at the public facade. The selected associated row contains two effects
+    // with the same operation spelling; Signal's resumptive `ping` is handled
+    // through the selected row. This crosses aliases, a re-export, typed
+    // Core, MIR frame dispatch, and the VM before proving that a contradictory
+    // provider revision cannot publish over the legal artifact.
+    let root = "use facade::{Callback, Gateway as Capability, Signal, apply}; pub fn forward() -> Callback<{}> { Capability::relay } pub fn main() -> i64 { handle apply(forward()) { Signal::ping(value) with k => k(value + 2) } }";
+    let provider = "pub effect Signal { [1,1] ping(value: i64) -> i64; } pub effect Stop { halt(value: i64) -> !; } pub effect Audit { [1,1] ping(value: i64) -> i64; } pub trait Capability { type Effects: EffectRow; fn relay(value: i64) -> i64 / { <Self as Capability>::Effects }; } pub type Callback<E: EffectRow> = (i64) -> i64 / { <i64 as Capability>::Effects, | E }; impl Capability for i64 { type Effects = {Signal}; fn relay(value: i64) -> i64 / { <i64 as Capability>::Effects } { Signal::ping(value) } } pub fn apply(callback: Callback<{}>) -> i64 / Signal { callback(40) }";
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Callback, Capability as Gateway, Signal, apply};".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+    let artifact = StageZeroCompiler::new()
+        .compile(world(provider))
+        .expect("selected open-row facade must lower terminal and resumptive operations")
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| function.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::Perform { .. }))));
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cache = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let trace = compiler.dependency_trace(parent, &facade).expect("legal facade trace");
+    let rejected = compiler.import_revision(world(&format!("{provider} impl !Capability for i64 {{}}")), Some(parent)).unwrap();
+    let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("contradictory projected-row revision must not publish");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G3406"), "missing coherence rollback: {:#?}", error.diagnostics());
+    assert_eq!(compiler.interface_cache_stats(), cache);
+    assert!(compiler.dependency_traces(rejected).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace));
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through
