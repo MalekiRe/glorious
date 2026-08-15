@@ -1051,6 +1051,21 @@ impl Parser<'_> {
                     "terminal operations may not declare a resumption quantity",
                 );
             }
+            // The G1 source surface deliberately exposes only affine and
+            // exact finite continuations.  The interval algebra remains more
+            // general for inferred/derived use facts, but accepting a
+            // deferred source interval would promise branch-sensitive
+            // resumption semantics that this language version does not yet
+            // specify or lower.
+            if has_quantity
+                && resumption != Quantity::AFFINE
+                && resumption.upper != Some(resumption.lower)
+            {
+                self.error(
+                    "G3254",
+                    "source resumption quantity must be `[0,1]` or exact `[n,n]`",
+                );
+            }
             if !self.punctuation(';') && !self.at_punctuation('}') {
                 // Newlines are trivia, so a following identifier begins the
                 // next operation.  The source form remains unambiguous here.

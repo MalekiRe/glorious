@@ -511,7 +511,7 @@ fn trait_impl_and_effect_headers_preserve_their_semantic_contracts() {
         }
         effect Console<T> {
             write(value: T);
-            [0, *] read() -> T;
+            [0, 1] read() -> T;
             fail(message: Text) -> !;
         }
     "#;
@@ -548,7 +548,7 @@ fn trait_impl_and_effect_headers_preserve_their_semantic_contracts() {
     };
     assert_eq!(value.operations.len(), 3);
     assert_eq!(value.operations[0].resumption, Quantity::ONCE);
-    assert_eq!(value.operations[1].resumption, Quantity::UNRESTRICTED);
+    assert_eq!(value.operations[1].resumption, Quantity::AFFINE);
     assert!(value.operations[2].terminal);
 }
 
@@ -708,9 +708,41 @@ fn terminal_effect_operations_reject_resumption_quantities() {
 }
 
 #[test]
+fn effect_source_resumption_quantities_accept_only_affine_or_exact_intervals() {
+    let package = PackageKey("header-effect-source-resumption-quantity@0.1.0".into());
+    for source in [
+        "effect Retry { [0, 1] retry() -> i64; }",
+        "effect Retry { [0, 0] retry() -> i64; }",
+        "effect Retry { [3, 3] retry() -> i64; }",
+    ] {
+        let file = FileKey::new(&package, "src/lib.glorious");
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        let header = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+        assert!(header.diagnostics.is_empty(), "{source}: {header:#?}");
+    }
+    for source in [
+        "effect Retry { [1, 2] retry() -> i64; }",
+        "effect Retry { [0, 2] retry() -> i64; }",
+        "effect Retry { [1, *] retry() -> i64; }",
+    ] {
+        let file = FileKey::new(&package, "src/lib.glorious");
+        let lexed = LexedFile::lex(file, source);
+        let scan = DeclarationScan::scan(&lexed, source);
+        let header = HeaderParse::parse(&lexed, source, &scan.declarations[0]);
+        assert!(
+            header
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G3254")
+        );
+    }
+}
+
+#[test]
 fn effect_resumption_bounds_share_structural_quantity_normalization() {
     let package = PackageKey("header-effect-quantity-arithmetic@0.1.0".into());
-    let source = "effect Retry { [(1 + 1), 3 * 2] retry() -> i64; }";
+    let source = "effect Retry { [(1 + 1), 1 + 1] retry() -> i64; }";
     let file = FileKey::new(&package, "src/lib.glorious");
     let lexed = LexedFile::lex(file, source);
     let scan = DeclarationScan::scan(&lexed, source);
@@ -721,7 +753,7 @@ fn effect_resumption_bounds_share_structural_quantity_normalization() {
     };
     assert_eq!(
         effect.operations[0].resumption,
-        Quantity::new(2, Some(6)).unwrap()
+        Quantity::new(2, Some(2)).unwrap()
     );
 }
 

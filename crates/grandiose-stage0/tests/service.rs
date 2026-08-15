@@ -5875,7 +5875,7 @@ fn service_rejects_deferred_resumption_quantities_at_the_g1_source_boundary() {
         assert!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.code == "G6005"),
+                .any(|diagnostic| diagnostic.code == "G3254"),
             "missing source-boundary resumption-quantity diagnostic for {quantity}: {diagnostics:#?}"
         );
     }
