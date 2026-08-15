@@ -5074,10 +5074,21 @@ impl MirFunction {
                         .find_map(|(binding, local)| {
                             (*local == Some(*dst)).then_some(MirPlaceBindingId(binding as u32))
                         })
-                        .ok_or_else(|| {
+                        ;
+                    // Captures are ABI parameters of a lifted callable. A
+                    // unique capture is addressable through that sealed
+                    // environment parameter, but it is not a new lexical
+                    // source owner in the child body and therefore has no
+                    // child-local StorageLive binding to manufacture.
+                    let Some(binding) = binding else {
+                        if self.parameters.contains(dst) {
+                            continue;
+                        }
+                        return Err(
                             "MIR Store targets a local without frozen addressable source storage"
-                                .to_owned()
-                        })?;
+                                .into(),
+                        );
+                    };
                     if !storage_live.contains(&binding) {
                         return Err("MIR Store targets source storage before StorageLive".into());
                     }
