@@ -8570,6 +8570,21 @@ fn service_dynamic_label_rejoin_completion_returns_a_closure_without_stale_capab
 }
 
 #[test]
+fn service_rolls_back_private_reference_closure_facade_revisions() {
+    let root = "use top_facade::make; pub fn main() -> i64 { let value = 42; make(&value)() }";
+    let public = "pub fn make<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value } }";
+    let private = "fn make<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value } }";
+    let world = |provider: &str| { let mut input = request(root); for (package, source) in [("reference-core@0.1.0", provider), ("middle-facade@0.1.0", "pub use reference_core::make;"), ("top-facade@0.1.0", "pub use middle_facade::*;")] { input.sources.push(SourceInput::new(PackageKey(package.into()), LogicalPath::parse("src/lib.glorious").unwrap(), source.as_bytes())); } input };
+    let compiler = StageZeroCompiler::new(); let parent = compiler.import_revision(world(public), None).unwrap();
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().run_i64().unwrap(), 42);
+    let cached = compiler.interface_cache_stats();
+    let child = compiler.import_revision(world(private), Some(parent)).unwrap();
+    let error = compiler.compile_session(&compiler.open_session(child).unwrap()).expect_err("private reference closure cannot cross facade");
+    assert!(error.diagnostics().iter().any(|d| matches!(d.code, "G3317" | "G3326")));
+    assert_eq!(compiler.interface_cache_stats(), cached); assert!(compiler.dependency_traces(child).is_empty());
+}
+
+#[test]
 fn service_dynamic_label_rejoin_returns_a_shared_reference_closure() {
     // The returned closure borrows a caller-owned outer value immutably. The
     // dynamic label crosses the nested Ask frames, then the completion closes
