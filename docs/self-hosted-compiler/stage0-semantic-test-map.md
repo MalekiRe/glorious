@@ -215,6 +215,13 @@ coarse. The composite fixtures cover:
   canonical VM bytes/fingerprints change with the associativity result, and
   the interface cache records fresh misses rather than reusing stale metadata
   (`service_invalidates_generic_facade_artifacts_across_provider_versioned_fixity_updates`).
+- when two versioned hyphenated packages would normalize to the same source
+  alias, the request is rejected canonically before touching an already
+  published generic facade or its interface cache. Replacing that collision
+  with the valid newer provider then re-elaborates the trait/effect/fixity
+  facade and VM artifact instead of retaining either stale diagnostics or
+  canonical metadata
+  (`service_recovers_from_hyphen_alias_version_collisions_without_stale_generic_facade_state`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and

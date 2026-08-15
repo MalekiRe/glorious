@@ -11451,6 +11451,112 @@ fn service_invalidates_generic_facade_artifacts_across_provider_versioned_fixity
 }
 
 #[test]
+fn service_recovers_from_hyphen_alias_version_collisions_without_stale_generic_facade_state() {
+    let root = "use semantic_facade::*; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn call(callback: Callback<i64>) -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: call(Capability<i64>::relay) }; Trace<i64>::note(packet.value) } pub fn effect_value() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let provider = |fixity: &str| {
+        format!(
+            "pub {fixity} 30 **; pub trait Combine<T> {{ **(left: T, right: T) -> T; }} impl Combine<i64> for i64 {{ **(left: i64, right: i64) -> i64 {{ left - right }} }} pub effect Trace<T> {{ [1,1] note(value: T) -> i64; }} pub trait Parent<T> {{ type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / {{ <Self as Parent<T>>::Effects<U> }}; }} pub trait Child<T>: Parent<T> {{}} impl Parent<i64> for i64 {{ type Item<U> = i64; type Effects<U> = {{Trace<U>}}; fn relay<U>(receiver: i64, value: U) -> i64 / {{Trace<U>}} {{ Trace<U>::note(value) }} }} impl Child<i64> for i64 {{}} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / {{ <i64 as Child<i64>>::Effects<U> }};"
+        )
+    };
+    let facade = "pub use semantic_lib::{Callback, Child as Capability, Trace}; pub use semantic_lib::*;";
+    let world = |providers: Vec<(&str, String)>| {
+        let mut input = request(root);
+        for (package, source) in providers {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                source.as_bytes(),
+            ));
+        }
+        input.sources.push(SourceInput::new(
+            PackageKey("semantic-facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            facade.as_bytes(),
+        ));
+        input
+    };
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(
+            world(vec![("semantic-lib@0.1.0", provider("infixl"))]),
+            None,
+        )
+        .unwrap();
+    let first = compiler
+        .compile_revision(parent)
+        .expect("the initial hyphenated generic facade must compile")
+        .artifact
+        .unwrap();
+    assert_eq!(first.run_i64().unwrap(), 48);
+    let cached_parent = compiler.interface_cache_stats();
+    let facade_node = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("semantic-facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let published_facade = compiler
+        .dependency_trace(parent, &facade_node)
+        .expect("parent facade interface must be published");
+
+    let collision = world(vec![
+        ("semantic-lib@0.1.0", provider("infixl")),
+        ("semantic-lib@0.2.0", provider("infixr")),
+    ]);
+    let mut reversed_collision = collision.clone();
+    reversed_collision.sources.reverse();
+    let mut diagnostics_by_order = Vec::new();
+    for input in [collision, reversed_collision] {
+        let error = compiler
+            .import_revision(input, Some(parent))
+            .expect_err("colliding hyphenated package aliases unexpectedly admitted a revision");
+        let diagnostics = error.diagnostics().to_vec();
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.code == "G7036"),
+            "missing package alias collision diagnostic: {diagnostics:#?}"
+        );
+        assert!(
+            diagnostics.iter().all(|diagnostic| diagnostic.code == "G7036"),
+            "alias collisions must fail before interface/body diagnostics: {diagnostics:#?}"
+        );
+        assert_eq!(
+            compiler.interface_cache_stats(),
+            cached_parent,
+            "rejected aliases must not mutate the established interface cache"
+        );
+        assert_eq!(
+            compiler.dependency_trace(parent, &facade_node),
+            Some(published_facade.clone()),
+            "rejected aliases must not overwrite an already-published generic facade"
+        );
+        diagnostics_by_order.push(diagnostics);
+    }
+    assert_eq!(
+        diagnostics_by_order[0], diagnostics_by_order[1],
+        "hyphenated version-alias rejection must be deterministic under source reordering"
+    );
+
+    let child = compiler
+        .import_revision(
+            world(vec![("semantic-lib@0.2.0", provider("infixr"))]),
+            Some(parent),
+        )
+        .expect("a valid version update must remain admissible after alias rejection");
+    let second = compiler
+        .compile_revision(child)
+        .expect("the recovered generic facade must not reuse stale fixity metadata")
+        .artifact
+        .unwrap();
+    assert_eq!(second.run_i64().unwrap(), 52);
+    assert_ne!(first.fingerprint(), second.fingerprint());
+    assert_ne!(first.canonical_bytes(), second.canonical_bytes());
+    let updated_facade = compiler
+        .dependency_trace(child, &facade_node)
+        .expect("recovered child facade interface must publish");
+    assert_ne!(published_facade.fingerprint, updated_facade.fingerprint);
+    assert!(matches!(updated_facade.status, DependencyStatus::Red { .. }));
+}
+
+#[test]
 fn service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping() {
     let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
     let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
