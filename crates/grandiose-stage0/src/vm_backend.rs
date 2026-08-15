@@ -2089,6 +2089,7 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
                 target,
                 arguments,
                 cleanup,
+                ..
             } => {
                 let target = *starts
                     .get(target.0 as usize)
@@ -5637,6 +5638,7 @@ fn lower_instruction(
             effect_arguments,
             operation,
             arguments,
+            ..
         } => VmInstruction::Perform {
             dst: dst.0,
             effect: *effect,
@@ -5655,6 +5657,7 @@ fn lower_instruction(
             resume_type,
             continuation,
             target,
+            ..
         } => VmInstruction::InstallHandler {
             effect: *effect,
             effect_arguments: effect_arguments
@@ -5680,20 +5683,22 @@ fn lower_instruction(
                 .expect("validated MIR handler target exists"),
         },
         MirInstruction::UninstallHandler => VmInstruction::UninstallHandler,
-        MirInstruction::CaptureResumption { dst } => {
+        MirInstruction::CaptureResumption { dst, .. } => {
             VmInstruction::CaptureResumption { dst: dst.0 }
         }
-        MirInstruction::Resume { value } => VmInstruction::Resume { value: value.0 },
-        MirInstruction::ResumeReturn { dst, value } => VmInstruction::ResumeReturn {
+        MirInstruction::Resume { value, .. } => VmInstruction::Resume { value: value.0 },
+        MirInstruction::ResumeReturn { dst, value, .. } => VmInstruction::ResumeReturn {
             dst: dst.0,
             value: value.0,
         },
-        MirInstruction::ResumeSnapshot { snapshot, value } => VmInstruction::ResumeSnapshot {
+        MirInstruction::ResumeSnapshot {
+            snapshot, value, ..
+        } => VmInstruction::ResumeSnapshot {
             snapshot: snapshot.0,
             value: value.0,
         },
-        MirInstruction::Forward => VmInstruction::Forward,
-        MirInstruction::Cancel => VmInstruction::Cancel,
+        MirInstruction::Forward { .. } => VmInstruction::Forward,
+        MirInstruction::Cancel { .. } => VmInstruction::Cancel,
         MirInstruction::Copy { dst, src } => VmInstruction::Copy {
             dst: dst.0,
             src: src.0,
@@ -6019,6 +6024,7 @@ fn lower_instruction(
             brand,
             target,
             destination,
+            ..
         } => VmInstruction::MakeLabel {
             dst: dst.0,
             brand_owner: brand.owner,

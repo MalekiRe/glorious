@@ -3983,7 +3983,7 @@ fn handler_resumption_alias_preserves_the_same_snapshot_identity() {
     let snapshot = instructions
         .iter()
         .find_map(|instruction| match instruction {
-            MirInstruction::CaptureResumption { dst } => Some(*dst),
+            MirInstruction::CaptureResumption { dst, .. } => Some(*dst),
             _ => None,
         })
         .expect("MIR captured the alias above");
@@ -4462,7 +4462,7 @@ fn affine_discarded_resumption_lowers_to_a_runtime_handler_cancellation() {
         block
             .instructions
             .iter()
-            .any(|instruction| matches!(instruction, MirInstruction::Cancel))
+            .any(|instruction| matches!(instruction, MirInstruction::Cancel { .. }))
     }));
 }
 

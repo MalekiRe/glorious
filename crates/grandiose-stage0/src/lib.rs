@@ -81,9 +81,12 @@ pub use interface::{
 };
 pub use mir::{
     MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment, MirCleanupPlan, MirContinuationPolicy,
-    MirDiagnostic, MirEditor, MirFunction, MirInstance, MirInstruction, MirLocal, MirLocalDecl,
-    MirLowering, MirNominalCopyDescriptor, MirOptimizationReport, MirPattern, MirPatternField,
-    MirProgram, MirTerminator, MirTraitMethodInstance, optimize as optimize_mir,
+    MirControlTables, MirDiagnostic, MirEditor, MirFunction, MirHandlerSiteData, MirHandlerSiteId,
+    MirInstance, MirInstruction, MirLabelData, MirLabelId, MirLocal, MirLocalDecl, MirLowering,
+    MirNominalCopyDescriptor, MirOptimizationReport, MirPattern, MirPatternField,
+    MirPerformSiteData, MirPerformSiteId, MirProgram, MirResumptionSiteData, MirResumptionSiteId,
+    MirResumptionSiteKind, MirScopeData, MirScopeId, MirTerminator, MirTraitMethodInstance,
+    optimize as optimize_mir,
 };
 pub use module_graph::{ModuleDiagnostic, ModuleGraph, ModuleNode};
 pub use operation::{Budget, BudgetError, CancellationToken, PublicationGuard};

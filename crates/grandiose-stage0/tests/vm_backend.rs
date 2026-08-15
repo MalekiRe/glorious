@@ -2,13 +2,14 @@ use grandiose_stage0::{
     BodySyntax, CallableId, CandidateVmArtifact, CandidateVmProgram, CoreId, DeclarationScan,
     DefKey, DefinitionIndex, Digest, ElaboratedInterface, EnvironmentBrand, FileKey,
     GenericArgument, InterfaceSet, LabelBrand, LexedFile, LogicalPath, MirBlock, MirBlockId,
-    MirCleanupPlan, MirFunction, MirInstruction, MirLocal, MirLocalDecl, MirLowering, MirProgram,
-    MirTerminator, PackageKey, PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCapture,
-    VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof,
-    VmContinuationPolicy, VmEffectRow, VmExecutionLimits, VmFunction, VmGenericArgument,
-    VmInstruction, VmNominalCopyDescriptor, VmPattern, VmPatternField, VmType,
-    decode_and_verify_artifact, decode_and_verify_program, decode_artifact, decode_program,
-    emit_vm, emit_vm_program, encode_artifact, encode_program, verify_vm, verify_vm_program,
+    MirCleanupPlan, MirControlTables, MirFunction, MirInstruction, MirLabelId, MirLocal,
+    MirLocalDecl, MirLowering, MirPerformSiteId, MirProgram, MirScopeId, MirTerminator, PackageKey,
+    PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCapture, VmCaptureEnvironment,
+    VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmContinuationPolicy,
+    VmEffectRow, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction,
+    VmNominalCopyDescriptor, VmPattern, VmPatternField, VmType, decode_and_verify_artifact,
+    decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
+    encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
 
@@ -1497,10 +1498,13 @@ fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols()
             },
         ],
         result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![MirInstruction::Perform {
+                site: MirPerformSiteId::UNASSIGNED,
                 dst: MirLocal(0),
                 effect,
                 effect_arguments: vec![GenericArgument::ConstU32Expr(expression.clone())],
@@ -1509,7 +1513,8 @@ fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols()
             }],
             terminator: MirTerminator::Return { value: MirLocal(0) },
         }],
-    };
+    }
+    .with_frozen_control_tables();
     let artifact = emit_vm(&function).expect("symbolic structural consts have a VM form");
     assert!(matches!(
         artifact.function.registers[1],
@@ -1670,10 +1675,13 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
             source: CoreId(u32::MAX),
         }],
         result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![MirInstruction::Perform {
+                site: MirPerformSiteId::UNASSIGNED,
                 dst: MirLocal(0),
                 effect,
                 effect_arguments: vec![GenericArgument::ConstU32(1)],
@@ -1682,7 +1690,8 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
             }],
             terminator: MirTerminator::Return { value: MirLocal(0) },
         }],
-    };
+    }
+    .with_frozen_control_tables();
     let artifact = emit_vm(&function).expect("const protocol argument has a VM identity");
     assert!(matches!(
         artifact.function.instructions.as_slice(),
@@ -5534,9 +5543,11 @@ fn vm_executes_verified_multiblock_mir_boolean_control_flow() {
             },
         ],
         result: i64_ty,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstBool {
                     dst: MirLocal(0),
@@ -5551,6 +5562,7 @@ fn vm_executes_verified_multiblock_mir_boolean_control_flow() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstI64 {
                     dst: MirLocal(1),
@@ -5559,6 +5571,7 @@ fn vm_executes_verified_multiblock_mir_boolean_control_flow() {
                 terminator: MirTerminator::Return { value: MirLocal(1) },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstI64 {
                     dst: MirLocal(2),
@@ -5567,7 +5580,8 @@ fn vm_executes_verified_multiblock_mir_boolean_control_flow() {
                 terminator: MirTerminator::Return { value: MirLocal(2) },
             },
         ],
-    };
+    }
+    .with_frozen_control_tables();
     let candidate = emit_vm(&mir).unwrap();
     let bytes = encode_artifact(&candidate);
     assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
@@ -5600,9 +5614,11 @@ fn vm_lowers_typed_cfg_edge_arguments_through_parallel_copies() {
             local(i64_ty.clone()),
         ],
         result: i64_ty,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![
                     MirInstruction::ConstBool {
@@ -5627,11 +5643,13 @@ fn vm_lowers_typed_cfg_edge_arguments_through_parallel_copies() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(3)],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(3) },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(4)],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(4) },
@@ -5660,9 +5678,11 @@ fn vm_omits_identity_cfg_edge_transfers() {
             source: CoreId(u32::MAX),
         }],
         result: i64_ty,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstI64 {
                     dst: MirLocal(0),
@@ -5674,12 +5694,14 @@ fn vm_omits_identity_cfg_edge_transfers() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(0)],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(0) },
             },
         ],
-    };
+    }
+    .with_frozen_control_tables();
     let candidate = emit_vm(&mir).unwrap();
     assert_eq!(candidate.function.instructions.len(), 3);
     assert!(matches!(
@@ -5713,15 +5735,18 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
             },
         ],
         result: i64_ty,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstI64 {
                     dst: MirLocal(0),
                     value: 42,
                 }],
                 terminator: MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
                     brand: LabelBrand { owner, label: 9 },
                     target: MirBlockId(1),
                     arguments: vec![MirLocal(0)],
@@ -5732,12 +5757,14 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(1)],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(1) },
             },
         ],
-    };
+    }
+    .with_frozen_control_tables();
     let candidate = emit_vm(&mir).unwrap();
     assert!(matches!(
         candidate.function.instructions.as_slice(),
@@ -5956,9 +5983,11 @@ fn vm_emits_and_executes_the_checked_mir_unreachable_terminal_as_a_trap() {
         parameters: vec![],
         locals: vec![local(Type::Scalar(ScalarType::Bool)), local(i64_ty.clone())],
         result: i64_ty,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![
                     MirInstruction::ConstBool {
@@ -5979,11 +6008,13 @@ fn vm_emits_and_executes_the_checked_mir_unreachable_terminal_as_a_trap() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(1) },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,

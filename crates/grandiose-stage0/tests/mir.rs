@@ -4,8 +4,9 @@ use grandiose_stage0::{
     CallableId, CaptureMode, ConstInferVar, ConstKind, CoreId, DefKey, Digest, EffectInstance,
     EffectRow, EffectRowProjection, EnvironmentBrand, GenericArgument, GenericKind, InferVar,
     InstanceKey, Lifetime, LoanFact, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment,
-    MirCleanupPlan, MirContinuationPolicy, MirEditor, MirFunction, MirInstance, MirInstruction,
-    MirLocal, MirLocalDecl, MirPattern, MirPatternField, MirProgram, MirTerminator,
+    MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirEditor, MirFunction,
+    MirHandlerSiteId, MirInstance, MirInstruction, MirLabelId, MirLocal, MirLocalDecl, MirPattern,
+    MirPatternField, MirPerformSiteId, MirProgram, MirResumptionSiteId, MirScopeId, MirTerminator,
     MirTraitMethodInstance, MoveFact, Mutability, Quantity, ScalarType, Type, VmArtifactError,
     emit_vm, emit_vm_program, optimize_mir, verify_vm,
 };
@@ -26,11 +27,14 @@ fn mir_rejects_a_forged_nonfinite_replay_budget() {
         parameters: vec![],
         locals: vec![local(Type::Scalar(ScalarType::I64))],
         result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::InstallHandler {
+                    site: MirHandlerSiteId::UNASSIGNED,
                     effect: DefKey(Digest::of_bytes(b"forged-mir-replay-effect")),
                     effect_arguments: vec![],
                     operation: 0,
@@ -42,6 +46,7 @@ fn mir_rejects_a_forged_nonfinite_replay_budget() {
                 terminator: MirTerminator::Unreachable,
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -67,9 +72,11 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
             local(Type::Scalar(ScalarType::I64)),
         ],
         result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstBool {
                     dst: MirLocal(0),
@@ -84,12 +91,14 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstI64 {
                     dst: MirLocal(1),
                     value: 1,
                 }],
                 terminator: MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
                     brand: grandiose_stage0::LabelBrand { owner, label: 0 },
                     target: MirBlockId(3),
                     arguments: vec![MirLocal(1)],
@@ -100,12 +109,14 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstI64 {
                     dst: MirLocal(2),
                     value: 2,
                 }],
                 terminator: MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
                     brand: grandiose_stage0::LabelBrand { owner, label: 0 },
                     target: MirBlockId(4),
                     arguments: vec![MirLocal(2)],
@@ -116,11 +127,13 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(3)],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(3) },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(2)],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(2) },
@@ -144,8 +157,10 @@ fn mir_rejects_a_forged_payload_distinct_nan_constant() {
         parameters: vec![],
         locals: vec![local(Type::Scalar(ScalarType::F64))],
         result: Type::Scalar(ScalarType::F64),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![MirInstruction::ConstF64 {
                 dst: MirLocal(0),
@@ -173,8 +188,10 @@ fn mir_rejects_a_literal_pattern_that_violates_the_lossless_lexer_contract() {
             local(Type::Scalar(ScalarType::Bool)),
         ],
         result: Type::Scalar(ScalarType::Bool),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![
                 MirInstruction::ConstText {
@@ -206,12 +223,15 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
         parameters: vec![],
         locals: vec![local(Type::Scalar(ScalarType::I64))],
         result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
                     brand: grandiose_stage0::LabelBrand {
                         owner: DefKey(Digest::of_bytes(b"forged-mir-cleanup-owner")),
                         label: 0,
@@ -222,6 +242,7 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(0)],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(0) },
@@ -280,9 +301,11 @@ fn graph() -> MirFunction {
             local(Type::Scalar(ScalarType::I64)),
         ],
         result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::SwitchBool {
@@ -294,11 +317,13 @@ fn graph() -> MirFunction {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(3)],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(3) },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(4)],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: MirLocal(4) },
@@ -337,8 +362,10 @@ fn mir_templates_may_defer_associated_const_projection_but_vm_emission_rejects_i
         parameters: vec![],
         locals: vec![local(nominal.clone())],
         result: nominal,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![],
             terminator: MirTerminator::Return { value: MirLocal(0) },
@@ -365,8 +392,10 @@ fn mir_validation_rejects_nominal_pattern_fields_outside_frozen_arity() {
         parameters: vec![],
         locals: vec![local(nominal), local(Type::Scalar(ScalarType::Bool))],
         result: Type::Scalar(ScalarType::Bool),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![MirInstruction::PatternTest {
                 dst: MirLocal(1),
@@ -408,8 +437,10 @@ fn mir_validation_rejects_nominal_pattern_field_type_forgery() {
         parameters: vec![],
         locals: vec![local(nominal), local(Type::Scalar(ScalarType::Bool))],
         result: Type::Scalar(ScalarType::Bool),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![MirInstruction::PatternTest {
                 dst: MirLocal(1),
@@ -458,8 +489,10 @@ fn mir_validation_rejects_forged_reborrow_capability_and_referent() {
         parameters: vec![],
         locals: vec![local(i64.clone()), local(shared_i64), local(unique_i64)],
         result: i64.clone(),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![
                 MirInstruction::ConstI64 {
@@ -505,8 +538,10 @@ fn mir_validation_rejects_forged_reborrow_capability_and_referent() {
             }),
         ],
         result: i64.clone(),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![
                 MirInstruction::ConstI64 {
@@ -542,8 +577,10 @@ fn mir_validation_rejects_forged_array_pattern_and_projection_element_types() {
         parameters: vec![],
         locals: vec![local(array.clone()), local(Type::Scalar(ScalarType::Bool))],
         result: Type::Scalar(ScalarType::Bool),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![MirInstruction::PatternTest {
                 dst: MirLocal(1),
@@ -569,8 +606,10 @@ fn mir_validation_rejects_forged_array_pattern_and_projection_element_types() {
         parameters: vec![],
         locals: vec![local(array), local(Type::Scalar(ScalarType::Bool))],
         result: Type::Scalar(ScalarType::Bool),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![MirInstruction::ProjectArray {
                 dst: MirLocal(1),
@@ -601,12 +640,15 @@ fn emitted_mir_cannot_resume_past_an_active_nested_handler_frame() {
             local(Type::Scalar(ScalarType::I64)),
         ],
         result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![
                     MirInstruction::InstallHandler {
+                        site: MirHandlerSiteId::UNASSIGNED,
                         effect: outer,
                         effect_arguments: vec![],
                         operation: 0,
@@ -616,6 +658,7 @@ fn emitted_mir_cannot_resume_past_an_active_nested_handler_frame() {
                         target: MirBlockId(1),
                     },
                     MirInstruction::Perform {
+                        site: MirPerformSiteId::UNASSIGNED,
                         dst: MirLocal(0),
                         effect: outer,
                         effect_arguments: vec![],
@@ -627,9 +670,11 @@ fn emitted_mir_cannot_resume_past_an_active_nested_handler_frame() {
                 terminator: MirTerminator::Return { value: MirLocal(0) },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![
                     MirInstruction::InstallHandler {
+                        site: MirHandlerSiteId::UNASSIGNED,
                         effect: inner,
                         effect_arguments: vec![],
                         operation: 0,
@@ -644,17 +689,39 @@ fn emitted_mir_cannot_resume_past_an_active_nested_handler_frame() {
                     },
                     // The topmost frame is the unsuspended inner frame, so
                     // this forged outer-resume edge has no valid target.
-                    MirInstruction::Resume { value: MirLocal(1) },
+                    MirInstruction::Resume {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                        value: MirLocal(1),
+                    },
                 ],
                 terminator: MirTerminator::Unreachable,
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
             },
         ],
-    };
+    }
+    .with_frozen_control_tables();
+    assert_eq!(forged.control.handlers.len(), 2);
+    assert_eq!(forged.control.performs.len(), 1);
+    assert_eq!(forged.control.resumptions.len(), 1);
+    assert_eq!(
+        forged.control.performs[0].handler_candidates,
+        vec![MirHandlerSiteId(0)]
+    );
+    forged
+        .validate()
+        .expect("freezing publishes a self-consistent control table");
+    let mut table_forgery = forged.clone();
+    table_forgery.control.performs[0].operation = 99;
+    assert!(
+        table_forgery
+            .validate()
+            .is_err_and(|error| error.contains("disagrees with frozen control table"))
+    );
     let artifact = emit_vm(&forged).expect("well-formed structural MIR emits");
     assert!(matches!(
         verify_vm(artifact),
@@ -859,6 +926,7 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
     operation_effect_row.blocks[0]
         .instructions
         .push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: MirLocal(1),
             effect: DefKey(Digest::of_bytes(b"operation-effect-row-target")),
             effect_arguments: vec![GenericArgument::EffectRow(EffectRow {
@@ -892,6 +960,7 @@ fn mir_validation_rejects_nested_unresolved_type_metadata_and_unscoped_lifetimes
     escaped_effect_lifetime.blocks[0]
         .instructions
         .push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: MirLocal(1),
             effect: DefKey(Digest::of_bytes(b"mir-escaped-hrtb-effect")),
             effect_arguments: vec![GenericArgument::Lifetime(Lifetime::Bound {
@@ -1001,6 +1070,7 @@ fn mir_program_rejects_generic_handler_metadata_in_a_canonical_instance_body() {
     function.blocks[0]
         .instructions
         .push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: DefKey(Digest::of_bytes(b"residual-handler-effect")),
             effect_arguments: vec![],
             operation: 0,
@@ -1164,8 +1234,10 @@ fn optimizer_folds_checked_scalar_constants_and_eliminates_known_branches() {
             local(i64_ty.clone()),
         ],
         result: i64_ty,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![
                 MirInstruction::ConstI64 {
@@ -1210,8 +1282,10 @@ fn optimizer_folds_reflexive_integer_and_boolean_comparisons_without_constants()
             local(bool_ty),
         ],
         result: Type::Scalar(ScalarType::Bool),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![
                 MirInstruction::LtI64 {
@@ -1273,9 +1347,11 @@ fn optimizer_folds_known_and_irrefutable_structural_pattern_tests() {
             local(bool_ty),
         ],
         result: Type::Scalar(ScalarType::Bool),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![
                     MirInstruction::ConstI64 {
@@ -1334,6 +1410,7 @@ fn optimizer_folds_known_and_irrefutable_structural_pattern_tests() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstBool {
                     dst: MirLocal(10),
@@ -1344,6 +1421,7 @@ fn optimizer_folds_known_and_irrefutable_structural_pattern_tests() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstBool {
                     dst: MirLocal(11),
@@ -1407,9 +1485,11 @@ fn optimizer_propagates_constants_through_typed_block_arguments() {
             local(i64_ty.clone()),
         ],
         result: i64_ty,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstI64 {
                     dst: MirLocal(0),
@@ -1421,6 +1501,7 @@ fn optimizer_propagates_constants_through_typed_block_arguments() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(1)],
                 instructions: vec![
                     MirInstruction::ConstI64 {
@@ -1464,9 +1545,11 @@ fn optimizer_requires_joined_block_arguments_to_agree() {
             local(i64_ty.clone()),
         ],
         result: i64_ty,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::SwitchBool {
@@ -1478,6 +1561,7 @@ fn optimizer_requires_joined_block_arguments_to_agree() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstI64 {
                     dst: MirLocal(1),
@@ -1489,6 +1573,7 @@ fn optimizer_requires_joined_block_arguments_to_agree() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstI64 {
                     dst: MirLocal(2),
@@ -1500,6 +1585,7 @@ fn optimizer_requires_joined_block_arguments_to_agree() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(3)],
                 instructions: vec![
                     MirInstruction::ConstI64 {
@@ -1543,9 +1629,11 @@ fn optimizer_folds_comparisons_and_carries_them_to_a_successor_branch() {
             local(bool_ty.clone()),
         ],
         result: bool_ty,
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![
                     MirInstruction::ConstI64 {
@@ -1568,6 +1656,7 @@ fn optimizer_folds_comparisons_and_carries_them_to_a_successor_branch() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![MirLocal(3)],
                 instructions: vec![],
                 terminator: MirTerminator::SwitchBool {
@@ -1579,6 +1668,7 @@ fn optimizer_folds_comparisons_and_carries_them_to_a_successor_branch() {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstBool {
                     dst: MirLocal(4),
@@ -1587,6 +1677,7 @@ fn optimizer_folds_comparisons_and_carries_them_to_a_successor_branch() {
                 terminator: MirTerminator::Return { value: MirLocal(4) },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::ConstBool {
                     dst: MirLocal(5),
@@ -1641,8 +1732,10 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
         parameters: vec![MirLocal(0)],
         locals: vec![local(Type::Scalar(ScalarType::I64))],
         result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![],
             terminator: MirTerminator::Return { value: MirLocal(0) },
@@ -1670,8 +1763,10 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
             lifetime_binders: 0,
             invocation: Quantity::ONCE,
         },
+        control: MirControlTables::default(),
         entry: MirBlockId(0),
         blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![
                 MirInstruction::ConstI64 {

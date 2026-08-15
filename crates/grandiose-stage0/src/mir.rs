@@ -27,6 +27,141 @@ use std::ops::Deref;
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MirLocal(pub u32);
 
+/// Typed, body-local lexical scope identity.  These are dense arena indices:
+/// they describe lowering facts inside one frozen MIR body and are never query
+/// or package cache keys.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirScopeId(pub u32);
+
+/// Typed, body-local identity for one lexical label realization.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirLabelId(pub u32);
+
+/// Typed, body-local identity for one installed handler frame site.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirHandlerSiteId(pub u32);
+
+/// Typed, body-local identity for one effect-performance site.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirPerformSiteId(pub u32);
+
+/// Typed, body-local identity for one continuation capture, resume, forward,
+/// or cancellation site.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirResumptionSiteId(pub u32);
+
+impl MirScopeId {
+    pub const ROOT: Self = Self(0);
+}
+
+const UNASSIGNED_CONTROL_SITE: u32 = u32::MAX;
+
+impl MirLabelId {
+    pub const UNASSIGNED: Self = Self(UNASSIGNED_CONTROL_SITE);
+}
+
+impl MirHandlerSiteId {
+    pub const UNASSIGNED: Self = Self(UNASSIGNED_CONTROL_SITE);
+}
+
+impl MirPerformSiteId {
+    pub const UNASSIGNED: Self = Self(UNASSIGNED_CONTROL_SITE);
+}
+
+impl MirResumptionSiteId {
+    pub const UNASSIGNED: Self = Self(UNASSIGNED_CONTROL_SITE);
+}
+
+/// Immutable lexical-scope record retained after lowering.  The current
+/// Stage-0 lowering has one root scope until cleanup elaboration starts
+/// splitting lexical exits, but every block already names its scope so that
+/// later passes cannot smuggle a raw stack through an instruction stream.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirScopeData {
+    pub parent: Option<MirScopeId>,
+    pub entered_label: Option<MirLabelId>,
+    pub entered_handler: Option<MirHandlerSiteId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirLabelData {
+    pub brand: crate::LabelBrand,
+    pub scope: MirScopeId,
+    pub destination: MirBlockId,
+    pub call_destination: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirHandlerSiteData {
+    pub block: MirBlockId,
+    pub scope: MirScopeId,
+    pub effect: DefKey,
+    pub effect_arguments: Vec<crate::GenericArgument>,
+    pub operation: u32,
+    pub target: MirBlockId,
+    pub resume_type: Type,
+    pub continuation: MirContinuationPolicy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirPerformSiteData {
+    pub block: MirBlockId,
+    pub scope: MirScopeId,
+    pub effect: DefKey,
+    pub effect_arguments: Vec<crate::GenericArgument>,
+    pub operation: u32,
+    /// Candidate sites are lexical identities, innermost first.  Stage 0
+    /// computes this when freezing the lowerer's linear handler regions.
+    pub handler_candidates: Vec<MirHandlerSiteId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MirResumptionSiteKind {
+    Capture,
+    Resume,
+    ResumeReturn,
+    ResumeSnapshot,
+    Forward,
+    Cancel,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirResumptionSiteData {
+    pub block: MirBlockId,
+    pub scope: MirScopeId,
+    pub kind: MirResumptionSiteKind,
+    pub originating_handler: Option<MirHandlerSiteId>,
+}
+
+/// Frozen control identity tables for a MIR body.  Instructions and
+/// terminators refer to these typed IDs; validation checks the relationship in
+/// both directions so no pass can add an executable control edge without its
+/// lexical identity record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirControlTables {
+    pub scopes: Vec<MirScopeData>,
+    pub labels: Vec<MirLabelData>,
+    pub handlers: Vec<MirHandlerSiteData>,
+    pub performs: Vec<MirPerformSiteData>,
+    pub resumptions: Vec<MirResumptionSiteData>,
+}
+
+impl Default for MirControlTables {
+    fn default() -> Self {
+        Self {
+            scopes: vec![MirScopeData {
+                parent: None,
+                entered_label: None,
+                entered_handler: None,
+            }],
+            labels: vec![],
+            handlers: vec![],
+            performs: vec![],
+            resumptions: vec![],
+        }
+    }
+}
+
 /// Append-only, typed storage for locals while a MIR body is being built.
 ///
 /// `MirLocal` values are arena identities, never positions supplied by a
@@ -702,6 +837,7 @@ pub enum MirInstruction {
     /// lowering later rewrites covered sites; an uncovered site reaches the
     /// VM's explicit unhandled-effect boundary.
     Perform {
+        site: MirPerformSiteId,
         dst: MirLocal,
         effect: DefKey,
         /// Exact nominal arguments of the protocol instance. `State<i64>`
@@ -714,6 +850,7 @@ pub enum MirInstruction {
     /// continuation at a matching `Perform` and transfers to `target`; a
     /// `Resume` re-enters that continuation with deep reinstatement.
     InstallHandler {
+        site: MirHandlerSiteId,
         effect: DefKey,
         effect_arguments: Vec<crate::GenericArgument>,
         operation: u32,
@@ -728,14 +865,17 @@ pub enum MirInstruction {
     /// an active handler frame; runtime aliases carry the same token rather
     /// than relying on a source binder spelling.
     CaptureResumption {
+        site: MirResumptionSiteId,
         dst: MirLocal,
     },
     Resume {
+        site: MirResumptionSiteId,
         value: MirLocal,
     },
     /// Resume a replayable continuation and re-enter the handler clause once
     /// that continuation completes, writing its result to `dst`.
     ResumeReturn {
+        site: MirResumptionSiteId,
         dst: MirLocal,
         value: MirLocal,
     },
@@ -743,6 +883,7 @@ pub enum MirInstruction {
     /// distinct from legacy `Resume`, which consumes the innermost frame and
     /// remains useful for tail-resumption lowering.
     ResumeSnapshot {
+        site: MirResumptionSiteId,
         snapshot: MirLocal,
         value: MirLocal,
     },
@@ -750,11 +891,15 @@ pub enum MirInstruction {
     /// original operation against the next outer matching frame. The VM keeps
     /// the declined frame in the resumed continuation, which is the deep
     /// forwarding counterpart of `Resume`.
-    Forward,
+    Forward {
+        site: MirResumptionSiteId,
+    },
     /// Abandon the innermost suspended continuation. This is legal only for
     /// source continuation contracts that permit zero uses; the VM consumes
     /// the snapshot and continues the handler clause normally.
-    Cancel,
+    Cancel {
+        site: MirResumptionSiteId,
+    },
     Copy {
         dst: MirLocal,
         src: MirLocal,
@@ -1116,6 +1261,7 @@ pub enum MirInstruction {
     /// destination are frozen CFG facts; the VM records the dynamic frame
     /// depth at construction so this value can cross generic calls safely.
     MakeLabel {
+        label: MirLabelId,
         dst: MirLocal,
         brand: crate::LabelBrand,
         target: MirBlockId,
@@ -1203,6 +1349,7 @@ pub enum MirTerminator {
     /// Stage-0 value runtime has no drop glue: validation and emission must
     /// agree on the exact ownership facts crossed by the edge.
     Leave {
+        label: MirLabelId,
         /// The lexical destination identity is retained through MIR even
         /// though a fully specialized VM edge may erase it to a jump.
         brand: crate::LabelBrand,
@@ -1273,6 +1420,9 @@ impl MirCleanupPlan {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirBlock {
+    /// Lexical scope active throughout this block.  Dynamic handler and label
+    /// stacks are reconstructed from this immutable scope tree.
+    pub scope: MirScopeId,
     pub parameters: Vec<MirLocal>,
     pub instructions: Vec<MirInstruction>,
     pub terminator: MirTerminator,
@@ -1909,15 +2059,15 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::MakeLabel { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
-        | MirInstruction::CaptureResumption { dst } => Some(*dst),
+        | MirInstruction::CaptureResumption { dst, .. } => Some(*dst),
         MirInstruction::Abort
         | MirInstruction::InstallHandler { .. }
         | MirInstruction::UninstallHandler
         | MirInstruction::Resume { .. }
         | MirInstruction::ResumeReturn { .. }
         | MirInstruction::ResumeSnapshot { .. }
-        | MirInstruction::Forward
-        | MirInstruction::Cancel
+        | MirInstruction::Forward { .. }
+        | MirInstruction::Cancel { .. }
         | MirInstruction::DerefStore { .. } => None,
         MirInstruction::ArraySetMove { .. }
         | MirInstruction::ArrayPushMove { .. }
@@ -1951,6 +2101,7 @@ pub struct MirFunction {
     pub parameters: Vec<MirLocal>,
     pub locals: Vec<MirLocalDecl>,
     pub result: Type,
+    pub control: MirControlTables,
     pub entry: MirBlockId,
     pub blocks: Vec<MirBlock>,
 }
@@ -2121,7 +2272,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2139,7 +2290,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2158,7 +2309,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2174,7 +2325,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2194,7 +2345,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2211,7 +2362,7 @@ impl MirLowering {
         ) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2227,7 +2378,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2247,7 +2398,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2267,7 +2418,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2287,7 +2438,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2306,7 +2457,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2322,7 +2473,7 @@ impl MirLowering {
         if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2338,7 +2489,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2364,7 +2515,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2394,7 +2545,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2423,7 +2574,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2449,7 +2600,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2475,7 +2626,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2501,7 +2652,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2527,7 +2678,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2552,7 +2703,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: lowerer.diagnostics,
                 };
@@ -2578,7 +2729,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2609,7 +2760,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2635,7 +2786,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2661,7 +2812,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2687,7 +2838,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2713,7 +2864,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2739,7 +2890,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2770,7 +2921,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2803,7 +2954,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2829,7 +2980,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2853,7 +3004,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2879,7 +3030,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2905,7 +3056,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2931,7 +3082,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2957,7 +3108,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2983,7 +3134,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3009,7 +3160,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3034,7 +3185,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3064,7 +3215,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3088,7 +3239,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3102,7 +3253,7 @@ impl MirLowering {
         if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function),
+                    function: Some(function.with_frozen_control_tables()),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3132,8 +3283,10 @@ impl MirLowering {
                 parameters,
                 locals: lowerer.locals.into_entries(),
                 result: body.expression(body.root).ty.clone(),
+                control: MirControlTables::default(),
                 entry: MirBlockId(0),
                 blocks: vec![MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: lowerer.instructions,
                     terminator: MirTerminator::Return { value: root },
@@ -3150,7 +3303,7 @@ impl MirLowering {
                 };
             }
             Self {
-                function: Some(function),
+                function: Some(function.with_frozen_control_tables()),
                 lifted: lowerer.lifted,
                 diagnostics: vec![],
             }
@@ -3164,6 +3317,192 @@ impl MirLowering {
     }
 }
 impl MirFunction {
+    /// Freeze the body-local control arena after lowering has finished
+    /// constructing its CFG.  Allocation deliberately happens once, at the
+    /// MIR artifact boundary: all instruction and terminator references are
+    /// rewritten from the builder-only unassigned sentinel to dense typed
+    /// identities, while VM lowering continues to select exactly the same
+    /// wire instructions as before.
+    pub fn with_frozen_control_tables(mut self) -> Self {
+        let mut control = MirControlTables::default();
+        let mut labels = BTreeMap::<crate::LabelBrand, MirLabelId>::new();
+        let mut handlers_by_target = BTreeMap::<MirBlockId, MirHandlerSiteId>::new();
+
+        for (block_index, block) in self.blocks.iter_mut().enumerate() {
+            let block_id = MirBlockId(block_index as u32);
+            let scope = block.scope;
+            for instruction in &mut block.instructions {
+                match instruction {
+                    MirInstruction::MakeLabel {
+                        label,
+                        brand,
+                        target,
+                        ..
+                    } => {
+                        let id = *labels.entry(*brand).or_insert_with(|| {
+                            let id = MirLabelId(control.labels.len() as u32);
+                            control.labels.push(MirLabelData {
+                                brand: *brand,
+                                scope,
+                                destination: *target,
+                                call_destination: true,
+                            });
+                            id
+                        });
+                        *label = id;
+                    }
+                    MirInstruction::InstallHandler {
+                        site,
+                        effect,
+                        effect_arguments,
+                        operation,
+                        target,
+                        resume_type,
+                        continuation,
+                        ..
+                    } => {
+                        let id = MirHandlerSiteId(control.handlers.len() as u32);
+                        control.handlers.push(MirHandlerSiteData {
+                            block: block_id,
+                            scope,
+                            effect: *effect,
+                            effect_arguments: effect_arguments.clone(),
+                            operation: *operation,
+                            target: *target,
+                            resume_type: resume_type.clone(),
+                            continuation: *continuation,
+                        });
+                        handlers_by_target.entry(*target).or_insert(id);
+                        *site = id;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        for (block_index, block) in self.blocks.iter_mut().enumerate() {
+            let block_id = MirBlockId(block_index as u32);
+            let scope = block.scope;
+            let originating_handler = handlers_by_target.get(&block_id).copied();
+            for instruction in &mut block.instructions {
+                match instruction {
+                    MirInstruction::Perform {
+                        site,
+                        effect,
+                        effect_arguments,
+                        operation,
+                        ..
+                    } => {
+                        let id = MirPerformSiteId(control.performs.len() as u32);
+                        let handler_candidates = control
+                            .handlers
+                            .iter()
+                            .enumerate()
+                            .rev()
+                            .filter_map(|(index, handler)| {
+                                (handler.effect == *effect
+                                    && handler.effect_arguments == *effect_arguments
+                                    && handler.operation == *operation)
+                                    .then_some(MirHandlerSiteId(index as u32))
+                            })
+                            .collect();
+                        control.performs.push(MirPerformSiteData {
+                            block: block_id,
+                            scope,
+                            effect: *effect,
+                            effect_arguments: effect_arguments.clone(),
+                            operation: *operation,
+                            handler_candidates,
+                        });
+                        *site = id;
+                    }
+                    MirInstruction::CaptureResumption { site, .. } => {
+                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
+                        control.resumptions.push(MirResumptionSiteData {
+                            block: block_id,
+                            scope,
+                            kind: MirResumptionSiteKind::Capture,
+                            originating_handler,
+                        });
+                        *site = id;
+                    }
+                    MirInstruction::Resume { site, .. } => {
+                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
+                        control.resumptions.push(MirResumptionSiteData {
+                            block: block_id,
+                            scope,
+                            kind: MirResumptionSiteKind::Resume,
+                            originating_handler,
+                        });
+                        *site = id;
+                    }
+                    MirInstruction::ResumeReturn { site, .. } => {
+                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
+                        control.resumptions.push(MirResumptionSiteData {
+                            block: block_id,
+                            scope,
+                            kind: MirResumptionSiteKind::ResumeReturn,
+                            originating_handler,
+                        });
+                        *site = id;
+                    }
+                    MirInstruction::ResumeSnapshot { site, .. } => {
+                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
+                        control.resumptions.push(MirResumptionSiteData {
+                            block: block_id,
+                            scope,
+                            kind: MirResumptionSiteKind::ResumeSnapshot,
+                            originating_handler,
+                        });
+                        *site = id;
+                    }
+                    MirInstruction::Forward { site } => {
+                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
+                        control.resumptions.push(MirResumptionSiteData {
+                            block: block_id,
+                            scope,
+                            kind: MirResumptionSiteKind::Forward,
+                            originating_handler,
+                        });
+                        *site = id;
+                    }
+                    MirInstruction::Cancel { site } => {
+                        let id = MirResumptionSiteId(control.resumptions.len() as u32);
+                        control.resumptions.push(MirResumptionSiteData {
+                            block: block_id,
+                            scope,
+                            kind: MirResumptionSiteKind::Cancel,
+                            originating_handler,
+                        });
+                        *site = id;
+                    }
+                    _ => {}
+                }
+            }
+            if let MirTerminator::Leave {
+                label,
+                brand,
+                target,
+                ..
+            } = &mut block.terminator
+            {
+                let id = *labels.entry(*brand).or_insert_with(|| {
+                    let id = MirLabelId(control.labels.len() as u32);
+                    control.labels.push(MirLabelData {
+                        brand: *brand,
+                        scope,
+                        destination: *target,
+                        call_destination: false,
+                    });
+                    id
+                });
+                *label = id;
+            }
+        }
+        self.control = control;
+        self
+    }
+
     pub fn entry_block(&self) -> &MirBlock {
         &self.blocks[self.entry.0 as usize]
     }
@@ -3177,6 +3516,7 @@ impl MirFunction {
             validate_mir_type(&local.ty, &mut vec![])?;
         }
         for (index, block) in self.blocks.iter().enumerate() {
+            self.validate_scope(block.scope)?;
             for &parameter in &block.parameters {
                 self.local_type(parameter)?;
             }
@@ -3190,6 +3530,214 @@ impl MirFunction {
             self.validate_terminator(index, &block.terminator)?;
         }
         self.validate_label_contracts()?;
+        self.validate_control_tables()?;
+        Ok(())
+    }
+    fn validate_scope(&self, scope: MirScopeId) -> Result<(), String> {
+        if scope.0 as usize >= self.control.scopes.len() {
+            return Err(format!("MIR block references absent scope {}", scope.0));
+        }
+        Ok(())
+    }
+    fn validate_control_tables(&self) -> Result<(), String> {
+        let Some(root) = self.control.scopes.first() else {
+            return Err("MIR control table has no root scope".into());
+        };
+        if root.parent.is_some() {
+            return Err("MIR root scope has a parent".into());
+        }
+        for (index, scope) in self.control.scopes.iter().enumerate().skip(1) {
+            let Some(parent) = scope.parent else {
+                return Err(format!("MIR non-root scope {index} has no parent"));
+            };
+            if parent.0 as usize >= index {
+                return Err(format!("MIR scope {index} has a non-ancestral parent"));
+            }
+            if let Some(label) = scope.entered_label {
+                self.control
+                    .labels
+                    .get(label.0 as usize)
+                    .ok_or_else(|| format!("MIR scope {index} enters absent label {}", label.0))?;
+            }
+            if let Some(handler) = scope.entered_handler {
+                self.control
+                    .handlers
+                    .get(handler.0 as usize)
+                    .ok_or_else(|| {
+                        format!("MIR scope {index} enters absent handler {}", handler.0)
+                    })?;
+            }
+        }
+        let mut seen_labels = vec![false; self.control.labels.len()];
+        let mut seen_handlers = vec![false; self.control.handlers.len()];
+        let mut seen_performs = vec![false; self.control.performs.len()];
+        let mut seen_resumptions = vec![false; self.control.resumptions.len()];
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            let block_id = MirBlockId(block_index as u32);
+            for instruction in &block.instructions {
+                match instruction {
+                    MirInstruction::MakeLabel {
+                        label,
+                        brand,
+                        target,
+                        ..
+                    } => {
+                        let entry = self.control.labels.get(label.0 as usize).ok_or_else(|| {
+                            format!("MIR label instruction references absent label {}", label.0)
+                        })?;
+                        if entry.brand != *brand
+                            || entry.destination != *target
+                            || entry.scope != block.scope
+                        {
+                            return Err(
+                                "MIR label instruction disagrees with frozen control table".into(),
+                            );
+                        }
+                        if std::mem::replace(&mut seen_labels[label.0 as usize], true)
+                            && !entry.call_destination
+                        {
+                            return Err("MIR non-call label has multiple materializations".into());
+                        }
+                    }
+                    MirInstruction::InstallHandler {
+                        site,
+                        effect,
+                        effect_arguments,
+                        operation,
+                        target,
+                        resume_type,
+                        continuation,
+                        ..
+                    } => {
+                        let entry =
+                            self.control.handlers.get(site.0 as usize).ok_or_else(|| {
+                                format!(
+                                    "MIR handler instruction references absent handler {}",
+                                    site.0
+                                )
+                            })?;
+                        if entry.block != block_id
+                            || entry.scope != block.scope
+                            || entry.effect != *effect
+                            || entry.effect_arguments != *effect_arguments
+                            || entry.operation != *operation
+                            || entry.target != *target
+                            || entry.resume_type != *resume_type
+                            || entry.continuation != *continuation
+                        {
+                            return Err(
+                                "MIR handler instruction disagrees with frozen control table"
+                                    .into(),
+                            );
+                        }
+                        if std::mem::replace(&mut seen_handlers[site.0 as usize], true) {
+                            return Err("MIR handler site is wired more than once".into());
+                        }
+                    }
+                    MirInstruction::Perform {
+                        site,
+                        effect,
+                        effect_arguments,
+                        operation,
+                        ..
+                    } => {
+                        let entry =
+                            self.control.performs.get(site.0 as usize).ok_or_else(|| {
+                                format!(
+                                    "MIR perform instruction references absent perform {}",
+                                    site.0
+                                )
+                            })?;
+                        if entry.block != block_id
+                            || entry.scope != block.scope
+                            || entry.effect != *effect
+                            || entry.effect_arguments != *effect_arguments
+                            || entry.operation != *operation
+                        {
+                            return Err(
+                                "MIR perform instruction disagrees with frozen control table"
+                                    .into(),
+                            );
+                        }
+                        if std::mem::replace(&mut seen_performs[site.0 as usize], true) {
+                            return Err("MIR perform site is wired more than once".into());
+                        }
+                    }
+                    instruction @ (MirInstruction::CaptureResumption { site, .. }
+                    | MirInstruction::Resume { site, .. }
+                    | MirInstruction::ResumeReturn { site, .. }
+                    | MirInstruction::ResumeSnapshot { site, .. }
+                    | MirInstruction::Forward { site }
+                    | MirInstruction::Cancel { site }) => {
+                        let entry =
+                            self.control
+                                .resumptions
+                                .get(site.0 as usize)
+                                .ok_or_else(|| {
+                                    format!(
+                                        "MIR resumption instruction references absent site {}",
+                                        site.0
+                                    )
+                                })?;
+                        let kind = match instruction {
+                            MirInstruction::CaptureResumption { .. } => {
+                                MirResumptionSiteKind::Capture
+                            }
+                            MirInstruction::Resume { .. } => MirResumptionSiteKind::Resume,
+                            MirInstruction::ResumeReturn { .. } => {
+                                MirResumptionSiteKind::ResumeReturn
+                            }
+                            MirInstruction::ResumeSnapshot { .. } => {
+                                MirResumptionSiteKind::ResumeSnapshot
+                            }
+                            MirInstruction::Forward { .. } => MirResumptionSiteKind::Forward,
+                            MirInstruction::Cancel { .. } => MirResumptionSiteKind::Cancel,
+                            _ => unreachable!("resumption match is exhaustive"),
+                        };
+                        if entry.block != block_id
+                            || entry.scope != block.scope
+                            || entry.kind != kind
+                        {
+                            return Err(
+                                "MIR resumption instruction disagrees with frozen control table"
+                                    .into(),
+                            );
+                        }
+                        if std::mem::replace(&mut seen_resumptions[site.0 as usize], true) {
+                            return Err("MIR resumption site is wired more than once".into());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let MirTerminator::Leave {
+                label,
+                brand,
+                target,
+                ..
+            } = &block.terminator
+            {
+                let entry = self
+                    .control
+                    .labels
+                    .get(label.0 as usize)
+                    .ok_or_else(|| format!("MIR leave references absent label {}", label.0))?;
+                if entry.brand != *brand
+                    || entry.destination != *target
+                    || entry.scope != block.scope
+                {
+                    return Err("MIR leave disagrees with frozen control table".into());
+                }
+                seen_labels[label.0 as usize] = true;
+            }
+        }
+        if seen_labels.iter().any(|seen| !seen)
+            || seen_handlers.iter().any(|seen| !seen)
+            || seen_performs.iter().any(|seen| !seen)
+            || seen_resumptions.iter().any(|seen| !seen)
+        {
+            return Err("MIR control table contains an unwired site".into());
+        }
         Ok(())
     }
     /// A nominal label brand is proof of exactly one lexical destination.
@@ -4102,8 +4650,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::Resume { .. }
         | MirInstruction::ResumeReturn { .. }
         | MirInstruction::ResumeSnapshot { .. }
-        | MirInstruction::Forward
-        | MirInstruction::Cancel
+        | MirInstruction::Forward { .. }
+        | MirInstruction::Cancel { .. }
         | MirInstruction::Copy { .. }
         | MirInstruction::Store { .. }
         | MirInstruction::Move { .. }
@@ -4218,7 +4766,11 @@ fn validate_lowered_handler_contracts(
     body: &TypedBody,
     function: &MirFunction,
 ) -> Result<(), String> {
-    function.validate()?;
+    // Specialised lowerers construct builder-only control sentinels, then the
+    // common publication boundary assigns dense site identities. Validate the
+    // same frozen view here: validating the pre-freeze builder would reject a
+    // correct handler merely because its table has not been published yet.
+    function.clone().with_frozen_control_tables().validate()?;
 
     let clauses = body
         .expressions
@@ -4241,6 +4793,7 @@ fn validate_lowered_handler_contracts(
                 resume_type,
                 continuation,
                 target,
+                ..
             } => Some((
                 effect,
                 effect_arguments,
@@ -4484,8 +5037,8 @@ fn handler_region_exits(function: &MirFunction, start: MirBlockId) -> HandlerReg
                     exits.resume = true
                 }
                 MirInstruction::ResumeReturn { .. } => exits.resume_return = true,
-                MirInstruction::Forward => exits.forward = true,
-                MirInstruction::Cancel => exits.cancel = true,
+                MirInstruction::Forward { .. } => exits.forward = true,
+                MirInstruction::Cancel { .. } => exits.cancel = true,
                 _ => {}
             }
         }
@@ -4913,12 +5466,14 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         } => payload_destinations.clone(),
         MirInstruction::Abort => Vec::new(),
         MirInstruction::UninstallHandler => Vec::new(),
-        MirInstruction::CaptureResumption { dst } => vec![*dst],
-        MirInstruction::Resume { value } => vec![*value],
-        MirInstruction::ResumeReturn { dst, value } => vec![*dst, *value],
-        MirInstruction::ResumeSnapshot { snapshot, value } => vec![*snapshot, *value],
-        MirInstruction::Forward => Vec::new(),
-        MirInstruction::Cancel => Vec::new(),
+        MirInstruction::CaptureResumption { dst, .. } => vec![*dst],
+        MirInstruction::Resume { value, .. } => vec![*value],
+        MirInstruction::ResumeReturn { dst, value, .. } => vec![*dst, *value],
+        MirInstruction::ResumeSnapshot {
+            snapshot, value, ..
+        } => vec![*snapshot, *value],
+        MirInstruction::Forward { .. } => Vec::new(),
+        MirInstruction::Cancel { .. } => Vec::new(),
         MirInstruction::Copy { dst, src }
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
@@ -5228,6 +5783,7 @@ impl Lowerer<'_> {
         let join_block = handler_block + 1;
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -5237,6 +5793,7 @@ impl Lowerer<'_> {
             target: MirBlockId(handler_block),
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: performed,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -5301,12 +5858,15 @@ impl Lowerer<'_> {
         self.values = boundary_values;
         self.bind_handler_patterns(&operation_clause.patterns, &payloads)?;
         let resumed = self.direct_handler_clause_value(operation_clause)?;
-        self.instructions
-            .push(MirInstruction::Resume { value: resumed });
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: resumed,
+        });
         let handler_instructions = std::mem::take(&mut self.instructions);
 
         let mut blocks = Vec::with_capacity(2 * completion_count + 3);
         blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry,
             terminator: MirTerminator::Goto {
@@ -5318,6 +5878,7 @@ impl Lowerer<'_> {
             let is_last = index + 1 == completion_count;
             let pattern = lower_pattern(refutable_clauses[index].pattern.clone())?;
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![completion_subjects[index]],
                 instructions: vec![MirInstruction::PatternTest {
                     dst: conditions[index],
@@ -5349,6 +5910,7 @@ impl Lowerer<'_> {
                 } => (
                     instructions,
                     MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
                         brand,
                         target: MirBlockId(join_block),
                         arguments: vec![value],
@@ -5364,6 +5926,7 @@ impl Lowerer<'_> {
                 } => (instructions, MirTerminator::Return { value }),
             };
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator,
@@ -5376,6 +5939,7 @@ impl Lowerer<'_> {
             } => (
                 instructions,
                 MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
                     brand,
                     target: MirBlockId(join_block),
                     arguments: vec![value],
@@ -5391,16 +5955,19 @@ impl Lowerer<'_> {
             } => (instructions, MirTerminator::Return { value }),
         };
         blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions,
             terminator,
         });
         blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: handler_instructions,
             terminator: MirTerminator::Unreachable,
         });
         blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![join],
             instructions: vec![],
             terminator: MirTerminator::Return { value: join },
@@ -5412,6 +5979,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -5520,6 +6088,7 @@ impl Lowerer<'_> {
         let mut entry = std::mem::take(&mut self.instructions);
         let handler_target = if fallback_clause.is_some() { 4 } else { 2 };
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -5529,6 +6098,7 @@ impl Lowerer<'_> {
             target: MirBlockId(handler_target),
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: performed,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -5571,13 +6141,16 @@ impl Lowerer<'_> {
         self.values = boundary_values;
         self.bind_handler_patterns(&operation_clause.patterns, &payloads)?;
         let resumed = self.direct_handler_clause_value(operation_clause)?;
-        self.instructions
-            .push(MirInstruction::Resume { value: resumed });
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: resumed,
+        });
         let handler_instructions = std::mem::take(&mut self.instructions);
         let blocks =
             if let Some((condition, pattern, fallback_instructions, fallback_value)) = fallback {
                 vec![
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: entry,
                         terminator: MirTerminator::Goto {
@@ -5586,6 +6159,7 @@ impl Lowerer<'_> {
                         },
                     },
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![completion_subject],
                         instructions: vec![MirInstruction::PatternTest {
                             dst: condition,
@@ -5601,9 +6175,11 @@ impl Lowerer<'_> {
                         },
                     },
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: completion_instructions,
                         terminator: MirTerminator::Leave {
+                            label: MirLabelId::UNASSIGNED,
                             brand,
                             target: MirBlockId(5),
                             arguments: vec![completed],
@@ -5614,6 +6190,7 @@ impl Lowerer<'_> {
                         },
                     },
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: fallback_instructions,
                         terminator: MirTerminator::Return {
@@ -5621,11 +6198,13 @@ impl Lowerer<'_> {
                         },
                     },
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: handler_instructions,
                         terminator: MirTerminator::Unreachable,
                     },
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![join],
                         instructions: vec![],
                         terminator: MirTerminator::Return { value: join },
@@ -5634,6 +6213,7 @@ impl Lowerer<'_> {
             } else {
                 vec![
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: entry,
                         terminator: MirTerminator::Goto {
@@ -5642,9 +6222,11 @@ impl Lowerer<'_> {
                         },
                     },
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![completion_subject],
                         instructions: completion_instructions,
                         terminator: MirTerminator::Leave {
+                            label: MirLabelId::UNASSIGNED,
                             brand,
                             target: MirBlockId(3),
                             arguments: vec![completed],
@@ -5655,11 +6237,13 @@ impl Lowerer<'_> {
                         },
                     },
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: handler_instructions,
                         terminator: MirTerminator::Unreachable,
                     },
                     MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![join],
                         instructions: vec![],
                         terminator: MirTerminator::Return { value: join },
@@ -5673,6 +6257,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -5801,6 +6386,7 @@ impl Lowerer<'_> {
         let handler_target = test_blocks[0].first().copied().unwrap_or(body_blocks[0]);
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -5810,6 +6396,7 @@ impl Lowerer<'_> {
             target: handler_target,
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: performed,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -5832,7 +6419,10 @@ impl Lowerer<'_> {
                 bodies.push((std::mem::take(&mut self.instructions), value, true));
             } else {
                 let value = self.direct_handler_clause_value(clause)?;
-                self.instructions.push(MirInstruction::Resume { value });
+                self.instructions.push(MirInstruction::Resume {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                    value,
+                });
                 bodies.push((std::mem::take(&mut self.instructions), value, false));
             }
         }
@@ -5842,6 +6432,7 @@ impl Lowerer<'_> {
 
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry,
                 terminator: MirTerminator::Goto {
@@ -5850,6 +6441,7 @@ impl Lowerer<'_> {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![join],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: join },
@@ -5865,6 +6457,7 @@ impl Lowerer<'_> {
                     .or(forward_block)
                     .expect("refutable handler dispatch has a next clause or forward block");
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![MirInstruction::PatternTest {
                         dst: *condition,
@@ -5886,10 +6479,12 @@ impl Lowerer<'_> {
         }
         for (instructions, value, leaves) in bodies {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: if leaves {
                     MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
                         brand,
                         target: MirBlockId(1),
                         arguments: vec![value],
@@ -5905,8 +6500,11 @@ impl Lowerer<'_> {
         }
         if forward_block.is_some() {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
-                instructions: vec![MirInstruction::Forward],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
                 terminator: MirTerminator::Unreachable,
             });
         }
@@ -5917,6 +6515,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -5988,6 +6587,7 @@ impl Lowerer<'_> {
             .collect::<Option<Vec<_>>>()?;
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -5997,6 +6597,7 @@ impl Lowerer<'_> {
             target: MirBlockId(2),
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: performed,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -6021,9 +6622,11 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Goto {
@@ -6032,14 +6635,17 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![join],
                     instructions: vec![],
                     terminator: MirTerminator::Return { value: join },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: clause_instructions,
                     terminator: MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
                         brand,
                         target: MirBlockId(1),
                         arguments: vec![transferred],
@@ -6135,6 +6741,7 @@ impl Lowerer<'_> {
             .collect::<Vec<_>>();
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation: clause.operation,
@@ -6223,22 +6830,27 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Return { value: result },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![join],
                     instructions: vec![],
                     terminator: MirTerminator::Return { value: join },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: handler_instructions,
                     terminator: MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
                         brand,
                         target: MirBlockId(1),
                         arguments: vec![transferred],
@@ -6349,6 +6961,7 @@ impl Lowerer<'_> {
         let mut entry = std::mem::take(&mut self.instructions);
         for (index, clause) in active.iter().enumerate() {
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
@@ -6407,12 +7020,17 @@ impl Lowerer<'_> {
             self.bind_handler_patterns(&clause.patterns, &payloads[index])?;
             if index == resume_index {
                 let value = self.direct_handler_clause_value(clause)?;
-                self.instructions.push(MirInstruction::Resume { value });
+                self.instructions.push(MirInstruction::Resume {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                    value,
+                });
                 handler_blocks.push((std::mem::take(&mut self.instructions), None));
             } else {
                 debug_assert_eq!(index, cancel_index);
                 let value = self.lower_label_transfer_path(clause.body, brand)?;
-                self.instructions.push(MirInstruction::Cancel);
+                self.instructions.push(MirInstruction::Cancel {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                });
                 handler_blocks.push((std::mem::take(&mut self.instructions), Some(value)));
             }
         }
@@ -6420,11 +7038,13 @@ impl Lowerer<'_> {
         self.values = boundary_values;
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry,
                 terminator: MirTerminator::Return { value: result },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![join],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: join },
@@ -6432,10 +7052,12 @@ impl Lowerer<'_> {
         ];
         for (instructions, transfer) in handler_blocks {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: transfer.map_or(MirTerminator::Unreachable, |value| {
                     MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
                         brand,
                         target: MirBlockId(1),
                         arguments: vec![value],
@@ -6454,6 +7076,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -6568,6 +7191,7 @@ impl Lowerer<'_> {
             .collect::<Vec<_>>();
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: outer.effect.definition,
             effect_arguments: outer.effect.arguments.clone(),
             operation: outer.operation,
@@ -6582,6 +7206,7 @@ impl Lowerer<'_> {
             entry = std::mem::take(&mut self.instructions);
         }
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: inner.effect.definition,
             effect_arguments: inner.effect.arguments.clone(),
             operation: inner.operation,
@@ -6635,7 +7260,9 @@ impl Lowerer<'_> {
         self.values = boundary_values.clone();
         self.bind_handler_patterns(&outer.patterns, &outer_payloads)?;
         let transferred = self.lower_label_transfer_path(outer.body, brand)?;
-        self.instructions.push(MirInstruction::Cancel);
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
         let outer_instructions = std::mem::take(&mut self.instructions);
 
         self.instructions = Vec::new();
@@ -6643,7 +7270,9 @@ impl Lowerer<'_> {
         self.values = boundary_values.clone();
         self.bind_handler_patterns(&inner.patterns, &inner_payloads)?;
         let inner_value = self.direct_handler_clause_value(inner)?;
-        self.instructions.push(MirInstruction::Cancel);
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
         let inner_instructions = std::mem::take(&mut self.instructions);
         self.named = boundary_named;
         self.values = boundary_values;
@@ -6656,22 +7285,27 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Return { value: result },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![join],
                     instructions: vec![],
                     terminator: MirTerminator::Return { value: join },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: outer_instructions,
                     terminator: MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
                         brand,
                         target: MirBlockId(1),
                         arguments: vec![transferred],
@@ -6682,6 +7316,7 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![MirInstruction::PatternTest {
                         dst: condition,
@@ -6697,13 +7332,17 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: inner_instructions,
                     terminator: MirTerminator::Return { value: inner_value },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
-                    instructions: vec![MirInstruction::Forward],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
                     terminator: MirTerminator::Unreachable,
                 },
             ],
@@ -6811,11 +7450,13 @@ impl Lowerer<'_> {
         // cleanup-carrying `Leave` edge.
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry_instructions,
                 terminator: MirTerminator::Unreachable,
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![join],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -6831,6 +7472,7 @@ impl Lowerer<'_> {
             let terminator = if self.contains_label_transfer(clause.body, brand) {
                 let value = self.lower_label_transfer_path(clause.body, brand)?;
                 MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
                     brand,
                     target: MirBlockId(1),
                     arguments: vec![value],
@@ -6850,6 +7492,7 @@ impl Lowerer<'_> {
                 }
             };
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: std::mem::take(&mut self.instructions),
                 terminator,
@@ -6873,6 +7516,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -6889,6 +7533,7 @@ impl Lowerer<'_> {
             let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::PatternTest {
                     dst: condition,
@@ -6916,6 +7561,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -7062,11 +7708,13 @@ impl Lowerer<'_> {
         let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry_instructions,
                 terminator: MirTerminator::Unreachable,
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![join],
                 instructions: vec![],
                 terminator: MirTerminator::Return { value: join },
@@ -7082,6 +7730,7 @@ impl Lowerer<'_> {
             let terminator = if self.contains_label_transfer(clause.body, brand) {
                 let value = self.lower_label_transfer_path(clause.body, brand)?;
                 MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
                     brand,
                     target: MirBlockId(1),
                     arguments: vec![value],
@@ -7107,6 +7756,7 @@ impl Lowerer<'_> {
                 }
             };
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: std::mem::take(&mut self.instructions),
                 terminator,
@@ -7121,6 +7771,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -7137,6 +7788,7 @@ impl Lowerer<'_> {
             let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::PatternTest {
                     dst: condition,
@@ -7164,6 +7816,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -7458,9 +8111,11 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry_instructions,
                     terminator: MirTerminator::SwitchBool {
@@ -7472,9 +8127,11 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: leave_instructions,
                     terminator: MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
                         brand,
                         target: MirBlockId(2),
                         arguments: vec![transferred],
@@ -7485,6 +8142,7 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![join],
                     instructions: continuation_instructions,
                     terminator: MirTerminator::Return { value: result },
@@ -7540,14 +8198,17 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry_instructions,
                     terminator: MirTerminator::Unreachable,
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![join],
                     instructions: vec![],
                     terminator: MirTerminator::Return { value: join },
@@ -7707,12 +8368,15 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: result_type,
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: leave_instructions,
                     terminator: MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
                         brand,
                         target: MirBlockId(1),
                         arguments: vec![value],
@@ -7723,6 +8387,7 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![join],
                     instructions: continuation_instructions,
                     terminator: MirTerminator::Return { value: result },
@@ -8393,6 +9058,7 @@ impl Lowerer<'_> {
         );
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: outer_clause.effect.definition,
             effect_arguments: outer_clause.effect.arguments.clone(),
             operation: outer_clause.operation,
@@ -8414,6 +9080,7 @@ impl Lowerer<'_> {
                 .copied()
                 .unwrap_or(dispatch.body_blocks[0]);
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
@@ -8424,6 +9091,7 @@ impl Lowerer<'_> {
             });
         }
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -8442,6 +9110,7 @@ impl Lowerer<'_> {
             .collect::<Option<Vec<_>>>()?;
         entry.extend(std::mem::take(&mut self.instructions));
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: result,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -8459,6 +9128,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
         let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
         self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
             value: outer_resumed,
         });
         let outer_instructions = std::mem::take(&mut self.instructions);
@@ -8472,8 +9142,10 @@ impl Lowerer<'_> {
                 let named = self.named.clone();
                 self.bind_handler_patterns(&clause.patterns, &dispatch.payload_destinations)?;
                 let resumed = self.direct_handler_clause_value(clause)?;
-                self.instructions
-                    .push(MirInstruction::Resume { value: resumed });
+                self.instructions.push(MirInstruction::Resume {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                    value: resumed,
+                });
                 bodies.push(std::mem::take(&mut self.instructions));
                 self.named = named;
             }
@@ -8485,19 +9157,23 @@ impl Lowerer<'_> {
             let named = self.named.clone();
             self.bind_handler_patterns(&clause.patterns, &direct_payload_destinations)?;
             let resumed = self.direct_handler_clause_value(clause)?;
-            self.instructions
-                .push(MirInstruction::Resume { value: resumed });
+            self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
+                value: resumed,
+            });
             direct_instructions.push(std::mem::take(&mut self.instructions));
             self.named = named;
         }
 
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry,
                 terminator: MirTerminator::Return { value: result },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: outer_instructions,
                 terminator: MirTerminator::Unreachable,
@@ -8523,6 +9199,7 @@ impl Lowerer<'_> {
                     .expect("sibling dispatch has a fallback or forward target");
                 for (test_index, (condition, subject, pattern)) in tests.iter().enumerate() {
                     blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: vec![MirInstruction::PatternTest {
                             dst: *condition,
@@ -8545,6 +9222,7 @@ impl Lowerer<'_> {
             }
             for instructions in bodies {
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions,
                     terminator: MirTerminator::Unreachable,
@@ -8552,8 +9230,11 @@ impl Lowerer<'_> {
             }
             if dispatch.forward_block.is_some() {
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
-                    instructions: vec![MirInstruction::Forward],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
                     terminator: MirTerminator::Unreachable,
                 });
             }
@@ -8577,6 +9258,7 @@ impl Lowerer<'_> {
                 .expect("direct dispatch has a fallback or forward target");
             for (test_index, (condition, subject, pattern)) in tests.iter().enumerate() {
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![MirInstruction::PatternTest {
                         dst: *condition,
@@ -8599,6 +9281,7 @@ impl Lowerer<'_> {
         }
         for instructions in direct_instructions {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: MirTerminator::Unreachable,
@@ -8606,8 +9289,11 @@ impl Lowerer<'_> {
         }
         if direct_dispatch.forward_block.is_some() {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
-                instructions: vec![MirInstruction::Forward],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
                 terminator: MirTerminator::Unreachable,
             });
         }
@@ -8618,6 +9304,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -8696,9 +9383,11 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry_instructions,
                     terminator: MirTerminator::SwitchBool {
@@ -8710,6 +9399,7 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: right_instructions,
                     terminator: MirTerminator::Goto {
@@ -8718,6 +9408,7 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![joined],
                     instructions: vec![],
                     terminator: MirTerminator::Return { value: joined },
@@ -8814,6 +9505,7 @@ impl Lowerer<'_> {
             .collect::<Vec<_>>();
         let mut blocks = (0..=steps.len())
             .map(|index| MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: if index == 0 {
                     vec![]
                 } else {
@@ -8885,6 +9577,7 @@ impl Lowerer<'_> {
                         }
                     };
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions,
                     terminator,
@@ -8896,6 +9589,7 @@ impl Lowerer<'_> {
             } else {
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![],
                     terminator: MirTerminator::Unreachable,
@@ -8933,6 +9627,7 @@ impl Lowerer<'_> {
                         });
                     let id = MirBlockId(blocks.len() as u32);
                     blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: vec![],
                         terminator: MirTerminator::SwitchBool {
@@ -8976,6 +9671,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -9142,6 +9838,7 @@ impl Lowerer<'_> {
 
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: outer_clause.effect.definition,
             effect_arguments: outer_clause.effect.arguments.clone(),
             operation: outer_clause.operation,
@@ -9161,6 +9858,7 @@ impl Lowerer<'_> {
             .zip(&sibling_targets)
         {
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
@@ -9171,6 +9869,7 @@ impl Lowerer<'_> {
             });
         }
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -9189,6 +9888,7 @@ impl Lowerer<'_> {
             .collect::<Option<Vec<_>>>()?;
         entry.extend(std::mem::take(&mut self.instructions));
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: result,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -9206,6 +9906,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
         let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
         self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
             value: outer_resumed,
         });
         let outer_instructions = std::mem::take(&mut self.instructions);
@@ -9219,8 +9920,10 @@ impl Lowerer<'_> {
             let named = self.named.clone();
             self.bind_handler_patterns(&clause.patterns, payload_destinations)?;
             let resumed = self.direct_handler_clause_value(clause)?;
-            self.instructions
-                .push(MirInstruction::Resume { value: resumed });
+            self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
+                value: resumed,
+            });
             sibling_bodies.push(std::mem::take(&mut self.instructions));
             self.named = named;
         }
@@ -9229,6 +9932,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(&direct_clause.patterns, &direct_payload_destinations)?;
         let direct_resumed = self.direct_handler_clause_value(direct_clause)?;
         self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
             value: direct_resumed,
         });
         let direct_instructions = std::mem::take(&mut self.instructions);
@@ -9236,11 +9940,13 @@ impl Lowerer<'_> {
 
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry,
                 terminator: MirTerminator::Return { value: result },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: outer_instructions,
                 terminator: MirTerminator::Unreachable,
@@ -9248,12 +9954,14 @@ impl Lowerer<'_> {
         ];
         for instructions in sibling_bodies {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: MirTerminator::Unreachable,
             });
         }
         blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: direct_instructions,
             terminator: MirTerminator::Unreachable,
@@ -9265,6 +9973,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -9508,6 +10217,7 @@ impl Lowerer<'_> {
         );
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: outer_clause.effect.definition,
             effect_arguments: outer_clause.effect.arguments.clone(),
             operation: outer_clause.operation,
@@ -9526,6 +10236,7 @@ impl Lowerer<'_> {
             sibling_payload_destinations.as_ref(),
         ) {
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
@@ -9536,6 +10247,7 @@ impl Lowerer<'_> {
             });
         }
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -9554,6 +10266,7 @@ impl Lowerer<'_> {
             .collect::<Option<Vec<_>>>()?;
         entry.extend(std::mem::take(&mut self.instructions));
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: result,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -9571,6 +10284,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(&outer_clause.patterns, &outer_payload_destinations)?;
         let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
         self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
             value: outer_resumed,
         });
         let outer_instructions = std::mem::take(&mut self.instructions);
@@ -9582,8 +10296,10 @@ impl Lowerer<'_> {
             let named = self.named.clone();
             self.bind_handler_patterns(&clause.patterns, &inner_payload_destinations)?;
             let resumed = self.direct_handler_clause_value(clause)?;
-            self.instructions
-                .push(MirInstruction::Resume { value: resumed });
+            self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
+                value: resumed,
+            });
             bodies.push(std::mem::take(&mut self.instructions));
             self.named = named;
         }
@@ -9598,19 +10314,23 @@ impl Lowerer<'_> {
                     .expect("sibling clause payload destinations exist"),
             )?;
             let resumed = self.direct_handler_clause_value(clause)?;
-            self.instructions
-                .push(MirInstruction::Resume { value: resumed });
+            self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
+                value: resumed,
+            });
             sibling_bodies.push(std::mem::take(&mut self.instructions));
             self.named = named;
         }
 
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry,
                 terminator: MirTerminator::Return { value: result },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: outer_instructions,
                 terminator: MirTerminator::Unreachable,
@@ -9624,6 +10344,7 @@ impl Lowerer<'_> {
                 .unwrap_or(forward_target);
             for (test_index, (condition, subject, pattern)) in tests.iter().cloned().enumerate() {
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![MirInstruction::PatternTest {
                         dst: condition,
@@ -9647,6 +10368,7 @@ impl Lowerer<'_> {
         }
         for instructions in bodies {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: MirTerminator::Unreachable,
@@ -9654,8 +10376,11 @@ impl Lowerer<'_> {
         }
         if !has_fallback {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
-                instructions: vec![MirInstruction::Forward],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
                 terminator: MirTerminator::Unreachable,
             });
         }
@@ -9667,6 +10392,7 @@ impl Lowerer<'_> {
                 .unwrap_or(sibling_forward_target);
             for (test_index, (condition, subject, pattern)) in tests.iter().cloned().enumerate() {
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![MirInstruction::PatternTest {
                         dst: condition,
@@ -9690,6 +10416,7 @@ impl Lowerer<'_> {
         }
         for instructions in sibling_bodies {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: MirTerminator::Unreachable,
@@ -9697,8 +10424,11 @@ impl Lowerer<'_> {
         }
         if !sibling_has_fallback && !sibling_dispatch.is_empty() {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
-                instructions: vec![MirInstruction::Forward],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
                 terminator: MirTerminator::Unreachable,
             });
         }
@@ -9709,6 +10439,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -9910,6 +10641,7 @@ impl Lowerer<'_> {
         {
             let clause = &clauses[0];
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
@@ -9931,6 +10663,7 @@ impl Lowerer<'_> {
         entry.extend(std::mem::take(&mut self.instructions));
         let result = self.alloc(resume_type, current);
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: result,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -9951,8 +10684,10 @@ impl Lowerer<'_> {
                 self.values = base_values.clone();
                 self.bind_handler_patterns(&clause.patterns, payloads)?;
                 let resumed = self.direct_handler_clause_value(clause)?;
-                self.instructions
-                    .push(MirInstruction::Resume { value: resumed });
+                self.instructions.push(MirInstruction::Resume {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                    value: resumed,
+                });
                 bodies.push(std::mem::take(&mut self.instructions));
             }
         }
@@ -9960,12 +10695,14 @@ impl Lowerer<'_> {
         self.values = base_values;
 
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry,
             terminator: MirTerminator::Return { value: result },
         }];
         for instructions in bodies {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: MirTerminator::Unreachable,
@@ -9990,6 +10727,7 @@ impl Lowerer<'_> {
                     clause_tests.into_iter().enumerate()
                 {
                     blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: vec![MirInstruction::PatternTest {
                             dst: condition,
@@ -10013,8 +10751,11 @@ impl Lowerer<'_> {
         for forward in forward_blocks {
             if forward.is_some() {
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
-                    instructions: vec![MirInstruction::Forward],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
                     terminator: MirTerminator::Unreachable,
                 });
             }
@@ -10026,6 +10767,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -10193,6 +10935,7 @@ impl Lowerer<'_> {
         let base_named = self.named.clone();
         let base_values = self.values.clone();
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![],
             terminator: MirTerminator::Unreachable,
@@ -10213,7 +10956,9 @@ impl Lowerer<'_> {
                     // and restored this frame's suffix. Once the exact use
                     // budget is met, cancel the dormant replay frame before
                     // returning the clause result to its enclosing resumption.
-                    self.instructions.push(MirInstruction::Cancel);
+                    self.instructions.push(MirInstruction::Cancel {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    });
                     // A replay clause returns the aggregate result of all
                     // `ResumeReturn` calls, rather than re-entering its
                     // suspended protected path. Only outer lexical frames
@@ -10223,10 +10968,14 @@ impl Lowerer<'_> {
                         self.instructions.push(MirInstruction::UninstallHandler);
                     }
                 } else {
-                    self.instructions.push(MirInstruction::Resume { value });
+                    self.instructions.push(MirInstruction::Resume {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                        value,
+                    });
                 }
                 let body = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: std::mem::take(&mut self.instructions),
                     terminator: if policy.is_replay() {
@@ -10256,8 +11005,11 @@ impl Lowerer<'_> {
             let forward = (!has_fallback).then(|| {
                 let target = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
-                    instructions: vec![MirInstruction::Forward],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
                     terminator: MirTerminator::Unreachable,
                 });
                 target
@@ -10272,6 +11024,7 @@ impl Lowerer<'_> {
                 for (condition, subject, pattern) in tests.into_iter().rev() {
                     let target = MirBlockId(blocks.len() as u32);
                     blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: vec![MirInstruction::PatternTest {
                             dst: condition,
@@ -10305,6 +11058,7 @@ impl Lowerer<'_> {
                 .nth(index)
                 .expect("frame and operation chain lengths match");
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: effect.definition,
                 effect_arguments: effect.arguments.clone(),
                 operation: *operation_index,
@@ -10325,6 +11079,7 @@ impl Lowerer<'_> {
                 .collect::<Option<Vec<_>>>()?;
             entry.extend(std::mem::take(&mut self.instructions));
             entry.push(MirInstruction::Perform {
+                site: MirPerformSiteId::UNASSIGNED,
                 dst: *result,
                 effect: effect.definition,
                 effect_arguments: effect.arguments.clone(),
@@ -10356,6 +11111,7 @@ impl Lowerer<'_> {
 
         let result = *results.last().expect("non-empty operation chain");
         blocks[0] = MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry,
             terminator: MirTerminator::Return { value: result },
@@ -10367,6 +11123,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -10498,6 +11255,7 @@ impl Lowerer<'_> {
 
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: outer_effect.definition,
             effect_arguments: outer_effect.arguments.clone(),
             operation: outer_operation_index,
@@ -10507,6 +11265,7 @@ impl Lowerer<'_> {
             target: MirBlockId(1),
         });
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: inner_effect.definition,
             effect_arguments: inner_effect.arguments.clone(),
             operation: inner_operation_index,
@@ -10521,6 +11280,7 @@ impl Lowerer<'_> {
             .collect::<Option<Vec<_>>>()?;
         entry.extend(std::mem::take(&mut self.instructions));
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: inner_result,
             effect: inner_effect.definition,
             effect_arguments: inner_effect.arguments,
@@ -10534,6 +11294,7 @@ impl Lowerer<'_> {
             .collect::<Option<Vec<_>>>()?;
         entry.extend(std::mem::take(&mut self.instructions));
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: outer_result,
             effect: outer_effect.definition,
             effect_arguments: outer_effect.arguments,
@@ -10553,8 +11314,10 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads)?;
         let outer_value = self.direct_handler_clause_value(outer_clause)?;
-        self.instructions
-            .push(MirInstruction::Resume { value: outer_value });
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: outer_value,
+        });
         let outer_instructions = std::mem::take(&mut self.instructions);
 
         self.named = base_named.clone();
@@ -10562,8 +11325,10 @@ impl Lowerer<'_> {
         self.instructions = Vec::new();
         self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads)?;
         let inner_value = self.direct_handler_clause_value(inner_clause)?;
-        self.instructions
-            .push(MirInstruction::Resume { value: inner_value });
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: inner_value,
+        });
         let inner_instructions = std::mem::take(&mut self.instructions);
         self.named = base_named;
         self.values = base_values;
@@ -10575,9 +11340,11 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Return {
@@ -10585,11 +11352,13 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: outer_instructions,
                     terminator: MirTerminator::Unreachable,
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: inner_instructions,
                     terminator: MirTerminator::Unreachable,
@@ -10759,6 +11528,7 @@ impl Lowerer<'_> {
         );
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: outer_clause.effect.definition,
             effect_arguments: outer_clause.effect.arguments.clone(),
             operation: outer_clause.operation,
@@ -10768,6 +11538,7 @@ impl Lowerer<'_> {
             target: MirBlockId(1),
         });
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: inner_clause.effect.definition,
             effect_arguments: inner_clause.effect.arguments.clone(),
             operation: inner_clause.operation,
@@ -10781,6 +11552,7 @@ impl Lowerer<'_> {
             },
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: result,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -10796,10 +11568,13 @@ impl Lowerer<'_> {
         let outer_resumed = self.direct_handler_clause_value(outer_clause)?;
         if outer_policy == MirContinuationPolicy::Consume {
             self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
                 value: outer_resumed,
             });
         } else {
-            self.instructions.push(MirInstruction::Cancel);
+            self.instructions.push(MirInstruction::Cancel {
+                site: MirResumptionSiteId::UNASSIGNED,
+            });
         }
         let outer_instructions = std::mem::take(&mut self.instructions);
         self.named = outer_named;
@@ -10809,6 +11584,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(&inner_clause.patterns, &inner_payload_destinations)?;
         let inner_resumed = self.direct_handler_clause_value(inner_clause)?;
         self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
             value: inner_resumed,
         });
         let inner_instructions = std::mem::take(&mut self.instructions);
@@ -10829,6 +11605,7 @@ impl Lowerer<'_> {
 
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry,
                 terminator: MirTerminator::Return {
@@ -10836,6 +11613,7 @@ impl Lowerer<'_> {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: outer_instructions,
                 terminator: if outer_policy.is_replay() {
@@ -10849,6 +11627,7 @@ impl Lowerer<'_> {
         ];
         for (index, (condition, subject, pattern)) in inner_tests.into_iter().enumerate() {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::PatternTest {
                     dst: condition,
@@ -10869,14 +11648,18 @@ impl Lowerer<'_> {
             });
         }
         blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: inner_instructions,
             terminator: MirTerminator::Unreachable,
         });
         if inner_test_count != 0 {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
-                instructions: vec![MirInstruction::Forward],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
                 terminator: MirTerminator::Unreachable,
             });
         }
@@ -10887,6 +11670,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -11049,6 +11833,7 @@ impl Lowerer<'_> {
         self.named = entry_named;
 
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry_instructions,
             terminator: MirTerminator::Unreachable,
@@ -11058,6 +11843,7 @@ impl Lowerer<'_> {
             .map(|(instructions, result)| {
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions,
                     terminator: MirTerminator::Return { value: result },
@@ -11072,6 +11858,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -11096,6 +11883,7 @@ impl Lowerer<'_> {
                 let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![MirInstruction::PatternTest {
                         dst: condition,
@@ -11125,6 +11913,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -11255,6 +12044,7 @@ impl Lowerer<'_> {
         let resumed = self.alloc(self.body.expression(perform).ty.clone(), perform);
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -11273,6 +12063,7 @@ impl Lowerer<'_> {
             .collect::<Option<Vec<_>>>()?;
         entry.extend(std::mem::take(&mut self.instructions));
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: resumed,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -11313,6 +12104,7 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
         let handler_value = self.direct_handler_clause_value(clause)?;
         self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
             value: handler_value,
         });
         let handler_instructions = std::mem::take(&mut self.instructions);
@@ -11324,14 +12116,17 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Return { value: result },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: handler_instructions,
                     terminator: MirTerminator::Unreachable,
@@ -11432,6 +12227,7 @@ impl Lowerer<'_> {
             .collect::<Option<Vec<_>>>()?;
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -11441,6 +12237,7 @@ impl Lowerer<'_> {
             target,
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: resumed,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -11464,7 +12261,10 @@ impl Lowerer<'_> {
             self.values = boundary_values.clone();
             self.bind_handler_patterns(&clause.patterns, &payloads)?;
             let value = self.direct_handler_clause_value(clause)?;
-            self.instructions.push(MirInstruction::Resume { value });
+            self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
+                value,
+            });
             bodies.push(std::mem::take(&mut self.instructions));
         }
         let mut tests = Vec::new();
@@ -11487,11 +12287,13 @@ impl Lowerer<'_> {
             tests.push(values);
         }
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry,
             terminator: MirTerminator::Return { value: result },
         }];
         blocks.extend(bodies.into_iter().map(|instructions| MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions,
             terminator: MirTerminator::Unreachable,
@@ -11511,6 +12313,7 @@ impl Lowerer<'_> {
                     .or(forward_block)
                     .expect("partial dispatch has a following clause or forwarding edge");
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![MirInstruction::PatternTest {
                         dst: condition,
@@ -11533,8 +12336,11 @@ impl Lowerer<'_> {
         }
         if forward_block.is_some() {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
-                instructions: vec![MirInstruction::Forward],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
                 terminator: MirTerminator::Unreachable,
             });
         }
@@ -11545,6 +12351,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -11648,6 +12455,7 @@ impl Lowerer<'_> {
             .collect::<Option<Vec<_>>>()?;
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -11657,6 +12465,7 @@ impl Lowerer<'_> {
             target: MirBlockId(2),
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: performed,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -11678,7 +12487,9 @@ impl Lowerer<'_> {
         self.values = boundary_values;
         self.bind_handler_patterns(&clause.patterns, &payloads)?;
         let _ = self.value(clause.body)?;
-        self.instructions.push(MirInstruction::Cancel);
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
         let handler_instructions = std::mem::take(&mut self.instructions);
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
@@ -11687,9 +12498,11 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Goto {
@@ -11698,11 +12511,13 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: suffix_instructions,
                     terminator: MirTerminator::Return { value: result },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: handler_instructions,
                     terminator: MirTerminator::Goto {
@@ -11978,6 +12793,7 @@ impl Lowerer<'_> {
 
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: outer_effect.definition,
             effect_arguments: outer_effect.arguments.clone(),
             operation: outer_operation,
@@ -11987,6 +12803,7 @@ impl Lowerer<'_> {
             target: MirBlockId(1),
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: outer_result,
             effect: outer_effect.definition,
             effect_arguments: outer_effect.arguments,
@@ -12001,6 +12818,7 @@ impl Lowerer<'_> {
         }
         let mut outer_arm = std::mem::take(&mut self.instructions);
         outer_arm.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: inner_effect.definition,
             effect_arguments: inner_effect.arguments.clone(),
             operation: inner_operation,
@@ -12017,6 +12835,7 @@ impl Lowerer<'_> {
                     .collect::<Option<Vec<_>>>()?;
                 outer_arm.extend(std::mem::take(&mut self.instructions));
                 outer_arm.push(MirInstruction::Perform {
+                    site: MirPerformSiteId::UNASSIGNED,
                     dst: inner_result,
                     effect: inner_effect.definition,
                     effect_arguments: inner_effect.arguments,
@@ -12102,6 +12921,7 @@ impl Lowerer<'_> {
         outer_arm.extend(std::mem::take(&mut self.instructions));
         self.named = outer_residual_named;
         outer_arm.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
             value: outer_resume_value,
         });
 
@@ -12113,6 +12933,7 @@ impl Lowerer<'_> {
         }
         let inner_resume_value = self.value(*inner_resume_argument)?;
         self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
             value: inner_resume_value,
         });
         let inner_arm = std::mem::take(&mut self.instructions);
@@ -12125,9 +12946,11 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Return {
@@ -12135,11 +12958,13 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: outer_arm,
                     terminator: MirTerminator::Unreachable,
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: inner_arm,
                     terminator: MirTerminator::Unreachable,
@@ -12256,6 +13081,7 @@ impl Lowerer<'_> {
         let performed = self.alloc(self.body.expression(value).ty.clone(), value);
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -12271,6 +13097,7 @@ impl Lowerer<'_> {
             target: MirBlockId(2),
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: performed,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -12295,9 +13122,12 @@ impl Lowerer<'_> {
         self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
         let handler_result = self.direct_handler_clause_value(clause)?;
         self.instructions.push(if cancellation || replay {
-            MirInstruction::Cancel
+            MirInstruction::Cancel {
+                site: MirResumptionSiteId::UNASSIGNED,
+            }
         } else {
             MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
                 value: handler_result,
             }
         });
@@ -12311,9 +13141,11 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Goto {
@@ -12322,6 +13154,7 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: continuation_instructions,
                     terminator: MirTerminator::Return {
@@ -12329,6 +13162,7 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: handler_instructions,
                     terminator: if cancellation || replay {
@@ -12456,11 +13290,13 @@ impl Lowerer<'_> {
 
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry_instructions,
                 terminator: MirTerminator::Unreachable,
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![continuation_parameter],
                 instructions: continuation_instructions,
                 terminator: MirTerminator::Return {
@@ -12489,6 +13325,7 @@ impl Lowerer<'_> {
                 }
             };
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: clause_instructions,
                 terminator,
@@ -12500,6 +13337,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -12538,6 +13376,7 @@ impl Lowerer<'_> {
                 });
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![],
                     terminator: MirTerminator::SwitchBool {
@@ -12563,6 +13402,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -12619,8 +13459,10 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: std::mem::take(&mut self.instructions),
                 terminator: MirTerminator::Return { value: result },
@@ -12727,6 +13569,7 @@ impl Lowerer<'_> {
         let mut entry = std::mem::take(&mut self.instructions);
         for (index, clause) in active.iter().enumerate() {
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
@@ -12780,6 +13623,7 @@ impl Lowerer<'_> {
         }
 
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry,
             terminator: MirTerminator::Return { value: performed },
@@ -12790,8 +13634,11 @@ impl Lowerer<'_> {
             self.named = previous_named.clone();
             self.bind_handler_patterns(&clause.patterns, &payloads)?;
             let result = self.value(clause.body)?;
-            self.instructions.push(MirInstruction::Cancel);
+            self.instructions.push(MirInstruction::Cancel {
+                site: MirResumptionSiteId::UNASSIGNED,
+            });
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: std::mem::take(&mut self.instructions),
                 terminator: MirTerminator::Return { value: result },
@@ -12805,6 +13652,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -12892,6 +13740,7 @@ impl Lowerer<'_> {
             .collect::<Vec<_>>();
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation: clause.operation,
@@ -12946,7 +13795,9 @@ impl Lowerer<'_> {
         let handler_named = self.named.clone();
         self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
         let result = self.value(clause.body)?;
-        self.instructions.push(MirInstruction::Cancel);
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = handler_named;
         Some(MirFunction {
@@ -12956,14 +13807,17 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Unreachable,
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: handler_instructions,
                     terminator: MirTerminator::Return { value: result },
@@ -13102,6 +13956,7 @@ impl Lowerer<'_> {
             .zip(&handler_blocks)
         {
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
@@ -13160,7 +14015,9 @@ impl Lowerer<'_> {
             self.values = boundary_values.clone();
             self.bind_handler_patterns(&clause.patterns, payloads)?;
             let handler_result = self.direct_handler_clause_value(clause)?;
-            self.instructions.push(MirInstruction::Cancel);
+            self.instructions.push(MirInstruction::Cancel {
+                site: MirResumptionSiteId::UNASSIGNED,
+            });
             handler_blocks_instructions
                 .push((handler_result, std::mem::take(&mut self.instructions)));
         }
@@ -13169,6 +14026,7 @@ impl Lowerer<'_> {
 
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry,
                 terminator: MirTerminator::Goto {
@@ -13177,6 +14035,7 @@ impl Lowerer<'_> {
                 },
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: continuation_instructions,
                 terminator: MirTerminator::Return {
@@ -13188,6 +14047,7 @@ impl Lowerer<'_> {
             handler_blocks_instructions
                 .into_iter()
                 .map(|(value, instructions)| MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions,
                     terminator: MirTerminator::Return { value },
@@ -13200,6 +14060,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -13318,6 +14179,7 @@ impl Lowerer<'_> {
             .collect::<Vec<_>>();
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation: clause.operation,
@@ -13379,7 +14241,9 @@ impl Lowerer<'_> {
         let handler_named = self.named.clone();
         self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
         let handler_result = self.direct_handler_clause_value(clause)?;
-        self.instructions.push(MirInstruction::Cancel);
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = handler_named;
         Some(MirFunction {
@@ -13389,9 +14253,11 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Goto {
@@ -13400,6 +14266,7 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: continuation_instructions,
                     terminator: MirTerminator::Return {
@@ -13407,6 +14274,7 @@ impl Lowerer<'_> {
                     },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: handler_instructions,
                     terminator: MirTerminator::Return {
@@ -13608,6 +14476,7 @@ impl Lowerer<'_> {
                 .copied()
                 .unwrap_or(body_blocks[index][0]);
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: group[0].effect.definition,
                 effect_arguments: group[0].effect.arguments.clone(),
                 operation: group[0].operation,
@@ -13680,9 +14549,14 @@ impl Lowerer<'_> {
                 self.bind_handler_patterns(&clause.patterns, payloads)?;
                 let value = self.direct_handler_clause_value(clause)?;
                 self.instructions.push(if replay {
-                    MirInstruction::Cancel
+                    MirInstruction::Cancel {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }
                 } else {
-                    MirInstruction::Resume { value }
+                    MirInstruction::Resume {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                        value,
+                    }
                 });
                 bodies.push((value, replay, std::mem::take(&mut self.instructions)));
             }
@@ -13714,6 +14588,7 @@ impl Lowerer<'_> {
         }
 
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry,
             terminator: MirTerminator::Return { value: result },
@@ -13722,6 +14597,7 @@ impl Lowerer<'_> {
             bodies
                 .into_iter()
                 .map(|(value, replay, instructions)| MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions,
                     terminator: if replay {
@@ -13752,6 +14628,7 @@ impl Lowerer<'_> {
                         .or(forward_blocks[group_index])
                         .expect("partial operation matrix has a forwarding edge");
                     blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
                         parameters: vec![],
                         instructions: vec![MirInstruction::PatternTest {
                             dst: condition,
@@ -13775,8 +14652,11 @@ impl Lowerer<'_> {
         }
         for forward in forward_blocks.into_iter().flatten() {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
-                instructions: vec![MirInstruction::Forward],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
                 terminator: MirTerminator::Unreachable,
             });
             debug_assert_eq!(forward.0, blocks.len() as u32 - 1);
@@ -13789,6 +14669,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -13929,6 +14810,7 @@ impl Lowerer<'_> {
         let target = test_blocks[0].first().copied().unwrap_or(body_blocks[0]);
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation: matching[0].operation,
@@ -13981,7 +14863,10 @@ impl Lowerer<'_> {
             self.values = boundary_values.clone();
             self.bind_handler_patterns(&clause.patterns, &payloads)?;
             let value = self.direct_handler_clause_value(clause)?;
-            self.instructions.push(MirInstruction::Resume { value });
+            self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
+                value,
+            });
             bodies.push(std::mem::take(&mut self.instructions));
         }
         self.named = boundary_named;
@@ -14006,11 +14891,13 @@ impl Lowerer<'_> {
             tests.push(values);
         }
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry,
             terminator: MirTerminator::Return { value: result },
         }];
         blocks.extend(bodies.into_iter().map(|instructions| MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions,
             terminator: MirTerminator::Unreachable,
@@ -14030,6 +14917,7 @@ impl Lowerer<'_> {
                     .or(forward_block)
                     .expect("partial dispatch has a following clause or forwarding edge");
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![MirInstruction::PatternTest {
                         dst: condition,
@@ -14052,8 +14940,11 @@ impl Lowerer<'_> {
         }
         if forward_block.is_some() {
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
-                instructions: vec![MirInstruction::Forward],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
                 terminator: MirTerminator::Unreachable,
             });
         }
@@ -14064,6 +14955,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -14169,6 +15061,7 @@ impl Lowerer<'_> {
         let mut entry = std::mem::take(&mut self.instructions);
         for (index, clause) in active.iter().enumerate() {
             entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
                 effect: clause.effect.definition,
                 effect_arguments: clause.effect.arguments.clone(),
                 operation: clause.operation,
@@ -14222,6 +15115,7 @@ impl Lowerer<'_> {
         }
 
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry,
             terminator: MirTerminator::Return { value: result },
@@ -14250,10 +15144,13 @@ impl Lowerer<'_> {
                 // frame before publishing the clause result.
                 self.instructions.push(MirInstruction::UninstallHandler);
             } else {
-                self.instructions
-                    .push(MirInstruction::Resume { value: resumed });
+                self.instructions.push(MirInstruction::Resume {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                    value: resumed,
+                });
             }
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: std::mem::take(&mut self.instructions),
                 terminator: if consume_returning_clause {
@@ -14271,6 +15168,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -14347,6 +15245,7 @@ impl Lowerer<'_> {
         let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -14356,6 +15255,7 @@ impl Lowerer<'_> {
             target: MirBlockId(1),
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: result,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -14368,8 +15268,10 @@ impl Lowerer<'_> {
         let previous_named = self.named.clone();
         self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
         let resumed = self.direct_handler_clause_value(clause)?;
-        self.instructions
-            .push(MirInstruction::Resume { value: resumed });
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: resumed,
+        });
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = previous_named;
         Some(MirFunction {
@@ -14379,14 +15281,17 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Return { value: result },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: handler_instructions,
                     terminator: MirTerminator::Unreachable,
@@ -14469,6 +15374,7 @@ impl Lowerer<'_> {
         let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
         let mut entry = std::mem::take(&mut self.instructions);
         entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
             effect: effect.definition,
             effect_arguments: effect.arguments.clone(),
             operation,
@@ -14478,6 +15384,7 @@ impl Lowerer<'_> {
             target: MirBlockId(1),
         });
         entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
             dst: result,
             effect: effect.definition,
             effect_arguments: effect.arguments,
@@ -14490,8 +15397,10 @@ impl Lowerer<'_> {
         let previous_named = self.named.clone();
         self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
         let resumed = self.direct_handler_clause_value(clause)?;
-        self.instructions
-            .push(MirInstruction::Resume { value: resumed });
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: resumed,
+        });
         let handler_instructions = std::mem::take(&mut self.instructions);
         self.named = previous_named;
         Some(MirFunction {
@@ -14501,14 +15410,17 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: entry,
                     terminator: MirTerminator::Return { value: result },
                 },
                 MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: handler_instructions,
                     terminator: MirTerminator::Unreachable,
@@ -14587,6 +15499,7 @@ impl Lowerer<'_> {
         let entry_instructions = std::mem::take(&mut self.instructions);
         let entry_values = self.values.clone();
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry_instructions,
             terminator: MirTerminator::Unreachable,
@@ -14620,6 +15533,7 @@ impl Lowerer<'_> {
             self.named = previous_named;
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: MirTerminator::Return { value: body },
@@ -14632,6 +15546,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -14660,6 +15575,7 @@ impl Lowerer<'_> {
             let selected_arm = bodies[index];
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::SwitchBool {
@@ -14683,6 +15599,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -14721,6 +15638,7 @@ impl Lowerer<'_> {
         let entry_named = self.named.clone();
         let entry = MirBlockId(blocks.len() as u32);
         blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry_instructions,
             terminator: MirTerminator::Unreachable,
@@ -14747,6 +15665,7 @@ impl Lowerer<'_> {
                 self.statement(clause.body)?;
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: std::mem::take(&mut self.instructions),
                     terminator: MirTerminator::Unreachable,
@@ -14756,6 +15675,7 @@ impl Lowerer<'_> {
                 let body = self.value(clause.body)?;
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: std::mem::take(&mut self.instructions),
                     terminator: MirTerminator::Return { value: body },
@@ -14771,6 +15691,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -14801,6 +15722,7 @@ impl Lowerer<'_> {
             let selected_arm = bodies[index];
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::SwitchBool {
@@ -14844,6 +15766,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry,
             blocks,
         })
@@ -14868,6 +15791,7 @@ impl Lowerer<'_> {
         if let Some(value) = finished {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: std::mem::take(&mut self.instructions),
                 terminator: MirTerminator::Return { value },
@@ -14896,6 +15820,7 @@ impl Lowerer<'_> {
         // and append a whole residual decision subgraph.
         let entry = MirBlockId(blocks.len() as u32);
         blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: vec![],
             terminator: MirTerminator::Unreachable,
@@ -14920,6 +15845,7 @@ impl Lowerer<'_> {
                 self.statement(clause.body)?;
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: std::mem::take(&mut self.instructions),
                     terminator: MirTerminator::Unreachable,
@@ -14951,6 +15877,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -14967,6 +15894,7 @@ impl Lowerer<'_> {
             let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![MirInstruction::PatternTest {
                     dst: condition,
@@ -15105,11 +16033,13 @@ impl Lowerer<'_> {
         let completed = self.alloc(self.body.expression(handler).ty.clone(), handler);
         let mut blocks = vec![
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry_instructions,
                 terminator: MirTerminator::Unreachable,
             },
             MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![completed],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -15138,6 +16068,7 @@ impl Lowerer<'_> {
                 }
             };
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator,
@@ -15163,6 +16094,7 @@ impl Lowerer<'_> {
             self.named = previous_named;
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: MirTerminator::Return { value: result },
@@ -15176,6 +16108,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -15197,6 +16130,7 @@ impl Lowerer<'_> {
             });
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::SwitchBool {
@@ -15219,6 +16153,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -15248,6 +16183,7 @@ impl Lowerer<'_> {
                 });
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![],
                     terminator: MirTerminator::SwitchBool {
@@ -15273,6 +16209,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -15346,6 +16283,7 @@ impl Lowerer<'_> {
 
         let entry_instructions = std::mem::take(&mut self.instructions);
         let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
             parameters: vec![],
             instructions: entry_instructions,
             terminator: MirTerminator::Unreachable,
@@ -15365,6 +16303,7 @@ impl Lowerer<'_> {
             self.named = previous_named;
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions,
                 terminator: MirTerminator::Return { value: body },
@@ -15378,6 +16317,7 @@ impl Lowerer<'_> {
         } else {
             let id = MirBlockId(blocks.len() as u32);
             blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -15417,6 +16357,7 @@ impl Lowerer<'_> {
                 });
                 let id = MirBlockId(blocks.len() as u32);
                 blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
                     parameters: vec![],
                     instructions: vec![],
                     terminator: MirTerminator::SwitchBool {
@@ -15442,6 +16383,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
         })
@@ -15454,8 +16396,10 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: Type::Error,
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![],
                 terminator: MirTerminator::Unreachable,
@@ -16038,8 +16982,10 @@ impl Lowerer<'_> {
                     // fresh top-of-stack resumption.
                     self.copy_or_move(dst, snapshot);
                 } else {
-                    self.instructions
-                        .push(MirInstruction::CaptureResumption { dst });
+                    self.instructions.push(MirInstruction::CaptureResumption {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                        dst,
+                    });
                     self.resumption_snapshots.insert(id, dst);
                 }
             }
@@ -16055,6 +17001,7 @@ impl Lowerer<'_> {
                     return None;
                 };
                 self.instructions.push(MirInstruction::MakeLabel {
+                    label: MirLabelId::UNASSIGNED,
                     dst,
                     brand,
                     target,
@@ -16217,6 +17164,7 @@ impl Lowerer<'_> {
                     .map(|argument| self.value(argument))
                     .collect::<Option<Vec<_>>>()?;
                 self.instructions.push(MirInstruction::Perform {
+                    site: MirPerformSiteId::UNASSIGNED,
                     dst,
                     effect: effect.definition,
                     effect_arguments: effect.arguments,
@@ -16537,6 +17485,7 @@ impl Lowerer<'_> {
                         DirectResumptionPlan::RuntimeConsumeReturn
                         | DirectResumptionPlan::RuntimeReplay => {
                             self.instructions.push(MirInstruction::ResumeReturn {
+                                site: MirResumptionSiteId::UNASSIGNED,
                                 dst,
                                 value: argument,
                             });
@@ -16579,8 +17528,11 @@ impl Lowerer<'_> {
                     };
                     let snapshot = self.value(callee)?;
                     let value = self.value(*argument)?;
-                    self.instructions
-                        .push(MirInstruction::ResumeSnapshot { snapshot, value });
+                    self.instructions.push(MirInstruction::ResumeSnapshot {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                        snapshot,
+                        value,
+                    });
                     self.values.insert(id, dst);
                     return Some(dst);
                 }
@@ -19340,8 +20292,10 @@ impl Lowerer<'_> {
                     // closure's sealed environment; the Core escape proof
                     // guarantees this capture is immediately invoked.
                     let snapshot = self.alloc(capture.ty.clone(), CoreId(u32::MAX));
-                    self.instructions
-                        .push(MirInstruction::CaptureResumption { dst: snapshot });
+                    self.instructions.push(MirInstruction::CaptureResumption {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                        dst: snapshot,
+                    });
                     self.named.insert(capture.name.clone(), snapshot);
                     snapshot
                 }
@@ -19445,17 +20399,24 @@ impl Lowerer<'_> {
             parameters: lifted_parameters,
             locals: child.locals.into_entries(),
             result: self.body.expression(body).ty.clone(),
+            control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![MirBlock {
+                scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: child.instructions,
                 terminator: MirTerminator::Return { value: root },
             }],
-        };
+        }
+        .with_frozen_control_tables();
         if let Err(message) = function.validate() {
             self.error("G6002", &message);
             return None;
         }
+        // A lifted callable is a separate frozen MIR body. It must cross the
+        // same one-way control-table boundary as its owning root before it is
+        // published into the package's lifted-function map; otherwise a
+        // later materialization can validate an unassigned builder sentinel.
         if self.lifted.insert(definition, function).is_some() {
             self.error("G6008", "lifted callable identity collision");
             return None;

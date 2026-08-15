@@ -2973,6 +2973,24 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
             }
         }
     }
+    // Control-site tables are frozen MIR metadata, not an advisory cache.
+    // Keep their type witnesses in lockstep with the executable instruction
+    // stream when a generic template becomes a concrete instance.
+    for handler in &mut function.control.handlers {
+        handler.effect_arguments = handler
+            .effect_arguments
+            .iter()
+            .map(|argument| specialize_generic_argument(argument, arguments))
+            .collect();
+        handler.resume_type = specialize_type(&handler.resume_type, arguments);
+    }
+    for perform in &mut function.control.performs {
+        perform.effect_arguments = perform
+            .effect_arguments
+            .iter()
+            .map(|argument| specialize_generic_argument(argument, arguments))
+            .collect();
+    }
 }
 
 /// A template can contain a `T` local whose concrete nominal layout becomes
@@ -3458,6 +3476,24 @@ fn normalize_materialized_associated_consts(
                     .collect::<Result<_, _>>()?;
             }
         }
+    }
+    // Associated-const normalization has the same frozen-control boundary as
+    // generic specialization above.  Normalize the duplicated witnesses too,
+    // so MIR validation can prove table and instruction agreement.
+    for handler in &mut function.control.handlers {
+        handler.effect_arguments = handler
+            .effect_arguments
+            .iter()
+            .map(|argument| normalize_materialized_generic_argument(argument, &mut solver))
+            .collect::<Result<_, _>>()?;
+        handler.resume_type = normalize_materialized_type(&handler.resume_type, &mut solver)?;
+    }
+    for perform in &mut function.control.performs {
+        perform.effect_arguments = perform
+            .effect_arguments
+            .iter()
+            .map(|argument| normalize_materialized_generic_argument(argument, &mut solver))
+            .collect::<Result<_, _>>()?;
     }
     Ok(())
 }
@@ -4051,8 +4087,10 @@ mod tests {
                 },
             ],
             result: generic.clone(),
+            control: crate::MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![MirBlock {
+                scope: crate::MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: vec![
                     MirInstruction::MakeRecord {
@@ -4079,6 +4117,7 @@ mod tests {
                         },
                     },
                     MirInstruction::InstallHandler {
+                        site: crate::MirHandlerSiteId::UNASSIGNED,
                         effect: key("generic-handler"),
                         effect_arguments: vec![GenericArgument::Type(generic.clone())],
                         operation: 0,
