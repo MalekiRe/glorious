@@ -372,6 +372,61 @@ fn parent_evidence_cannot_select_a_method_requested_through_an_unimplemented_chi
 }
 
 #[test]
+fn parent_lexical_evidence_cannot_select_an_inherited_child_method() {
+    let (interface, signatures) = signatures(
+        "trait Parent { fn identity(value: Self) -> Self; } trait Child: Parent {} impl Parent for i64 { fn identity(value: i64) -> i64 { value } }",
+    );
+    let parent = key(&interface, "Parent");
+    let child = key(&interface, "Child");
+    let subject = Type::Scalar(ScalarType::I64);
+    let child_goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: child,
+            arguments: vec![],
+        },
+        subject: subject.clone(),
+    };
+    let parent_assumption = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: parent,
+            arguments: vec![],
+        },
+        subject,
+    };
+    assert!(matches!(
+        TraitSolver::new(&signatures).select_method_with_assumptions(
+            child_goal,
+            "identity",
+            &[],
+            &[parent_assumption],
+        ),
+        TraitMethodAnswer::NoSolution
+    ));
+}
+
+#[test]
+fn negative_child_evidence_refutes_an_inherited_method_request() {
+    let (interface, signatures) = signatures(
+        "trait Parent { fn identity(value: Self) -> Self; } trait Child: Parent {} impl Parent for i64 { fn identity(value: i64) -> i64 { value } } impl !Child for i64 {}",
+    );
+    let child = key(&interface, "Child");
+    assert!(matches!(
+        TraitSolver::new(&signatures).select_method(
+            TraitGoal {
+                relation: ElaboratedTraitReference {
+                    definition: child,
+                    arguments: vec![],
+                },
+                subject: Type::Scalar(ScalarType::I64),
+            },
+            "identity",
+            &[],
+        ),
+        TraitMethodAnswer::Refuted { .. }
+    ));
+}
+
+#[test]
 fn method_selection_uses_lexical_where_bounds_for_generic_impl_candidates() {
     let (interface, signatures) = signatures(
         "trait Gate {} trait Parent { fn identity(value: Self) -> Self; } impl<T> Parent for T where T: Gate { fn identity(value: T) -> T { value } }",
