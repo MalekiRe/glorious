@@ -1651,8 +1651,41 @@ impl MirCleanupPlan {
                 ));
             }
         }
+        for loan in &self.active_loans {
+            if loan.binding.0 as usize >= tables.bindings.len() {
+                return Err(format!(
+                    "MIR cleanup loan references absent binding {}",
+                    loan.binding.0
+                ));
+            }
+        }
+        for &path in &self.moved_paths {
+            let moved = &tables.paths[path.0 as usize];
+            if self.active_loans.iter().any(|loan| {
+                loan.binding.0 == moved.binding.0
+                    && path_fields(tables, path).is_some_and(|fields| {
+                        fields.starts_with(&loan.fields) || loan.fields.starts_with(&fields)
+                    })
+            }) {
+                return Err("MIR cleanup path overlaps a live typed loan".into());
+            }
+        }
         Ok(())
     }
+}
+
+fn path_fields(tables: &MirMovePathTables, path: MirMovePathId) -> Option<Vec<u32>> {
+    let mut fields = Vec::new();
+    let mut cursor = Some(path);
+    while let Some(current) = cursor {
+        let node = tables.paths.get(current.0 as usize)?;
+        if let Some(field) = node.field {
+            fields.push(field);
+        }
+        cursor = node.parent;
+    }
+    fields.reverse();
+    Some(fields)
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirBlock {

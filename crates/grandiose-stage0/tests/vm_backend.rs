@@ -1657,6 +1657,9 @@ struct LeaveFixtureOffsets {
     brand_owner: usize,
     target: usize,
     destination_count: usize,
+    moved_path: usize,
+    moved_binding: usize,
+    moved_root: usize,
     moved_field_count: usize,
     loan_owner_tag: usize,
     loan_field_count: usize,
@@ -2488,16 +2491,20 @@ fn leave_fixture_offsets(bytes: &[u8]) -> LeaveFixtureOffsets {
     let argument_count = target + 4;
     let destination_count = argument_count + 8 + 4;
     let cleanup = destination_count + 8 + 4;
-    let moved_root_length = cleanup + 8;
+    let moved_path = cleanup + 8;
+    let moved_root_length = moved_path + 8;
     let moved_fields = moved_root_length + 8 + b"value".len();
     let loan_count = moved_fields + 8 + 4;
     let loan_owner_tag = loan_count + 8;
-    let loan_root_length = loan_owner_tag + 1;
+    let loan_root_length = loan_owner_tag + 1 + 4;
     let loan_fields = loan_root_length + 8 + b"loan".len();
     LeaveFixtureOffsets {
         brand_owner,
         target,
         destination_count,
+        moved_path,
+        moved_binding: moved_path + 4,
+        moved_root: moved_root_length + 8,
         moved_field_count: moved_fields,
         loan_owner_tag,
         loan_field_count: loan_fields,
@@ -2536,11 +2543,14 @@ fn encoded_leave_fixture() -> Vec<u8> {
                     destinations: vec![1],
                     cleanup: VmCleanupProof {
                         moved_places: vec![VmCleanupPlace {
+                            path: 0,
+                            binding: 0,
                             root: "value".into(),
                             fields: vec![0],
                         }],
                         active_loans: vec![VmCleanupLoan {
                             owner: None,
+                            binding: 1,
                             root: "loan".into(),
                             fields: vec![1],
                             unique: false,
@@ -2585,11 +2595,14 @@ fn cleanup_carrying_leave_entry(definition: DefKey, first: VmInstruction) -> VmF
                 destinations: vec![1],
                 cleanup: VmCleanupProof {
                     moved_places: vec![VmCleanupPlace {
+                        path: 0,
+                        binding: 0,
                         root: "result".into(),
                         fields: vec![0],
                     }],
                     active_loans: vec![VmCleanupLoan {
                         owner: Some("frame".into()),
+                        binding: 0,
                         root: "result".into(),
                         fields: vec![1],
                         unique: true,
@@ -2640,6 +2653,8 @@ fn cleanup_leave_budget_loop(definition: DefKey) -> VmFunction {
                 destinations: vec![],
                 cleanup: VmCleanupProof {
                     moved_places: vec![VmCleanupPlace {
+                        path: 0,
+                        binding: 0,
                         root: "loop".into(),
                         fields: vec![0],
                     }],
@@ -2832,6 +2847,34 @@ fn schema_26_leave_payload_mutations_reject_before_vm_execution() {
         decode_and_verify_artifact(&invalid_target),
         Err(VmArtifactError::InvalidInstructionTarget { target: u32::MAX })
     ));
+
+    let mut stale_path = bytes.clone();
+    stale_path[offsets.moved_path..offsets.moved_path + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+    rebind_artifact_fingerprint(&mut stale_path);
+    assert!(matches!(
+        decode_and_verify_artifact(&stale_path),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "leave cleanup proof is not canonical"
+        })
+    ));
+
+    let mut stale_binding = bytes.clone();
+    stale_binding[offsets.moved_binding..offsets.moved_binding + 4]
+        .copy_from_slice(&u32::MAX.to_le_bytes());
+    rebind_artifact_fingerprint(&mut stale_binding);
+    assert!(matches!(
+        decode_and_verify_artifact(&stale_binding),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "leave cleanup proof is not canonical"
+        })
+    ));
+
+    // Diagnostic roots do not participate in cleanup ownership identity.
+    let mut renamed_presentation = bytes.clone();
+    renamed_presentation[offsets.moved_root..offsets.moved_root + b"value".len()]
+        .copy_from_slice(b"other");
+    rebind_artifact_fingerprint(&mut renamed_presentation);
+    assert!(decode_and_verify_artifact(&renamed_presentation).is_ok());
 
     // Label brands are immutable artifact payload. A raw owner substitution is
     // rejected by the verifier's fingerprint gate before any control transfer.
@@ -6572,6 +6615,8 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
                     destinations: vec![1],
                     cleanup: VmCleanupProof {
                         moved_places: vec![VmCleanupPlace {
+                            path: 0,
+                            binding: 0,
                             root: "value".into(),
                             fields: vec![0],
                         }],
@@ -6658,6 +6703,8 @@ fn lowered_partial_move_leave_keeps_only_the_residual_aggregate_cleanup() {
     assert_eq!(
         cleanup.moved_places,
         vec![VmCleanupPlace {
+            path: 1,
+            binding: 0,
             root: "pair".into(),
             fields: vec![0],
         }]
@@ -6696,10 +6743,14 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
                     cleanup: VmCleanupProof {
                         moved_places: vec![
                             VmCleanupPlace {
+                                path: 0,
+                                binding: 0,
                                 root: "x".into(),
                                 fields: vec![],
                             },
                             VmCleanupPlace {
+                                path: 1,
+                                binding: 0,
                                 root: "x".into(),
                                 fields: vec![],
                             },
@@ -6796,10 +6847,14 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
         verify_vm(candidate(VmCleanupProof {
             moved_places: vec![
                 VmCleanupPlace {
+                    path: 0,
+                    binding: 0,
                     root: "pair".into(),
                     fields: vec![]
                 },
                 VmCleanupPlace {
+                    path: 1,
+                    binding: 0,
                     root: "pair".into(),
                     fields: vec![0]
                 },
@@ -6811,11 +6866,14 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
     assert!(matches!(
         verify_vm(candidate(VmCleanupProof {
             moved_places: vec![VmCleanupPlace {
+                path: 0,
+                binding: 0,
                 root: "pair".into(),
                 fields: vec![0]
             }],
             active_loans: vec![VmCleanupLoan {
                 owner: Some("loan".into()),
+                binding: 0,
                 root: "pair".into(),
                 fields: vec![],
                 unique: false,
@@ -6823,6 +6881,43 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
         })),
         Err(VmArtifactError::MalformedEncoding { .. })
     ));
+    assert!(matches!(
+        verify_vm(candidate(VmCleanupProof {
+            moved_places: vec![VmCleanupPlace {
+                path: 0,
+                binding: 7,
+                root: "moved-display".into(),
+                fields: vec![0],
+            }],
+            active_loans: vec![VmCleanupLoan {
+                owner: Some("loan".into()),
+                binding: 7,
+                root: "unrelated-display".into(),
+                fields: vec![],
+                unique: false,
+            }],
+        })),
+        Err(VmArtifactError::MalformedEncoding { .. })
+    ));
+    assert!(
+        verify_vm(candidate(VmCleanupProof {
+            moved_places: vec![VmCleanupPlace {
+                path: 0,
+                binding: 7,
+                root: "same-display".into(),
+                fields: vec![0],
+            }],
+            active_loans: vec![VmCleanupLoan {
+                owner: Some("loan".into()),
+                binding: 8,
+                root: "same-display".into(),
+                fields: vec![],
+                unique: false,
+            }],
+        }))
+        .is_ok(),
+        "presentation text must not create a numeric cleanup overlap"
+    );
 }
 
 #[test]

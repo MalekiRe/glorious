@@ -88,6 +88,9 @@ struct ProjectionLoan {
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct LoanFact {
     pub owner: Option<String>,
+    /// Opaque lexical storage identity for this loan's root. Text remains
+    /// available for diagnostics, but cleanup and VM verification compare it.
+    pub binding: PlaceBindingId,
     pub root: String,
     pub fields: Vec<u32>,
     pub unique: bool,
@@ -399,6 +402,7 @@ impl PlaceFlow {
             .iter()
             .map(|loan| LoanFact {
                 owner: loan.owner.clone(),
+                binding: a.bindings.id(&loan.place.root),
                 root: loan.place.root.clone(),
                 fields: loan.place.fields.clone(),
                 unique: loan.unique,

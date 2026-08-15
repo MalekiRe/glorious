@@ -279,6 +279,7 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
         }],
         active_loans: vec![LoanFact {
             owner: Some("loan".into()),
+            binding: grandiose_stage0::PlaceBindingId(0),
             root: "pair".into(),
             fields: vec![],
             unique: false,

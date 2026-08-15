@@ -62,8 +62,9 @@ retained below but scheduled after the core language and tooling tranche.
   binding-pack construction, ownership, reference-origin transport, and frozen
   bytecode selection are implemented). Direct final cleanup serialization,
   including parallel edge-transfer temporaries and arbitrary MIR-derived
-  public-`LEAVE` boundaries, now consumes the single MIR ownership source and
-  is independently checked by the VM verifier.
+  public-`LEAVE` boundaries, now consumes numeric MIR move-path and binding
+  identities (with root text retained only for diagnostics) and is
+  independently checked by the VM verifier.
 
 ### 5.4 Bytecode peepholes and validation
 

@@ -1045,9 +1045,9 @@ pub enum VmInstruction {
     Trap,
 }
 /// Canonical, artifact-safe ownership evidence attached to a nonlocal leave.
-/// It deliberately contains only structural place text and indices—not MIR
-/// locals, Core arena IDs, or host pointers—so a decoded artifact can verify
-/// the same proof without compiler-session state.
+/// Move paths and lexical bindings are numeric identities frozen by MIR. Text
+/// is retained only as diagnostic presentation and is never used to decide
+/// ownership overlap in a decoded artifact.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmCleanupProof {
     pub moved_places: Vec<VmCleanupPlace>,
@@ -1069,12 +1069,17 @@ struct PendingLeave {
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct VmCleanupPlace {
+    pub path: u32,
+    pub binding: u32,
+    /// Human-readable presentation of the binding; never a semantic key.
     pub root: String,
     pub fields: Vec<u32>,
 }
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct VmCleanupLoan {
     pub owner: Option<String>,
+    pub binding: u32,
+    /// Human-readable presentation of the binding; never a semantic key.
     pub root: String,
     pub fields: Vec<u32>,
     pub unique: bool,
@@ -1083,40 +1088,75 @@ impl VmCleanupProof {
     pub fn from_mir(plan: &crate::MirCleanupPlan, paths: &crate::MirMovePathTables) -> Self {
         debug_assert!(plan.validate().is_ok());
         debug_assert!(plan.validate_with_paths(paths).is_ok());
-        let moved_places = plan
-            .moved_places
+        let mut moved_places = plan
+            .moved_paths
             .iter()
-            .map(|place| VmCleanupPlace {
-                root: place.root.clone(),
-                fields: place.fields.clone(),
+            .zip(&plan.moved_places)
+            .map(|(&path, place)| {
+                let data = &paths.paths[path.0 as usize];
+                VmCleanupPlace {
+                    path: path.0,
+                    binding: data.binding.0,
+                    root: place.root.clone(),
+                    fields: place.fields.clone(),
+                }
             })
             .collect::<Vec<_>>();
-        let active_loans = plan
+        moved_places.sort_by_key(|place| place.path);
+        let mut active_loans = plan
             .active_loans
             .iter()
             .map(|loan| VmCleanupLoan {
                 owner: loan.owner.clone(),
+                binding: loan.binding.0,
                 root: loan.root.clone(),
                 fields: loan.fields.clone(),
                 unique: loan.unique,
             })
             .collect::<Vec<_>>();
+        active_loans.sort_by(|left, right| {
+            (left.binding, &left.fields, &left.owner, left.unique).cmp(&(
+                right.binding,
+                &right.fields,
+                &right.owner,
+                right.unique,
+            ))
+        });
         Self {
             moved_places,
             active_loans,
         }
     }
     pub fn validate(&self) -> bool {
-        if self.moved_places.iter().any(|place| place.root.is_empty())
-            || self.active_loans.iter().any(|loan| loan.root.is_empty())
-            || !self.moved_places.windows(2).all(|pair| pair[0] < pair[1])
-            || !self.active_loans.windows(2).all(|pair| pair[0] < pair[1])
+        if self.moved_places.iter().any(|place| {
+            place.path == u32::MAX || place.binding == u32::MAX || place.root.is_empty()
+        }) || self
+            .active_loans
+            .iter()
+            .any(|loan| loan.binding == u32::MAX || loan.root.is_empty())
+            || !self
+                .moved_places
+                .windows(2)
+                .all(|pair| pair[0].path < pair[1].path)
+            || !self.active_loans.windows(2).all(|pair| {
+                (
+                    pair[0].binding,
+                    &pair[0].fields,
+                    &pair[0].owner,
+                    pair[0].unique,
+                ) < (
+                    pair[1].binding,
+                    &pair[1].fields,
+                    &pair[1].owner,
+                    pair[1].unique,
+                )
+            })
         {
             return false;
         }
         if self.moved_places.iter().enumerate().any(|(index, place)| {
             self.moved_places[index + 1..].iter().any(|other| {
-                place.root == other.root
+                place.binding == other.binding
                     && (place.fields.starts_with(&other.fields)
                         || other.fields.starts_with(&place.fields))
             })
@@ -1125,7 +1165,7 @@ impl VmCleanupProof {
         }
         !self.moved_places.iter().any(|moved| {
             self.active_loans.iter().any(|loan| {
-                moved.root == loan.root
+                moved.binding == loan.binding
                     && (moved.fields.starts_with(&loan.fields)
                         || loan.fields.starts_with(&moved.fields))
             })
@@ -1415,8 +1455,9 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// effect-distinct function values cannot collapse across a frozen boundary.
 /// Schema 80 also adds the sealed f32/f64 runtime intrinsic opcode and
 /// first-class f32 VM layout. Older artifacts cannot be decoded under the
-/// merged runtime contract.
-pub const STAGE0_VM_SCHEMA: u32 = 80;
+/// merged runtime contract. Schema 81 encodes numeric cleanup path and
+/// binding identities, making diagnostic root strings non-semantic.
+pub const STAGE0_VM_SCHEMA: u32 = 81;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -3491,13 +3532,20 @@ impl<'a> Decoder<'a> {
         let moved_count = self.count("cleanup moved places", MAX_DECODE_REGISTERS)?;
         let mut moved_places = Vec::with_capacity(moved_count);
         for _ in 0..moved_count {
+            let path = self.u32()?;
+            let binding = self.u32()?;
             let root = self.text()?;
             let field_count = self.count("cleanup moved place fields", MAX_DECODE_REGISTERS)?;
             let mut fields = Vec::with_capacity(field_count);
             for _ in 0..field_count {
                 fields.push(self.u32()?);
             }
-            moved_places.push(VmCleanupPlace { root, fields });
+            moved_places.push(VmCleanupPlace {
+                path,
+                binding,
+                root,
+                fields,
+            });
         }
         let loan_count = self.count("cleanup active loans", MAX_DECODE_REGISTERS)?;
         let mut active_loans = Vec::with_capacity(loan_count);
@@ -3511,6 +3559,7 @@ impl<'a> Decoder<'a> {
                     });
                 }
             };
+            let binding = self.u32()?;
             let root = self.text()?;
             let field_count = self.count("cleanup loan fields", MAX_DECODE_REGISTERS)?;
             let mut fields = Vec::with_capacity(field_count);
@@ -3528,6 +3577,7 @@ impl<'a> Decoder<'a> {
             };
             active_loans.push(VmCleanupLoan {
                 owner,
+                binding,
                 root,
                 fields,
                 unique,
@@ -13825,6 +13875,8 @@ fn encode_pattern(value: &VmPattern, output: &mut Vec<u8>) {
 fn encode_cleanup_proof(value: &VmCleanupProof, output: &mut Vec<u8>) {
     output.extend_from_slice(&(value.moved_places.len() as u64).to_le_bytes());
     for place in &value.moved_places {
+        output.extend_from_slice(&place.path.to_le_bytes());
+        output.extend_from_slice(&place.binding.to_le_bytes());
         output.extend_from_slice(&(place.root.len() as u64).to_le_bytes());
         output.extend_from_slice(place.root.as_bytes());
         output.extend_from_slice(&(place.fields.len() as u64).to_le_bytes());
@@ -13842,6 +13894,7 @@ fn encode_cleanup_proof(value: &VmCleanupProof, output: &mut Vec<u8>) {
                 output.extend_from_slice(owner.as_bytes());
             }
         }
+        output.extend_from_slice(&loan.binding.to_le_bytes());
         output.extend_from_slice(&(loan.root.len() as u64).to_le_bytes());
         output.extend_from_slice(loan.root.as_bytes());
         output.extend_from_slice(&(loan.fields.len() as u64).to_le_bytes());
