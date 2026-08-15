@@ -96,7 +96,7 @@ pub use pattern::{
 };
 pub use placeflow::{
     FlowDiagnostic, FlowEvent, FlowEventKind, LoanFact, LocalState, MoveFact, MovePathData,
-    MovePathId, PlaceFlow, RefinementFact,
+    MovePathId, PlaceBinding, PlaceBindingId, PlaceFlow, RefinementFact,
 };
 pub use quantity::{Quantity, QuantityError};
 pub use request::{

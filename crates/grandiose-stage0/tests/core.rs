@@ -1813,6 +1813,39 @@ fn handler_payload_shadowing_keeps_the_outer_loan_across_the_dynamic_join() {
 }
 
 #[test]
+fn placeflow_freezes_distinct_move_path_roots_for_shadowed_bindings() {
+    let source = "effect Take { take(value: i64) -> i64; } pub fn main(value: i64) -> i64 { handle Take::take(1) { Take::take(value) => { move value; 0 } }; move value; 0 }";
+    let flow = flow_for("core-place-binding-shadowed-move-path@0.1.0", source);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert_eq!(flow.move_paths.len(), 2, "{flow:#?}");
+    assert!(
+        flow.move_paths
+            .iter()
+            .all(|path| path.parent.is_none() && path.field.is_none() && path.root == "value"),
+        "shadowed roots must retain their presentation spelling: {flow:#?}"
+    );
+    assert_ne!(
+        flow.move_paths[0].binding, flow.move_paths[1].binding,
+        "shadowed storage must retain distinct opaque binding identities: {flow:#?}"
+    );
+    assert_eq!(flow.bindings.len(), 2, "{flow:#?}");
+    assert!(
+        flow.move_paths.iter().all(|path| {
+            flow.bindings
+                .get(path.binding.0 as usize)
+                .is_some_and(|binding| binding.id == path.binding && binding.spelling == path.root)
+        }),
+        "move paths must point into the frozen binding table: {flow:#?}"
+    );
+    assert!(
+        flow.bindings
+            .iter()
+            .all(|binding| binding.spelling == "value"),
+        "binding spellings are presentation metadata, not identity: {flow:#?}"
+    );
+}
+
+#[test]
 fn forged_completion_refinement_shadowing_is_rejected_before_placeflow_or_mir() {
     let mut core = core_for(
         "core-forged-completion-refinement-place-shadow@0.1.0",
@@ -2304,6 +2337,15 @@ fn placeflow_tracks_nested_partial_moves_and_respects_projection_loans() {
         Some(grandiose_stage0::MovePathId(1))
     );
     assert_eq!(flow.move_paths[2].field, Some(0));
+    assert!(
+        flow.move_paths
+            .iter()
+            .all(|path| path.binding == flow.move_paths[0].binding),
+        "every prefix of one owned place must retain its opaque binding root: {flow:#?}"
+    );
+    assert_eq!(flow.bindings.len(), 1, "{flow:#?}");
+    assert_eq!(flow.bindings[0].id, flow.move_paths[0].binding);
+    assert_eq!(flow.bindings[0].spelling, "outer");
 
     let disjoint_loan = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; let loan = &pair.right; move pair.left; loan; 0 }";
     let flow = flow_for("core-partial-move-disjoint-loan@0.1.0", disjoint_loan);

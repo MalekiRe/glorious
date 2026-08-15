@@ -111,6 +111,24 @@ pub struct MoveFact {
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MovePathId(pub u32);
 
+/// Opaque identity for one lexical storage binding in a Typed Core body.
+///
+/// A source spelling is intentionally not an identity: a nested `let value`
+/// must never share a move-path root with an outer `value`.  The id is dense
+/// and append-only during one PlaceFlow analysis.  It is published alongside
+/// the original spelling so diagnostics and the legacy compact facts can stay
+/// readable while later MIR import stops reconstructing ownership from names.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct PlaceBindingId(pub u32);
+
+/// Presentation metadata for a [`PlaceBindingId`].  `spelling` is never a
+/// lookup key for ownership; it exists solely for diagnostics and tools.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct PlaceBinding {
+    pub id: PlaceBindingId,
+    pub spelling: String,
+}
+
 /// One node in the canonical move-path tree published by PlaceFlow.
 ///
 /// The root node of a source storage place has no `parent` or `field`; every
@@ -121,6 +139,10 @@ pub struct MovePathId(pub u32);
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MovePathData {
     pub parent: Option<MovePathId>,
+    /// The opaque lexical storage root.  This, rather than `root`, is the
+    /// ownership identity consumed by later lowering.
+    pub binding: PlaceBindingId,
+    /// Human-readable source spelling of `binding`.
     pub root: String,
     pub field: Option<u32>,
 }
@@ -136,17 +158,21 @@ struct MovePathArena {
 }
 
 impl MovePathArena {
-    fn intern(&mut self, path: &Projection) -> MovePathId {
+    fn intern(&mut self, path: &Projection, binding: PlaceBindingId, root: &str) -> MovePathId {
         if let Some(id) = self.ids.get(path) {
             return *id;
         }
 
         let (parent, field) = match path.fields.split_last() {
             Some((field, prefix)) => {
-                let parent = self.intern(&Projection {
-                    root: path.root.clone(),
-                    fields: prefix.to_vec(),
-                });
+                let parent = self.intern(
+                    &Projection {
+                        root: path.root.clone(),
+                        fields: prefix.to_vec(),
+                    },
+                    binding,
+                    root,
+                );
                 (Some(parent), Some(*field))
             }
             None => (None, None),
@@ -157,7 +183,8 @@ impl MovePathArena {
         );
         self.entries.push(MovePathData {
             parent,
-            root: path.root.clone(),
+            binding,
+            root: root.to_owned(),
             field,
         });
         self.ids.insert(path.clone(), id);
@@ -165,6 +192,49 @@ impl MovePathArena {
     }
 
     fn into_entries(self) -> Vec<MovePathData> {
+        self.entries
+    }
+}
+
+/// The analyzer's private name-resolution key is deliberately separate from
+/// the frozen identity published to consumers.  Existing transfer/loan maps
+/// still use the key while they are incrementally migrated; no frozen fact
+/// may expose it.
+#[derive(Clone, Debug, Default)]
+struct PlaceBindingArena {
+    ids: BTreeMap<String, PlaceBindingId>,
+    entries: Vec<PlaceBinding>,
+}
+
+impl PlaceBindingArena {
+    fn intern(&mut self, identity: &str, spelling: &str) -> PlaceBindingId {
+        if let Some(id) = self.ids.get(identity) {
+            return *id;
+        }
+        let id = PlaceBindingId(
+            u32::try_from(self.entries.len())
+                .expect("PlaceFlow binding arena exceeded the representable identity space"),
+        );
+        self.ids.insert(identity.to_owned(), id);
+        self.entries.push(PlaceBinding {
+            id,
+            spelling: spelling.to_owned(),
+        });
+        id
+    }
+
+    fn id(&self, identity: &str) -> PlaceBindingId {
+        *self
+            .ids
+            .get(identity)
+            .expect("every PlaceFlow projection root has a binding identity")
+    }
+
+    fn spelling(&self, id: PlaceBindingId) -> &str {
+        &self.entries[id.0 as usize].spelling
+    }
+
+    fn into_entries(self) -> Vec<PlaceBinding> {
         self.entries
     }
 }
@@ -220,6 +290,8 @@ pub struct FlowDiagnostic {
 }
 #[derive(Clone, Debug, Default)]
 pub struct PlaceFlow {
+    /// Frozen lexical storage identities referenced by `move_paths`.
+    pub bindings: Vec<PlaceBinding>,
     pub final_states: BTreeMap<String, LocalState>,
     /// Projection-granular uninitialized paths. `final_states` remains the
     /// compact whole-local summary for existing consumers; this retains the
@@ -245,6 +317,7 @@ impl PlaceFlow {
             reference_origins: BTreeMap::new(),
             moved_places: BTreeSet::new(),
             move_paths: MovePathArena::default(),
+            bindings: PlaceBindingArena::default(),
             scopes: vec![BTreeMap::new()],
             scope_refinement_starts: vec![0],
             next_shadow: 0,
@@ -253,6 +326,7 @@ impl PlaceFlow {
             diagnostics: vec![],
         };
         for (name, _) in &body.parameters {
+            a.bindings.intern(name, name);
             a.states.insert(name.clone(), LocalState::Initialized);
             a.scopes[0].insert(name.clone(), name.clone());
         }
@@ -283,6 +357,7 @@ impl PlaceFlow {
             })
             .collect();
         Self {
+            bindings: a.bindings.into_entries(),
             final_states: a.states,
             moved_places,
             move_paths: a.move_paths.into_entries(),
@@ -311,6 +386,7 @@ struct Analyzer<'a> {
     /// deliberately are not, because their siblings remain usable.
     moved_places: BTreeSet<Projection>,
     move_paths: MovePathArena,
+    bindings: PlaceBindingArena,
     /// Source spellings remain useful in frozen Core diagnostics, while
     /// ownership facts need lexical identities so an inner `let value` does
     /// not alias an outer loan of the same spelling.
@@ -390,6 +466,7 @@ impl Analyzer<'_> {
     }
 
     fn activate_binding(&mut self, spelling: &str, identity: String) {
+        self.bindings.intern(&identity, spelling);
         self.scopes
             .last_mut()
             .expect("PlaceFlow always has a root lexical scope")
@@ -1262,7 +1339,9 @@ impl Analyzer<'_> {
     }
 
     fn record_move(&mut self, place: Projection) {
-        self.move_paths.intern(&place);
+        let binding = self.bindings.id(&place.root);
+        let spelling = self.bindings.spelling(binding).to_owned();
+        self.move_paths.intern(&place, binding, &spelling);
         // A whole/parent move subsumes any child facts. Conversely, a child
         // fact under an already moved parent cannot add information.
         if self
