@@ -18946,6 +18946,33 @@ fn service_rejoins_dynamic_lazy_terminal_only_handler() {
 }
 
 #[test]
+fn service_uses_an_opaque_handler_result_as_a_lazy_boolean_condition() {
+    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(callback: () -> Bool / Ask, right: Bool) -> Bool { handle apply(callback) { Ask::ask() with k => k(right) } and right } pub fn main() -> Bool { select(relay, true) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+}
+
+#[test]
+fn service_uses_a_resumed_handler_result_to_select_a_lazy_or_branch() {
+    let source = "effect Ask { [1,1] ask() -> Bool; } pub fn relay() -> Bool / Ask { Ask::ask() } pub fn apply(callback: () -> Bool / Ask) -> Bool / Ask { callback() } pub fn select(callback: () -> Bool / Ask, right: Bool) -> Bool { handle apply(callback) { Ask::ask() with k => k(false) } or right } pub fn main() -> Bool { select(relay, true) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+}
+
+#[test]
+fn service_uses_a_terminal_handler_result_to_skip_a_lazy_right_branch() {
+    let source = "effect Halt { halt() -> !; } pub fn relay() -> Bool / Halt { Halt::halt() } pub fn apply(callback: () -> Bool / Halt) -> Bool / Halt { callback() } pub fn select(callback: () -> Bool / Halt, right: Bool) -> Bool { handle apply(callback) { Halt::halt() => false } and right } pub fn main() -> Bool { select(relay, true) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert!(!decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_bool().unwrap());
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through

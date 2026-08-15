@@ -3889,6 +3889,22 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        if let Some(function) = lowerer
+            .lower_root_lazy_condition_one_shot_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_outward_effect_call(body.root, parameters.clone())
         {
@@ -14647,6 +14663,348 @@ impl Lowerer<'_> {
             blocks,
         })
     }
+
+    /// Lower the complementary lazy form: the handled computation supplies
+    /// the boolean condition and its ordinary result decides whether the
+    /// right operand is evaluated.  Keeping the decision in its own block is
+    /// important: both a normal call return and a terminal handler arm must
+    /// re-enter precisely the same lazy continuation.
+    fn lower_root_lazy_condition_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (operator, handler, right, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::IntrinsicCall { operator, arguments } => {
+                let [handler, right] = arguments.as_slice() else {
+                    return None;
+                };
+                (operator, *handler, *right, Vec::new())
+            }
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                let CoreKind::IntrinsicCall { operator, arguments } =
+                    self.body.expression(*last).kind.clone()
+                else {
+                    return None;
+                };
+                let [handler, right] = arguments.as_slice() else {
+                    return None;
+                };
+                (operator, *handler, *right, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let bool_ty = Type::Scalar(crate::types::ScalarType::Bool);
+        if !matches!(operator.as_str(), "and" | "or")
+            || self.body.expression(root).ty != bool_ty
+            || self.body.expression(handler).ty != bool_ty
+            || self.body.expression(right).ty != bool_ty
+        {
+            return None;
+        }
+        let CoreKind::Handle {
+            computation,
+            clauses,
+        } = self.body.expression(handler).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.effects.is_empty() || effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let terminal = clauses
+            .iter()
+            .filter(|clause| clause.terminal && effects.effects.contains(&clause.effect))
+            .cloned()
+            .collect::<Vec<_>>();
+        if terminal.len() > 1
+            || terminal.iter().any(|clause| {
+                clause.patterns.len() != clause.payload_types.len()
+                    || !clause.patterns.iter().all(pattern_is_irrefutable)
+                    || !matches!(clause.resumption, CoreHandlerResumption::Terminal)
+            })
+        {
+            return None;
+        }
+        let terminal = terminal.into_iter().next();
+        let active = clauses
+            .iter()
+            .filter(|clause| !clause.terminal && effects.effects.contains(&clause.effect))
+            .cloned()
+            .collect::<Vec<_>>();
+        let clause = match active.as_slice() {
+            [clause] => Some(clause),
+            [] if terminal.is_some() => None,
+            _ => return None,
+        };
+        if clause.is_some_and(|clause| {
+            clause.patterns.len() != clause.payload_types.len()
+                || !clause.patterns.iter().all(pattern_is_irrefutable)
+                || !matches!(
+                    clause.resumption,
+                    CoreHandlerResumption::Tail {
+                        quantity: crate::quantity::Quantity::ONCE
+                    } | CoreHandlerResumption::Explicit {
+                        quantity: crate::quantity::Quantity::ONCE,
+                        ..
+                    }
+                )
+                || clause.continuation.is_none()
+                || self.handler_body_uses_snapshot_alias(clause.body)
+        }) {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+
+        // The protected call is block zero. Its result and every terminal-arm
+        // result flow through block one, which makes the right side lazy for
+        // every route through the handler.
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let call_result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let payloads = clause
+            .map(|clause| {
+                clause
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), computation))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let terminal_payloads = terminal.as_ref().map(|clause| {
+            clause
+                .payload_types
+                .iter()
+                .map(|ty| self.alloc(ty.clone(), computation))
+                .collect::<Vec<_>>()
+        });
+        if let Some(terminal_clause) = &terminal {
+            self.instructions.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: terminal_clause.effect.definition,
+                effect_arguments: terminal_clause.effect.arguments.clone(),
+                operation: terminal_clause.operation,
+                payload_destinations: terminal_payloads
+                    .as_ref()
+                    .expect("terminal payloads were allocated")
+                    .clone(),
+                resume_type: Type::Never,
+                continuation: MirContinuationPolicy::Terminal,
+                target: MirBlockId(4),
+            });
+        }
+        if let Some(clause) = clause {
+            self.instructions.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads.clone(),
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target: MirBlockId(if terminal.is_some() { 5 } else { 4 }),
+            });
+        }
+        match callee_kind {
+            CoreKind::Function {
+                definition,
+                arguments: generic_arguments,
+                ..
+            } => self.instructions.push(MirInstruction::Call {
+                dst: call_result,
+                callee: definition,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method,
+                trait_arguments,
+                method_arguments,
+            } => self.instructions.push(MirInstruction::Call {
+                dst: call_result,
+                callee: method,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => self.instructions.push(MirInstruction::CallIndirect {
+                dst: call_result,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        if clause.is_some() {
+            self.instructions.push(MirInstruction::UninstallHandler);
+        }
+        if terminal.is_some() {
+            self.instructions.push(MirInstruction::UninstallHandler);
+        }
+        let call_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        let right_result = self.value(right)?;
+        let right_instructions = std::mem::take(&mut self.instructions);
+
+        let terminal_block = if let Some(terminal_clause) = &terminal {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(
+                &terminal_clause.patterns,
+                terminal_payloads
+                    .as_ref()
+                    .expect("terminal payloads were allocated"),
+            )?;
+            let result = self.value(terminal_clause.body)?;
+            self.instructions.push(MirInstruction::Cancel {
+                site: MirResumptionSiteId::UNASSIGNED,
+            });
+            Some((std::mem::take(&mut self.instructions), result))
+        } else {
+            None
+        };
+        let active_block = if let Some(clause) = clause {
+            self.instructions = Vec::new();
+            self.named = boundary_named;
+            self.values = boundary_values;
+            self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            let consume_returning = matches!(
+                clause.resumption,
+                CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                }
+            );
+            let resumed = if consume_returning {
+                self.direct_handler_clause_value_for_consuming_return(clause)?
+            } else {
+                self.direct_handler_clause_value(clause)?
+            };
+            if consume_returning {
+                self.instructions.push(MirInstruction::UninstallHandler);
+            } else {
+                self.instructions.push(MirInstruction::Resume {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                    value: resumed,
+                });
+            }
+            Some((
+                std::mem::take(&mut self.instructions),
+                if consume_returning {
+                    MirTerminator::Return { value: resumed }
+                } else {
+                    MirTerminator::Unreachable
+                },
+            ))
+        } else {
+            None
+        };
+        let condition = self.alloc(bool_ty.clone(), root);
+        let joined = self.alloc(bool_ty, root);
+        let (then_target, then_arguments, else_target, else_arguments) = if operator == "and" {
+            (MirBlockId(2), vec![], MirBlockId(3), vec![condition])
+        } else {
+            (MirBlockId(3), vec![condition], MirBlockId(2), vec![])
+        };
+        let mut blocks = vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: call_instructions,
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![call_result],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![condition],
+                instructions: vec![],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target,
+                    then_arguments,
+                    else_target,
+                    else_arguments,
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: right_instructions,
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(3),
+                    arguments: vec![right_result],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![joined],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: joined },
+            },
+        ];
+        if let Some((instructions, result)) = terminal_block {
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions,
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![result],
+                },
+            });
+        }
+        if let Some((instructions, terminator)) = active_block {
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions,
+                terminator,
+            });
+        }
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.declared_result_type(root),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+
     /// Lower a straight-line sequence of one-shot performances under one
     /// lexical handler.  Each operation gets an explicit dispatch subgraph;
     /// every arm enters the following residual block through that operation's
