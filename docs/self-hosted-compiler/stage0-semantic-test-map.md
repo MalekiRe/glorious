@@ -95,6 +95,10 @@ coarse. The composite fixtures cover:
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate
   modules, carried through record construction, projection, and VM execution.
+- public fixity declarations cross glob imports and public re-export facades
+  with their operator traits. The importing body's grouping table therefore
+  observes the resolved operator identity rather than only declarations in its
+  own source file (`service_imports_public_fixities_with_their_operator_traits_across_modules`).
 - dependency manifest names retain their exact package identity while crossing
   the source boundary through the required hyphen-to-underscore module alias;
   malformed and colliding aliases fail while the immutable request world is

@@ -1080,6 +1080,15 @@ impl StageZeroCompiler {
                 .flat_map(|graph| graph.modules.values())
                 .map(|node| &node.interface.interface),
         );
+        let declared_fixities = graphs
+            .values()
+            .flat_map(|graph| graph.modules.values())
+            .flat_map(|node| node.interface.interface.definitions.iter())
+            .filter_map(|definition| match &definition.syntax.header {
+                ParsedHeader::Fixity(fixity) => Some((definition.key, fixity.clone())),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
         // Local collection cannot know the transitive public surface of a
         // module alias or glob until every interface in the module graph has
         // been frozen. Seal that surface before publishing dependency facts:
@@ -1222,7 +1231,7 @@ impl StageZeroCompiler {
             let text =
                 std::str::from_utf8(&source.bytes).expect("normalized world only contains UTF-8");
             let lexed = crate::LexedFile::lex(source.key, text);
-            let fixities = FixityTable::for_module(&node.interface.interface);
+            let fixities = visible_fixities_for_module(&node.key, &index, &declared_fixities);
             for declaration in node
                 .interface
                 .interface
@@ -1495,7 +1504,7 @@ impl StageZeroCompiler {
             let text =
                 std::str::from_utf8(&source.bytes).expect("normalized world only contains UTF-8");
             let lexed = crate::LexedFile::lex(source.key, text);
-            let fixities = FixityTable::for_module(&node.interface.interface);
+            let fixities = visible_fixities_for_module(&node.key, &index, &declared_fixities);
             dependencies.record(
                 DependencyNode::Fixity(node.key.clone()),
                 fixities.fingerprint(),
@@ -3841,6 +3850,30 @@ fn reachable_functions(
                 .map(|body| (definition, body))
         })
         .collect()
+}
+
+/// Build the body-grouping table from every operator declaration visible in
+/// this lexical module. Interface collection owns declarations, while the
+/// resolution index owns imports, aliases, globs, privacy, and re-exports;
+/// joining them here prevents a body parser from treating an imported operator
+/// as if it had no declared associativity.
+fn visible_fixities_for_module(
+    module: &crate::ModuleKey,
+    index: &DefinitionIndex,
+    declarations: &BTreeMap<DefKey, crate::FixityHeader>,
+) -> FixityTable {
+    let mut table = FixityTable::with_prelude();
+    for (definition, header) in declarations {
+        let path = vec![header.operator.clone()];
+        if matches!(
+            index.resolve_path(crate::DefinitionNamespace::Operator, module, &path),
+            crate::ResolutionState::Resolved(candidate) if candidate == *definition
+        ) {
+            table.insert_declared(*definition, header);
+        }
+    }
+    table.freeze();
+    table
 }
 
 /// MIR contains no source spans; its deterministic structural debug form is

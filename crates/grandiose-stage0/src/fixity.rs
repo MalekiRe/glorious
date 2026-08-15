@@ -81,22 +81,36 @@ impl FixityTable {
             let ParsedHeader::Fixity(header) = &definition.syntax.header else {
                 continue;
             };
-            let position = if header.form.is_prefix() {
-                FixityPosition::Prefix
-            } else {
-                FixityPosition::Infix
-            };
-            table.entries.insert(
-                (position, header.operator.clone()),
-                Fixity {
-                    declaration: Some(definition.key),
-                    form: header.form,
-                    precedence: header.precedence,
-                },
-            );
+            table.insert_declared(definition.key, header);
         }
-        table.refresh_fingerprint();
+        table.freeze();
         table
+    }
+
+    /// Extend a module table with a declaration already proven visible by the
+    /// module resolver. Imports and globs are resolved before this point, so
+    /// the caller supplies the source spelling that is in scope.
+    pub(crate) fn insert_declared(&mut self, declaration: DefKey, header: &crate::FixityHeader) {
+        let position = if header.form.is_prefix() {
+            FixityPosition::Prefix
+        } else {
+            FixityPosition::Infix
+        };
+        self.entries.insert(
+            (position, header.operator.clone()),
+            Fixity {
+                declaration: Some(declaration),
+                form: header.form,
+                precedence: header.precedence,
+            },
+        );
+    }
+
+    /// Seal a table after every locally declared and resolver-visible import
+    /// has been inserted. This keeps the fingerprint sensitive to imported
+    /// fixities, not merely the owning source file.
+    pub(crate) fn freeze(&mut self) {
+        self.refresh_fingerprint();
     }
 
     pub fn infix(&self, operator: &str) -> Option<&Fixity> {

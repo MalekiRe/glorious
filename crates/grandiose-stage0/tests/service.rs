@@ -11532,6 +11532,36 @@ fn service_selects_operator_traits_imported_into_lexical_scope() {
 }
 
 #[test]
+fn service_imports_public_fixities_with_their_operator_traits_across_modules() {
+    let root = r#"
+        pub mod math;
+        pub mod facade;
+        use facade::*;
+        pub fn main() -> i64 { 10 ** 3 ** 2 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_modules(
+            root,
+            &[
+                (
+                    "math",
+                    r#"
+                        pub infixr 30 **;
+                        pub trait Combine { **(left: i64, right: i64) -> i64; }
+                        impl Combine for i64 {
+                            **(left: i64, right: i64) -> i64 { left - right }
+                        }
+                    "#,
+                ),
+                ("facade", "pub use crate::math::*;"),
+            ],
+        ))
+        .expect("a public reexported fixity must group an imported operator trait");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 9);
+}
+
+#[test]
 fn service_does_not_dispatch_to_operator_traits_outside_lexical_scope() {
     let root = r#"
         mod math;
