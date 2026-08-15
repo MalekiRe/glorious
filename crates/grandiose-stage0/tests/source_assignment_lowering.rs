@@ -31,7 +31,11 @@ fn lower_function(source: &str, function: &str) -> (TypedBody, PlaceFlow, MirLow
         .iter()
         .find(|definition| definition.name.as_deref() == Some(function))
         .expect("requested function definition");
-    let body = BodySyntax::parse(&lexed, source, definition.body.expect("requested function body"));
+    let body = BodySyntax::parse(
+        &lexed,
+        source,
+        definition.body.expect("requested function body"),
+    );
     let core = TypedBody::elaborate(
         definition,
         &body,
