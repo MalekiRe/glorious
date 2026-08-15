@@ -9591,6 +9591,11 @@ struct RuntimeResumptionReturn {
     dst: u32,
     registers: Vec<Option<VmValue>>,
     handlers: Vec<RuntimeHandlerFrame>,
+    /// A replayed continuation can cross ordinary calls. Restoring only its
+    /// registers and handler frames would resume the saved program counter
+    /// in whichever callee happened to return last; retain the full program
+    /// location alongside the clause environment.
+    program: Option<RuntimeProgramContinuation>,
     /// The protected replay may return with an outer frame still active after
     /// an inner operation has cancelled. Only frames restored for this exact
     /// continuation are permitted to cross the clause-return edge.
@@ -12679,6 +12684,7 @@ fn execute(
                     dst,
                     registers: registers.clone(),
                     handlers: return_handlers,
+                    program: None,
                     resumed_handler_ids,
                 });
                 // The active execution gets a clean handler frame so its
@@ -15773,6 +15779,10 @@ fn execute_with_arguments(
                     dst: *dst,
                     registers: registers.clone(),
                     handlers: return_handlers,
+                    program: Some(RuntimeProgramContinuation {
+                        definition,
+                        callers: callers.clone(),
+                    }),
                     resumed_handler_ids,
                 });
                 if replaying {
@@ -16833,6 +16843,10 @@ fn execute_with_arguments(
                     let return_to_clause = resumption_returns
                         .pop()
                         .expect("checked clause-return frame exists");
+                    if let Some(program) = return_to_clause.program {
+                        definition = program.definition;
+                        callers = program.callers;
+                    }
                     registers = return_to_clause.registers;
                     registers[return_to_clause.dst as usize] = Some(value);
                     handlers = return_to_clause.handlers;

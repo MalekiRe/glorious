@@ -121,6 +121,12 @@ coarse. The composite fixtures cover:
   identity from provider performance through root replay and VM execution;
   the facade cannot expose the corresponding private effect declaration
   (`service_preserves_generic_effect_identity_through_dependency_reexport_facades`).
+- an exact replay may perform an outer effect from inside its inner handler
+  clause, then return across ordinary call frames to continue the next replay
+  use. The VM restores the clause's program location as well as registers and
+  handler frames; the local and dependency-private-helper cases execute this
+  control shape (`service_executes_local_generic_nested_handler_replay_with_an_outer_effect`,
+  `service_links_private_generic_nested_handler_replay_bodies_from_dependencies`).
 - imported reference lifetime relations through a local closure and handler,
   including rejection of a closure escape after the imported call.
 - whole-referent `move *reference` retains its direct unique-reference handle

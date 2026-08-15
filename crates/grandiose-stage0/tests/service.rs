@@ -10335,6 +10335,30 @@ fn service_preserves_generic_dependency_effect_identity_through_replay() {
 }
 
 #[test]
+fn service_links_private_generic_nested_handler_replay_bodies_from_dependencies() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::Tick; use math::relay; pub fn main() -> i64 { handle relay(41) { Tick::tick() with k => k(0) } }",
+            "math@0.1.0",
+            "pub effect Ask<T> { [2,2] ask(value: T) -> T; } pub effect Tick { [1,1] tick() -> i64; } fn leaf<T>(value: T) -> T / Ask<T> { Ask<T>::ask(value) } pub fn relay(value: i64) -> i64 / Tick { handle leaf<i64>(value) { Ask<i64>::ask(found) with k => { Tick::tick(); k(found) + k(found + 1) } } }",
+        ))
+        .expect("a linked dependency must retain private generic leaf and nested replay handler bodies");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 83);
+}
+
+#[test]
+fn service_executes_local_generic_nested_handler_replay_with_an_outer_effect() {
+    let outcome = StageZeroCompiler::new()
+        .compile(request(
+            "effect Ask<T> { [2,2] ask(value: T) -> T; } effect Tick { [1,1] tick() -> i64; } fn leaf<T>(value: T) -> T / Ask<T> { Ask<T>::ask(value) } pub fn relay(value: i64) -> i64 / Tick { handle leaf<i64>(value) { Ask<i64>::ask(found) with k => { Tick::tick(); k(found) + k(found + 1) } } } pub fn main() -> i64 { handle relay(41) { Tick::tick() with k => k(0) } }",
+        ))
+        .expect("the local control shape must compile before dependency linking is considered");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 83);
+}
+
+#[test]
 fn service_preserves_generic_effect_identity_through_dependency_reexport_facades() {
     let public = {
         let mut request = request(
