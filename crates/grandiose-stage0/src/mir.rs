@@ -21093,6 +21093,15 @@ impl Lowerer<'_> {
             .into_iter()
             .map(|argument| self.value(argument))
             .collect::<Option<Vec<_>>>()?;
+        // The protected callable can be a first-class alias of the same
+        // fully-normalized closed row. Materialize it before the frame stack
+        // is installed, exactly as ordinary call lowering does; the dynamic
+        // frames then remain unchanged across `Call` and `CallIndirect`.
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
         // Keep the protected computation result distinct from the enclosing
         // completion result. A completion can be evaluated only after the
         // handler frames have been removed, both on the ordinary call edge
@@ -21223,7 +21232,7 @@ impl Lowerer<'_> {
             self.statement(expression)?;
         }
         entry.extend(std::mem::take(&mut self.instructions));
-        match self.body.expression(callee).kind.clone() {
+        match callee_kind {
             CoreKind::Function {
                 definition,
                 arguments: generic_arguments,
@@ -21235,7 +21244,11 @@ impl Lowerer<'_> {
                 trait_instance: None,
                 arguments,
             }),
-            _ => return None,
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: result,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
         }
         for _ in 0..4 {
             entry.push(MirInstruction::UninstallHandler);

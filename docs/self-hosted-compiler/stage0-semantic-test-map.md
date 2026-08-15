@@ -547,6 +547,11 @@ coarse. The composite fixtures cover:
   (`projected_trait_effect_handler_statements_rejoin_their_lexical_suffix_in_mir`,
   `service_rejoins_a_projected_trait_effect_handler_statement_before_its_suffix`,
   `service_rejoins_an_opaque_projected_trait_effect_handler_statement_before_its_suffix`).
+- a projected two-operation row retains its exact replay-frame identity across
+  a direct public call and an opaque callable alias: a refutable inner row
+  forwards to the outer replay frame, each residual cancels the sibling
+  operation, and normal completion executes after that unwind
+  (`service_replays_a_projected_multi_operation_row_through_refutable_forwarding_cancellation_and_completion`).
 
 ## Previously enabled red semantic cases
 

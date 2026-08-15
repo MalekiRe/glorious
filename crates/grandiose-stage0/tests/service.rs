@@ -12044,6 +12044,67 @@ fn service_forwards_a_nested_partial_replay_matrix_to_an_outer_replay_handler() 
 }
 
 #[test]
+fn service_replays_a_projected_multi_operation_row_through_refutable_forwarding_cancellation_and_completion() {
+    // The associated row selects the two-operation `Console` protocol before
+    // crossing a public facade. The inner Read arm refutes
+    // its payload and must Forward to the outer exact-two replayer. Every
+    // replay reaches Write's affine cancellation, then the outer normal
+    // completion runs per residual. Run both a direct and opaque facade
+    // boundary so the VM has to preserve the same projected frame identity
+    // across Call and CallIndirect.
+    for (indirect, root) in [
+        (
+            false,
+            "use bridge::{Console, invoke}; pub fn main() -> i64 { handle { handle { handle invoke(false) { Console::read(true) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(true) with k => k(3) + k(4) } } { value => value + 1; Console::read(_) with k => k(20) + k(21) } }",
+        ),
+        (
+            true,
+            "use bridge::{Console, invoke}; pub fn main() -> i64 { let action = invoke; handle { handle { handle action(false) { Console::read(true) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(true) with k => k(3) + k(4) } } { value => value + 1; Console::read(_) with k => k(20) + k(21) } }",
+        ),
+    ] {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("bridge@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Capability, Console, relay}; pub fn invoke(value: Bool) -> i64 / { <i64 as Capability>::Effects } { relay(value) }".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub effect Console { [2,2] read(value: Bool) -> i64; [0,1] write(value: i64) -> i64; } pub trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Console}; } pub fn relay(value: Bool) -> i64 / { <i64 as Capability>::Effects } { let read = Console::read(value); Console::write(read) }".as_slice(),
+        ));
+        let outcome = StageZeroCompiler::new().compile(input).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        let program = decode_program(&artifact.canonical_bytes()).unwrap();
+        let entry = program.functions.get(&program.entry).unwrap();
+        assert_eq!(
+            entry.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. })),
+            indirect,
+            "directness at the projected outer boundary: {entry:#?}"
+        );
+        assert!(program.functions.values().any(|function| function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Forward))),
+            "the refutable Read arm must retain Forward: {program:#?}");
+        assert!(program.functions.values().any(|function| function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Cancel))),
+            "the affine Write arm must retain Cancel: {program:#?}");
+        assert!(entry.instructions.iter().filter(|instruction| matches!(
+            instruction,
+            VmInstruction::InstallHandler { continuation: VmContinuationPolicy::Replay { uses: 2 }, .. }
+        )).count() >= 2,
+            "the partial and selected outer Read frames must retain exact replay budgets: {entry:#?}");
+        assert!(entry.instructions.iter().any(|instruction| matches!(instruction, VmInstruction::PatternTest { .. })),
+            "the refutable Read arm must retain its payload test: {entry:#?}");
+        assert_eq!(artifact.run_i64().unwrap(), 82);
+    }
+}
+
+#[test]
 fn service_replays_an_indirect_cross_call_continuation_with_resume_return() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn leaf() -> i64 / Ask { Ask::ask() } pub fn helper() -> i64 / Ask { leaf() } pub fn main() -> i64 { let operation = helper; handle { let value = operation(); let mutable = value; mutable = mutable + 1; mutable } { Ask::ask(k) => k(20) + k(21) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
