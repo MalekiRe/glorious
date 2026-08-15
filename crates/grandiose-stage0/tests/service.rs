@@ -1863,6 +1863,156 @@ fn service_rejects_label_dependent_closure_exports_through_public_facades() {
 }
 
 #[test]
+fn service_preserves_distinct_generic_label_brands_through_public_facades_and_closures() {
+    // Each helper mints a same-typed but independently branded label. The
+    // generic public facade must preserve the supplied brand, and the
+    // immediately invoked closures remain label-independent shared work.
+    let root = r#"
+        use facade::escape;
+        pub fn inner_case() -> i64 {
+            @inner: i64 {
+                let adjust = (value: i64) -> i64 { value + 1 };
+                escape(@inner, adjust(41))
+            }
+        }
+        pub fn outer_case() -> i64 {
+            @outer: i64 {
+                let adjust = (value: i64) -> i64 { value + 1 };
+                escape(@outer, adjust(41))
+            }
+        }
+        pub fn main() -> i64 { inner_case() + outer_case() }
+    "#;
+    let mut input = request(root);
+    input.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::escape;".as_slice(),
+    ));
+    input.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn escape<L>(destination: L, value: i64) -> ! where L: Label<i64> { destination(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(input)
+        .expect("generic facade calls must retain distinct dynamic label brands");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 84);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 84);
+
+    // Revisions must not let an invalid cross-brand or escaped-label
+    // declaration pollute the interface cache or the dependency trace that
+    // belongs to the already verified facade world.
+    let provider = "pub fn escape<L>(destination: L, value: i64) -> ! where L: Label<i64> { destination(value) }";
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::escape;".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    assert_eq!(parent_artifact.run_i64().unwrap(), 84);
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let parent_trace = compiler
+        .dependency_trace(parent, &facade)
+        .expect("the legal facade revision has one frozen interface trace");
+    let crossed = format!(
+        "{provider} pub effect Route<L> where L: Label<i64> {{ exit(value: i64) -> !; }} pub fn cross<L, M>(left: L, right: M) -> i64 where L: Label<i64>, M: Label<i64> {{ handle Route<L>::exit(41) {{ Route<M>::exit(value) => value }} }}"
+    );
+    let escaped = format!(
+        "{provider} pub fn leaked() -> i64 {{ @done: i64 {{ let delayed = (value: i64) -> i64 {{ @done(value) }}; 0 }} }}"
+    );
+    for (name, invalid, expected) in [
+        ("cross-brand", crossed.as_str(), "G4155"),
+        ("escaped-label", escaped.as_str(), "G4179"),
+    ] {
+        let child = compiler.import_revision(world(invalid), Some(parent)).unwrap();
+        let error = compiler
+            .compile_session(&compiler.open_session(child).unwrap())
+            .expect_err("invalid label revision must not publish");
+        assert!(
+            error.diagnostics().iter().any(|diagnostic| diagnostic.code == expected),
+            "{name} revision did not report {expected}: {:#?}",
+            error.diagnostics()
+        );
+        assert_eq!(compiler.interface_cache_stats(), cached, "{name} revision published cache state");
+        assert!(compiler.dependency_traces(child).is_empty(), "{name} revision published trace state");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(parent_trace.clone()));
+        let mut reordered = world(invalid);
+        reordered.sources.reverse();
+        assert_eq!(
+            error.diagnostics(),
+            StageZeroCompiler::new()
+                .compile(reordered)
+                .expect_err("source ordering cannot admit an invalid label revision")
+                .diagnostics(),
+            "{name} diagnostics must stay canonical"
+        );
+    }
+}
+
+#[test]
+fn service_generic_facade_label_rejoins_through_nested_lexical_handler_scopes() {
+    // Required by the callable/brand contract: a generic transport preserves
+    // the supplied label brand, even when that label is minted beneath another
+    // lexical scope and leaves through a nested handler. The result must skip
+    // both the handler's normal continuation and the inner lexical suffix.
+    let root = r#"
+        use facade::escape;
+        effect Ask { [1, 1] ask() -> i64; }
+        pub fn main() -> i64 {
+            @outer: i64 {
+                @inner: i64 {
+                    1 + handle Ask::ask() {
+                        Ask::ask() => {
+                            let adjust = (value: i64) -> i64 { value + 1 };
+                            escape(@inner, adjust(41))
+                        }
+                    }
+                }
+            }
+        }
+    "#;
+    let mut input = request(root);
+    input.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::escape;".as_slice(),
+    ));
+    input.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn escape<L>(destination: L, value: i64) -> ! where L: Label<i64> { destination(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(input)
+        .expect("a nested lexical label must rejoin through its generic public facade");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.expect("required semantic program emits VM bytecode");
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_accepts_symbolic_structural_const_layout_contracts() {
     let source = "pub struct Tag<n: u32> {} pub fn identity<n: u32>(value: Tag<n + 1>) -> Tag<1 + n> { value } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new()
