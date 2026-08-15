@@ -150,3 +150,19 @@ fn source_storage_erasure_witness_round_trips_and_malformed_actions_fail_decode(
     malformed[first_action_tag] = 9;
     assert!(decode_artifact(&malformed).is_err());
 }
+
+#[test]
+fn verifier_rejects_storage_dead_before_witness_disarm() {
+    let mut artifact = witnessed_storage_exit();
+    let VmInstruction::Leave { cleanup, .. } = &mut artifact.function.instructions[1] else {
+        panic!("fixture must begin with witnessed cleanup");
+    };
+    let VmStorageErasureWitness::Verified { actions, .. } = &mut cleanup.storage_erasure else {
+        panic!("fixture must carry a verified storage witness");
+    };
+    *actions = vec![VmStorageErasureAction::StorageDead { storage: 0 }];
+    artifact.fingerprint = artifact.computed_fingerprint();
+    let bytes = encode_artifact(&artifact);
+    assert!(decode_artifact(&bytes).is_ok());
+    assert!(decode_and_verify_artifact(&bytes).is_err());
+}
