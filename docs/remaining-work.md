@@ -72,22 +72,21 @@ retained below but scheduled after the core language and tooling tranche.
   `EndBorrow`/`Destroy`/`StorageDead` cleanup actions with protected payloads.
   The enabled red forged-MIR matrix covers uninitialized reads,
   unique-loan invalidation, path-dependent initialization at joins, and cleanup
-  disarming protected `Leave` payloads. The red composite witnesses additionally
+  disarming protected `Leave` payloads. The composite witnesses additionally
   cover nested lexical exits, reverse destruction, loan-before-storage ordering,
-  branch-correlated drop-flag transitions, and VM erasure proof. Completing this
-  slice must additionally reject store-before-live, read-after-dead, replacement
-  without zero-use destruction, direct dead-with-live-loan, wrong drop-flag
-  transitions, and cleanup plans that omit or reorder required actions; VM
-  lowering must either execute the verified action sequence or
-  prove its compact erasure preserves that sequence exactly. The current
-  candidate-artifact `Leave` wire record carries only canonical numeric
-  moved-path/binding identities and active-loan facts. It has no
-  source-storage lifecycle, drop-flag-transition, or ordered-action witness,
-  so `vm_storage_erasure.rs` deliberately proves the decoded verifier still
-  accepts an otherwise canonical compact exit with none of those facts. That
-  test must turn green only when artifact encode/decode/verifier checks a
-  witness derived from validated MIR rather than trusting register cleanup
-  shape alone.
+  branch-correlated drop-flag transitions, and VM erasure proof.
+  `storage_statement_contract.rs` closes the remaining program-point audit:
+  store-before-live, reuse after transfer/death, and replacement without a
+  zero-use `Destroy` must all fail at MIR validation; its all-false branch
+  fixture proves that a `DestroyIf` skip path erases to `StorageDead` without
+  inventing a destroy or touching a protected payload. Completing this slice
+  requires executable statements to turn those contracts green, including
+  direct dead-with-live-loan, wrong drop-flag transitions, and cleanup plans
+  that omit or reorder required actions. VM lowering must either execute the
+  verified action sequence or prove its compact erasure preserves both true and
+  false flag arms exactly; a candidate artifact must be rejected unless its
+  decode-time witness is derived from validated MIR rather than a register
+  cleanup shape alone.
 
 ### 5.4 Bytecode peepholes and validation
 
