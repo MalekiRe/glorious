@@ -187,6 +187,10 @@ pub struct MirControlTables {
     /// source-compatible while still serializing one stable, body-local arena.
     pub operations: MirOperationArena,
     pub move_paths: MirMovePathTables,
+    /// Basic blocks retired by a checked structural edit.  Their numeric IDs
+    /// stay reserved so persistent operation and diagnostic identities cannot
+    /// be accidentally rebound to a different executable block.
+    pub tombstoned_blocks: BTreeSet<MirBlockId>,
 }
 
 /// One lexical frame while the raw CFG is frozen.  These markers are only a
@@ -213,6 +217,7 @@ impl Default for MirControlTables {
             resumptions: vec![],
             operations: MirOperationArena::default(),
             move_paths: MirMovePathTables::default(),
+            tombstoned_blocks: BTreeSet::new(),
         }
     }
 }
@@ -349,6 +354,15 @@ impl MirPlaceArena {
 /// Body-local basic-block identity. It never crosses a MIR body boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MirBlockId(pub u32);
+
+/// A typed selector for one mutable successor slot in a terminator.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MirEdge {
+    Goto,
+    Then,
+    Else,
+    Leave,
+}
 
 /// Stable body-local identity for one executable MIR instruction.  Like block
 /// identities, operation IDs are never recycled: deleting an instruction
@@ -1733,15 +1747,174 @@ impl MirEditor {
         &mut self,
         block: MirBlockId,
         terminator: MirTerminator,
-    ) -> Result<(), String> {
-        self.transaction(MirAnalysisInvalidation::ALL, |function| {
-            let block = function
+    ) -> Result<MirAnalysisInvalidation, String> {
+        let before = self
+            .function
+            .blocks
+            .get(block.0 as usize)
+            .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?
+            .terminator
+            .clone();
+        let invalidation = terminator_replacement_invalidation(&before, &terminator);
+        self.transaction(invalidation, |function| {
+            let block_data = function
                 .blocks
                 .get_mut(block.0 as usize)
                 .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?;
-            block.terminator = terminator;
+            block_data.terminator = terminator;
+            synchronize_terminator_control(function, block)?;
             Ok(())
+        })?;
+        Ok(invalidation)
+    }
+
+    /// Redirect exactly one typed successor edge.  The target's argument
+    /// contract and all frozen control identities are checked as one
+    /// transaction, so an invalid attempt never leaves a partially rewired
+    /// terminator or label table behind.
+    pub fn redirect_edge(
+        &mut self,
+        block: MirBlockId,
+        edge: MirEdge,
+        target: MirBlockId,
+        arguments: Vec<MirLocal>,
+    ) -> Result<MirAnalysisInvalidation, String> {
+        let invalidation = MirAnalysisInvalidation::ALL;
+        self.transaction(invalidation, |function| {
+            let terminator = &mut function
+                .blocks
+                .get_mut(block.0 as usize)
+                .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?
+                .terminator;
+            redirect_terminator_edge(terminator, edge, target, arguments)?;
+            synchronize_terminator_control(function, block)?;
+            Ok(())
+        })?;
+        Ok(invalidation)
+    }
+
+    /// Split a block before instruction `at`, preserving every operation ID.
+    /// The original block becomes a plain fallthrough to a fresh suffix block;
+    /// frozen handler/perform/resumption locations are relocated with their
+    /// instructions atomically.
+    pub fn split_block(&mut self, block: MirBlockId, at: usize) -> Result<MirBlockId, String> {
+        self.transaction(MirAnalysisInvalidation::ALL, |function| {
+            let source = function
+                .blocks
+                .get(block.0 as usize)
+                .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?;
+            if at > source.instructions.len() {
+                return Err(format!(
+                    "MIR split index {at} exceeds block {} instruction count {}",
+                    block.0,
+                    source.instructions.len()
+                ));
+            }
+            let suffix_scope = scope_after_block_prefix(function, block, at)?;
+            let suffix = MirBlockId(
+                u32::try_from(function.blocks.len())
+                    .map_err(|_| "MIR block identity space exhausted".to_owned())?,
+            );
+            let (instructions, terminator) = {
+                let source = function.blocks.get_mut(block.0 as usize).unwrap();
+                let instructions = source.instructions.split_off(at);
+                let terminator = std::mem::replace(
+                    &mut source.terminator,
+                    MirTerminator::Goto {
+                        target: suffix,
+                        arguments: vec![],
+                    },
+                );
+                (instructions, terminator)
+            };
+            function.blocks.push(MirBlock {
+                scope: suffix_scope,
+                parameters: vec![],
+                instructions,
+                terminator,
+            });
+            relocate_operations_after_split(function, block, suffix, at);
+            refresh_control_block_sites(function, suffix)?;
+            Ok(suffix)
         })
+    }
+
+    /// Merge a plain fallthrough successor into its predecessor.  The merged
+    /// block ID becomes a tombstone, keeping all existing block handles from
+    /// being silently repurposed.
+    pub fn merge_blocks(
+        &mut self,
+        predecessor: MirBlockId,
+        successor: MirBlockId,
+    ) -> Result<MirAnalysisInvalidation, String> {
+        let invalidation = MirAnalysisInvalidation::ALL;
+        self.transaction(invalidation, |function| {
+            if predecessor == successor {
+                return Err("MIR cannot merge a block with itself".into());
+            }
+            if function.control.tombstoned_blocks.contains(&predecessor)
+                || function.control.tombstoned_blocks.contains(&successor)
+            {
+                return Err("MIR cannot merge a tombstoned block".into());
+            }
+            let predecessor_block = function
+                .blocks
+                .get(predecessor.0 as usize)
+                .ok_or_else(|| format!("MIR merge predecessor block {} is absent", predecessor.0))?;
+            let (target, arguments) = match &predecessor_block.terminator {
+                MirTerminator::Goto { target, arguments } => (*target, arguments),
+                _ => return Err("MIR merge predecessor does not end in a plain goto".into()),
+            };
+            if target != successor {
+                return Err("MIR merge successor is not the predecessor goto target".into());
+            }
+            let successor_block = function
+                .blocks
+                .get(successor.0 as usize)
+                .ok_or_else(|| format!("MIR merge successor block {} is absent", successor.0))?;
+            if predecessor_block.scope != successor_block.scope {
+                return Err("MIR merge crosses lexical control scopes".into());
+            }
+            if successor == function.entry
+                || predecessor_count(function, successor) != 1
+                || function.control.handlers.iter().any(|site| site.target == successor)
+                || function.control.labels.iter().any(|label| label.destination == successor)
+            {
+                return Err("MIR merge successor is an externally visible entry".into());
+            }
+            if !arguments.is_empty() {
+                return Err("MIR merge predecessor goto carries block arguments".into());
+            }
+            if !successor_block.parameters.is_empty() {
+                return Err("MIR merge successor has block parameters".into());
+            }
+            let instruction_offset = predecessor_block.instructions.len() as u32;
+            let (instructions, terminator) = {
+                let successor_block = function.blocks.get_mut(successor.0 as usize).unwrap();
+                let instructions = std::mem::take(&mut successor_block.instructions);
+                let terminator = std::mem::replace(
+                    &mut successor_block.terminator,
+                    MirTerminator::Unreachable,
+                );
+                (instructions, terminator)
+            };
+            let predecessor_block = function.blocks.get_mut(predecessor.0 as usize).unwrap();
+            predecessor_block.instructions.extend(instructions);
+            predecessor_block.terminator = terminator;
+            for entry in &mut function.control.operations.entries {
+                if let Some(data) = entry.as_mut().filter(|data| data.block == successor) {
+                    data.block = predecessor;
+                    data.instruction_index = data
+                        .instruction_index
+                        .checked_add(instruction_offset)
+                        .ok_or_else(|| "MIR operation location overflow while merging".to_owned())?;
+                }
+            }
+            function.control.tombstoned_blocks.insert(successor);
+            refresh_control_block_sites(function, predecessor)?;
+            Ok(())
+        })?;
+        Ok(invalidation)
     }
     pub fn replace_instructions(
         &mut self,
@@ -1955,6 +2128,225 @@ impl MirEditor {
         self.invalidation |= invalidation;
         Ok(value)
     }
+}
+
+fn redirect_terminator_edge(
+    terminator: &mut MirTerminator,
+    edge: MirEdge,
+    target: MirBlockId,
+    arguments: Vec<MirLocal>,
+) -> Result<(), String> {
+    match (terminator, edge) {
+        (MirTerminator::Goto { target: slot, arguments: slots }, MirEdge::Goto)
+        | (MirTerminator::Leave { target: slot, arguments: slots, .. }, MirEdge::Leave) => {
+            *slot = target;
+            *slots = arguments;
+            Ok(())
+        }
+        (
+            MirTerminator::SwitchBool { then_target, then_arguments, .. },
+            MirEdge::Then,
+        ) => {
+            *then_target = target;
+            *then_arguments = arguments;
+            Ok(())
+        }
+        (
+            MirTerminator::SwitchBool { else_target, else_arguments, .. },
+            MirEdge::Else,
+        ) => {
+            *else_target = target;
+            *else_arguments = arguments;
+            Ok(())
+        }
+        _ => Err("MIR edge selector does not match the source terminator".into()),
+    }
+}
+
+fn synchronize_terminator_control(function: &mut MirFunction, block: MirBlockId) -> Result<(), String> {
+    let terminator = function
+        .blocks
+        .get(block.0 as usize)
+        .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?
+        .terminator
+        .clone();
+    if let MirTerminator::Leave { label, brand, target, .. } = terminator {
+        let entry = function.control.labels.get_mut(label.0 as usize).ok_or_else(|| {
+            format!("MIR leave references absent label {}", label.0)
+        })?;
+        if entry.brand != brand {
+            return Err("MIR leave brand disagrees with frozen control table".into());
+        }
+        entry.destination = target;
+    }
+    Ok(())
+}
+
+fn terminator_replacement_invalidation(
+    before: &MirTerminator,
+    after: &MirTerminator,
+) -> MirAnalysisInvalidation {
+    if before == after {
+        return MirAnalysisInvalidation::NONE;
+    }
+    let before_successors = terminator_successors(before);
+    let after_successors = terminator_successors(after);
+    let mut invalidation = MirAnalysisInvalidation::COST;
+    if before_successors != after_successors {
+        invalidation |= MirAnalysisInvalidation::CFG
+            | MirAnalysisInvalidation::USES
+            | MirAnalysisInvalidation::FLOW
+            | MirAnalysisInvalidation::EFFECTS
+            | MirAnalysisInvalidation::VALUES;
+    } else if terminator_references(before) != terminator_references(after) {
+        invalidation |= MirAnalysisInvalidation::USES
+            | MirAnalysisInvalidation::FLOW
+            | MirAnalysisInvalidation::VALUES;
+    }
+    if matches!(before, MirTerminator::Leave { .. }) || matches!(after, MirTerminator::Leave { .. }) {
+        invalidation |= MirAnalysisInvalidation::EFFECTS | MirAnalysisInvalidation::FLOW;
+    }
+    invalidation
+}
+
+fn terminator_successors(terminator: &MirTerminator) -> Vec<MirBlockId> {
+    match terminator {
+        MirTerminator::Goto { target, .. } | MirTerminator::Leave { target, .. } => vec![*target],
+        MirTerminator::SwitchBool { then_target, else_target, .. } => vec![*then_target, *else_target],
+        MirTerminator::Return { .. } | MirTerminator::Unreachable => vec![],
+    }
+}
+
+fn terminator_references(terminator: &MirTerminator) -> Vec<MirLocal> {
+    match terminator {
+        MirTerminator::Goto { arguments, .. } | MirTerminator::Leave { arguments, .. } => {
+            arguments.clone()
+        }
+        MirTerminator::SwitchBool { condition, then_arguments, else_arguments, .. } => {
+            let mut references = vec![*condition];
+            references.extend(then_arguments);
+            references.extend(else_arguments);
+            references
+        }
+        MirTerminator::Return { value } => vec![*value],
+        MirTerminator::Unreachable => vec![],
+    }
+}
+
+fn scope_after_block_prefix(
+    function: &MirFunction,
+    block: MirBlockId,
+    at: usize,
+) -> Result<MirScopeId, String> {
+    let block_data = function
+        .blocks
+        .get(block.0 as usize)
+        .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?;
+    let mut scope = block_data.scope;
+    for instruction in &block_data.instructions[..at] {
+        match instruction {
+            MirInstruction::MakeLabel { label: label_id, .. } => {
+                let label = function.control.labels.get(label_id.0 as usize).ok_or_else(|| {
+                    format!("MIR split instruction references absent label {}", label_id.0)
+                })?;
+                if !scope_enters_label(&function.control, label.scope, scope, *label_id) {
+                    return Err("MIR split label disagrees with lexical scope".into());
+                }
+                scope = label.scope;
+            }
+            MirInstruction::InstallHandler { site, .. } => {
+                let handler = function.control.handlers.get(site.0 as usize).ok_or_else(|| {
+                    format!("MIR split instruction references absent handler {}", site.0)
+                })?;
+                if !scope_enters_handler(&function.control, handler.scope, scope, *site) {
+                    return Err("MIR split handler disagrees with lexical scope".into());
+                }
+                scope = handler.scope;
+            }
+            MirInstruction::UninstallHandler => {
+                scope = scope_after_uninstall(&function.control, scope)
+                    .ok_or_else(|| "MIR split uninstall escapes lexical scope tree".to_owned())?;
+            }
+            _ => {}
+        }
+    }
+    Ok(scope)
+}
+
+fn relocate_operations_after_split(
+    function: &mut MirFunction,
+    source: MirBlockId,
+    suffix: MirBlockId,
+    at: usize,
+) {
+    for entry in &mut function.control.operations.entries {
+        if let Some(data) = entry.as_mut().filter(|data| {
+            data.block == source && data.instruction_index >= at as u32
+        }) {
+            data.block = suffix;
+            data.instruction_index -= at as u32;
+        }
+    }
+}
+
+fn refresh_control_block_sites(function: &mut MirFunction, block: MirBlockId) -> Result<(), String> {
+    let instructions = function
+        .blocks
+        .get(block.0 as usize)
+        .ok_or_else(|| format!("MIR control refresh names absent block {}", block.0))?
+        .instructions
+        .clone();
+    for instruction in instructions {
+        match instruction {
+            MirInstruction::InstallHandler { site, .. } => {
+                function
+                    .control
+                    .handlers
+                    .get_mut(site.0 as usize)
+                    .ok_or_else(|| format!("MIR handler {} is absent", site.0))?
+                    .block = block;
+            }
+            MirInstruction::Perform { site, .. } => {
+                function
+                    .control
+                    .performs
+                    .get_mut(site.0 as usize)
+                    .ok_or_else(|| format!("MIR perform {} is absent", site.0))?
+                    .block = block;
+            }
+            MirInstruction::CaptureResumption { site, .. }
+            | MirInstruction::Resume { site, .. }
+            | MirInstruction::ResumeReturn { site, .. }
+            | MirInstruction::ResumeSnapshot { site, .. }
+            | MirInstruction::Forward { site }
+            | MirInstruction::Cancel { site } => {
+                function
+                    .control
+                    .resumptions
+                    .get_mut(site.0 as usize)
+                    .ok_or_else(|| format!("MIR resumption {} is absent", site.0))?
+                    .block = block;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn predecessor_count(function: &MirFunction, target: MirBlockId) -> usize {
+    function
+        .blocks
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            !function
+                .control
+                .tombstoned_blocks
+                .contains(&MirBlockId(*index as u32))
+        })
+        .flat_map(|(_, block)| terminator_successors(&block.terminator))
+        .filter(|successor| *successor == target)
+        .count()
 }
 
 fn operation_replacement_invalidation(
@@ -3931,6 +4323,7 @@ impl MirFunction {
     pub fn with_frozen_control_tables(mut self) -> Self {
         let mut control = MirControlTables {
             move_paths: self.control.move_paths.clone(),
+            tombstoned_blocks: self.control.tombstoned_blocks.clone(),
             ..MirControlTables::default()
         };
         let mut labels = BTreeMap::<crate::LabelBrand, MirLabelId>::new();
@@ -4077,6 +4470,23 @@ impl MirFunction {
     pub fn validate(&self) -> Result<(), String> {
         if self.entry.0 as usize >= self.blocks.len() {
             return Err(format!("MIR entry block {} is absent", self.entry.0));
+        }
+        if self.control.tombstoned_blocks.contains(&self.entry) {
+            return Err("MIR entry block is tombstoned".into());
+        }
+        for &block_id in &self.control.tombstoned_blocks {
+            let block = self.blocks.get(block_id.0 as usize).ok_or_else(|| {
+                format!("MIR tombstoned block {} is absent", block_id.0)
+            })?;
+            if !block.parameters.is_empty()
+                || !block.instructions.is_empty()
+                || !matches!(block.terminator, MirTerminator::Unreachable)
+            {
+                return Err(format!(
+                    "MIR tombstoned block {} remains executable",
+                    block_id.0
+                ));
+            }
         }
         validate_nominal_copy_descriptors(&self.nominal_copy_descriptors)?;
         self.validate_move_path_tables()?;
@@ -4283,6 +4693,28 @@ impl MirFunction {
                         candidate.0
                     ));
                 }
+            }
+        }
+        for (index, label) in self.control.labels.iter().enumerate() {
+            if self.control.tombstoned_blocks.contains(&label.destination) {
+                return Err(format!("MIR label {index} targets a tombstoned block"));
+            }
+        }
+        for (index, handler) in self.control.handlers.iter().enumerate() {
+            if self.control.tombstoned_blocks.contains(&handler.block)
+                || self.control.tombstoned_blocks.contains(&handler.target)
+            {
+                return Err(format!("MIR handler {index} targets a tombstoned block"));
+            }
+        }
+        for (index, perform) in self.control.performs.iter().enumerate() {
+            if self.control.tombstoned_blocks.contains(&perform.block) {
+                return Err(format!("MIR perform {index} is in a tombstoned block"));
+            }
+        }
+        for (index, resumption) in self.control.resumptions.iter().enumerate() {
+            if self.control.tombstoned_blocks.contains(&resumption.block) {
+                return Err(format!("MIR resumption {index} is in a tombstoned block"));
             }
         }
         for (index, resumption) in self.control.resumptions.iter().enumerate() {
@@ -4615,6 +5047,9 @@ impl MirFunction {
                 .blocks
                 .get(target.0 as usize)
                 .ok_or_else(|| "MIR label value target block is absent".to_string())?;
+            if self.control.tombstoned_blocks.contains(target) {
+                return Err("MIR label value targets a tombstoned block".into());
+            }
             if block.parameters.as_slice() != [*destination] {
                 return Err("MIR label value target does not accept its exact payload".into());
             }
@@ -4745,6 +5180,9 @@ impl MirFunction {
             if target.0 as usize >= self.blocks.len() {
                 return Err("MIR handler target block is absent".into());
             }
+            if self.control.tombstoned_blocks.contains(target) {
+                return Err("MIR handler targets a tombstoned block".into());
+            }
             let mut destinations = BTreeSet::new();
             for destination in payload_destinations {
                 self.local_type(*destination)?;
@@ -4827,6 +5265,9 @@ impl MirFunction {
         Ok(())
     }
     fn validate_edge(&self, target: MirBlockId, arguments: &[MirLocal]) -> Result<(), String> {
+        if self.control.tombstoned_blocks.contains(&target) {
+            return Err(format!("MIR edge targets tombstoned block {}", target.0));
+        }
         let target = self
             .blocks
             .get(target.0 as usize)

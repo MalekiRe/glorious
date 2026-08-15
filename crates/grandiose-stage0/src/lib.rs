@@ -81,14 +81,14 @@ pub use interface::{
 };
 pub use mir::{
     MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment,
-    MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirDiagnostic, MirEditor, MirFunction,
-    MirHandlerSiteData, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelData, MirLabelId,
-    MirLocal, MirLocalDecl, MirLowering, MirMovePathData, MirMovePathId, MirMovePathTables,
-    MirNominalCopyDescriptor, MirOperationArena, MirOperationData, MirOperationId,
-    MirOptimizationReport, MirPattern, MirPatternField, MirPerformSiteData, MirPerformSiteId,
-    MirPlaceBindingData, MirPlaceBindingId, MirProgram, MirResumptionSiteData, MirResumptionSiteId,
-    MirResumptionSiteKind, MirScopeData, MirScopeId, MirTerminator, MirTraitMethodInstance,
-    optimize as optimize_mir,
+    MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirDiagnostic, MirEdge, MirEditor,
+    MirFunction, MirHandlerSiteData, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelData,
+    MirLabelId, MirLocal, MirLocalDecl, MirLowering, MirMovePathData, MirMovePathId,
+    MirMovePathTables, MirNominalCopyDescriptor, MirOperationArena, MirOperationData,
+    MirOperationId, MirOptimizationReport, MirPattern, MirPatternField, MirPerformSiteData,
+    MirPerformSiteId, MirPlaceBindingData, MirPlaceBindingId, MirProgram, MirResumptionSiteData,
+    MirResumptionSiteId, MirResumptionSiteKind, MirScopeData, MirScopeId, MirTerminator,
+    MirTraitMethodInstance, optimize as optimize_mir,
 };
 pub use module_graph::{ModuleDiagnostic, ModuleGraph, ModuleNode};
 pub use operation::{Budget, BudgetError, CancellationToken, PublicationGuard};

@@ -4,11 +4,11 @@ use grandiose_stage0::{
     CallableId, CaptureMode, ConstInferVar, ConstKind, CoreId, DefKey, Digest, EffectInstance,
     EffectRow, EffectRowProjection, EnvironmentBrand, GenericArgument, GenericKind, InferVar,
     InstanceKey, Lifetime, LoanFact, MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture,
-    MirCaptureEnvironment, MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirEditor,
-    MirFunction, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelId, MirLocal, MirLocalDecl,
-    MirOperationId, MirPattern, MirPatternField, MirPerformSiteId, MirProgram, MirResumptionSiteId,
-    MirScopeId, MirTerminator, MirTraitMethodInstance, MoveFact, Mutability, Quantity, ScalarType,
-    Type, VmArtifactError, emit_vm, emit_vm_program, optimize_mir, verify_vm,
+    MirCaptureEnvironment, MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirEdge,
+    MirEditor, MirFunction, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelId, MirLocal,
+    MirLocalDecl, MirOperationId, MirPattern, MirPatternField, MirPerformSiteId, MirProgram,
+    MirResumptionSiteId, MirScopeId, MirTerminator, MirTraitMethodInstance, MoveFact, Mutability,
+    Quantity, ScalarType, Type, VmArtifactError, emit_vm, emit_vm_program, optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -1354,6 +1354,269 @@ fn checked_mir_editor_rolls_back_an_invalid_cfg_edit() {
             .is_err()
     );
     assert_eq!(editor.finish(), function);
+}
+
+fn editor_cfg_function() -> MirFunction {
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"mir-editor-cfg")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(i64_ty.clone()), local(i64_ty.clone())],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 1,
+                },
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(1),
+                    value: 2,
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(1) },
+        }],
+    }
+}
+
+#[test]
+fn checked_mir_editor_redirects_edges_transactionally() {
+    let original = graph();
+    let mut editor = MirEditor::open(original.clone()).unwrap();
+    let invalidation = editor
+        .redirect_edge(
+            MirBlockId(0),
+            MirEdge::Then,
+            MirBlockId(2),
+            vec![MirLocal(2)],
+        )
+        .unwrap();
+    assert!(invalidation.contains(MirAnalysisInvalidation::CFG));
+    assert!(invalidation.contains(MirAnalysisInvalidation::EFFECTS));
+    let redirected = editor.finish();
+    assert!(matches!(
+        redirected.blocks[0].terminator,
+        MirTerminator::SwitchBool {
+            then_target: MirBlockId(2),
+            ref then_arguments,
+            ..
+        } if then_arguments == &vec![MirLocal(2)]
+    ));
+
+    let mut rejected = MirEditor::open(original.clone()).unwrap();
+    assert!(
+        rejected
+            .redirect_edge(MirBlockId(0), MirEdge::Goto, MirBlockId(1), vec![])
+            .is_err()
+    );
+    assert_eq!(rejected.finish(), original);
+}
+
+#[test]
+fn checked_mir_editor_splits_preserves_ids_and_merge_tombstones() {
+    let mut editor = MirEditor::open(editor_cfg_function()).unwrap();
+    let suffix = editor.split_block(MirBlockId(0), 1).unwrap();
+    assert_eq!(suffix, MirBlockId(1));
+    assert_eq!(
+        editor.operation_data(MirOperationId(0)).unwrap().block,
+        MirBlockId(0)
+    );
+    assert_eq!(
+        editor.operation_data(MirOperationId(1)).unwrap().block,
+        suffix
+    );
+    assert_eq!(
+        editor
+            .operation_data(MirOperationId(1))
+            .unwrap()
+            .instruction_index,
+        0
+    );
+    let split = editor.finish();
+    assert!(split.validate().is_ok());
+
+    let mut editor = MirEditor::open(split).unwrap();
+    editor.merge_blocks(MirBlockId(0), suffix).unwrap();
+    let merged = editor.finish();
+    assert!(merged.control.tombstoned_blocks.contains(&suffix));
+    assert!(matches!(
+        merged.blocks[suffix.0 as usize].terminator,
+        MirTerminator::Unreachable
+    ));
+    assert_eq!(
+        merged
+            .control
+            .operations
+            .get(MirOperationId(1))
+            .unwrap()
+            .block,
+        MirBlockId(0)
+    );
+    assert_eq!(
+        merged
+            .control
+            .operations
+            .get(MirOperationId(1))
+            .unwrap()
+            .instruction_index,
+        1
+    );
+    assert!(merged.validate().is_ok());
+}
+
+#[test]
+fn checked_mir_editor_rejects_invalid_split_without_spending_identities() {
+    let original = editor_cfg_function();
+    let mut editor = MirEditor::open(original.clone()).unwrap();
+    assert!(editor.split_block(MirBlockId(0), 3).is_err());
+    assert_eq!(editor.finish(), original.with_frozen_operation_arena());
+}
+
+fn externally_visible_handler_merge_function() -> MirFunction {
+    let effect = DefKey(Digest::of_bytes(b"editor-merge-handler-effect"));
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"editor-merge-handler")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(i64_ty.clone())],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(0),
+                        value: 1,
+                    },
+                    MirInstruction::InstallHandler {
+                        site: MirHandlerSiteId::UNASSIGNED,
+                        effect,
+                        effect_arguments: vec![],
+                        operation: 0,
+                        payload_destinations: vec![],
+                        resume_type: Type::Scalar(ScalarType::I64),
+                        continuation: MirContinuationPolicy::Consume,
+                        target: MirBlockId(2),
+                    },
+                ],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(2),
+                    arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(0) },
+            },
+        ],
+    }
+    .with_frozen_control_tables()
+}
+
+fn externally_visible_label_merge_function() -> MirFunction {
+    let owner = DefKey(Digest::of_bytes(b"editor-merge-label"));
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: owner,
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(i64_ty.clone())],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 1,
+                }],
+                terminator: MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
+                    brand: grandiose_stage0::LabelBrand { owner, label: 0 },
+                    target: MirBlockId(2),
+                    arguments: vec![MirLocal(0)],
+                    cleanup: MirCleanupPlan {
+                        moved_places: vec![],
+                        moved_paths: vec![],
+                        active_loans: vec![],
+                    },
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(2),
+                    arguments: vec![MirLocal(0)],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(0)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(0) },
+            },
+        ],
+    }
+    .with_frozen_control_tables()
+}
+
+#[test]
+fn checked_mir_editor_rejects_merging_externally_visible_control_entries() {
+    for function in [
+        externally_visible_handler_merge_function(),
+        externally_visible_label_merge_function(),
+    ] {
+        function.validate().unwrap();
+        let mut editor = MirEditor::open(function.clone()).unwrap();
+        let error = editor.merge_blocks(MirBlockId(1), MirBlockId(2)).unwrap_err();
+        assert!(error.contains("externally visible entry"), "{error}");
+        assert_eq!(editor.finish(), function);
+    }
+}
+
+#[test]
+fn checked_mir_editor_rolls_back_leave_and_label_metadata_together() {
+    let original = externally_visible_label_merge_function();
+    let mut editor = MirEditor::open(original.clone()).unwrap();
+    assert!(editor
+        .redirect_edge(
+            MirBlockId(0),
+            MirEdge::Leave,
+            MirBlockId(99),
+            vec![MirLocal(0)],
+        )
+        .is_err());
+    // The failed edit briefly changes the label destination internally; a
+    // transactional failure must restore that frozen control entry as well as
+    // the terminator that named it.
+    assert_eq!(editor.finish(), original);
 }
 
 #[test]
