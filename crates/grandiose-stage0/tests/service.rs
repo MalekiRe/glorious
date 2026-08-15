@@ -4219,6 +4219,14 @@ fn service_executes_hrtb_closures_with_concrete_associated_effect_projections() 
 }
 
 #[test]
+fn service_executes_hrtb_closures_with_lifetime_gat_projections() {
+    let source = "trait Family { type Item<'a>; } struct Value {} impl Family for Value { type Item<'a> = &'a i64; } pub fn apply(callback: for<'a> (<Value as Family>::Item<'a>) -> <Value as Family>::Item<'a>) -> i64 { let value = 41; let result = callback(&value); *result + 1 } pub fn main() -> i64 { apply({ value => value }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_proves_and_enforces_direct_callable_trait_bounds() {
     let accepted = "trait Sendable {} impl Sendable for i64 {} pub fn identity<T>(value: T) -> T where T: Sendable { value } pub fn main() -> i64 { identity(42) }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();

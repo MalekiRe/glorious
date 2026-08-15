@@ -158,6 +158,11 @@ coarse. The composite fixtures cover:
   contract; the concrete projection is exercised through an indirect callback
   call and verified VM execution
   (`service_executes_hrtb_closures_with_concrete_associated_effect_projections`).
+- concrete lifetime-GAT projections can be selected beneath an HRTB callback
+  binder without treating that rigid item argument as an escaped solver goal;
+  the normalized borrowed item flows through a compact closure, dereference,
+  and verified VM execution
+  (`service_executes_hrtb_closures_with_lifetime_gat_projections`).
 - generic integer wrappers preserve their operand width through deferred MIR
   materialization: signed right shift remains arithmetic, unsigned right shift
   remains logical, and every count at least the operand width traps rather than

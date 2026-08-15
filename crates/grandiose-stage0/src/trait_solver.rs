@@ -875,7 +875,7 @@ impl TraitSolver {
             subject,
         };
         let root_key = associated_projection_key(&goal, name, &arguments);
-        let answer = self.select_associated_type_application(goal, name, &arguments);
+        let answer = self.select_associated_type_application(goal, name, &arguments, false);
         let TraitProjectionAnswer::Normalized { evidence, ty } = answer else {
             return answer;
         };
@@ -894,11 +894,17 @@ impl TraitSolver {
         goal: TraitGoal,
         name: &str,
         arguments: &[GenericArgument],
+        scoped_hrtb_item_arguments: bool,
     ) -> TraitProjectionAnswer {
+        // A public projection request has no enclosing binder, so a bound
+        // item argument is an escaped HRTB placeholder. The recursive type
+        // normalizer may opt in only after it has verified that the argument
+        // is owned by a surrounding callable binder.
         if trait_goal_contains_escaping_hrtb(&goal)
-            || arguments
-                .iter()
-                .any(generic_argument_contains_escaping_hrtb)
+            || (!scoped_hrtb_item_arguments
+                && arguments
+                    .iter()
+                    .any(generic_argument_contains_escaping_hrtb))
         {
             return TraitProjectionAnswer::NoSolution;
         }
@@ -1014,6 +1020,18 @@ impl TraitSolver {
         value: Type,
         active: &mut Vec<Digest>,
     ) -> Result<Type, Box<TraitProjectionAnswer>> {
+        self.normalize_type_projections_in_hrtb(value, active, &[])
+    }
+
+    /// HRTB-aware form of type projection normalization. `hrtb_binders` is
+    /// ordered from the innermost callable outwards and is used solely to
+    /// decide whether a bound item argument is rigidly scoped or escaped.
+    fn normalize_type_projections_in_hrtb(
+        &mut self,
+        value: Type,
+        active: &mut Vec<Digest>,
+        hrtb_binders: &[u32],
+    ) -> Result<Type, Box<TraitProjectionAnswer>> {
         match value {
             Type::Nominal {
                 definition,
@@ -1022,7 +1040,9 @@ impl TraitSolver {
                 definition,
                 arguments: arguments
                     .into_iter()
-                    .map(|argument| self.normalize_trait_argument(argument, active))
+                    .map(|argument| {
+                        self.normalize_trait_argument_in_hrtb(argument, active, hrtb_binders)
+                    })
                     .collect::<Result<_, _>>()?,
             }),
             Type::Projection {
@@ -1033,14 +1053,19 @@ impl TraitSolver {
                 item_generic_kinds,
                 item_arguments,
             } => {
-                let subject = self.normalize_type_projections(*subject, active)?;
+                let subject =
+                    self.normalize_type_projections_in_hrtb(*subject, active, hrtb_binders)?;
                 let trait_arguments = trait_arguments
                     .into_iter()
-                    .map(|argument| self.normalize_trait_argument(argument, active))
+                    .map(|argument| {
+                        self.normalize_trait_argument_in_hrtb(argument, active, hrtb_binders)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let item_arguments = item_arguments
                     .into_iter()
-                    .map(|argument| self.normalize_trait_argument(argument, active))
+                    .map(|argument| {
+                        self.normalize_trait_argument_in_hrtb(argument, active, hrtb_binders)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let projection = Type::Projection {
                     subject: Box::new(subject),
@@ -1050,7 +1075,7 @@ impl TraitSolver {
                     item_generic_kinds,
                     item_arguments,
                 };
-                if !projection_is_concrete(&projection) {
+                if !projection_is_concrete_in_hrtb_scope(&projection, hrtb_binders) {
                     return Ok(projection);
                 }
                 let Type::Projection {
@@ -1082,10 +1107,15 @@ impl TraitSolver {
                     return Err(Box::new(TraitProjectionAnswer::Overflow));
                 }
                 active.push(key);
-                let answer = self.select_associated_type_application(goal, &name, &item_arguments);
+                let answer = self.select_associated_type_application(
+                    goal,
+                    &name,
+                    &item_arguments,
+                    !hrtb_binders.is_empty(),
+                );
                 let result = match answer {
                     TraitProjectionAnswer::Normalized { ty, .. } => {
-                        self.normalize_type_projections(ty, active)
+                        self.normalize_type_projections_in_hrtb(ty, active, hrtb_binders)
                     }
                     answer => Err(Box::new(answer)),
                 };
@@ -1095,11 +1125,13 @@ impl TraitSolver {
             Type::Tuple(values) => Ok(Type::Tuple(
                 values
                     .into_iter()
-                    .map(|value| self.normalize_type_projections(value, active))
+                    .map(|value| {
+                        self.normalize_type_projections_in_hrtb(value, active, hrtb_binders)
+                    })
                     .collect::<Result<_, _>>()?,
             )),
             Type::Array(value) => Ok(Type::Array(Box::new(
-                self.normalize_type_projections(*value, active)?,
+                self.normalize_type_projections_in_hrtb(*value, active, hrtb_binders)?,
             ))),
             Type::Reference {
                 mutability,
@@ -1108,7 +1140,11 @@ impl TraitSolver {
             } => Ok(Type::Reference {
                 mutability,
                 lifetime,
-                referent: Box::new(self.normalize_type_projections(*referent, active)?),
+                referent: Box::new(self.normalize_type_projections_in_hrtb(
+                    *referent,
+                    active,
+                    hrtb_binders,
+                )?),
             }),
             Type::Callable {
                 lifetime_binders,
@@ -1116,16 +1152,31 @@ impl TraitSolver {
                 result,
                 effects,
                 invocation,
-            } => Ok(Type::Callable {
-                lifetime_binders,
-                parameters: parameters
-                    .into_iter()
-                    .map(|parameter| self.normalize_type_projections(parameter, active))
-                    .collect::<Result<_, _>>()?,
-                result: Box::new(self.normalize_type_projections(*result, active)?),
-                effects,
-                invocation,
-            }),
+            } => {
+                let mut nested_binders = Vec::with_capacity(hrtb_binders.len() + 1);
+                nested_binders.push(lifetime_binders);
+                nested_binders.extend_from_slice(hrtb_binders);
+                Ok(Type::Callable {
+                    lifetime_binders,
+                    parameters: parameters
+                        .into_iter()
+                        .map(|parameter| {
+                            self.normalize_type_projections_in_hrtb(
+                                parameter,
+                                active,
+                                &nested_binders,
+                            )
+                        })
+                        .collect::<Result<_, _>>()?,
+                    result: Box::new(self.normalize_type_projections_in_hrtb(
+                        *result,
+                        active,
+                        &nested_binders,
+                    )?),
+                    effects,
+                    invocation,
+                })
+            }
             value => Ok(value),
         }
     }
@@ -1971,9 +2022,18 @@ impl TraitSolver {
         argument: GenericArgument,
         active: &mut Vec<Digest>,
     ) -> Result<GenericArgument, Box<TraitProjectionAnswer>> {
+        self.normalize_trait_argument_in_hrtb(argument, active, &[])
+    }
+
+    fn normalize_trait_argument_in_hrtb(
+        &mut self,
+        argument: GenericArgument,
+        active: &mut Vec<Digest>,
+        hrtb_binders: &[u32],
+    ) -> Result<GenericArgument, Box<TraitProjectionAnswer>> {
         match argument {
             GenericArgument::Type(value) => self
-                .normalize_type_projections(value, active)
+                .normalize_type_projections_in_hrtb(value, active, hrtb_binders)
                 .map(GenericArgument::Type),
             GenericArgument::ConstProjection {
                 subject,
@@ -1982,10 +2042,13 @@ impl TraitSolver {
                 name,
                 kind,
             } => {
-                let subject = self.normalize_type_projections(*subject, active)?;
+                let subject =
+                    self.normalize_type_projections_in_hrtb(*subject, active, hrtb_binders)?;
                 let trait_arguments = trait_arguments
                     .into_iter()
-                    .map(|argument| self.normalize_trait_argument(argument, active))
+                    .map(|argument| {
+                        self.normalize_trait_argument_in_hrtb(argument, active, hrtb_binders)
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 let projection = GenericArgument::ConstProjection {
                     subject: Box::new(subject),
@@ -2038,7 +2101,7 @@ impl TraitSolver {
                     // structural term, while recursive definitions fail
                     // closed instead of leaking an unresolved projection.
                     TraitConstProjectionAnswer::Normalized { value, .. } => {
-                        self.normalize_trait_argument(value, active)
+                        self.normalize_trait_argument_in_hrtb(value, active, hrtb_binders)
                     }
                     TraitConstProjectionAnswer::Ambiguous => {
                         Err(Box::new(TraitProjectionAnswer::Ambiguous))
@@ -3297,6 +3360,59 @@ fn projection_is_concrete(value: &Type) -> bool {
     }
 }
 
+/// The callable-owned counterpart to `projection_is_concrete`. Bound
+/// lifetimes become rigid, selectable item arguments only when their De
+/// Bruijn depth names a live callable binder in this traversal.
+fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> bool {
+    match value {
+        Type::Generic(_) | Type::Infer(_) | Type::Error => false,
+        Type::Nominal { arguments, .. } => arguments
+            .iter()
+            .all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)),
+        Type::Tuple(arguments) => arguments
+            .iter()
+            .all(|argument| projection_is_concrete_in_hrtb_scope(argument, hrtb_binders)),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            projection_is_concrete_in_hrtb_scope(subject, hrtb_binders)
+                && trait_arguments.iter().all(|argument| {
+                    generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)
+                })
+                && item_arguments.iter().all(|argument| {
+                    generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)
+                })
+        }
+        Type::Array(element) => projection_is_concrete_in_hrtb_scope(element, hrtb_binders),
+        Type::Reference { referent, .. } => {
+            projection_is_concrete_in_hrtb_scope(referent, hrtb_binders)
+        }
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            ..
+        } => {
+            let mut nested_binders = Vec::with_capacity(hrtb_binders.len() + 1);
+            nested_binders.push(*lifetime_binders);
+            nested_binders.extend_from_slice(hrtb_binders);
+            parameters
+                .iter()
+                .all(|parameter| projection_is_concrete_in_hrtb_scope(parameter, &nested_binders))
+                && projection_is_concrete_in_hrtb_scope(result, &nested_binders)
+        }
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. } => true,
+    }
+}
+
 fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
     match value {
         GenericArgument::Type(value) => projection_is_concrete(value),
@@ -3314,6 +3430,35 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         GenericArgument::ConstU32Expr(_) => false,
         GenericArgument::ConstProjection { .. } => false,
         GenericArgument::Lifetime(crate::Lifetime::Generic(_) | crate::Lifetime::Bound { .. })
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstInfer { .. } => false,
+    }
+}
+
+fn generic_argument_is_concrete_in_hrtb_scope(
+    value: &GenericArgument,
+    hrtb_binders: &[u32],
+) -> bool {
+    match value {
+        GenericArgument::Type(value) => projection_is_concrete_in_hrtb_scope(value, hrtb_binders),
+        GenericArgument::EffectRow(value) => {
+            value.tail.is_none()
+                && value.projections.is_empty()
+                && value.effects.iter().all(|effect| {
+                    effect.arguments.iter().all(|argument| {
+                        generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)
+                    })
+                })
+        }
+        GenericArgument::Lifetime(crate::Lifetime::Bound { depth, index }) => hrtb_binders
+            .get(*depth as usize)
+            .is_some_and(|count| *index < *count),
+        GenericArgument::Lifetime(crate::Lifetime::Static | crate::Lifetime::Elided)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstQuantity(_) => true,
+        GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstProjection { .. }
+        | GenericArgument::Lifetime(crate::Lifetime::Generic(_))
         | GenericArgument::ConstGeneric { .. }
         | GenericArgument::ConstInfer { .. } => false,
     }
