@@ -6687,6 +6687,102 @@ fn service_executes_shared_gat_hrtb_reborrows_through_facades() {
 }
 
 #[test]
+fn service_composes_facaded_hrtb_callback_reborrows_closure_capture_and_unique_reborrow() {
+    // `Callback` is a public HRTB alias whose result is a selected lifetime
+    // GAT.  The returned shared reference crosses a closure environment while
+    // an independent unique reborrow is opened, consumed, and released before
+    // its parent is used again.  This checks the complete source -> Core ->
+    // MIR -> VM -> decoded-VM path rather than treating either reference as a
+    // compiler-only proof artifact.
+    let root = "use facade::{relay, Callback}; pub fn apply(callback: Callback) -> i64 { let value = 39; let input = &value; let returned = callback(input); let captured = () -> i64 { *returned }; let mutable = 1; let parent = &mut mutable; let child = &mut *parent; *child = 3; *parent + captured() } pub fn main() -> i64 { apply(relay) }";
+    let provider = "pub trait Gate { type Item<'a>; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a>; impl Gate for i64 { type Item<'a> = &'a i64; } pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> { value }";
+    let world = |root: &str, provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Gate, relay}; pub type Callback = provider::Callback;".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@1.0.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(root, provider), None).unwrap();
+    let artifact = compiler
+        .compile_revision(parent)
+        .expect("facaded HRTB callback/reborrow composition must compile")
+        .artifact
+        .unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("facaded HRTB callback/reborrow program must decode and verify");
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+
+    // A provider revision may not silently strengthen the GAT result to a
+    // static borrow.  Its relay body is then an invalid source of the public
+    // callback contract; rejection must leave the legal revision's facade,
+    // cache, dependency trace, and executable product intact.
+    let invalid = provider.replace("type Item<'a> = &'a i64", "type Item<'a> = &'static i64");
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let trace = compiler
+        .dependency_trace(parent, &facade)
+        .expect("legal facaded HRTB callback must publish a frozen interface");
+    let child = compiler
+        .import_revision(world(root, &invalid), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(child).unwrap())
+        .expect_err("static GAT strengthening must not publish a child revision");
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5017"),
+        "missing lifetime-strengthening rejection: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached);
+    assert!(compiler.dependency_traces(child).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()));
+
+    // The same public HRTB callback also cannot carry an invocation-local
+    // borrow into a returned closure.  This rejects at the escape boundary
+    // (rather than merely at the alias declaration) and exercises the
+    // transactional service path after a previous failed provider revision.
+    let escaping_root = "use facade::Callback; pub fn bad(callback: Callback) -> () -> &i64 { let local = 1; () -> &i64 { callback(&local) } } pub fn main() -> i64 { let candidate = bad; 0 }";
+    let escape = compiler
+        .import_revision(world(escaping_root, provider), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(escape).unwrap())
+        .expect_err("returned closure must not retain the invocation-local HRTB callback result");
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"),
+        "missing returned-reference escape rejection: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached);
+    assert!(compiler.dependency_traces(escape).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace));
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .canonical_bytes(),
+        artifact.canonical_bytes(),
+        "failed provider revision must not disturb the legal artifact"
+    );
+}
+
+#[test]
 fn service_preserves_caller_reference_closure_results_and_rejects_invocation_locals() {
     let legal = "pub fn retain<'a>(value: &'a i64) -> () -> &'a i64 { () -> &'a i64 { value } } pub fn main() -> i64 { let value = 41; let closure = retain(&value); 42 }";
     let artifact = StageZeroCompiler::new()
