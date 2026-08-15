@@ -121,11 +121,28 @@ pub struct MovePathId(pub u32);
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct PlaceBindingId(pub u32);
 
+/// Stable Typed-Core provenance for a lexical storage binding.
+///
+/// The presentation spelling is deliberately insufficient: an inner `value`
+/// must not alias an outer `value`.  The origin records the Core construction
+/// which introduced the storage, including a deterministic arm/binder slot
+/// for pattern and handler binders.  It is preserved into MIR so later local
+/// allocation can join identities without name resolution.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum PlaceBindingOrigin {
+    Parameter { index: u32 },
+    Let { expression: CoreId },
+    HandlerBinder { handle: CoreId, clause: u32, binder: u32 },
+    HandlerResumption { handle: CoreId, clause: u32 },
+    CompletionBinder { completion: CoreId, clause: u32, binder: u32 },
+}
+
 /// Presentation metadata for a [`PlaceBindingId`].  `spelling` is never a
 /// lookup key for ownership; it exists solely for diagnostics and tools.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct PlaceBinding {
     pub id: PlaceBindingId,
+    pub origin: PlaceBindingOrigin,
     pub spelling: String,
 }
 
@@ -194,6 +211,13 @@ impl MovePathArena {
     fn into_entries(self) -> Vec<MovePathData> {
         self.entries
     }
+
+    fn id(&self, path: &Projection) -> MovePathId {
+        *self
+            .ids
+            .get(path)
+            .expect("every final move fact has a recorded move path")
+    }
 }
 
 /// The analyzer's private name-resolution key is deliberately separate from
@@ -207,7 +231,12 @@ struct PlaceBindingArena {
 }
 
 impl PlaceBindingArena {
-    fn intern(&mut self, identity: &str, spelling: &str) -> PlaceBindingId {
+    fn intern(
+        &mut self,
+        identity: &str,
+        spelling: &str,
+        origin: PlaceBindingOrigin,
+    ) -> PlaceBindingId {
         if let Some(id) = self.ids.get(identity) {
             return *id;
         }
@@ -218,6 +247,7 @@ impl PlaceBindingArena {
         self.ids.insert(identity.to_owned(), id);
         self.entries.push(PlaceBinding {
             id,
+            origin,
             spelling: spelling.to_owned(),
         });
         id
@@ -302,6 +332,10 @@ pub struct PlaceFlow {
     /// `moved_places`, which intentionally retains only final uninitialized
     /// leaves for cleanup.
     pub move_paths: Vec<MovePathData>,
+    /// Exact identities for `moved_places` in the same canonical order.  The
+    /// legacy facts retain text for diagnostics and VM wire compatibility;
+    /// consumers that need ownership identity must use this companion list.
+    pub final_move_paths: Vec<MovePathId>,
     pub active_loans: Vec<LoanFact>,
     pub refinements: Vec<RefinementFact>,
     pub events: Vec<FlowEvent>,
@@ -325,8 +359,15 @@ impl PlaceFlow {
             refinements: vec![],
             diagnostics: vec![],
         };
-        for (name, _) in &body.parameters {
-            a.bindings.intern(name, name);
+        for (index, (name, _)) in body.parameters.iter().enumerate() {
+            a.bindings.intern(
+                name,
+                name,
+                PlaceBindingOrigin::Parameter {
+                    index: u32::try_from(index)
+                        .expect("parameter index exceeded PlaceFlow identity space"),
+                },
+            );
             a.states.insert(name.clone(), LocalState::Initialized);
             a.scopes[0].insert(name.clone(), name.clone());
         }
@@ -348,11 +389,16 @@ impl PlaceFlow {
                 unique: loan.unique,
             })
             .collect();
+        let final_move_paths = a
+            .moved_places
+            .iter()
+            .map(|place| a.move_paths.id(place))
+            .collect::<Vec<_>>();
         let moved_places = a
             .moved_places
             .iter()
             .map(|place| MoveFact {
-                root: place.root.clone(),
+                root: a.bindings.spelling(a.bindings.id(&place.root)).to_owned(),
                 fields: place.fields.clone(),
             })
             .collect();
@@ -361,6 +407,7 @@ impl PlaceFlow {
             final_states: a.states,
             moved_places,
             move_paths: a.move_paths.into_entries(),
+            final_move_paths,
             active_loans,
             refinements: a.refinements,
             events: a.events,
@@ -465,8 +512,13 @@ impl Analyzer<'_> {
         }
     }
 
-    fn activate_binding(&mut self, spelling: &str, identity: String) {
-        self.bindings.intern(&identity, spelling);
+    fn activate_binding(
+        &mut self,
+        spelling: &str,
+        identity: String,
+        origin: PlaceBindingOrigin,
+    ) {
+        self.bindings.intern(&identity, spelling, origin);
         self.scopes
             .last_mut()
             .expect("PlaceFlow always has a root lexical scope")
@@ -529,15 +581,25 @@ impl Analyzer<'_> {
         &mut self,
         bindings: impl IntoIterator<Item = &'b (String, crate::types::Type)>,
         resumption: Option<&str>,
+        mut origin: impl FnMut(u32) -> PlaceBindingOrigin,
+        resumption_origin: Option<PlaceBindingOrigin>,
     ) {
-        for (name, _) in bindings {
+        for (index, (name, _)) in bindings.into_iter().enumerate() {
             let identity = self.fresh_binding(name);
-            self.activate_binding(name, identity.clone());
+            self.activate_binding(
+                name,
+                identity.clone(),
+                origin(u32::try_from(index).expect("branch binder index exceeded identity space")),
+            );
             self.states.insert(identity, LocalState::Initialized);
         }
         if let Some(name) = resumption {
             let identity = self.fresh_binding(name);
-            self.activate_binding(name, identity.clone());
+            self.activate_binding(
+                name,
+                identity.clone(),
+                resumption_origin.expect("resumption binding must have typed-core provenance"),
+            );
             self.states.insert(identity, LocalState::Initialized);
         }
     }
@@ -613,7 +675,11 @@ impl Analyzer<'_> {
                 } else {
                     self.visit_with_live_after(value, live_after);
                 }
-                self.activate_binding(&name, binding.clone());
+                self.activate_binding(
+                    &name,
+                    binding.clone(),
+                    PlaceBindingOrigin::Let { expression: id },
+                );
                 self.states.insert(binding.clone(), LocalState::Initialized);
                 self.record_aggregate_reference_origins(&binding, value);
                 self.event(FlowEventKind::Initialize(binding), e.span)
@@ -738,7 +804,21 @@ impl Analyzer<'_> {
                         }
                         _ => None,
                     };
-                    self.activate_branch_bindings(&clause.bindings, resumption);
+                    let clause_index = u32::try_from(exits.len())
+                        .expect("handler clause index exceeded PlaceFlow identity space");
+                    self.activate_branch_bindings(
+                        &clause.bindings,
+                        resumption,
+                        |binder| PlaceBindingOrigin::HandlerBinder {
+                            handle: id,
+                            clause: clause_index,
+                            binder,
+                        },
+                        resumption.map(|_| PlaceBindingOrigin::HandlerResumption {
+                            handle: id,
+                            clause: clause_index,
+                        }),
+                    );
                     self.record_handler_payload_origins(computation, &clause);
                     self.visit_with_live_after(clause.body, live_after);
                     // A dynamically selected arm may update outer places,
@@ -799,7 +879,18 @@ impl Analyzer<'_> {
                     // those names the same generative treatment as ordinary
                     // completion-pattern binders: forged Core cannot use a
                     // matching spelling to retarget an outer loan.
-                    self.activate_branch_bindings(&clause.bindings, None);
+                    let clause_index = u32::try_from(exits.len())
+                        .expect("completion clause index exceeded PlaceFlow identity space");
+                    self.activate_branch_bindings(
+                        &clause.bindings,
+                        None,
+                        |binder| PlaceBindingOrigin::CompletionBinder {
+                            completion: id,
+                            clause: clause_index,
+                            binder,
+                        },
+                        None,
+                    );
                     self.record_completion_result_origins(computation, &clause.pattern);
                     self.record_refinement_reference_origins(clause.refinement.as_ref());
                     self.visit_with_live_after(clause.body, live_after);
