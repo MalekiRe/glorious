@@ -4824,6 +4824,80 @@ fn service_executes_alias_equivalent_hrtb_effect_gat_traits_through_vm() {
 }
 
 #[test]
+fn service_executes_cross_trait_hrtb_gat_alias_bounds_through_vm() {
+    let mut request = request(
+        "use bridge::Left as Primary; use bridge::Right as Secondary; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / { <&'a i64 as Secondary<i64>>::Effects<'a> } { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Primary<i64>::apply<i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{First as Left, Second as Right, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait First<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<U>(receiver: Self, callback: for<'a> (<Self as First<T>>::Item<'a>) -> <Self as First<T>>::Item<'a> / { <Self as First<T>>::Effects<'a> }, marker: U) -> i64 / { <Self as First<T>>::Effects<'static> }; } pub trait Second<T> { type Item<'a>; type Effects<'a>: EffectRow; } impl<'r> First<i64> for &'r i64 { type Item<'a> = <&'r i64 as Second<i64>>::Item<'a>; type Effects<'a> = {Trace<i64>}; fn apply<U>(receiver: &'r i64, callback: for<'a> (<&'r i64 as First<i64>>::Item<'a>) -> <&'r i64 as First<i64>>::Item<'a> / { <&'r i64 as First<i64>>::Effects<'a> }, marker: U) -> i64 / { <&'r i64 as First<i64>>::Effects<'static> } { let value = 41; let result = callback(&value); Trace<i64>::note(*receiver); *result + 1 } } impl<'r> Second<i64> for &'r i64 { type Item<'a> = &'a i64; type Effects<'a> = { <&'r i64 as First<i64>>::Effects<'a> }; }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("cross-trait HRTB GAT aliases must normalize into a VM contract");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_mutually_recursive_hrtb_gat_alias_bounds() {
+    let mut request = request(
+        "use bridge::Left; pub fn relay<'a>(value: &'a i64) -> &'a i64 / { <&'a i64 as Left<i64>>::Effects<'a> } { value } pub fn main() -> i64 { let value = 40; *relay(&value) + 2 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::First as Left;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub trait First<T> { type Item<'a>; type Effects<'a>: EffectRow; } pub trait Second<T> { type Item<'a>; type Effects<'a>: EffectRow; } impl<'r> First<i64> for &'r i64 { type Item<'a> = &'a i64; type Effects<'a> = { <&'r i64 as Second<i64>>::Effects<'a> }; } impl<'r> Second<i64> for &'r i64 { type Item<'a> = &'a i64; type Effects<'a> = { <&'r i64 as First<i64>>::Effects<'a> }; }".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("mutually recursive HRTB GAT aliases unexpectedly entered VM emission");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"),
+        "missing recursive HRTB GAT rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_alias_equivalent_positive_and_negative_hrtb_gat_impls() {
+    let mut request = request(
+        "use bridge::First as Positive; use bridge::Second as Negative; pub struct Local {} impl Positive<i64> for Local { type Effects<'a> = {}; } impl !Negative<i64> for Local {} pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Capability as First, Capability as Second};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub trait Capability<T> { type Effects<'a>: EffectRow; }".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("alias-equivalent positive and negative implementations coexisted");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G3406"),
+        "missing mixed-polarity alias coherence rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_overlapping_impls_spelled_through_trait_reexport_aliases() {
     let mut request = request(
         "use bridge::First as Primary; use bridge::Second as Secondary; pub struct Local {} impl Primary<i64> for Local { type Effects<'a> = {}; } impl Secondary<i64> for Local { type Effects<'a> = {}; } pub fn main() -> i64 { 42 }",

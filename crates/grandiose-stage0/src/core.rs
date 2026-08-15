@@ -4937,6 +4937,7 @@ impl Elaborator<'_> {
         let mut result = self.normalize_concrete_effect_row(value);
         let mut projections = std::mem::take(&mut result.projections);
         let mut unresolved = vec![];
+        let mut expanded = std::collections::BTreeSet::new();
         while let Some(projection) = projections.pop() {
             if !projection_is_concrete(&projection.subject)
                 || !projection
@@ -4948,6 +4949,26 @@ impl Elaborator<'_> {
                     .iter()
                     .all(generic_argument_is_selectable_effect_projection)
             {
+                unresolved.push(projection);
+                continue;
+            }
+            let trait_arguments = canonical_generic_arguments_encoding(&projection.trait_arguments);
+            let subject = canonical_type_encoding(&projection.subject);
+            let item_arguments = canonical_generic_arguments_encoding(&projection.item_arguments);
+            let key = Digest::of_parts([
+                b"grandiose-stage0-selectable-effect-projection-v1".as_slice(),
+                projection.trait_definition.0.as_bytes().as_slice(),
+                trait_arguments.as_slice(),
+                subject.as_slice(),
+                projection.name.as_bytes(),
+                item_arguments.as_slice(),
+            ]);
+            if !expanded.insert(key) {
+                // A selectable row may expand through another associated row.
+                // Retain a repeated projection as unresolved rather than
+                // re-opening a fresh solver query forever; ordinary effect
+                // validation then reports the recursive contract without
+                // manufacturing an empty executable row.
                 unresolved.push(projection);
                 continue;
             }
