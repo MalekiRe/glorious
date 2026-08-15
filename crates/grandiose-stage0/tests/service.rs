@@ -4983,6 +4983,62 @@ fn service_rejects_three_level_defaulted_hrtb_gat_alias_mixed_polarity() {
 }
 
 #[test]
+fn service_materializes_three_level_defaulted_gat_trait_method_values_through_vm() {
+    // `relay` belongs to Base but is extracted through the Top facade as an
+    // indirect callable. Its explicit effect-row/const generic arguments
+    // select Base's HRTB GAT defaults, so method materialization cannot lose
+    // either the inherited owner or the concrete defaulted effect identity.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn apply(callback: (i64) -> i64 / Trace<7, i64>) -> i64 / Trace<7, i64> { callback(41) } pub fn main() -> i64 { handle apply(Capability<i64>::relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Base<T> { type Item<'a, row: EffectRow, n: u32> = i64; type Effects<'a, row: EffectRow, n: u32>: EffectRow = {Trace<n, <Self as Base<T>>::Item<'a, row, n>>, | row}; fn relay(value: i64) -> i64 / { <Self as Base<T>>::Effects<'static, {}, 7> }; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Base<i64> for i64 { fn relay(value: i64) -> i64 / { <i64 as Base<i64>>::Effects<'static, {}, 7> } { Trace<7, i64>::note(value) } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("inherited defaulted-GAT method values must materialize into the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_mixed_polarity_three_level_defaulted_method_values_through_aliases() {
+    // The extracted method is inherited from Base, but its requested callable
+    // identity begins at the Top alias. A conflicting negative alias must
+    // block that materialization just as it blocks direct defaulted-GAT
+    // projection selection.
+    let mut request = request(
+        "use bridge::{Base, Middle, First as Positive, Second as Negative, Trace}; pub struct Local {} impl Base<i64> for Local { fn relay(value: i64) -> i64 / { <Local as Base<i64>>::Effects<'static, {}, 7> } { Trace<7, i64>::note(value) } } impl Middle<i64> for Local where Local: Base<i64> {} impl Positive<i64> for Local where Local: Middle<i64> {} impl !Negative<i64> for Local {} pub fn apply(callback: (i64) -> i64 / Trace<7, i64>) -> i64 / Trace<7, i64> { callback(41) } pub fn main() -> i64 { handle apply(Positive<i64>::relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Base, Middle, Top as First, Top as Second, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Base<T> { type Item<'a, row: EffectRow, n: u32> = i64; type Effects<'a, row: EffectRow, n: u32>: EffectRow = {Trace<n, <Self as Base<T>>::Item<'a, row, n>>, | row}; fn relay(value: i64) -> i64 / { <Self as Base<T>>::Effects<'static, {}, 7> }; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("mixed-polarity inherited method value unexpectedly entered VM emission");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G3406"),
+        "missing mixed-polarity inherited method-value coherence rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
