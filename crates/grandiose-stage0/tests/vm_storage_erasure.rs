@@ -170,10 +170,71 @@ fn verifier_rejects_storage_dead_before_witness_disarm() {
 #[test]
 fn verifier_rejects_malformed_storage_witness_state_machine_actions() {
     let cases = vec![
-        vec![VmStorageErasureAction::EndBorrow { storage: 0 }, VmStorageErasureAction::EndBorrow { storage: 0 }, VmStorageErasureAction::Protect { storage: 0, register: 0 }, VmStorageErasureAction::SetDropFlag { drop_flag: 0, initialized: false }, VmStorageErasureAction::StorageDead { storage: 0 }],
-        vec![VmStorageErasureAction::EndBorrow { storage: 0 }, VmStorageErasureAction::Protect { storage: 0, register: 1 }, VmStorageErasureAction::SetDropFlag { drop_flag: 0, initialized: false }, VmStorageErasureAction::StorageDead { storage: 0 }],
-        vec![VmStorageErasureAction::EndBorrow { storage: 0 }, VmStorageErasureAction::Protect { storage: 0, register: 0 }, VmStorageErasureAction::SetDropFlag { drop_flag: 0, initialized: true }, VmStorageErasureAction::StorageDead { storage: 0 }],
-        vec![VmStorageErasureAction::EndBorrow { storage: 0 }, VmStorageErasureAction::Protect { storage: 0, register: 0 }, VmStorageErasureAction::SetDropFlag { drop_flag: 0, initialized: false }, VmStorageErasureAction::StorageDead { storage: 0 }, VmStorageErasureAction::StorageDead { storage: 0 }],
+        vec![
+            VmStorageErasureAction::EndBorrow { storage: 0 },
+            VmStorageErasureAction::EndBorrow { storage: 0 },
+            VmStorageErasureAction::Protect {
+                storage: 0,
+                register: 0,
+            },
+            VmStorageErasureAction::SetDropFlag {
+                drop_flag: 0,
+                initialized: false,
+            },
+            VmStorageErasureAction::StorageDead { storage: 0 },
+        ],
+        vec![
+            VmStorageErasureAction::EndBorrow { storage: 0 },
+            VmStorageErasureAction::Protect {
+                storage: 0,
+                register: 1,
+            },
+            VmStorageErasureAction::SetDropFlag {
+                drop_flag: 0,
+                initialized: false,
+            },
+            VmStorageErasureAction::StorageDead { storage: 0 },
+        ],
+        vec![
+            VmStorageErasureAction::EndBorrow { storage: 0 },
+            VmStorageErasureAction::Protect {
+                storage: 0,
+                register: 0,
+            },
+            VmStorageErasureAction::SetDropFlag {
+                drop_flag: 0,
+                initialized: true,
+            },
+            VmStorageErasureAction::StorageDead { storage: 0 },
+        ],
+        vec![
+            VmStorageErasureAction::EndBorrow { storage: 0 },
+            VmStorageErasureAction::Protect {
+                storage: 0,
+                register: 0,
+            },
+            VmStorageErasureAction::SetDropFlag {
+                drop_flag: 0,
+                initialized: false,
+            },
+            VmStorageErasureAction::StorageDead { storage: 0 },
+            VmStorageErasureAction::StorageDead { storage: 0 },
+        ],
     ];
-    for actions in cases { let mut artifact = witnessed_storage_exit(); let VmInstruction::Leave { cleanup, .. } = &mut artifact.function.instructions[1] else { panic!() }; let VmStorageErasureWitness::Verified { actions: witness_actions, .. } = &mut cleanup.storage_erasure else { panic!() }; *witness_actions = actions; artifact.fingerprint = artifact.computed_fingerprint(); assert!(decode_and_verify_artifact(&encode_artifact(&artifact)).is_err()); }
+    for actions in cases {
+        let mut artifact = witnessed_storage_exit();
+        let VmInstruction::Leave { cleanup, .. } = &mut artifact.function.instructions[1] else {
+            panic!("fixture must retain its leave instruction");
+        };
+        let VmStorageErasureWitness::Verified {
+            actions: witness_actions,
+            ..
+        } = &mut cleanup.storage_erasure
+        else {
+            panic!("fixture must carry a verified storage witness");
+        };
+        *witness_actions = actions;
+        artifact.fingerprint = artifact.computed_fingerprint();
+        assert!(decode_and_verify_artifact(&encode_artifact(&artifact)).is_err());
+    }
 }

@@ -1899,7 +1899,7 @@ impl MirCleanupPlan {
             })?;
             match *action {
                 MirCleanupAction::EndBorrow { .. } => {
-                    if !matches!(*state, Progress::Start | Progress::EndedBorrow) {
+                    if !matches!(*state, Progress::Start) {
                         return Err(
                             "MIR cleanup ends a borrow after terminal storage cleanup".into()
                         );

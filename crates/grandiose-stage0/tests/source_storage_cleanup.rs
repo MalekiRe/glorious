@@ -84,6 +84,51 @@ fn one_owner_storage(local: MirLocal, expression: u32) -> MirControlTables {
     }
 }
 
+/// Raw MIR and the serialized VM witness use the same single-transition
+/// lifecycle: a borrow may be ended once before the terminal owner action.
+/// Duplicating `EndBorrow` is not an idempotent cleanup shortcut; it would
+/// make a forged raw body disagree with the artifact verifier.
+#[test]
+fn mir_rejects_duplicate_end_borrow_in_source_storage_cleanup() {
+    let control = one_owner_storage(MirLocal(0), 99);
+    let cleanup = MirCleanupPlan {
+        source_storage_scope: MirSourceStorageScopeId(1),
+        target_storage_scope: MirSourceStorageScopeId::ROOT,
+        moved_paths: vec![],
+        moved_places: vec![],
+        active_loans: vec![],
+        drop_flags: vec![MirCleanupDropFlag {
+            id: MirDropFlagId(0),
+            binding: MirPlaceBindingId(0),
+        }],
+        actions: vec![
+            MirCleanupAction::EndBorrow {
+                binding: MirPlaceBindingId(0),
+            },
+            MirCleanupAction::EndBorrow {
+                binding: MirPlaceBindingId(0),
+            },
+            MirCleanupAction::Protect {
+                binding: MirPlaceBindingId(0),
+                local: MirLocal(0),
+            },
+            MirCleanupAction::ClearDropFlag {
+                flag: MirDropFlagId(0),
+            },
+            MirCleanupAction::StorageDead {
+                binding: MirPlaceBindingId(0),
+            },
+        ],
+        protected_values: vec![MirLocal(0)],
+    };
+    assert!(
+        cleanup
+            .validate_with_storage(&control.move_paths, &control.source_storage)
+            .is_err_and(|error| error.contains("ends a borrow")),
+        "raw MIR must reject duplicate EndBorrow before VM emission"
+    );
+}
+
 /// A lexical leave abandons an initialized source slot in an inner label
 /// scope.  Cleanup elaboration must generate an ordered plan: newest storage
 /// first, `EndBorrow` before `Destroy`, then `StorageDead`; the value carried
