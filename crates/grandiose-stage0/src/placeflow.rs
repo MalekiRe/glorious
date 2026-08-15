@@ -365,6 +365,12 @@ pub struct PlaceFlow {
     /// `bindings` order and names the exact scope which owns each binding.
     pub storage_scopes: Vec<SourceStorageScope>,
     pub binding_scopes: Vec<SourceStorageScopeId>,
+    /// Exact lexical source-storage boundary crossed by each static label
+    /// transfer. The key is the branded Core label identity; the pair is
+    /// `(source, target)` in source-storage scope space. MIR consumes this
+    /// directly while elaborating a `Leave`, rather than attempting to
+    /// reconstruct lexical ownership from CFG blocks or local spellings.
+    pub label_storage_exits: BTreeMap<crate::LabelBrand, (SourceStorageScopeId, SourceStorageScopeId)>,
     pub final_states: BTreeMap<String, LocalState>,
     /// Projection-granular uninitialized paths. `final_states` remains the
     /// compact whole-local summary for existing consumers; this retains the
@@ -421,6 +427,7 @@ impl PlaceFlow {
             }],
             active_storage_scopes: vec![SourceStorageScopeId::ROOT],
             binding_scopes: vec![],
+            label_storage_exits: BTreeMap::new(),
             scope_refinement_starts: vec![0],
             next_shadow: 0,
             events: vec![],
@@ -476,6 +483,7 @@ impl PlaceFlow {
             bindings: a.bindings.into_entries(),
             storage_scopes: a.storage_scopes,
             binding_scopes: a.binding_scopes,
+            label_storage_exits: a.label_storage_exits,
             final_states: a.states,
             moved_places,
             move_paths: a.move_paths.into_entries(),
@@ -516,6 +524,7 @@ struct Analyzer<'a> {
     storage_scopes: Vec<SourceStorageScope>,
     active_storage_scopes: Vec<SourceStorageScopeId>,
     binding_scopes: Vec<SourceStorageScopeId>,
+    label_storage_exits: BTreeMap<crate::LabelBrand, (SourceStorageScopeId, SourceStorageScopeId)>,
     /// The refinement journal position at each lexical boundary.  Positive
     /// pattern evidence is branch-local evidence, so it must not survive an
     /// arm/block exit merely because it shares a source spelling with an
@@ -737,9 +746,36 @@ impl Analyzer<'_> {
                 self.visit_closure_environment(&environment, e.span, None);
             }
             CoreKind::Local(_) => self.read_place(id, e.span),
-            CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
-                self.visit_with_live_after(body, live_after)
+            CoreKind::Label { brand, body } => {
+                // Labels are control boundaries, but their body is also a
+                // lexical storage region. Capture that region at analysis
+                // time while Core still tells us exactly which branded label
+                // owns it. Later MIR cleanup can therefore cross the real
+                // `source -> target` storage boundary without guessing from
+                // a block number or local spelling.
+                let target = *self
+                    .active_storage_scopes
+                    .last()
+                    .expect("PlaceFlow always has a root source-storage scope");
+                let next_scope = SourceStorageScopeId(
+                    u32::try_from(self.storage_scopes.len())
+                        .expect("PlaceFlow source-storage arena exceeded the representable identity space"),
+                );
+                let body_opens_scope = matches!(
+                    self.body.expression(body).kind,
+                    CoreKind::Block(_)
+                ) && body != self.body.root;
+                self.visit_with_live_after(body, live_after);
+                let source = (body_opens_scope
+                    && self
+                        .storage_scopes
+                        .get(next_scope.0 as usize)
+                        .is_some_and(|scope| scope.parent == Some(target)))
+                    .then_some(next_scope)
+                    .unwrap_or(target);
+                self.label_storage_exits.insert(brand, (source, target));
             }
+            CoreKind::Transfer { value: body, .. } => self.visit_with_live_after(body, live_after),
             CoreKind::Let { name, value } => {
                 // A strict initializer which transfers out or evaluates to
                 // `Never` never creates the lexical owner. In particular,

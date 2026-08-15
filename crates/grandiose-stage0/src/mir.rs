@@ -4853,8 +4853,89 @@ impl MirFunction {
             }
             self.blocks[block_index].instructions = rewritten;
         }
+        self.elaborate_source_storage_leaves(&storage, &flow.label_storage_exits);
         self.control.source_storage = storage;
         self
+    }
+
+    /// Turn the lexical source-storage boundary recorded by PlaceFlow into
+    /// the executable cleanup witness carried by every static `Leave`.
+    ///
+    /// This is deliberately an elaboration at the immutable PlaceFlow-to-MIR
+    /// boundary: a label brand is the source authority for the scope exit,
+    /// while the frozen storage table supplies the exact owners and locals.
+    /// No CFG shape, local spelling, or individual source test is used to
+    /// rediscover either fact.
+    fn elaborate_source_storage_leaves(
+        &mut self,
+        storage: &MirSourceStorageTables,
+        label_exits: &BTreeMap<crate::LabelBrand, (crate::SourceStorageScopeId, crate::SourceStorageScopeId)>,
+    ) {
+        for block in &mut self.blocks {
+            let MirTerminator::Leave {
+                brand,
+                arguments,
+                cleanup,
+                ..
+            } = &mut block.terminator
+            else {
+                continue;
+            };
+            // Raw MIR is intentionally not elaborated here: only a boundary
+            // explicitly supplied by the source ownership analysis may gain
+            // an executable cleanup witness.
+            let Some(&(source, target)) = label_exits.get(brand) else {
+                continue;
+            };
+            let source = MirSourceStorageScopeId(source.0);
+            let target = MirSourceStorageScopeId(target.0);
+            let Ok(exited) = storage.exited_bindings(source, target) else {
+                continue;
+            };
+            // Crossing an empty syntactic block does not end an addressable
+            // source lifetime. Preserve the existing same-scope ownership
+            // facts on that `Leave` (notably a residual partial move of an
+            // outer owner) instead of fabricating a storage boundary.
+            if exited.is_empty() {
+                continue;
+            }
+            cleanup.source_storage_scope = source;
+            cleanup.target_storage_scope = target;
+            cleanup.drop_flags = exited
+                .iter()
+                .enumerate()
+                .map(|(index, &binding)| MirCleanupDropFlag {
+                    id: MirDropFlagId(index as u32),
+                    binding,
+                })
+                .collect();
+            cleanup.protected_values = arguments.clone();
+            cleanup.actions.clear();
+            for (index, binding) in exited.into_iter().enumerate() {
+                let flag = MirDropFlagId(index as u32);
+                if cleanup
+                    .active_loans
+                    .iter()
+                    .any(|loan| loan.binding.0 == binding.0)
+                {
+                    cleanup.actions.push(MirCleanupAction::EndBorrow { binding });
+                }
+                match storage.binding_local(binding) {
+                    Some(local) if arguments.contains(&local) => cleanup
+                        .actions
+                        .push(MirCleanupAction::Protect { binding, local }),
+                    _ => cleanup
+                        .actions
+                        .push(MirCleanupAction::Drop { binding, flag }),
+                }
+                cleanup
+                    .actions
+                    .push(MirCleanupAction::ClearDropFlag { flag });
+                cleanup
+                    .actions
+                    .push(MirCleanupAction::StorageDead { binding });
+            }
+        }
     }
 
     /// Freeze the body-local control arena after lowering has finished
@@ -11302,7 +11383,23 @@ impl Lowerer<'_> {
             // and writes the destination. A transfer in that source therefore
             // exits before any store or destination-place action is emitted.
             CoreKind::Assign { value, .. } => self.lower_label_transfer_path(value, target),
-            CoreKind::Transfer { brand, value } if brand == target => self.value(value),
+            CoreKind::Transfer { brand, value } if brand == target => {
+                // A direct local transfer carries the owner slot itself over
+                // the `Leave` edge.  This lets source-storage cleanup protect
+                // that exact mapped owner; lowering it through `value()`
+                // would first move it into an untracked temporary and erase
+                // the identity needed by the cleanup elaborator.
+                match &self.body.expression(value).kind {
+                    CoreKind::Local(name) => self.named.get(name).copied().or_else(|| {
+                        self.error(
+                            "G6012",
+                            "label transfer references an unavailable source owner",
+                        );
+                        None
+                    }),
+                    _ => self.value(value),
+                }
+            }
             CoreKind::Transfer { .. } => {
                 self.error(
                     "G6012",
