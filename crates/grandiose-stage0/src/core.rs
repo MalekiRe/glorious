@@ -2969,8 +2969,12 @@ impl TypedBody {
             .map(|signature| signature.result.clone());
         elaborator.declared_effects =
             elaborator.normalize_selectable_effect_row(elaborator.declared_effects.clone());
-        let expected_result =
-            expected_result.map(|result| elaborator.normalize_concrete_type_projections(result));
+        // A callable owns its declared generic binders just as an impl method
+        // does.  Select concrete trait heads through those rigid arguments
+        // before supplying the result as a body expectation; an abstract head
+        // remains symbolic and cannot acquire global implementation evidence.
+        let expected_result = expected_result
+            .map(|result| elaborator.normalize_selectable_type_projections(result));
         let mut parameters = vec![];
         if let Some(signature) = signatures
             .definitions
@@ -4884,7 +4888,9 @@ impl Elaborator<'_> {
                 if !active.insert(key) {
                     return projection;
                 }
-                let answer = self.trait_query().normalize_associated_type_application(
+                let answer = self
+                    .trait_query()
+                    .normalize_associated_type_application_in_hrtb(
                     TraitGoal {
                         relation: crate::ElaboratedTraitReference {
                             definition: *trait_definition,
@@ -4894,6 +4900,7 @@ impl Elaborator<'_> {
                     },
                     name,
                     item_arguments,
+                    hrtb_binders,
                 );
                 active.remove(&key);
                 match answer {
@@ -7432,20 +7439,20 @@ impl Elaborator<'_> {
             self.normalize_concrete_hrtb_effect_row(bound_signature.effects, lifetime_binders);
         let expected_effects =
             self.normalize_concrete_hrtb_effect_row(expected_effects, lifetime_binders);
-        let bound_callable = Type::Callable {
+        let bound_callable = self.normalize_selectable_type_projections(Type::Callable {
             lifetime_binders,
             parameters: bound_signature.parameters,
             result: Box::new(bound_signature.result),
             effects: bound_effects,
             invocation: bound_signature.invocation,
-        };
-        let expected = Type::Callable {
+        });
+        let expected = self.normalize_selectable_type_projections(Type::Callable {
             lifetime_binders,
             parameters: expected_parameters,
             result: expected_result,
             effects: expected_effects,
             invocation: expected_invocation,
-        };
+        });
         if self.inference.unify(bound_callable, expected.clone()).is_err() {
             return None;
         }

@@ -911,6 +911,51 @@ impl TraitSolver {
         }
     }
 
+    /// Select an associated type while a callable-owned HRTB binder is live.
+    /// Bound lifetimes are rigid evidence in that scope, but remain rejected
+    /// by the ordinary public projection entry point.
+    pub fn normalize_associated_type_application_in_hrtb(
+        &mut self,
+        goal: TraitGoal,
+        name: &str,
+        arguments: &[GenericArgument],
+        lifetime_binders: &[u32],
+    ) -> TraitProjectionAnswer {
+        let mut active = vec![];
+        let subject = match self.normalize_type_projections_in_hrtb(
+            goal.subject,
+            &mut active,
+            lifetime_binders,
+        ) {
+            Ok(subject) => subject,
+            Err(answer) => return *answer,
+        };
+        let trait_arguments = match goal.relation.arguments.into_iter().map(|argument| {
+            self.normalize_trait_argument_in_hrtb(argument, &mut active, lifetime_binders)
+        }).collect::<Result<Vec<_>, _>>() {
+            Ok(arguments) => arguments,
+            Err(answer) => return *answer,
+        };
+        let arguments = match arguments.iter().cloned().map(|argument| {
+            self.normalize_trait_argument_in_hrtb(argument, &mut active, lifetime_binders)
+        }).collect::<Result<Vec<_>, _>>() {
+            Ok(arguments) => arguments,
+            Err(answer) => return *answer,
+        };
+        let goal = TraitGoal {
+            relation: ElaboratedTraitReference { definition: goal.relation.definition, arguments: trait_arguments },
+            subject,
+        };
+        let root_key = associated_projection_key(&goal, name, &arguments);
+        let answer = self.select_associated_type_application(goal, name, &arguments, true);
+        let TraitProjectionAnswer::Normalized { evidence, ty } = answer else { return answer; };
+        let mut active = vec![root_key];
+        match self.normalize_type_projections_in_hrtb(ty, &mut active, lifetime_binders) {
+            Ok(ty) => TraitProjectionAnswer::Normalized { evidence, ty },
+            Err(answer) => *answer,
+        }
+    }
+
     /// Perform the one-step selection and substitution for an associated type.
     /// Recursive normalization is intentionally kept above this boundary so
     /// every nested projection uses the same candidate selection machinery.

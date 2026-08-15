@@ -5148,6 +5148,43 @@ fn service_materializes_unique_hrtb_static_method_values_with_defaulted_gats_and
 }
 
 #[test]
+fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
+    // The public callable alias nests a selected type GAT and selected effect
+    // GAT under `for<'a>`. Their item arguments combine the caller's row,
+    // the method-owned lifetime, and a structural const. The implementation
+    // body must select the concrete Gate evidence without treating its row
+    // generic as inference evidence.
+    let mut request = request(
+        "use facade::{Callback, Trace, closed}; pub fn apply(callback: Callback<{}>) -> i64 / Trace<7, i64> { let value = 41; let result = callback(&value); Trace<7, i64>::note(result) } pub fn main() -> i64 { handle apply(closed) { Trace<7, i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Trace, closed}; pub type Callback<e: EffectRow> = provider::Callback<e>;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Gate { type Item<'a, e: EffectRow, n: u32>; type Effects<'a, e: EffectRow, n: u32>: EffectRow; } pub type Callback<e: EffectRow> = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a, e, 7> / { <i64 as Gate>::Effects<'a, e, 7> }; impl Gate for i64 { type Item<'a, e: EffectRow, n: u32> = i64; type Effects<'a, e: EffectRow, n: u32> = {Trace<n, i64>, | e}; } pub fn relay<'a, e: EffectRow>(value: &'a i64) -> <i64 as Gate>::Item<'a, e, 7> / { <i64 as Gate>::Effects<'a, e, 7> } { *value } pub fn closed<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a, {}, 7> / { <i64 as Gate>::Effects<'a, {}, 7> } { *value }".as_slice(),
+    ));
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("nested selected HRTB callable alias must materialize");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(request)
+        .expect("source order must preserve nested selected HRTB callable aliases");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_static_hrtb_method_values_with_overlapping_gat_constrained_blankets() {
     // The exact `i64` implementation and the blanket implementation both
     // apply: `i64` proves `Gate` with precisely the row required by the
