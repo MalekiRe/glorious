@@ -4058,6 +4058,26 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
         )
     }));
 
+    let reversed_comparison = core_for(
+        "core-nominal-bool-reversed-integer-comparison@0.1.0",
+        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; infixl 20 <; pub fn main(value: u32) -> Bool { handle value < 55296 { true => true, false => handle 57343 < value { true => true, false => false } } }",
+    );
+    assert!(
+        reversed_comparison.diagnostics.is_empty(),
+        "{:#?}",
+        reversed_comparison.diagnostics
+    );
+    assert!(reversed_comparison.expressions.iter().any(|expression| {
+        matches!(
+            expression.kind,
+            CoreKind::IntrinsicCall { ref operator, ref arguments }
+                if operator == "<"
+                    && arguments.len() == 2
+                    && reversed_comparison.expression(arguments[0]).ty == Type::Scalar(ScalarType::U32)
+                    && reversed_comparison.expression(arguments[1]).ty == Type::Scalar(ScalarType::U32)
+        )
+    }));
+
     let terminal_handler = core_for(
         "core-nominal-bool-terminal-handler@0.1.0",
         "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; effect Branch { select(value: u32) -> ! } pub fn main(value: u32) -> Bool { handle Branch::select(value) { Branch::select(0) => false, Branch::select(_) => true } }",

@@ -12072,10 +12072,9 @@ impl Elaborator<'_> {
         let Some(operator) = operators.pop() else {
             return false;
         };
-        let (Some(mut right), Some(left)) = (values.pop(), values.pop()) else {
+        let (Some(mut right), Some(mut left)) = (values.pop(), values.pop()) else {
             return false;
         };
-        let left_ty = self.expressions[left.0 as usize].ty.clone();
         // Operators are elaborated from their receiver outward.  A numeric
         // source literal on the right has no inherent width, so preserve the
         // receiver's concrete scalar width before testing the primitive or
@@ -12086,6 +12085,7 @@ impl Elaborator<'_> {
             CoreKind::Literal(text) if literal_is_numeric(text) => Some(text.clone()),
             _ => None,
         };
+        let left_ty = self.expressions[left.0 as usize].ty.clone();
         if let (Some(text), Type::Scalar(scalar)) = (numeric_literal, left_ty.clone())
             && scalar_is_numeric(scalar)
         {
@@ -12093,6 +12093,21 @@ impl Elaborator<'_> {
             right = self.literal_expected(text, Some(Type::Scalar(scalar)), literal_span);
         }
         let right_ty = self.expressions[right.0 as usize].ty.clone();
+        // The receiver need not be syntactically left-most. Comparisons such
+        // as `57343 < value` occur in the canonical character validator, and
+        // must contextualize the leading literal from the concrete right
+        // operand just as `value < 57343` does from the left operand.
+        let numeric_literal = match &self.expressions[left.0 as usize].kind {
+            CoreKind::Literal(text) if literal_is_numeric(text) => Some(text.clone()),
+            _ => None,
+        };
+        if let (Some(text), Type::Scalar(scalar)) = (numeric_literal, right_ty.clone())
+            && scalar_is_numeric(scalar)
+        {
+            let literal_span = self.expressions[left.0 as usize].span;
+            left = self.literal_expected(text, Some(Type::Scalar(scalar)), literal_span);
+        }
+        let left_ty = self.expressions[left.0 as usize].ty.clone();
         // Built-in arithmetic is homogeneous, but a trait operator is not:
         // `Index::[]`, comparisons against a wrapper, and application-style
         // domain operators may legitimately have different left/right types.
