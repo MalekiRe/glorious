@@ -1205,9 +1205,10 @@ boundary:
   changed/unchanged outcomes are deterministic and never speculative. It still needs
   to derive all edge-transfer-temporary lists directly and thereby remove the
   seeded-bytecode-anchor completion step.
-- **Not yet realized.** Executable `StorageLive`/`StorageDead` statements and
-  frontend-emitted drop flags (branch post-states must agree at source level).
-  Frozen bodies now retain a separate typed source-storage scope arena with
+- **Realized lifecycle contract.** Executable `StorageLive`/`StorageDead`
+  statements, compiler-emitted drop flags, and `DestroyIf` carry branch
+  post-states through MIR validation and VM lowering. Frozen bodies retain a
+  separate typed source-storage scope arena with
   binding provenance, deterministic live-forward/dead-reverse lifecycle
   events, binding-to-local mapping, and validated cleanup source/target
   boundaries. Raw and frozen MIR both reject path-dependent uninitialized
@@ -1235,7 +1236,7 @@ boundary:
   it rejects a read of dead storage, invalidating addressable storage while a
   unique loan is live, a source-storage read after a path-dependent join, and
   an ordered cleanup plan that disarms a protected `Leave` payload. The second
-  witness stands in for direct `StorageDead` until that statement exists; once
-  it does, the test must retain the same live-loan outcome using the direct
-  instruction as well. These are enabled red tests until the lifecycle/action
-  representation and VM boundary validation make them pass.
+  witness exercises the corresponding backing-slot invalidation, while the
+  validator separately rejects direct `StorageDead` under the same live loan.
+  These are passing regression tests for the lifecycle/action representation
+  and VM boundary validation.

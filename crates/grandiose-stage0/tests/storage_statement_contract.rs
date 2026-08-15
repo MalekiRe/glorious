@@ -1,7 +1,7 @@
-//! Deliberately-red contracts for the executable storage-statement slice.
+//! Regression contracts for the executable storage-statement slice.
 //!
 //! `source_storage_cleanup.rs` already proves the frozen lexical arena and
-//! cleanup witness cannot be forged.  These fixtures cover the still-missing
+//! cleanup witness cannot be forged. These fixtures cover the executable
 //! *program-point* half of MIR design sections 2.2, 3.3, 4.3, and 5.3: an
 //! addressable local may not become live by an incidental register write, a
 //! replacement needs a prior zero-use destroy, and an all-false drop-flag arm
@@ -56,8 +56,8 @@ fn forged_function(
 /// `Use<[0,0]>` proof.  A transfer makes the source uninitialized, so a later
 /// read is use-after-dead even if the VM happens to retain a register number.
 ///
-/// This intentionally fails until raw/frozen MIR has executable storage
-/// statements and ownership-state validation at each program point.
+/// Raw and frozen MIR validate these executable storage statements and their
+/// ownership state at each program point.
 #[test]
 fn mir_storage_statement_matrix_rejects_implicit_liveness_replacement_and_reuse() {
     let cases = [

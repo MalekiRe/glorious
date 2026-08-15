@@ -23,8 +23,8 @@ fn local(ty: Type) -> MirLocalDecl {
 
 /// Sections 2.2, 3.2, 4.3, and 5.3 require a source-storage local to begin
 /// dead, become readable only after `StorageLive` and initialization, and be
-/// rejected before it can reach bytecode lowering.  This remains deliberately
-/// red until the source-storage lifecycle is represented and validated in MIR.
+/// rejected before it can reach bytecode lowering. The executable
+/// source-storage lifecycle is validated in MIR before VM emission.
 #[test]
 fn mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering() {
     let function = MirFunction {
@@ -56,11 +56,9 @@ fn mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering() {
 }
 
 /// Sections 2.2, 3.2, and 4.2 require an addressable owner to remain stable
-/// while a unique loan is live.  `StorageDead` is not an executable MIR
-/// statement yet, so this forged-MIR witness exercises the observable
-/// equivalent: replacing the backing slot before the still-live dereference.
-/// The eventual lifecycle representation must reject both this mutation and a
-/// direct `StorageDead` on the same loan state.
+/// while a unique loan is live. This forged-MIR witness exercises replacement
+/// of the backing slot before the still-live dereference; the same liveness
+/// validator rejects a direct `StorageDead` on that loan state.
 #[test]
 fn mir_rejects_addressable_storage_invalidation_while_unique_loan_is_live() {
     let i64 = Type::Scalar(ScalarType::I64);

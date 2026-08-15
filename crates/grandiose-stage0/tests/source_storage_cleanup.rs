@@ -1,9 +1,8 @@
-//! Deliberately-red conformance contracts for the source-storage MIR slice.
+//! Conformance contracts for the executable source-storage MIR slice.
 //!
-//! These fixtures use the already-public raw MIR boundary so the eventual
-//! storage representation is tested at the same hostile-input boundary as the
-//! rest of `mir.rs`.  They intentionally fail until MIR owns executable
-//! storage state and ordered cleanup actions rather than treating every local
+//! These fixtures use the already-public raw MIR boundary so executable
+//! storage state and ordered cleanup actions are tested at the same hostile
+//! input boundary as the rest of `mir.rs`, rather than treating every local
 //! as an always-live SSA register.
 
 use grandiose_stage0::{
@@ -90,10 +89,9 @@ fn one_owner_storage(local: MirLocal, expression: u32) -> MirControlTables {
 /// first, `EndBorrow` before `Destroy`, then `StorageDead`; the value carried
 /// to the target is protected and must not appear in that plan.
 ///
-/// The pre-storage MIR only sees ordinary locals and accepts this empty plan,
-/// which is exactly the gap this composite fixture keeps red.  Once storage
-/// metadata/actions exist, this one example also proves reverse destruction,
-/// nested scope exit, and protected payload exclusion together.
+/// This composite fixture proves that storage metadata/actions reject an empty
+/// plan while covering reverse destruction, nested scope exit, and protected
+/// payload exclusion together.
 #[test]
 fn mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave() {
     let owner = DefKey(Digest::of_bytes(b"source-storage-cleanup-nested-leave"));
@@ -297,8 +295,8 @@ fn vm_round_trips_typed_nonempty_source_storage_erasure_witness() {
 
 /// Storage death is not permitted while a loan of that storage is live.  The
 /// required cleanup ordering ends the loan before destroying/releasing the
-/// source slot.  The old representation has neither a storage lifecycle nor
-/// ordered cleanup actions, so this forged leave currently reaches the VM.
+/// source slot. The executable lifecycle and ordered cleanup actions reject
+/// this forged leave before it reaches the VM.
 #[test]
 fn mir_requires_end_borrow_before_source_storage_cleanup() {
     let owner = DefKey(Digest::of_bytes(b"source-storage-cleanup-live-loan"));
@@ -385,6 +383,75 @@ fn mir_requires_end_borrow_before_source_storage_cleanup() {
     );
 }
 
+/// `StorageDead` is itself an executable MIR instruction, so a hostile body
+/// must not be able to bypass cleanup ordering by ending a still-borrowed
+/// source slot directly. The owner is first moved out only to satisfy the
+/// dead-storage precondition; the outstanding unique loan remains the reason
+/// this transition is rejected.
+#[test]
+fn mir_rejects_direct_storage_dead_while_unique_loan_is_live() {
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"source-storage-direct-dead-live-unique-loan")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(i64_ty.clone()),
+            local(Type::Reference {
+                mutability: Mutability::Unique,
+                lifetime: Lifetime::Elided,
+                referent: Box::new(i64_ty.clone()),
+            }),
+            local(i64_ty.clone()),
+        ],
+        result: i64_ty,
+        control: one_owner_storage(MirLocal(0), 104),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::StorageLive {
+                    binding: MirPlaceBindingId(0),
+                    local: MirLocal(0),
+                },
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 10,
+                },
+                MirInstruction::Borrow {
+                    dst: MirLocal(1),
+                    src: MirLocal(0),
+                    fields: vec![],
+                    unique: true,
+                    reborrow: false,
+                },
+                MirInstruction::Move {
+                    dst: MirLocal(2),
+                    src: MirLocal(0),
+                },
+                MirInstruction::StorageDead {
+                    binding: MirPlaceBindingId(0),
+                    local: MirLocal(0),
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(2) },
+        }],
+    };
+
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("while a unique loan is live")),
+        "StorageDead must reject an addressable slot with a still-live unique loan"
+    );
+    assert!(
+        emit_vm(&function).is_err(),
+        "a rejected direct StorageDead must not reach VM emission"
+    );
+}
+
 /// A source slot initialized on only one predecessor needs a compiler-created
 /// drop flag before both paths can leave its lexical scope.  The `true` edge
 /// must destroy/release the owner and clear the flag; the `false` edge must
@@ -392,9 +459,9 @@ fn mir_requires_end_borrow_before_source_storage_cleanup() {
 /// VM cleanup has to preserve precisely those two outcomes.
 ///
 /// This is deliberately expressed as one branch/leave fixture instead of a
-/// synthetic flag API: frontend-emitted flags are not represented yet, and
-/// the important contract is that malformed raw MIR cannot evade the required
-/// transition and its VM erasure proof.
+/// synthetic flag API: compiler-emitted flags have no source spelling, and
+/// malformed raw MIR cannot evade the required transition and its VM erasure
+/// proof.
 #[test]
 fn mir_requires_drop_flag_for_divergent_source_storage_initialization() {
     let owner = DefKey(Digest::of_bytes(b"source-storage-cleanup-drop-flag"));

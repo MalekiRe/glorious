@@ -1,11 +1,11 @@
 //! Persistent source-storage lifetime facts at the PlaceFlow-to-MIR boundary.
 //!
-//! Compact Stage-0 register MIR does not yet serialize source `StorageLive`
-//! and `StorageDead` opcodes.  It nevertheless must retain their exact typed
-//! contract: no later cleanup or lowering pass may reconstruct a storage
-//! lifetime from a local spelling, register number, or source span.  This
-//! module carries that contract as one immutable arena and validates the
-//! equivalent live/dead sequence for every lexical source scope.
+//! Compact Stage-0 register MIR serializes source `StorageLive` and
+//! `StorageDead` opcodes after freezing this exact typed contract: no later
+//! cleanup or lowering pass may reconstruct a storage lifetime from a local
+//! spelling, register number, or source span. This module carries that
+//! contract as one immutable arena and validates the live/dead sequence for
+//! every lexical source scope.
 
 use crate::{
     mir::{MirLocal, MirMovePathId, MirMovePathTables, MirPlaceBindingId},
