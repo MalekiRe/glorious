@@ -2757,6 +2757,9 @@ fn service_request_package_registry_commits_or_rolls_back_atomically() {
         .unwrap();
     let good = compiler.open_session(good_revision).unwrap();
     assert!(good.package_sessions().is_empty());
+    assert_eq!(good.retention_metadata().active_packages, 0);
+    assert_eq!(good.retention_metadata().active_body_scratch, 0);
+    assert_eq!(good.retention_metadata().staged_body_products, 0);
     compiler.compile_session(&good).unwrap();
     assert_eq!(
         good.package_sessions()
@@ -2764,6 +2767,16 @@ fn service_request_package_registry_commits_or_rolls_back_atomically() {
             .map(|entry| entry.status)
             .collect::<Vec<_>>(),
         vec![PackageSessionStatus::Committed]
+    );
+    let committed = good.retention_metadata();
+    assert_eq!(committed.active_packages, 0);
+    assert_eq!(committed.active_body_scratch, 0);
+    assert_eq!(committed.staged_body_products, 0);
+    assert!(
+        committed
+            .packages
+            .iter()
+            .all(|package| package.active_body_scratch == 0 && package.staged_body_products == 0)
     );
 
     // A failure after body-session admission must abandon every request-local
@@ -2781,6 +2794,16 @@ fn service_request_package_registry_commits_or_rolls_back_atomically() {
             .map(|entry| entry.status)
             .collect::<Vec<_>>(),
         vec![PackageSessionStatus::RolledBack]
+    );
+    let rolled_back = failed.retention_metadata();
+    assert_eq!(rolled_back.active_packages, 0);
+    assert_eq!(rolled_back.active_body_scratch, 0);
+    assert_eq!(rolled_back.staged_body_products, 0);
+    assert!(
+        rolled_back
+            .packages
+            .iter()
+            .all(|package| package.active_body_scratch == 0 && package.staged_body_products == 0)
     );
 }
 
