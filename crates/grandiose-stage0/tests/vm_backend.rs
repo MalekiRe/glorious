@@ -5841,6 +5841,77 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
 }
 
 #[test]
+fn vm_leave_in_cfg_successor_retains_outer_handler_depth() {
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let owner = DefKey(Digest::of_bytes(b"successor-leave-owner"));
+    let effect = DefKey(Digest::of_bytes(b"successor-leave-effect"));
+    let mut mir = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"successor-leave")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            MirLocalDecl { ty: i64_ty.clone(), source: CoreId(u32::MAX) },
+            MirLocalDecl { ty: i64_ty.clone(), source: CoreId(u32::MAX) },
+        ],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::ConstI64 { dst: MirLocal(0), value: 42 },
+                    MirInstruction::InstallHandler {
+                        site: grandiose_stage0::MirHandlerSiteId::UNASSIGNED,
+                        effect,
+                        effect_arguments: vec![],
+                        operation: 0,
+                        payload_destinations: vec![],
+                        resume_type: Type::Scalar(ScalarType::I64),
+                        continuation: grandiose_stage0::MirContinuationPolicy::Consume,
+                        target: MirBlockId(3),
+                    },
+                ],
+                terminator: MirTerminator::Goto { target: MirBlockId(1), arguments: vec![] },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
+                    brand: LabelBrand { owner, label: 0 },
+                    target: MirBlockId(2),
+                    arguments: vec![MirLocal(0)],
+                    cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
+                        moved_paths: vec![], moved_places: vec![], active_loans: vec![],
+                        drop_flags: vec![], actions: vec![], protected_values: vec![],
+                    },
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(1)],
+                instructions: vec![MirInstruction::UninstallHandler],
+                terminator: MirTerminator::Return { value: MirLocal(1) },
+            },
+            MirBlock { scope: MirScopeId::ROOT, parameters: vec![], instructions: vec![], terminator: MirTerminator::Unreachable },
+        ],
+    }.with_frozen_control_tables();
+    mir.control.leave_handler_depths.insert(MirBlockId(1), 1);
+    let candidate = emit_vm(&mir).expect("successor leave must lower");
+    assert!(candidate.function.instructions.iter().any(|instruction| matches!(
+        instruction,
+        VmInstruction::Leave { handler_depth: 1, .. }
+    )));
+    assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn verifier_rejects_a_label_brand_retargeted_to_another_typed_destination() {
     let definition = DefKey(Digest::of_bytes(b"forged-vm-label-contract"));
     let owner = DefKey(Digest::of_bytes(b"forged-vm-label-contract-owner"));

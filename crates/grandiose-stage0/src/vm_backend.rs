@@ -2506,7 +2506,7 @@ fn emit_with_specialized_lifted_targets(
             .ok_or(VmArtifactError::UnsupportedControlFlow)?;
     }
     let mut instructions = Vec::with_capacity(next as usize);
-    for block in &function.blocks {
+    for (block_index, block) in function.blocks.iter().enumerate() {
         instructions.extend(
             block
                 .instructions
@@ -2547,7 +2547,12 @@ fn emit_with_specialized_lifted_targets(
                 instructions.push(VmInstruction::Leave {
                     brand_owner: brand.owner,
                     brand_label: brand.label,
-                    handler_depth: retained_handler_depth(&block.instructions),
+                    handler_depth: function
+                        .control
+                        .leave_handler_depths
+                        .get(&crate::mir::MirBlockId(block_index as u32))
+                        .copied()
+                        .unwrap_or_else(|| retained_handler_depth(&block.instructions)),
                     target,
                     arguments: arguments.clone(),
                     destinations: function.blocks[target_index(target, &starts)?]

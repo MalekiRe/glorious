@@ -189,6 +189,10 @@ pub struct MirControlTables {
     pub handlers: Vec<MirHandlerSiteData>,
     pub performs: Vec<MirPerformSiteData>,
     pub resumptions: Vec<MirResumptionSiteData>,
+    /// Explicit lexical handler prefix retained by a direct nonlocal leave.
+    /// Absent entries retain the historical empty prefix; specialized lowering
+    /// records this only when a label target stays inside an outer handler.
+    pub leave_handler_depths: BTreeMap<MirBlockId, u32>,
     /// Body-wide operation identities share the frozen table boundary with
     /// control identities.  This keeps existing raw `MirFunction` literals
     /// source-compatible while still serializing one stable, body-local arena.
@@ -226,6 +230,7 @@ impl Default for MirControlTables {
             handlers: vec![],
             performs: vec![],
             resumptions: vec![],
+            leave_handler_depths: BTreeMap::new(),
             operations: MirOperationArena::default(),
             move_paths: MirMovePathTables::default(),
             tombstoned_blocks: BTreeSet::new(),
@@ -5141,6 +5146,7 @@ impl MirFunction {
     /// wire instructions as before.
     pub fn with_frozen_control_tables(mut self) -> Self {
         let mut control = MirControlTables {
+            leave_handler_depths: self.control.leave_handler_depths.clone(),
             move_paths: self.control.move_paths.clone(),
             tombstoned_blocks: self.control.tombstoned_blocks.clone(),
             source_storage: self.control.source_storage.clone(),
@@ -18877,6 +18883,13 @@ impl Lowerer<'_> {
         } else {
             None
         };
+        let mut control = MirControlTables::default();
+        if completion_effect.is_some() {
+            // The labelled join remains inside this enclosing effect handler;
+            // record its runtime prefix explicitly instead of asking VM
+            // lowering to reconstruct lexical handler state from CFG shape.
+            control.leave_handler_depths.insert(MirBlockId(0), 1);
+        }
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
@@ -18884,7 +18897,7 @@ impl Lowerer<'_> {
             parameters,
             locals: self.locals.to_entries(),
             result: self.body.expression(root).ty.clone(),
-            control: MirControlTables::default(),
+            control,
             entry: MirBlockId(0),
             blocks: {
                 let mut blocks = vec![
