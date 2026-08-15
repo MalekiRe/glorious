@@ -857,8 +857,23 @@ impl Analyzer<'_> {
                 computation,
                 clauses,
             } => {
-                let computation = self.expression(computation, environment);
+                let computation_id = computation;
+                let computation = self.expression(computation_id, environment);
                 let incoming = environment.clone();
+                // A completion pattern can deconstruct an already-owned
+                // aggregate.  Its binders must retain the canonical callable
+                // contract of the selected field rather than manufacture a
+                // second, independent owner.  Otherwise
+                //
+                //   handle pair { Pair { function, .. } =>
+                //       function(..) + pair.function(..) }
+                //
+                // appears to invoke two distinct exact callables even though
+                // both spellings name the same affine field.  Fresh
+                // computation results still receive fresh contracts below;
+                // only a structurally known source carries identities into
+                // its pattern binders.
+                let completion_source = self.binding_for_value(computation_id, &incoming);
                 let computation_escapes = self.take_escapes();
                 let mut arms = None::<Summary>;
                 let mut arm_escapes = None::<EscapeSummary>;
@@ -869,7 +884,9 @@ impl Analyzer<'_> {
                     // is owned only after this completion arm is selected;
                     // checking it after the arm preserves exact lower bounds
                     // without contaminating sibling branch hulls.
-                    let completion_contracts = self.bind_conditional_bindings(
+                    let completion_contracts = self.bind_completion_bindings(
+                        &clause.pattern,
+                        &completion_source,
                         &clause.bindings,
                         &mut arm_environment,
                         clause.span,
@@ -1203,6 +1220,95 @@ impl Analyzer<'_> {
             environment.bindings.insert(name.clone(), binding);
         }
         contracts
+    }
+
+    /// Install normal-completion pattern binders.  Unlike effect payload
+    /// binders, a completion pattern may select a field of an aggregate that
+    /// remains lexically named outside the pattern.  Preserve that field's
+    /// contract key so all aliases contribute to the one owner obligation.
+    ///
+    /// If the computation is an opaque or newly produced value there is no
+    /// pre-existing binding to preserve, so the fallback intentionally keeps
+    /// the conditional fresh-owner behavior used by the former implementation.
+    fn bind_completion_bindings(
+        &mut self,
+        pattern: &CorePattern,
+        source: &Binding,
+        bindings: &[(String, Type)],
+        environment: &mut Environment,
+        span: Span,
+    ) -> Vec<ContractKey> {
+        let mut projected = BTreeMap::new();
+        Self::pattern_bindings(pattern, source, &mut projected);
+        let mut contracts = vec![];
+        for (name, ty) in bindings {
+            let binding = projected
+                .remove(name)
+                .unwrap_or_else(|| self.binding_for_type(name, ty, span));
+            Self::binding_contract_keys(&binding, &mut contracts);
+            environment.bindings.insert(name.clone(), binding);
+        }
+        contracts
+    }
+
+    /// Recover each binder's ownership identity from a structural Core
+    /// pattern.  A missing/opaque field deliberately yields no entry: its
+    /// caller allocates the fresh conditional owner appropriate for a value
+    /// received from a callable/effect boundary.
+    fn pattern_bindings(
+        pattern: &CorePattern,
+        source: &Binding,
+        bindings: &mut BTreeMap<String, Binding>,
+    ) {
+        match pattern {
+            CorePattern::Bind { name } => {
+                // `Other` carries no ownership identity.  Do not install it
+                // as though it were an alias: the caller must allocate the
+                // fresh conditional contract dictated by the binder type
+                // (for example, a callable field of a newly returned
+                // nominal value).
+                if !matches!(source, Binding::Other) {
+                    bindings.insert(name.clone(), source.clone());
+                }
+            }
+            CorePattern::Tuple(values) => {
+                for (index, pattern) in values.iter().enumerate() {
+                    let field = match source {
+                        Binding::Aggregate(fields) => fields
+                            .get(&(index as u32))
+                            .cloned()
+                            .unwrap_or(Binding::Other),
+                        _ => Binding::Other,
+                    };
+                    Self::pattern_bindings(pattern, &field, bindings);
+                }
+            }
+            CorePattern::Array { elements, .. } => {
+                for (index, pattern) in elements.iter().enumerate() {
+                    let field = match source {
+                        Binding::Aggregate(fields) => fields
+                            .get(&(index as u32))
+                            .cloned()
+                            .unwrap_or(Binding::Other),
+                        _ => Binding::Other,
+                    };
+                    Self::pattern_bindings(pattern, &field, bindings);
+                }
+            }
+            CorePattern::Record { fields, .. } | CorePattern::Enum { fields, .. } => {
+                for field_pattern in fields {
+                    let field = match source {
+                        Binding::Aggregate(fields) => fields
+                            .get(&field_pattern.index)
+                            .cloned()
+                            .unwrap_or(Binding::Other),
+                        _ => Binding::Other,
+                    };
+                    Self::pattern_bindings(&field_pattern.pattern, &field, bindings);
+                }
+            }
+            CorePattern::Any | CorePattern::Literal(_) | CorePattern::Error => {}
+        }
     }
 
     fn binding_contract_keys(binding: &Binding, contracts: &mut Vec<ContractKey>) {

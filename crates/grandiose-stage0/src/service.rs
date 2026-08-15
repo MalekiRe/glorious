@@ -1690,6 +1690,25 @@ impl StageZeroCompiler {
                 })
                 .collect::<BTreeSet<_>>();
             for (index, expression) in body.expressions.iter().enumerate() {
+                // An implementation head can introduce binders which do not
+                // occur in the trait relation (`impl<T, U> Trait<T> for
+                // Wrapper<U>`).  The concrete receiver is therefore part of
+                // a trait-method executable identity, not merely an ABI
+                // operand discarded after type checking.
+                let trait_receiver = match &expression.kind {
+                    crate::core::CoreKind::Call {
+                        callee, arguments, ..
+                    } if matches!(
+                        body.expression(*callee).kind,
+                        crate::core::CoreKind::TraitMethod { .. }
+                    ) =>
+                    {
+                        arguments.first().map(|receiver| {
+                            specialize_type(&body.expression(*receiver).ty, caller.arguments())
+                        })
+                    }
+                    _ => None,
+                };
                 let function = match &expression.kind {
                     crate::core::CoreKind::Function { .. }
                     | crate::core::CoreKind::TraitMethod { .. }
@@ -1768,6 +1787,7 @@ impl StageZeroCompiler {
                             *method,
                             &trait_arguments,
                             &method_arguments,
+                            trait_receiver.as_ref(),
                         )
                     }
                     _ => continue,
@@ -2086,6 +2106,13 @@ fn materialize_concrete_instances(
     for function in functions.values_mut() {
         for block in &mut function.blocks {
             for instruction in &mut block.instructions {
+                let receiver = match &*instruction {
+                    crate::MirInstruction::Call { arguments, .. } => arguments
+                        .first()
+                        .and_then(|local| function.locals.get(local.0 as usize))
+                        .map(|local| local.ty.clone()),
+                    _ => None,
+                };
                 let (callee, generic_arguments, trait_instance) = match instruction {
                     crate::MirInstruction::Call {
                         callee,
@@ -2102,17 +2129,23 @@ fn materialize_concrete_instances(
                     _ => continue,
                 };
                 if trait_instance.is_some() {
-                    let key = {
-                        let trait_instance = trait_instance
+                    let (evidence, trait_arguments, method_arguments) = {
+                        let instance = trait_instance
                             .as_ref()
                             .expect("trait method identity was checked");
-                        trait_method_instance_key(
-                            trait_instance.evidence,
-                            *callee,
-                            &trait_instance.trait_arguments,
-                            &trait_instance.method_arguments,
+                        (
+                            instance.evidence,
+                            instance.trait_arguments.clone(),
+                            instance.method_arguments.clone(),
                         )
                     };
+                    let key = trait_method_instance_key(
+                        evidence,
+                        *callee,
+                        &trait_arguments,
+                        &method_arguments,
+                        receiver.as_ref(),
+                    );
                     let key = match key {
                         Ok(key) => key,
                         Err(
@@ -2214,39 +2247,59 @@ fn materialization_body_arguments(
             if implementation_method_key(*implementation_definition, name) != key.callable {
                 continue;
             }
-            let trait_generic_kinds = match signatures
-                .definitions
-                .get(&implementation.relation.definition)
-            {
-                Some(ElaboratedHeader::Trait(trait_header)) => &trait_header.generic_kinds,
-                _ => {
-                    return Err("selected implementation method has no trait declaration".into());
-                }
-            };
-            // A body binder can only be reconstructed from a trait-instance
-            // key when the implementation binders correspond one-for-one to
-            // the trait relation binders.  More general impl-head inversion
-            // needs a first-class selected substitution; fail closed until it
-            // exists instead of assigning a wrong register type.
-            if !implementation.generic_kinds.is_empty()
-                && implementation.generic_kinds != *trait_generic_kinds
-            {
-                return Err(
-                    "selected generic implementation method lacks a reconstructible body substitution"
-                        .into(),
-                );
-            }
             let relation_arguments = implementation.relation.arguments.len();
             let method_arguments = method.generic_kinds.len();
             const EVIDENCE_ARGUMENTS: usize = 8;
-            let expected = relation_arguments
+            let without_receiver = relation_arguments
                 .checked_add(method_arguments)
                 .and_then(|count| count.checked_add(EVIDENCE_ARGUMENTS))
                 .ok_or_else(|| "trait method instance argument count overflowed".to_owned())?;
-            if key.arguments().len() != expected {
+            let with_receiver = without_receiver
+                .checked_add(1)
+                .ok_or_else(|| "trait method instance argument count overflowed".to_owned())?;
+            let receiver = if key.arguments().len() == with_receiver {
+                match &key.arguments()[relation_arguments + method_arguments] {
+                    GenericArgument::Type(receiver) => Some(receiver),
+                    _ => return Err("trait method executable key has a non-type receiver".into()),
+                }
+            } else if key.arguments().len() == without_receiver {
+                None
+            } else {
                 return Err("selected trait method instance has an invalid executable key".into());
+            };
+            let relation_values = &key.arguments()[..relation_arguments];
+            let mut bindings = BTreeMap::new();
+            for (template, value) in implementation
+                .relation
+                .arguments
+                .iter()
+                .zip(relation_values)
+            {
+                bind_impl_head_argument(template, value, &mut bindings)?;
             }
-            let mut arguments = key.arguments()[..implementation.generic_kinds.len()].to_vec();
+            if let Some(receiver) = receiver {
+                bind_impl_head_type(&implementation.self_ty, receiver, &mut bindings)?;
+            } else if !implementation.generic_kinds.is_empty() {
+                return Err(
+                    "selected generic implementation method needs a concrete Self to reconstruct its body substitution"
+                        .into(),
+                );
+            }
+            let mut arguments =
+                Vec::with_capacity(implementation.generic_kinds.len() + method_arguments);
+            for (index, kind) in implementation.generic_kinds.iter().enumerate() {
+                let argument = bindings.get(&(index as u32)).cloned().ok_or_else(|| {
+                    format!(
+                        "selected trait implementation leaves generic binder {index} unconstrained"
+                    )
+                })?;
+                if instance_argument_kind(&argument) != *kind {
+                    return Err(format!(
+                        "selected trait implementation binds generic {index} with the wrong kind"
+                    ));
+                }
+                arguments.push(argument);
+            }
             arguments.extend_from_slice(
                 &key.arguments()[relation_arguments..relation_arguments + method_arguments],
             );
@@ -2254,6 +2307,120 @@ fn materialization_body_arguments(
         }
     }
     Ok(key.arguments().to_vec())
+}
+
+/// Invert the selected trait head into an implementation binder substitution.
+/// This operates only on the frozen, solver-selected head and therefore never
+/// re-runs inference while materializing an executable body.
+fn bind_impl_head_argument(
+    template: &GenericArgument,
+    value: &GenericArgument,
+    bindings: &mut BTreeMap<u32, GenericArgument>,
+) -> Result<(), String> {
+    match (template, value) {
+        (GenericArgument::Type(template), GenericArgument::Type(value)) => {
+            bind_impl_head_type(template, value, bindings)
+        }
+        (
+            GenericArgument::Lifetime(crate::Lifetime::Generic(index)),
+            GenericArgument::Lifetime(value),
+        ) => bind_impl_head_slot(*index, GenericArgument::Lifetime(*value), bindings),
+        (GenericArgument::EffectRow(template), GenericArgument::EffectRow(value))
+            if template.effects.is_empty()
+                && template.projections.is_empty()
+                && matches!(template.tail, Some(crate::EffectTail::Generic(_))) =>
+        {
+            let Some(crate::EffectTail::Generic(index)) = template.tail else {
+                unreachable!("effect-row guard established a generic tail");
+            };
+            bind_impl_head_slot(index, GenericArgument::EffectRow(value.clone()), bindings)
+        }
+        (GenericArgument::ConstGeneric { index, kind }, value)
+            if instance_argument_kind(value) == crate::GenericKind::Const(*kind) =>
+        {
+            bind_impl_head_slot(*index, value.clone(), bindings)
+        }
+        _ if template == value => Ok(()),
+        _ => Err("selected trait implementation head does not match its executable key".into()),
+    }
+}
+
+fn bind_impl_head_type(
+    template: &Type,
+    value: &Type,
+    bindings: &mut BTreeMap<u32, GenericArgument>,
+) -> Result<(), String> {
+    match (template, value) {
+        (Type::Generic(index), value) => {
+            bind_impl_head_slot(*index, GenericArgument::Type(value.clone()), bindings)
+        }
+        (
+            Type::Nominal {
+                definition: template_definition,
+                arguments: template_arguments,
+            },
+            Type::Nominal {
+                definition: value_definition,
+                arguments: value_arguments,
+            },
+        ) if template_definition == value_definition
+            && template_arguments.len() == value_arguments.len() =>
+        {
+            for (template, value) in template_arguments.iter().zip(value_arguments) {
+                bind_impl_head_argument(template, value, bindings)?;
+            }
+            Ok(())
+        }
+        (Type::Tuple(template), Type::Tuple(value)) if template.len() == value.len() => {
+            for (template, value) in template.iter().zip(value) {
+                bind_impl_head_type(template, value, bindings)?;
+            }
+            Ok(())
+        }
+        (Type::Array(template), Type::Array(value)) => {
+            bind_impl_head_type(template, value, bindings)
+        }
+        (
+            Type::Reference {
+                mutability: template_mutability,
+                lifetime: template_lifetime,
+                referent: template_referent,
+            },
+            Type::Reference {
+                mutability: value_mutability,
+                lifetime: value_lifetime,
+                referent: value_referent,
+            },
+        ) if template_mutability == value_mutability => {
+            bind_impl_head_argument(
+                &GenericArgument::Lifetime(*template_lifetime),
+                &GenericArgument::Lifetime(*value_lifetime),
+                bindings,
+            )?;
+            bind_impl_head_type(template_referent, value_referent, bindings)
+        }
+        _ if template == value => Ok(()),
+        _ => {
+            Err("selected trait implementation Self type does not match its executable key".into())
+        }
+    }
+}
+
+fn bind_impl_head_slot(
+    index: u32,
+    value: GenericArgument,
+    bindings: &mut BTreeMap<u32, GenericArgument>,
+) -> Result<(), String> {
+    match bindings.get(&index) {
+        Some(previous) if previous != &value => Err(format!(
+            "selected trait implementation assigns incompatible values to generic binder {index}"
+        )),
+        Some(_) => Ok(()),
+        None => {
+            bindings.insert(index, value);
+            Ok(())
+        }
+    }
 }
 
 /// Rewrite scalar operations whose source templates deliberately retain a
@@ -2343,9 +2510,13 @@ fn trait_method_instance_key(
     method: DefKey,
     trait_arguments: &[GenericArgument],
     method_arguments: &[GenericArgument],
+    receiver: Option<&Type>,
 ) -> Result<InstanceKey, crate::InstanceKeyError> {
     let mut arguments = trait_arguments.to_vec();
     arguments.extend_from_slice(method_arguments);
+    if let Some(receiver) = receiver {
+        arguments.push(GenericArgument::Type(receiver.clone()));
+    }
     let mut kinds = arguments
         .iter()
         .map(instance_argument_kind)

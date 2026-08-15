@@ -2954,21 +2954,22 @@ fn validate_generic_arguments(
     Ok(())
 }
 
-/// Executable nominal layouts retain type and structural-const identity. A
-/// region or effect-row application remains meaningful in an interface, but
-/// this VM's record/enum signatures cannot encode it as a runtime layout slot.
-/// Keep that boundary shared by every nominal constructor and pattern query.
+/// Executable nominal layouts retain type and structural-const identity.
+/// Lifetimes are erased by the VM value representation, but they remain
+/// meaningful while this interface query substitutes fields: `struct
+/// Borrowed<'a> { value: &'a T }` must be constructible and projectable before
+/// that final erasure. Effect-row applications still have no VM nominal-layout
+/// representation, so keep rejecting those at the shared boundary.
 fn validate_runtime_nominal_arguments(
     kinds: &[GenericKind],
     arguments: &[GenericArgument],
 ) -> Result<(), InstantiationError> {
     validate_generic_arguments(kinds, arguments)?;
-    if let Some((slot, argument)) = arguments.iter().enumerate().find(|(_, argument)| {
-        matches!(
-            argument,
-            GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_)
-        )
-    }) {
+    if let Some((slot, argument)) = arguments
+        .iter()
+        .enumerate()
+        .find(|(_, argument)| matches!(argument, GenericArgument::EffectRow(_)))
+    {
         return Err(InstantiationError::RequiresType {
             slot,
             argument: Box::new(argument.clone()),

@@ -116,6 +116,51 @@ pub struct CaptureEnvironment {
     pub runs_in: RunsInEvidence,
     pub sealed: bool,
 }
+
+/// The three ordinary source ownership forms admitted as the `Access`
+/// argument of compiler-generated `RunsIn` evidence.  This is deliberately
+/// an elaborator-local classification, not a second receiver-mode type in
+/// Core: the retained evidence is always the ordinary `E`, `&E`, or `&mut E`
+/// source type.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RunsInAccess {
+    Owned,
+    Shared,
+    Unique,
+}
+
+/// An opaque, deterministic nominal identity for one sealed environment
+/// state.  `after` distinguishes an owned call's normal successor ledger
+/// from its incoming ledger without exposing either as a source declaration.
+fn generated_environment_type(brand: EnvironmentBrand, after: bool) -> Type {
+    let callable = brand.callable.0.to_le_bytes();
+    let phase = if after {
+        b"after".as_slice()
+    } else {
+        b"before".as_slice()
+    };
+    Type::Nominal {
+        definition: DefKey(Digest::of_parts([
+            b"grandiose-stage0-generated-environment-type-v1".as_slice(),
+            brand.owner.0.as_bytes().as_slice(),
+            callable.as_slice(),
+            phase,
+        ])),
+        arguments: vec![],
+    }
+}
+
+/// Decode the two type-valued arguments of an intrinsic RunsIn relation.
+/// Header elaboration enforces the outer shape; retaining this check here
+/// keeps forged or partially recovered signatures from gaining evidence.
+fn intrinsic_runs_in_arguments(relation: &crate::ElaboratedTraitReference) -> Option<(Type, Type)> {
+    let [GenericArgument::Type(access), GenericArgument::Type(inputs)] =
+        relation.arguments.as_slice()
+    else {
+        return None;
+    };
+    Some((access.clone(), inputs.clone()))
+}
 /// Positive evidence produced by `is`. Bindings remain facts rather than
 /// ordinary locals until a branching consumer opens their lexical scope; this
 /// prevents a test expression from silently leaking a pattern binder.
@@ -1739,7 +1784,11 @@ fn perform_payload_contract_error(body: &TypedBody, kind: &CoreKind) -> Option<S
             // Core graph validator above.
             continue;
         };
-        if actual != payload_type {
+        // A transfer in a strict payload position abandons evaluation before
+        // the operation is performed. It therefore has no runtime payload to
+        // validate against this selected ABI; `Never` is the ordinary typed
+        // representation of that terminal edge, not a mismatched argument.
+        if actual != payload_type && !matches!(actual, Type::Never) {
             return Some(format!(
                 "effect operation payload {index} does not match its frozen selected parameter contract"
             ));
@@ -2901,6 +2950,7 @@ impl TypedBody {
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
             resumption_use_trackers: vec![],
+            generated_environment_types: std::collections::BTreeSet::new(),
         };
         let expected_result = signatures
             .definitions
@@ -3161,6 +3211,7 @@ impl TypedBody {
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
             resumption_use_trackers: vec![],
+            generated_environment_types: std::collections::BTreeSet::new(),
         };
         elaborator.declared_effects =
             elaborator.normalize_concrete_effect_row(elaborator.declared_effects.clone());
@@ -3251,6 +3302,7 @@ impl TypedBody {
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
             resumption_use_trackers: vec![],
+            generated_environment_types: std::collections::BTreeSet::new(),
         };
         let expected = match signatures.definitions.get(&definition.key) {
             Some(ElaboratedHeader::Constant(Some(ty))) => Some(ty.clone()),
@@ -3347,6 +3399,7 @@ impl TypedBody {
             resumption_bindings: std::collections::BTreeMap::new(),
             active_labels: vec![],
             resumption_use_trackers: vec![],
+            generated_environment_types: std::collections::BTreeSet::new(),
         };
         let root = elaborator.expression_expected(body.root, None);
         let initializer_type = match elaborator
@@ -3512,6 +3565,11 @@ struct Elaborator<'a> {
     /// resumed from a nested handler body, while an identically spelled inner
     /// continuation remains a distinct branded value.
     resumption_use_trackers: Vec<ResumptionUseTracker>,
+    /// Opaque nominal identities minted for this body's sealed callable
+    /// environments and their normal post-states.  They are intentionally
+    /// tracked separately from source nominal definitions: a source path can
+    /// never resolve to one of these identities.
+    generated_environment_types: std::collections::BTreeSet<DefKey>,
 }
 impl Elaborator<'_> {
     fn pattern_generic_scope(&self) -> PatternGenericScope {
@@ -4427,8 +4485,6 @@ impl Elaborator<'_> {
         }
         let parameters = vec![];
         let captures = self.closure_captures(body, &parameters);
-        self.check_resumption_captures(&captures, span);
-        self.check_refinement_captures(&captures, span);
         self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
@@ -4541,8 +4597,6 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
         let captures = self.closure_captures(body, &parameters);
-        self.check_resumption_captures(&captures, span);
-        self.check_refinement_captures(&captures, span);
         self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
@@ -5663,45 +5717,177 @@ impl Elaborator<'_> {
             .map(|(name, (mode, ty))| ClosureCapture { name, mode, ty })
             .collect()
     }
-    /// Continuations are frame-bound identities. Capturing one by a nested
-    /// closure would let it survive the handler frame that owns it, which the
-    /// current continuation lowering deliberately has no representation for.
-    /// Direct invocation remains valid; this is only the closure-capture
-    /// product boundary.
-    fn check_resumption_captures(&mut self, captures: &[ClosureCapture], span: Span) {
-        if let Some(capture) = captures
+    /// A continuation snapshot is valid only while its handler frame is
+    /// active.  A closure may capture it when the complete enclosing clause
+    /// proves that the closure is immediately invoked; returning, storing, or
+    /// passing that closure would let the snapshot outlive the frame and is
+    /// therefore rejected.  This mirrors refinement-capture checking but
+    /// retains the stronger handler-frame diagnostic and provenance.
+    fn check_resumption_capture_escapes(
+        &mut self,
+        branch: CoreId,
+        resumptions: &std::collections::BTreeSet<String>,
+    ) {
+        if resumptions.is_empty() {
+            return;
+        }
+        // Capture names are not continuation identities: a nested operation
+        // payload may deliberately shadow an outer `with k`.  Freeze the
+        // currently visible resumption type while the arm remains active so
+        // the later structural scan only diagnoses the actual snapshot, not
+        // an ordinary same-spelled payload local.
+        let resumption_types = resumptions
             .iter()
-            .find(|capture| self.active_resumption(&capture.name).is_some())
-        {
+            .filter_map(|name| {
+                self.active_resumption(name)
+                    .and_then(|_| self.locals.lookup(name).cloned())
+                    .map(|ty| (name.clone(), ty))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut closures = Vec::new();
+        self.collect_refinement_capturing_closures(branch, &resumption_types, &mut closures);
+        for (closure, resumption) in closures {
+            if self.refinement_closure_is_immediately_invoked(branch, closure) {
+                continue;
+            }
             self.error(
-                span,
+                self.expressions[closure.0 as usize].span,
                 "G4174",
                 &format!(
-                    "nested closure cannot capture handler resumption `{}` before continuations have an escaping representation",
-                    capture.name
+                    "nested closure cannot let handler resumption `{resumption}` escape its active frame",
                 ),
             );
             self.recovered = true;
         }
     }
-    /// A refinement binder is a branch-local proof-backed projection. A
-    /// closure could be invoked after the selected branch (or its protecting
-    /// borrow) ends, so it must not retain that projection as an ordinary
-    /// capture until refinement packs have an escaping representation.
-    fn check_refinement_captures(&mut self, captures: &[ClosureCapture], span: Span) {
-        if let Some(capture) = captures
+    /// A refinement binder is a branch-local proof-backed projection.  A
+    /// closure may use such a projection only while the branch proves the
+    /// refinement.  Direct invocation is therefore sound, including the
+    /// common `let callback = { ... }; callback()` spelling, whereas
+    /// returning, storing, passing, or otherwise retaining the closure is
+    /// an escape.  We check this after elaborating the complete branch so the
+    /// decision is based on frozen Core control structure rather than on the
+    /// order in which an initializer happened to be elaborated.
+    fn check_refinement_capture_escapes(
+        &mut self,
+        branch: CoreId,
+        refinement_bindings: &std::collections::BTreeSet<String>,
+    ) {
+        if refinement_bindings.is_empty() {
+            return;
+        }
+        let refinement_types = refinement_bindings
             .iter()
-            .find(|capture| self.active_refinement_bindings.contains(&capture.name))
-        {
+            .filter_map(|name| {
+                self.locals
+                    .lookup(name)
+                    .cloned()
+                    .map(|ty| (name.clone(), ty))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let mut closures = Vec::new();
+        self.collect_refinement_capturing_closures(branch, &refinement_types, &mut closures);
+        for (closure, binding) in closures {
+            if self.refinement_closure_is_immediately_invoked(branch, closure) {
+                continue;
+            }
+            let span = self.expressions[closure.0 as usize].span;
             self.error(
                 span,
                 "G4171",
                 &format!(
-                    "nested closure cannot capture refinement binder `{}` outside its proven branch",
-                    capture.name
+                    "nested closure cannot capture refinement binder `{binding}` outside its proven branch"
                 ),
             );
             self.recovered = true;
+        }
+    }
+
+    fn collect_refinement_capturing_closures(
+        &self,
+        expression: CoreId,
+        refinement_bindings: &std::collections::BTreeMap<String, Type>,
+        closures: &mut Vec<(CoreId, String)>,
+    ) {
+        let node = &self.expressions[expression.0 as usize];
+        if let CoreKind::Closure {
+            environment, body, ..
+        } = &node.kind
+        {
+            if let Some(binding) = environment.captures.iter().find(|capture| {
+                refinement_bindings
+                    .get(&capture.name)
+                    .is_some_and(|ty| ty == &capture.ty)
+            }) {
+                closures.push((expression, binding.name.clone()));
+            }
+            // A closure body is checked in the lexical branch in which that
+            // closure is created.  Inspect nested closures as well: a child
+            // that retains a refinement capture is independently required to
+            // be directly invoked before its enclosing scope ends.
+            self.collect_refinement_capturing_closures(*body, refinement_bindings, closures);
+            return;
+        }
+        for child in core_children(&node.kind) {
+            self.collect_refinement_capturing_closures(child, refinement_bindings, closures);
+        }
+    }
+
+    fn refinement_closure_is_immediately_invoked(&self, branch: CoreId, closure: CoreId) -> bool {
+        let node = &self.expressions[branch.0 as usize].kind;
+        match node {
+            CoreKind::Call { callee, .. } if *callee == closure => true,
+            CoreKind::Block(values) => {
+                values.windows(2).enumerate().any(|(index, window)| {
+                    let [CoreId(let_index), CoreId(call_index)] = *window else {
+                        return false;
+                    };
+                    let CoreKind::Let { name, value } = &self.expressions[let_index as usize].kind
+                    else {
+                        return false;
+                    };
+                    let CoreKind::Call {
+                        callee, arguments, ..
+                    } = &self.expressions[call_index as usize].kind
+                    else {
+                        return false;
+                    };
+                    if !matches!(
+                        &self.expressions[callee.0 as usize].kind,
+                        CoreKind::Local(callee_name) if *value == closure && callee_name == name
+                    ) {
+                        return false;
+                    }
+                    // The immediate call is the only permitted use of its
+                    // temporary local.  In particular, a closure cannot be
+                    // handed to another abstraction and then called locally
+                    // as a way to launder its branch dependency.
+                    if arguments
+                        .iter()
+                        .any(|argument| self.core_contains_local(*argument, name))
+                    {
+                        return false;
+                    }
+                    !values[index + 2..]
+                        .iter()
+                        .any(|following| self.core_contains_local(*following, name))
+                }) || values
+                    .iter()
+                    .any(|value| self.refinement_closure_is_immediately_invoked(*value, closure))
+            }
+            CoreKind::Closure { .. } => false,
+            _ => core_children(node)
+                .into_iter()
+                .any(|child| self.refinement_closure_is_immediately_invoked(child, closure)),
+        }
+    }
+
+    fn core_contains_local(&self, expression: CoreId, name: &str) -> bool {
+        match &self.expressions[expression.0 as usize].kind {
+            CoreKind::Local(candidate) => candidate == name,
+            kind => core_children(kind)
+                .into_iter()
+                .any(|child| self.core_contains_local(child, name)),
         }
     }
     /// A closure executes after its surrounding label scope may have exited.
@@ -7014,6 +7200,48 @@ impl Elaborator<'_> {
                 })
                 .collect(),
         )
+    }
+    /// A replayed continuation may use an enclosing label in its clause
+    /// *after* all resumed activations have returned. What is unsound is a
+    /// transfer in the residual region itself: replaying that continuation
+    /// would duplicate the lexical Leave edge. Distinguish the two by
+    /// locating transfers after the selected performance, just as the unique
+    /// borrow check locates duplicated loan uses.
+    fn replay_residual_captures_label_transfer(
+        &self,
+        root: CoreId,
+        effect: &EffectInstance,
+        operation: u32,
+    ) -> bool {
+        let mut pending = vec![root];
+        let mut visited = std::collections::BTreeSet::new();
+        let mut performances = vec![];
+        let mut reachable = vec![];
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let expression = &self.expressions[id.0 as usize];
+            if matches!(
+                &expression.kind,
+                CoreKind::Perform {
+                    effect: performed_effect,
+                    operation: performed_operation,
+                    ..
+                } if performed_effect == effect && *performed_operation == operation
+            ) {
+                performances.push(expression.span);
+            }
+            pending.extend(core_children(&expression.kind));
+            reachable.push(id);
+        }
+        reachable.into_iter().any(|id| {
+            let expression = &self.expressions[id.0 as usize];
+            matches!(expression.kind, CoreKind::Transfer { .. })
+                && performances
+                    .iter()
+                    .any(|performance| expression.span.start >= performance.end)
+        })
     }
 
     fn record(
@@ -8679,6 +8907,12 @@ impl Elaborator<'_> {
                 | CoreHandlerResumption::Terminal => Some(result.clone()),
             };
             let body = self.expression_expected(clause.source.body, body_expected);
+            if let Some(name) = active_resumption.as_ref() {
+                self.check_resumption_capture_escapes(
+                    body,
+                    &std::collections::BTreeSet::from([name.clone()]),
+                );
+            }
             self.handled_effects = clause_effects;
             self.handled_operations = clause_operations;
             let direct_uses = if active_identity.is_some() {
@@ -8699,7 +8933,11 @@ impl Elaborator<'_> {
             // loan or a live lexical leave target: either capability would be
             // duplicated by the second activation.
             if direct_uses >= 2 {
-                if !self.active_labels.is_empty() {
+                if self.replay_residual_captures_label_transfer(
+                    computation,
+                    &clause.effect,
+                    clause.operation_index,
+                ) {
                     self.error(
                         clause.source.span,
                         "G4188",
@@ -8969,6 +9207,7 @@ impl Elaborator<'_> {
                     .push((refinement.subject, refinement.pattern.clone()));
             }
             let body = self.expression_expected(clause.body, Some(result.clone()));
+            self.check_refinement_capture_escapes(body, &self.active_refinement_bindings.clone());
             self.active_refinement_bindings = previous_refinement_bindings;
             self.active_refinement_patterns = previous_refinement_patterns;
             self.locals.leave();
@@ -9970,6 +10209,13 @@ impl Elaborator<'_> {
         arguments: Option<&[CoreId]>,
         span: Span,
     ) {
+        // RunsIn is not an ordinary globally-selectable trait.  Its concrete
+        // environment type is minted by the closure elaborator, so bind that
+        // evidence before attempting to zonk the rest of this call contract.
+        // In particular, this lets an `E` which appears only in a RunsIn
+        // relation become the unnameable environment of the actual closure.
+        self.check_intrinsic_runs_in_bindings(&signature, arguments, span);
+        self.check_intrinsic_environment_bounds(signature.where_bounds.clone(), span);
         self.check_where_bounds(signature.where_bounds.clone(), span);
         self.check_intrinsic_callable_bindings(
             signature.where_bounds.clone(),
@@ -9977,7 +10223,6 @@ impl Elaborator<'_> {
             signature.where_associated_effect_bindings.clone(),
             span,
         );
-        self.check_intrinsic_runs_in_bindings(&signature, arguments, span);
         self.check_nonintrinsic_associated_bindings(
             signature.where_associated_type_bindings,
             signature.where_associated_effect_bindings,
@@ -10193,7 +10438,9 @@ impl Elaborator<'_> {
             // closure environment, rather than a globally selectable trait
             // implementation. Direct-call checking below validates that
             // evidence against the actual callable argument.
-            if crate::is_intrinsic_runs_in_trait(&relation) {
+            if crate::is_intrinsic_runs_in_trait(&relation)
+                || crate::is_intrinsic_environment_trait(&relation)
+            {
                 continue;
             }
             let subject = match self.inference.zonk(subject) {
@@ -10400,26 +10647,23 @@ impl Elaborator<'_> {
             let Some(argument) = argument else {
                 continue;
             };
-            let CoreKind::Closure { environment, .. } = &self.expressions[argument.0 as usize].kind
-            else {
-                self.error(
-                    span,
-                    "G4188",
-                    "intrinsic `RunsIn` requires compiler-generated callable environment evidence",
-                );
-                self.recovered = true;
-                continue;
-            };
-            let empty_environment = match relation.arguments.as_slice() {
-                [
-                    GenericArgument::Type(Type::Unit),
-                    GenericArgument::Type(Type::Unit),
-                ] => true,
-                [
-                    GenericArgument::Type(Type::Unit),
-                    GenericArgument::Type(Type::Tuple(values)),
-                ] => values.is_empty(),
-                _ => false,
+            let environment = match &self.expressions[argument.0 as usize].kind {
+                CoreKind::Closure { environment, .. } => Some(environment.clone()),
+                // A named function item is a compiler-created callable with
+                // the canonical empty physical environment. It therefore
+                // carries the same unit RunsIn relation as a noncapturing
+                // closure, even though its nominal callable identity lives in
+                // the frozen declaration table rather than a Core closure.
+                CoreKind::Function { .. } => None,
+                _ => {
+                    self.error(
+                        span,
+                        "G4188",
+                        "intrinsic `RunsIn` requires compiler-generated callable environment evidence",
+                    );
+                    self.recovered = true;
+                    continue;
+                }
             };
             let callable = self.expressions[argument.0 as usize].ty.clone();
             let Ok(Type::Callable {
@@ -10434,43 +10678,109 @@ impl Elaborator<'_> {
                 self.recovered = true;
                 continue;
             };
-            let inputs_match = matches!(
-                relation.arguments.get(1),
-                Some(GenericArgument::Type(Type::Unit)) if parameters.is_empty()
-            ) || matches!(
-                relation.arguments.get(1),
-                Some(GenericArgument::Type(Type::Tuple(inputs))) if *inputs == parameters
-            );
-            let output_matches = signature
+            let Some((access, inputs)) = intrinsic_runs_in_arguments(relation) else {
+                self.error(
+                    span,
+                    "G4188",
+                    "intrinsic `RunsIn` requires an environment access and tuple input argument",
+                );
+                self.recovered = true;
+                continue;
+            };
+            // The unit type is the sole public spelling for the canonical
+            // empty environment. Every nonempty layout receives an opaque
+            // nominal input and post-state identity.
+            let is_empty_environment = environment
+                .as_ref()
+                .is_none_or(|value| value.captures.is_empty());
+            let environment_type = if is_empty_environment {
+                Type::Unit
+            } else {
+                generated_environment_type(
+                    environment
+                        .as_ref()
+                        .expect("nonempty closure must retain its environment")
+                        .brand,
+                    false,
+                )
+            };
+            let after_type = if is_empty_environment {
+                Type::Unit
+            } else {
+                generated_environment_type(
+                    environment
+                        .as_ref()
+                        .expect("nonempty closure must retain its environment")
+                        .brand,
+                    true,
+                )
+            };
+            self.remember_generated_environment_type(&environment_type);
+            self.remember_generated_environment_type(&after_type);
+            let access = self.match_runs_in_access(access, &environment_type, span);
+            let inputs_match = self.match_runs_in_inputs(inputs, &parameters);
+            let output_bindings = signature
                 .where_associated_type_bindings
                 .iter()
                 .filter(|binding| {
-                    binding.subject == subject
-                        && binding.relation == *relation
+                    binding.relation == *relation
                         && binding.name == "Output"
                         && binding.item_arguments.is_empty()
                 })
-                .all(|binding| {
-                    self.inference
-                        .zonk(binding.value.clone())
-                        .is_ok_and(|output| output == *result)
-                });
-            let after_matches = signature
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut output_matches = true;
+            for binding in output_bindings {
+                if self
+                    .inference
+                    .zonk(binding.subject)
+                    .is_ok_and(|value| value == subject)
+                {
+                    output_matches &= self.inference.unify(binding.value, *result.clone()).is_ok();
+                }
+            }
+            let expected_after = match access {
+                Some(RunsInAccess::Owned) => after_type,
+                Some(RunsInAccess::Shared | RunsInAccess::Unique) => environment_type,
+                None => Type::Error,
+            };
+            let access_matches_captures = match (access, environment.as_ref()) {
+                (Some(RunsInAccess::Owned), _) | (_, None) => true,
+                (Some(RunsInAccess::Shared), Some(environment)) => environment
+                    .captures
+                    .iter()
+                    .all(|capture| capture.mode == CaptureMode::SharedBorrow),
+                (Some(RunsInAccess::Unique), Some(environment)) => environment
+                    .captures
+                    .iter()
+                    .all(|capture| capture.mode != CaptureMode::Move),
+                (None, _) => false,
+            };
+            let after_bindings = signature
                 .where_associated_type_bindings
                 .iter()
                 .filter(|binding| {
-                    binding.subject == subject
-                        && binding.relation == *relation
+                    binding.relation == *relation
                         && binding.name == "After"
                         && binding.item_arguments.is_empty()
                 })
-                .all(|binding| {
-                    self.inference
-                        .zonk(binding.value.clone())
-                        .is_ok_and(|after| after == Type::Unit)
-                });
-            if !empty_environment
-                || !environment.captures.is_empty()
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut after_matches = true;
+            for binding in after_bindings {
+                if self
+                    .inference
+                    .zonk(binding.subject)
+                    .is_ok_and(|value| value == subject)
+                {
+                    after_matches &= self
+                        .inference
+                        .unify(binding.value, expected_after.clone())
+                        .is_ok();
+                }
+            }
+            if access.is_none()
+                || !access_matches_captures
                 || !inputs_match
                 || !output_matches
                 || !after_matches
@@ -10483,6 +10793,86 @@ impl Elaborator<'_> {
                 self.recovered = true;
             }
         }
+    }
+
+    /// Validate intrinsic `Environment` declarations after RunsIn has bound
+    /// their otherwise-unnameable type variables to the sealed closure
+    /// environment.  These facts have no source implementation and therefore
+    /// must never be delegated to ordinary trait selection.
+    fn check_intrinsic_environment_bounds(
+        &mut self,
+        bounds: Vec<(Type, crate::ElaboratedTraitReference)>,
+        span: Span,
+    ) {
+        for (subject, relation) in bounds {
+            if !crate::is_intrinsic_environment_trait(&relation) {
+                continue;
+            }
+            let Ok(subject) = self.inference.zonk(subject) else {
+                // A generic environment not used by this direct call remains
+                // a declaration-level promise; its caller is responsible for
+                // supplying concrete RunsIn evidence.
+                continue;
+            };
+            if !self.is_compiler_environment_type(&subject) {
+                self.error(
+                    span,
+                    "G4188",
+                    "intrinsic `Environment` evidence is only created for sealed compiler environments",
+                );
+                self.recovered = true;
+            }
+        }
+    }
+
+    fn match_runs_in_access(
+        &mut self,
+        access: Type,
+        environment: &Type,
+        _span: Span,
+    ) -> Option<RunsInAccess> {
+        match access {
+            Type::Reference {
+                mutability,
+                referent,
+                ..
+            } => self
+                .inference
+                .unify(*referent, environment.clone())
+                .ok()
+                .map(|_| match mutability {
+                    Mutability::Shared => RunsInAccess::Shared,
+                    Mutability::Unique => RunsInAccess::Unique,
+                }),
+            access => self
+                .inference
+                .unify(access, environment.clone())
+                .ok()
+                .map(|_| RunsInAccess::Owned),
+        }
+    }
+
+    fn match_runs_in_inputs(&mut self, inputs: Type, parameters: &[Type]) -> bool {
+        match inputs {
+            Type::Unit => parameters.is_empty(),
+            Type::Tuple(inputs) if inputs.len() == parameters.len() => inputs
+                .into_iter()
+                .zip(parameters.iter().cloned())
+                .all(|(input, parameter)| self.inference.unify(input, parameter).is_ok()),
+            _ => false,
+        }
+    }
+
+    fn remember_generated_environment_type(&mut self, ty: &Type) {
+        if let Type::Nominal { definition, .. } = ty {
+            self.generated_environment_types.insert(*definition);
+        }
+    }
+
+    fn is_compiler_environment_type(&self, ty: &Type) -> bool {
+        matches!(ty, Type::Unit)
+            || matches!(ty, Type::Nominal { definition, arguments } if arguments.is_empty()
+                && self.generated_environment_types.contains(definition))
     }
     /// Freeze the declaration-owned trait contracts into scoped solver
     /// assumptions.  The solver expands their supertrait closure, while this

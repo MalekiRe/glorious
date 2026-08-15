@@ -383,13 +383,15 @@ fn generic_instantiation_preserves_all_source_kinds_before_runtime_lowering() {
         );
     }
     let argument = GenericArgument::Lifetime(Lifetime::Static);
-    assert!(matches!(
-        signatures.instantiate_struct_fields_generic(
-            definition("region_record"),
-            std::slice::from_ref(&argument),
-        ),
-        Err(InstantiationError::RequiresType { slot: 0, argument: found }) if *found == argument
-    ));
+    assert!(
+        signatures
+            .instantiate_struct_fields_generic(
+                definition("region_record"),
+                std::slice::from_ref(&argument),
+            )
+            .is_ok(),
+        "lifetime-parametric nominal layouts remain semantically meaningful until VM erasure"
+    );
 }
 
 #[test]

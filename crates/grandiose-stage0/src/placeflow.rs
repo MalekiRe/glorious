@@ -1532,6 +1532,26 @@ impl Analyzer<'_> {
 
     fn record_aggregate_reference_origins(&mut self, name: &str, id: CoreId) {
         match self.body.expression(id).kind.clone() {
+            // A reference stored inside an aggregate is owned by that
+            // aggregate's lexical storage just as `let r = &mut value` is
+            // owned by `r`.  The initial borrow was necessarily visited
+            // before the aggregate binding existed, so it has no direct NLL
+            // owner yet. Reify the sealed projected loan under the aggregate
+            // field identity now; scope exit can then release the unique
+            // borrow instead of pinning the referent to the enclosing body.
+            CoreKind::Borrow { unique, value } => {
+                if let Some(place) = self.projection(value) {
+                    let loan = ProjectionLoan {
+                        place,
+                        unique,
+                        owner: Some(name.to_owned()),
+                    };
+                    self.reference_origins.insert(name.to_owned(), loan.clone());
+                    if !self.projection_loans.contains(&loan) {
+                        self.projection_loans.push(loan);
+                    }
+                }
+            }
             // Every aggregate constructor carries its children in frozen Core
             // order.  Keeping this deliberately independent of source field
             // syntax means that enum payload binders and array elements get

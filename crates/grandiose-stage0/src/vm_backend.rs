@@ -2291,6 +2291,7 @@ fn vm_nominal_copy_descriptor(
         arguments: descriptor
             .arguments
             .iter()
+            .filter(|argument| !matches!(argument, GenericArgument::Lifetime(_)))
             .map(vm_nominal_argument)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|ty| VmArtifactError::UnsupportedType { local: 0, ty })?,
@@ -2352,6 +2353,12 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
             definition: *definition,
             arguments: arguments
                 .iter()
+                // Regions constrain source validity and field substitution,
+                // but carry no runtime representation. Keeping them out of
+                // the VM nominal layout makes `T<'a>` and `T<'b>` the same
+                // value shape without weakening compiler-side lifetime
+                // checks.
+                .filter(|argument| !matches!(argument, GenericArgument::Lifetime(_)))
                 .map(vm_nominal_argument)
                 .collect::<Result<Vec<_>, _>>()?,
         }),
@@ -9460,6 +9467,94 @@ enum UniqueReferenceTransfer {
     ToCaller,
 }
 
+/// Translate reference targets embedded in a value read through a caller
+/// reference into the current callee's coordinate system. A caller-local
+/// target at depth `n` remains one caller farther away for every nested call;
+/// preserving that arithmetic recursively is what lets destructors safely
+/// observe aggregates containing mutable references.
+fn rebase_caller_references(value: VmValue, caller_depth: u32) -> Result<VmValue, VmArtifactError> {
+    match value {
+        VmValue::Reference {
+            target,
+            fields,
+            unique,
+            referent,
+        } => {
+            let target = match target {
+                ReferenceTarget::Register(register) => ReferenceTarget::Caller {
+                    caller_depth,
+                    register,
+                },
+                ReferenceTarget::Caller {
+                    caller_depth: nested,
+                    register,
+                } => ReferenceTarget::Caller {
+                    caller_depth: caller_depth
+                        .checked_add(nested)
+                        .and_then(|depth| depth.checked_add(1))
+                        .ok_or(VmArtifactError::UnsupportedEscapingUniqueReference)?,
+                    register,
+                },
+                ReferenceTarget::Captured(value) => ReferenceTarget::Captured(value),
+            };
+            Ok(VmValue::Reference {
+                target,
+                fields,
+                unique,
+                referent,
+            })
+        }
+        VmValue::Tuple(values) => Ok(VmValue::Tuple(
+            values
+                .iter()
+                .cloned()
+                .map(|value| rebase_caller_references(value, caller_depth))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+        )),
+        VmValue::Array { values, capacity } => Ok(VmValue::Array {
+            values: values
+                .iter()
+                .cloned()
+                .map(|value| rebase_caller_references(value, caller_depth))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+            capacity,
+        }),
+        VmValue::Record {
+            definition,
+            fields,
+            signature,
+        } => Ok(VmValue::Record {
+            definition,
+            fields: fields
+                .iter()
+                .cloned()
+                .map(|value| rebase_caller_references(value, caller_depth))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+            signature,
+        }),
+        VmValue::Enum {
+            definition,
+            variant,
+            fields,
+            signature,
+        } => Ok(VmValue::Enum {
+            definition,
+            variant,
+            fields: fields
+                .iter()
+                .cloned()
+                .map(|value| rebase_caller_references(value, caller_depth))
+                .collect::<Result<Vec<_>, _>>()?
+                .into(),
+            signature,
+        }),
+        value => Ok(value),
+    }
+}
+
 /// Move a value across an ordinary call boundary. Shared references retain the
 /// existing immutable capture behavior; unique references instead retain a
 /// live caller-frame target so stores in either frame address the same owner.
@@ -14955,10 +15050,21 @@ fn execute_with_arguments(
                         register: *reference,
                     });
                 };
-                registers[*dst as usize] = Some(project_reference(
-                    reference_target(&registers, &callers, target)?,
-                    fields,
-                )?);
+                let value =
+                    project_reference(reference_target(&registers, &callers, target)?, fields)?;
+                // Dereferencing a reference into a caller frame materializes
+                // a value whose nested references are still expressed in the
+                // caller's register coordinate system. Rebase those paths
+                // before exposing the value in this callee; otherwise a
+                // custom Drop hook that projects `self.field` would interpret
+                // the field's reference target as one of its own registers.
+                let value = match target {
+                    ReferenceTarget::Caller { caller_depth, .. } => {
+                        rebase_caller_references(value, *caller_depth)?
+                    }
+                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) => value,
+                };
+                registers[*dst as usize] = Some(value);
             }
             VmInstruction::DerefStore { reference, src } => {
                 let VmValue::Reference {

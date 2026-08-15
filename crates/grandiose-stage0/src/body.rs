@@ -498,7 +498,12 @@ impl Parser<'_> {
             let start = self.advance()?;
             let name = self.expect_identifier()?;
             let value = self
-                .parse_prefix()
+                // A transfer owns its complete value expression, just as a
+                // return-like nonlocal exit does.  Parsing only a prefix made
+                // `transfer done value + 1` mean `(transfer done value) + 1`,
+                // silently dropping the `+ 1` on the terminal path instead
+                // of transferring the computed payload.
+                .parse_expression()
                 .unwrap_or_else(|| self.recover_expression());
             return Some(self.alloc(
                 ExprKind::Transfer { name, value },

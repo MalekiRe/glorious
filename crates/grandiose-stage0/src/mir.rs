@@ -12,8 +12,9 @@ use crate::{
     runtime_manifest::{FloatPrimitive, PrimitiveRole},
     signature::{
         ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedInterface,
-        ElaboratedNominalLayout,
+        ElaboratedNominalLayout, ElaboratedTraitReference,
     },
+    trait_solver::{TraitAnswer, TraitGoal, TraitSolver},
     types::{
         GenericArgument, Mutability, StructuralU32Expr, Type,
         is_canonical_generic_argument_identity, is_canonical_type_identity,
@@ -1968,6 +1969,7 @@ impl MirLowering {
             label_rejoins: BTreeMap::new(),
             label_values: BTreeMap::new(),
             direct_resumption: None,
+            immediate_resumption_closures: BTreeMap::new(),
             suspend_completion: false,
             deferred_completion: None,
         };
@@ -2037,6 +2039,59 @@ impl MirLowering {
         }
         if let Some(function) =
             lowerer.lower_root_label_handler_leave(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        // The same lexical leave can occur after a one-shot continuation
+        // resumes an operation performed by an ordinary callee.  This needs
+        // a real dynamic frame rather than the direct-perform specializer
+        // above, because the suspended continuation crosses the call frame.
+        if let Some(function) = lowerer
+            .lower_root_label_interprocedural_one_shot_handler_leave(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) = lowerer.lower_root_label_interprocedural_resume_then_cancel_leave(
+            body.root,
+            parameters.clone(),
+        ) {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        if let Some(function) =
+            lowerer.lower_root_label_partial_forward_to_outer_leave(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
@@ -4851,6 +4906,12 @@ struct Lowerer<'a> {
     /// representation can be eliminated: either the root identity or a
     /// replay-safe residual computation cloned once per finite resumption.
     direct_resumption: Option<DirectResumptionState>,
+    /// Closures which capture the active direct resumption and have already
+    /// been proved by Core to be invoked before the handler frame can end.
+    /// They are lowered by substituting their body at that one call site;
+    /// emitting a first-class callable would unnecessarily require a dynamic
+    /// handler frame for an otherwise identity-resumptive clause.
+    immediate_resumption_closures: BTreeMap<String, ImmediateResumptionClosure>,
     /// While lowering a root expression with a non-tail normal completion,
     /// stop at the first completion in source evaluation order.  The CFG
     /// continuation lowerer records that boundary, selects an arm, and then
@@ -4868,6 +4929,12 @@ struct DirectResumptionState {
     quantity: crate::quantity::Quantity,
     calls: u64,
     plan: DirectResumptionPlan,
+}
+
+#[derive(Clone, Debug)]
+struct ImmediateResumptionClosure {
+    parameters: Vec<(String, Type)>,
+    body: CoreId,
 }
 
 #[derive(Clone, Debug)]
@@ -5521,11 +5588,12 @@ impl Lowerer<'_> {
             matching.truncate(fallback + 1);
         }
         if first_refutable >= matching.len()
-            || matching.iter().any(|clause| {
-                clause.terminal
-                    || clause.patterns.len() != argument_ids.len()
-                    || !self.contains_label_transfer(clause.body, brand)
-            })
+            || matching
+                .iter()
+                .any(|clause| clause.terminal || clause.patterns.len() != argument_ids.len())
+            || !matching
+                .iter()
+                .any(|clause| self.contains_label_transfer(clause.body, brand))
         {
             return None;
         }
@@ -5623,8 +5691,14 @@ impl Lowerer<'_> {
             self.named = boundary_named.clone();
             self.values = boundary_values.clone();
             self.bind_handler_patterns(&clause.patterns, &payloads)?;
-            let value = self.lower_label_transfer_path(clause.body, brand)?;
-            bodies.push((std::mem::take(&mut self.instructions), value));
+            if self.contains_label_transfer(clause.body, brand) {
+                let value = self.lower_label_transfer_path(clause.body, brand)?;
+                bodies.push((std::mem::take(&mut self.instructions), value, true));
+            } else {
+                let value = self.direct_handler_clause_value(clause)?;
+                self.instructions.push(MirInstruction::Resume { value });
+                bodies.push((std::mem::take(&mut self.instructions), value, false));
+            }
         }
         self.named = boundary_named;
         self.values = boundary_values;
@@ -5674,18 +5748,22 @@ impl Lowerer<'_> {
                 });
             }
         }
-        for (instructions, value) in bodies {
+        for (instructions, value, leaves) in bodies {
             blocks.push(MirBlock {
                 parameters: vec![],
                 instructions,
-                terminator: MirTerminator::Leave {
-                    brand,
-                    target: MirBlockId(1),
-                    arguments: vec![value],
-                    cleanup: MirCleanupPlan {
-                        moved_places: self.leave_cleanup.moved_places.clone(),
-                        active_loans: self.leave_cleanup.active_loans.clone(),
-                    },
+                terminator: if leaves {
+                    MirTerminator::Leave {
+                        brand,
+                        target: MirBlockId(1),
+                        arguments: vec![value],
+                        cleanup: MirCleanupPlan {
+                            moved_places: self.leave_cleanup.moved_places.clone(),
+                            active_loans: self.leave_cleanup.active_loans.clone(),
+                        },
+                    }
+                } else {
+                    MirTerminator::Unreachable
                 },
             });
         }
@@ -5834,6 +5912,663 @@ impl Lowerer<'_> {
                             active_loans: self.leave_cleanup.active_loans.clone(),
                         },
                     },
+                },
+            ],
+        })
+    }
+
+    /// Lower the exact dynamic shape `label L { handle callee() { op(k) =>
+    /// transfer L k(v) } }`.  `ResumeReturn` restores this clause only after
+    /// the callee's residual continuation has completed; the following Leave
+    /// then abandons both the restored handler frame and the lexical label
+    /// body.  Treating this as the direct-perform identity case would return
+    /// `v` instead of the residual result.
+    fn lower_root_label_interprocedural_one_shot_handler_leave(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (label, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => (root, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Label { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let (computation, clauses, label_prefix) = self.lexical_handle(body)?;
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.effects.len() != 1 || effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let effect = effects.effects.iter().next()?.clone();
+        let matching = clauses
+            .iter()
+            .filter(|clause| !clause.terminal && clause.effect == effect)
+            .collect::<Vec<_>>();
+        let [clause] = matching.as_slice() else {
+            return None;
+        };
+        let CoreHandlerResumption::Explicit { name, quantity } = &clause.resumption else {
+            return None;
+        };
+        let replay_uses = if *quantity == crate::quantity::Quantity::ONCE {
+            None
+        } else {
+            Some(exact_replay_uses(&clause.resumption)?)
+        };
+        if clause.patterns.len() != clause.payload_types.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+            || !self.contains_label_transfer(clause.body, brand)
+            || self.handler_body_uses_snapshot_alias(clause.body)
+        {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        for expression in label_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let payloads = clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation: clause.operation,
+            payload_destinations: payloads.clone(),
+            resume_type: clause.continuation.as_ref()?.parameter.clone(),
+            continuation: replay_uses.map_or(MirContinuationPolicy::Consume, |uses| {
+                MirContinuationPolicy::Replay { uses }
+            }),
+            target: MirBlockId(2),
+        });
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+                ..
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: result,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        entry.push(MirInstruction::UninstallHandler);
+
+        let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(&clause.patterns, &payloads)?;
+        let previous = self.direct_resumption.replace(DirectResumptionState {
+            name: name.clone(),
+            quantity: *quantity,
+            calls: 0,
+            plan: if replay_uses.is_some() {
+                DirectResumptionPlan::RuntimeReplay
+            } else {
+                DirectResumptionPlan::RuntimeConsumeReturn
+            },
+        });
+        let transferred = self.lower_label_transfer_path(clause.body, brand);
+        let state = self
+            .direct_resumption
+            .take()
+            .expect("dynamic direct resumption state must outlive its clause body");
+        self.direct_resumption = previous;
+        let transferred = transferred?;
+        let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls)).ok()?;
+        if !state.quantity.contains(actual) {
+            self.error(
+                "G6005",
+                "interprocedural resumptive handler calls do not satisfy its declared quantity",
+            );
+            return None;
+        }
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        self.named = boundary_named;
+        self.values = boundary_values;
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Leave {
+                        brand,
+                        target: MirBlockId(1),
+                        arguments: vec![transferred],
+                        cleanup: MirCleanupPlan {
+                            moved_places: self.leave_cleanup.moved_places.clone(),
+                            active_loans: self.leave_cleanup.active_loans.clone(),
+                        },
+                    },
+                },
+            ],
+        })
+    }
+
+    /// Dynamic two-operation composition where an exact-one resumption
+    /// re-enters the protected callee and a later discarded operation takes
+    /// an enclosing label. The `Cancel` is observable VM control: it drops
+    /// the second suspended performance before the lexical Leave unwinds the
+    /// handler stack.
+    fn lower_root_label_interprocedural_resume_then_cancel_leave(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (label, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => (root, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Label { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let (computation, clauses, label_prefix) = self.lexical_handle(body)?;
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.effects.len() != 1 || effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let active = clauses
+            .iter()
+            .filter(|clause| !clause.terminal && effects.effects.contains(&clause.effect))
+            .collect::<Vec<_>>();
+        if active.len() != 2
+            || active.iter().any(|clause| {
+                clause.patterns.len() != clause.payload_types.len()
+                    || !clause.patterns.iter().all(pattern_is_irrefutable)
+            })
+        {
+            return None;
+        }
+        let resume_index = active.iter().position(|clause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Tail {
+                    quantity: crate::quantity::Quantity::ONCE
+                } | CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                }
+            ) && !self.contains_label_transfer(clause.body, brand)
+        })?;
+        let cancel_index = active.iter().position(|clause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Discard { quantity }
+                    if !quantity.requires_positive_use()
+            ) && self.contains_label_transfer(clause.body, brand)
+        })?;
+        if resume_index == cancel_index {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        for expression in label_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let payloads = active
+            .iter()
+            .map(|clause| {
+                clause
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), computation))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (index, clause) in active.iter().enumerate() {
+            entry.push(MirInstruction::InstallHandler {
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads[index].clone(),
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target: MirBlockId(2 + index as u32),
+            });
+        }
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+                ..
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: result,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        for _ in &active {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+
+        let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let mut handler_blocks = Vec::with_capacity(active.len());
+        for (index, clause) in active.iter().enumerate() {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(&clause.patterns, &payloads[index])?;
+            if index == resume_index {
+                let value = self.direct_handler_clause_value(clause)?;
+                self.instructions.push(MirInstruction::Resume { value });
+                handler_blocks.push((std::mem::take(&mut self.instructions), None));
+            } else {
+                debug_assert_eq!(index, cancel_index);
+                let value = self.lower_label_transfer_path(clause.body, brand)?;
+                self.instructions.push(MirInstruction::Cancel);
+                handler_blocks.push((std::mem::take(&mut self.instructions), Some(value)));
+            }
+        }
+        self.named = boundary_named;
+        self.values = boundary_values;
+        let mut blocks = vec![
+            MirBlock {
+                parameters: vec![],
+                instructions: entry,
+                terminator: MirTerminator::Return { value: result },
+            },
+            MirBlock {
+                parameters: vec![join],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: join },
+            },
+        ];
+        for (instructions, transfer) in handler_blocks {
+            blocks.push(MirBlock {
+                parameters: vec![],
+                instructions,
+                terminator: transfer.map_or(MirTerminator::Unreachable, |value| {
+                    MirTerminator::Leave {
+                        brand,
+                        target: MirBlockId(1),
+                        arguments: vec![value],
+                        cleanup: MirCleanupPlan {
+                            moved_places: self.leave_cleanup.moved_places.clone(),
+                            active_loans: self.leave_cleanup.active_loans.clone(),
+                        },
+                    }
+                }),
+            });
+        }
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+
+    /// Preserve the dynamic residual stack for the smallest nested partial
+    /// matrix: an inner refutable discarded arm explicitly `Forward`s the
+    /// suspended operation, and the enclosing handler cancels it by taking a
+    /// lexical label. The outer payload destinations are intentionally
+    /// distinct; Forward must repopulate the next frame rather than reuse the
+    /// inner pattern locals.
+    fn lower_root_label_partial_forward_to_outer_leave(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (label, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => (root, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Label { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let (outer_computation, outer_clauses, label_prefix) = self.lexical_handle(body)?;
+        let (inner, outer_prefix) = match self.body.expression(outer_computation).kind.clone() {
+            CoreKind::Handle { .. } => (outer_computation, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Handle { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Handle {
+            computation,
+            clauses: inner_clauses,
+        } = self.body.expression(inner).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.effects.len() != 1 || effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let effect = effects.effects.iter().next()?;
+        let outer = outer_clauses
+            .iter()
+            .filter(|clause| !clause.terminal && clause.effect == *effect)
+            .collect::<Vec<_>>();
+        let inner = inner_clauses
+            .iter()
+            .filter(|clause| !clause.terminal && clause.effect == *effect)
+            .collect::<Vec<_>>();
+        let ([outer], [inner]) = (outer.as_slice(), inner.as_slice()) else {
+            return None;
+        };
+        if outer.operation != inner.operation
+            || outer.patterns.len() != outer.payload_types.len()
+            || inner.patterns.len() != inner.payload_types.len()
+            || !outer.patterns.iter().all(pattern_is_irrefutable)
+            || inner.patterns.iter().all(pattern_is_irrefutable)
+            || !matches!(
+                outer.resumption,
+                CoreHandlerResumption::Discard { quantity } if !quantity.requires_positive_use()
+            )
+            || !matches!(
+                inner.resumption,
+                CoreHandlerResumption::Discard { quantity } if !quantity.requires_positive_use()
+            )
+            || !self.contains_label_transfer(outer.body, brand)
+        {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        for expression in label_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let outer_payloads = outer
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let inner_payloads = inner
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            effect: outer.effect.definition,
+            effect_arguments: outer.effect.arguments.clone(),
+            operation: outer.operation,
+            payload_destinations: outer_payloads.clone(),
+            resume_type: outer.continuation.as_ref()?.parameter.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(2),
+        });
+        for expression in outer_prefix {
+            self.instructions = entry;
+            self.statement(expression)?;
+            entry = std::mem::take(&mut self.instructions);
+        }
+        entry.push(MirInstruction::InstallHandler {
+            effect: inner.effect.definition,
+            effect_arguments: inner.effect.arguments.clone(),
+            operation: inner.operation,
+            payload_destinations: inner_payloads.clone(),
+            resume_type: inner.continuation.as_ref()?.parameter.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(3),
+        });
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+                ..
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: result,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        entry.push(MirInstruction::UninstallHandler);
+        entry.push(MirInstruction::UninstallHandler);
+
+        let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(&outer.patterns, &outer_payloads)?;
+        let transferred = self.lower_label_transfer_path(outer.body, brand)?;
+        self.instructions.push(MirInstruction::Cancel);
+        let outer_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(&inner.patterns, &inner_payloads)?;
+        let inner_value = self.direct_handler_clause_value(inner)?;
+        self.instructions.push(MirInstruction::Cancel);
+        let inner_instructions = std::mem::take(&mut self.instructions);
+        self.named = boundary_named;
+        self.values = boundary_values;
+        let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), computation);
+        let pattern = lower_pattern(inner.patterns[0].clone())?;
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: outer_instructions,
+                    terminator: MirTerminator::Leave {
+                        brand,
+                        target: MirBlockId(1),
+                        arguments: vec![transferred],
+                        cleanup: MirCleanupPlan {
+                            moved_places: self.leave_cleanup.moved_places.clone(),
+                            active_loans: self.leave_cleanup.active_loans.clone(),
+                        },
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::PatternTest {
+                        dst: condition,
+                        subject: inner_payloads[0],
+                        pattern,
+                    }],
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: MirBlockId(4),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(5),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: inner_instructions,
+                    terminator: MirTerminator::Return { value: inner_value },
+                },
+                MirBlock {
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::Forward],
+                    terminator: MirTerminator::Unreachable,
                 },
             ],
         })
@@ -6872,9 +7607,18 @@ impl Lowerer<'_> {
     ) -> Option<MirLocal> {
         match self.body.expression(id).kind.clone() {
             CoreKind::Block(values) => {
+                // A transfer bypasses ordinary block completion, but it must
+                // still destroy every binding introduced by the crossed
+                // lexical scope. Emit those calls on the path immediately
+                // before the enclosing builder turns the returned payload
+                // into a checked `Leave` terminator.
+                let outer_named = self.named.clone();
                 for value in values {
                     if self.contains_label_transfer(value, target) {
-                        return self.lower_label_transfer_path(value, target);
+                        let payload = self.lower_label_transfer_path(value, target)?;
+                        self.cleanup_scope_bindings(&outer_named, Some(payload))?;
+                        self.named = outer_named;
+                        return Some(payload);
                     }
                     self.statement(value)?;
                 }
@@ -6942,6 +7686,18 @@ impl Lowerer<'_> {
                 }
                 self.error("G6012", "label scope has no transfer to its target brand");
                 None
+            }
+            // The protected computation starts only after its handler frame
+            // has been entered.  When a transfer occurs while evaluating the
+            // computation *before* its first performance (not in a clause),
+            // it abandons that frame before dispatch.  No handler clause is
+            // eligible, so lowering the strict computation path directly is
+            // equivalent to installing then immediately unwinding an inert
+            // frame, while preserving the transfer's lexical destination.
+            CoreKind::Handle { computation, .. }
+                if self.contains_label_transfer(computation, target) =>
+            {
+                self.lower_label_transfer_path(computation, target)
             }
             CoreKind::Field { base, .. }
             | CoreKind::PatternTest { subject: base, .. }
@@ -7130,6 +7886,12 @@ impl Lowerer<'_> {
                 }
                 false
             }
+            // A label transfer on the protected-computation path occurs
+            // before a handler can dispatch to any of its clauses.  Follow
+            // that path so a label nested in an effect argument can claim its
+            // lexical Leave edge before generic handler lowering sees the
+            // bottom-typed transfer as an ordinary argument value.
+            CoreKind::Handle { computation, .. } => self.prepare_label_path(computation, target),
             CoreKind::Field { base, .. }
             | CoreKind::PatternTest { subject: base, .. }
             | CoreKind::Let { value: base, .. }
@@ -7138,12 +7900,11 @@ impl Lowerer<'_> {
             | CoreKind::Move(base)
             | CoreKind::Transfer { value: base, .. } => self.prepare_label_path(base, target),
             CoreKind::Assign { value, .. } => self.prepare_label_path(value, target),
-            // Handler/completion clauses introduce independently checked
-            // continuation scopes. Their label transfers are either rejected
-            // by Core or lowered by the dedicated handler paths, never by
-            // this lexical expression rejoin.
-            CoreKind::Handle { .. }
-            | CoreKind::Completion { .. }
+            // Completion clauses introduce independently checked continuation
+            // scopes. Their label transfers are either rejected by Core or
+            // lowered by dedicated paths, never by this lexical expression
+            // rejoin.
+            CoreKind::Completion { .. }
             | CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
@@ -7192,6 +7953,13 @@ impl Lowerer<'_> {
             CoreKind::Perform { arguments, .. } => arguments
                 .iter()
                 .any(|argument| self.contains_label_transfer(*argument, target)),
+            // Handler clauses are separate continuation scopes and are
+            // claimed by the frame-aware handler specializers.  A transfer in
+            // the protected computation, however, executes before dispatch
+            // and is an ordinary lexical transfer through the handler frame.
+            CoreKind::Handle { computation, .. } => {
+                self.contains_label_transfer(*computation, target)
+            }
             CoreKind::Assign { value, .. } => self.contains_label_transfer(*value, target),
             _ => false,
         }
@@ -14559,6 +15327,13 @@ impl Lowerer<'_> {
         }
     }
     fn direct_handler_clause_value(&mut self, clause: &CoreHandlerClause) -> Option<MirLocal> {
+        // A source-level alias of a continuation is a first-class snapshot,
+        // even when this otherwise direct one-shot shape could erase the
+        // frame.  Keep that explicit MIR capability so the alias continues
+        // to name the same captured resumption at each use.
+        if self.handler_body_uses_snapshot_alias(clause.body) {
+            return self.value(clause.body);
+        }
         match &clause.resumption {
             CoreHandlerResumption::Terminal => self.value(clause.body),
             CoreHandlerResumption::Tail { quantity } => {
@@ -14581,40 +15356,33 @@ impl Lowerer<'_> {
                     );
                     return None;
                 }
-                if !self.handler_body_uses_snapshot_alias(clause.body) {
-                    let previous = self.direct_resumption.replace(DirectResumptionState {
-                        name: name.clone(),
-                        quantity: *quantity,
-                        calls: 0,
-                        plan: if replay {
-                            DirectResumptionPlan::RuntimeReplay
-                        } else {
-                            DirectResumptionPlan::Identity
-                        },
-                    });
-                    let result = self.value(clause.body);
-                    let state = self
-                        .direct_resumption
-                        .take()
-                        .expect("direct resumption state must outlive its clause body");
-                    self.direct_resumption = previous;
-                    let result = result?;
-                    let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls))
-                        .expect("direct resumption calls are representable");
-                    if !state.quantity.contains(actual) {
-                        self.error(
-                            "G6005",
-                            "direct resumptive handler calls do not satisfy its declared quantity",
-                        );
-                        return None;
-                    }
-                    return Some(result);
+                let previous = self.direct_resumption.replace(DirectResumptionState {
+                    name: name.clone(),
+                    quantity: *quantity,
+                    calls: 0,
+                    plan: if replay {
+                        DirectResumptionPlan::RuntimeReplay
+                    } else {
+                        DirectResumptionPlan::Identity
+                    },
+                });
+                let result = self.value(clause.body);
+                let state = self
+                    .direct_resumption
+                    .take()
+                    .expect("direct resumption state must outlive its clause body");
+                self.direct_resumption = previous;
+                let result = result?;
+                let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls))
+                    .expect("direct resumption calls are representable");
+                if !state.quantity.contains(actual) {
+                    self.error(
+                        "G6005",
+                        "direct resumptive handler calls do not satisfy its declared quantity",
+                    );
+                    return None;
                 }
-                // The dynamic handler path deliberately retains a real
-                // snapshot operand instead of relying on the legacy implicit
-                // top-of-stack `Resume`. This is the boundary where aliasing
-                // becomes executable bytecode rather than a Core-only fact.
-                self.value(clause.body)
+                Some(result)
             }
             CoreHandlerResumption::Discard { quantity } => {
                 if quantity.requires_positive_use() {
@@ -14869,6 +15637,32 @@ impl Lowerer<'_> {
         // registers, but a `let` cannot merely alias its initializer: later
         // assignment must overwrite this same destination.
         if let CoreKind::Let { name, value } = &e.kind {
+            if let CoreKind::Closure {
+                parameters,
+                environment,
+                body,
+                ..
+            } = &self.body.expression(*value).kind
+                && self.direct_resumption.as_ref().is_some_and(|resumption| {
+                    environment
+                        .captures
+                        .iter()
+                        .any(|capture| capture.name == resumption.name)
+                })
+            {
+                self.immediate_resumption_closures.insert(
+                    name.clone(),
+                    ImmediateResumptionClosure {
+                        parameters: parameters.clone(),
+                        body: *body,
+                    },
+                );
+                let unit = self.alloc(Type::Unit, id);
+                self.instructions
+                    .push(MirInstruction::ConstUnit { dst: unit });
+                self.values.insert(id, unit);
+                return Some(unit);
+            }
             let aliases_direct_resumption = match &self.body.expression(*value).kind {
                 CoreKind::Resumption { .. } => true,
                 CoreKind::Local(source) => {
@@ -15098,6 +15892,15 @@ impl Lowerer<'_> {
                         dst,
                         src: *snapshot,
                     });
+                } else if let CoreKind::Resumption { name, .. } = &e.kind
+                    && let Some(snapshot) = self.named.get(name).copied()
+                {
+                    // A lifted, immediately-invoked closure receives its
+                    // handler snapshot as an ordinary sealed capture.  The
+                    // child body has no handler frame of its own, so it must
+                    // reuse that exact capability rather than manufacturing a
+                    // fresh top-of-stack resumption.
+                    self.copy_or_move(dst, snapshot);
                 } else {
                     self.instructions
                         .push(MirInstruction::CaptureResumption { dst });
@@ -15530,6 +16333,31 @@ impl Lowerer<'_> {
             CoreKind::Call {
                 callee, arguments, ..
             } => {
+                if let CoreKind::Local(name) = &self.body.expression(callee).kind
+                    && let Some(closure) = self.immediate_resumption_closures.get(name).cloned()
+                {
+                    if closure.parameters.len() != arguments.len() {
+                        self.error(
+                            "G6005",
+                            "immediately-invoked resumption closure has the wrong argument arity",
+                        );
+                        return None;
+                    }
+                    let arguments = arguments
+                        .iter()
+                        .map(|argument| self.value(*argument))
+                        .collect::<Option<Vec<_>>>()?;
+                    let previous_named = self.named.clone();
+                    for ((parameter, _), argument) in closure.parameters.iter().zip(arguments) {
+                        self.named.insert(parameter.clone(), argument);
+                    }
+                    let result = self.value(closure.body);
+                    self.named = previous_named;
+                    let result = result?;
+                    self.copy_or_move(dst, result);
+                    self.values.insert(id, dst);
+                    return Some(dst);
+                }
                 let direct_resumption = match &self.body.expression(callee).kind {
                     // An identity-bearing Core node can only be produced for
                     // a lexical alias of the currently active continuation.
@@ -17487,6 +18315,17 @@ impl Lowerer<'_> {
                 });
             }
             CoreKind::Block(values) => {
+                // Typed Core retains lexical blocks, so destruction belongs
+                // here rather than in a backend-wide finalizer.  Snapshot
+                // the visible bindings before evaluating the block; any
+                // later binding is owned by this scope and must be destroyed
+                // in reverse declaration order before its storage vanishes.
+                // The final expression is evaluated first, then its value is
+                // moved/copied across the boundary before cleanup so a
+                // returned affine value is not accidentally destroyed.
+                let outer_named = self.named.clone();
+                let outer_immediate_resumption_closures =
+                    self.immediate_resumption_closures.clone();
                 let Some(last) = values.last().copied() else {
                     self.instructions.push(MirInstruction::ConstUnit { dst });
                     self.values.insert(id, dst);
@@ -17501,6 +18340,10 @@ impl Lowerer<'_> {
                 // manufacture a second unique capability at a structural
                 // block boundary.
                 self.copy_or_move(dst, src);
+                let result_local = self.source_local(last);
+                self.cleanup_scope_bindings(&outer_named, result_local)?;
+                self.named = outer_named;
+                self.immediate_resumption_closures = outer_immediate_resumption_closures;
             }
             // A label with no transfer is static scope evidence only and
             // erases to its body. A transfer itself deliberately fails closed
@@ -18081,6 +18924,105 @@ impl Lowerer<'_> {
             self.instructions.push(MirInstruction::Move { dst, src });
         }
     }
+    /// Return the storage identity carried directly by a block result. A
+    /// whole local moves across the block boundary; its source scope must not
+    /// also run that value's Drop hook. Projections and computed results do
+    /// not transfer the owning aggregate, so they remain armed for cleanup.
+    fn source_local(&self, id: CoreId) -> Option<MirLocal> {
+        match &self.body.expression(id).kind {
+            CoreKind::Local(name) => self.named.get(name).copied(),
+            _ => None,
+        }
+    }
+
+    /// Destroy bindings introduced since `outer_named` in reverse lexical
+    /// declaration order. `MirLocal` allocation is monotonic and every
+    /// ordinary `let` receives its stable storage at declaration time, so its
+    /// index is the sealed ordering fact for this lowering scope.
+    fn cleanup_scope_bindings(
+        &mut self,
+        outer_named: &BTreeMap<String, MirLocal>,
+        transferred: Option<MirLocal>,
+    ) -> Option<()> {
+        let mut cleanup = self
+            .named
+            .iter()
+            .filter_map(|(name, local)| {
+                (!outer_named.contains_key(name) && Some(*local) != transferred).then_some(*local)
+            })
+            .collect::<Vec<_>>();
+        cleanup.sort_unstable_by_key(|local| std::cmp::Reverse(local.0));
+        for local in cleanup {
+            self.emit_custom_drop(local)?;
+        }
+        Some(())
+    }
+
+    /// Insert the opaque custom hook for one still-armed lexical local. The
+    /// trait solver is the sole selector: matching a nominal spelling alone
+    /// would let a generic or negative implementation bypass coherence.
+    /// Structural destruction has no VM work yet, but every observable Drop
+    /// method is a normal verified call over an exact unique borrow.
+    fn emit_custom_drop(&mut self, local: MirLocal) -> Option<()> {
+        let ty = self.locals.get(local.0 as usize)?.ty.clone();
+        let Some(signatures) = self.signatures else {
+            return Some(());
+        };
+        let relation = ElaboratedTraitReference {
+            definition: crate::resolution::language_drop_trait_definition(),
+            arguments: vec![],
+        };
+        let evidence = match TraitSolver::new(signatures).solve(TraitGoal {
+            relation,
+            subject: ty.clone(),
+        }) {
+            TraitAnswer::Proven { evidence } => evidence,
+            TraitAnswer::Refuted { .. }
+            | TraitAnswer::NoSolution
+            | TraitAnswer::Ambiguous
+            | TraitAnswer::Overflow => return Some(()),
+        };
+        let Some(ElaboratedHeader::Implementation(implementation)) =
+            signatures.definitions.get(&evidence)
+        else {
+            self.error(
+                "G6014",
+                "custom Drop evidence does not name an implementation",
+            );
+            return None;
+        };
+        if !implementation.methods.contains_key("drop") {
+            self.error(
+                "G6014",
+                "custom Drop implementation omits its destructor method",
+            );
+            return None;
+        }
+        let borrowed = self.alloc(
+            Type::Reference {
+                mutability: Mutability::Unique,
+                lifetime: crate::Lifetime::Elided,
+                referent: Box::new(ty),
+            },
+            CoreId(u32::MAX),
+        );
+        self.instructions.push(MirInstruction::Borrow {
+            dst: borrowed,
+            src: local,
+            fields: vec![],
+            unique: true,
+            reborrow: false,
+        });
+        let result = self.alloc(Type::Unit, CoreId(u32::MAX));
+        self.instructions.push(MirInstruction::Call {
+            dst: result,
+            callee: crate::implementation_method_key(evidence, "drop"),
+            generic_arguments: vec![],
+            trait_instance: None,
+            arguments: vec![borrowed],
+        });
+        Some(())
+    }
     /// Resolve a Typed Core value place to its stable runtime root and field
     /// path.  This refuses computed values: a borrow may never be lowered as
     /// a hidden copy of a temporary.
@@ -18221,12 +19163,30 @@ impl Lowerer<'_> {
             .iter()
             .zip(&capture_environment.post_states)
         {
-            let Some(local) = self.named.get(&capture.name).copied() else {
-                self.error(
-                    "G6007",
-                    &format!("closure capture `{}` has no MIR local", capture.name),
-                );
-                return None;
+            let local = match self.named.get(&capture.name).copied() {
+                Some(local) => local,
+                None if self
+                    .direct_resumption
+                    .as_ref()
+                    .is_some_and(|resumption| resumption.name == capture.name) =>
+                {
+                    // The handler frame is active in the parent clause. Mint
+                    // one frame-bound snapshot and pass it through the
+                    // closure's sealed environment; the Core escape proof
+                    // guarantees this capture is immediately invoked.
+                    let snapshot = self.alloc(capture.ty.clone(), CoreId(u32::MAX));
+                    self.instructions
+                        .push(MirInstruction::CaptureResumption { dst: snapshot });
+                    self.named.insert(capture.name.clone(), snapshot);
+                    snapshot
+                }
+                None => {
+                    self.error(
+                        "G6007",
+                        &format!("closure capture `{}` has no MIR local", capture.name),
+                    );
+                    return None;
+                }
             };
             // PlaceFlow owns the capture-mode decision.  Keep an actual move
             // in MIR when it selected one; shared/unique runtime references
@@ -18289,6 +19249,7 @@ impl Lowerer<'_> {
             label_rejoins: BTreeMap::new(),
             label_values: BTreeMap::new(),
             direct_resumption: None,
+            immediate_resumption_closures: BTreeMap::new(),
             suspend_completion: false,
             deferred_completion: None,
         };

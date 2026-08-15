@@ -243,6 +243,103 @@ fn semantic_capture_free_callable_uses_unit_environment() {
 }
 
 #[test]
+fn semantic_named_callable_uses_compiler_generated_unit_runs_in_evidence() {
+    let source = r#"
+        apply<F>(body: F) -> i64
+        where
+            F: Fn<(), Output = i64>,
+            F: RunsIn<(), (), Output = i64, After = ()>
+        {
+            body()
+        }
+        answer() -> i64 { 42 }
+        pub main() -> i64 { apply(answer) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn semantic_capturing_callable_runs_in_its_compiler_generated_environment() {
+    let source = r#"
+        invoke<E, S, F>(body: F) -> i64
+        where
+            E: Environment<'static>,
+            S: Environment<'static>,
+            F: Fn<(), Output = i64>,
+            F: RunsIn<E, (), Output = i64, After = S>
+        {
+            body()
+        }
+        pub main() -> i64 {
+            let captured = 41;
+            invoke(() -> i64 { captured + 1 })
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn semantic_runs_in_borrowed_access_matches_sealed_capture_authority() {
+    let source = r#"
+        observe<E, F>(body: F) -> i64
+        where
+            E: Environment<'static>,
+            F: Fn<(), Output = i64>,
+            F: RunsIn<&'static E, (), Output = i64, After = E>
+        {
+            body()
+        }
+
+        update<E, F>(body: F) -> i64
+        where
+            E: Environment<'static>,
+            F: Fn<(), Output = i64>,
+            F: RunsIn<&'static mut E, (), Output = i64, After = E>
+        {
+            body()
+        }
+
+        pub main() -> i64 {
+            let observed = 40;
+            let updated = 1;
+            observe(() -> i64 { observed })
+                + update(() -> i64 { updated = updated + 1; updated })
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn semantic_shared_runs_in_cannot_claim_a_moving_environment() {
+    let source = r#"
+        observe<E, F>(body: F) -> i64
+        where
+            E: Environment<'static>,
+            F: Fn<(), Output = i64>,
+            F: RunsIn<&'static E, (), Output = i64, After = E>
+        {
+            body()
+        }
+
+        pub main() -> i64 {
+            let moved = 42;
+            observe(() -> i64 { move moved })
+        }
+    "#;
+    assert_semantic_rejection(
+        source,
+        "shared RunsIn cannot manufacture moving environment evidence",
+        &[&["RunsIn"], &["environment", "sealed", "evidence"]],
+    );
+}
+
+#[test]
 fn semantic_runs_in_access_is_expressed_with_ordinary_types() {
     let source = r#"
         owned<E, F, S>(body: F) ->
