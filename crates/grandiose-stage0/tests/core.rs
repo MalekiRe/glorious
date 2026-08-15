@@ -86,7 +86,7 @@ fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
     assert!(
         core.expressions
             .iter()
-            .any(|expression| matches!(expression.kind, CoreKind::Binary { .. }))
+            .any(|expression| matches!(expression.kind, CoreKind::IntrinsicCall { .. }))
     );
 }
 
@@ -3660,9 +3660,10 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
     assert!(comparison.expressions.iter().any(|expression| {
         matches!(
             expression.kind,
-            CoreKind::Binary { ref operator, right, .. }
+            CoreKind::IntrinsicCall { ref operator, ref arguments }
                 if operator == "<="
-                    && comparison.expression(right).ty == Type::Scalar(ScalarType::U32)
+                    && arguments.len() == 2
+                    && comparison.expression(arguments[1]).ty == Type::Scalar(ScalarType::U32)
         )
     }));
 

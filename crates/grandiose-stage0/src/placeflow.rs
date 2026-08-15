@@ -408,6 +408,7 @@ impl Analyzer<'_> {
         match e.kind {
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -500,7 +501,9 @@ impl Analyzer<'_> {
                 }
                 self.move_place(v, e.span)
             }
-            CoreKind::Unary { value, .. } => self.visit_with_live_after(value, live_after),
+            CoreKind::IntrinsicCall { arguments, .. } => {
+                self.visit_sequence(&arguments, live_after);
+            }
             CoreKind::Borrow { unique, value } => {
                 if self.projection(value).is_none() {
                     self.visit_with_live_after(value, live_after);
@@ -699,9 +702,6 @@ impl Analyzer<'_> {
                     span: e.span,
                 });
             }
-            CoreKind::Binary { left, right, .. } => {
-                self.visit_sequence(&[left, right], live_after);
-            }
             CoreKind::Block(values) if id == self.body.root => {
                 self.visit_sequence(&values, live_after)
             }
@@ -758,7 +758,6 @@ impl Analyzer<'_> {
                 exit => exit,
             },
             CoreKind::Let { value, .. }
-            | CoreKind::Unary { value, .. }
             | CoreKind::Borrow { value, .. }
             | CoreKind::Deref(value)
             | CoreKind::Move(value)
@@ -771,9 +770,7 @@ impl Analyzer<'_> {
             CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
                 Self::first_abrupt_exit(body, fields)
             }
-            CoreKind::Binary { left, right, .. } => {
-                Self::abrupt_exit(body, *left).or_else(|| Self::abrupt_exit(body, *right))
-            }
+            CoreKind::IntrinsicCall { arguments, .. } => Self::first_abrupt_exit(body, arguments),
             CoreKind::Call {
                 callee, arguments, ..
             } => Self::abrupt_exit(body, *callee)
@@ -788,6 +785,7 @@ impl Analyzer<'_> {
             | CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -829,7 +827,6 @@ impl Analyzer<'_> {
             | CoreKind::Borrow { value: base, .. }
             | CoreKind::Deref(base)
             | CoreKind::Move(base)
-            | CoreKind::Unary { value: base, .. }
             | CoreKind::PatternTest { subject: base, .. } => self.collect_local_uses(*base, uses),
             CoreKind::Let { value, .. } => self.collect_local_uses(*value, uses),
             CoreKind::Assign { place, value } => {
@@ -867,9 +864,10 @@ impl Analyzer<'_> {
                     self.collect_local_uses(clause.body, uses);
                 }
             }
-            CoreKind::Binary { left, right, .. } => {
-                self.collect_local_uses(*left, uses);
-                self.collect_local_uses(*right, uses);
+            CoreKind::IntrinsicCall { arguments, .. } => {
+                for argument in arguments {
+                    self.collect_local_uses(*argument, uses);
+                }
             }
             CoreKind::Closure { environment, .. } => {
                 // Captures are reads at callable construction time.  More
@@ -885,6 +883,7 @@ impl Analyzer<'_> {
             }
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }

@@ -138,6 +138,13 @@ pub enum ExprKind {
         result: Option<HeaderType>,
         body: ExprId,
     },
+    /// A first-class reference to the lexically active label destination.
+    /// Unlike a transfer, this is a proof-carrying callable value and can be
+    /// passed through a generic `L: Label<T>` parameter.  Core resolves the
+    /// spelling to a fresh `LabelBrand` before any later lowering phase.
+    LabelValue {
+        name: String,
+    },
     /// Transfer one value to a lexically visible label destination.
     Transfer {
         name: String,
@@ -459,8 +466,16 @@ impl Parser<'_> {
                     join(self.lexed.tokens[start].span, self.expression(value).span),
                 ));
             }
-            self.error_current("G4031", "expected `:` or `(` after label name");
-            return None;
+            // A bare label spelling is an ordinary first-class value.  It is
+            // deliberately distinct from `Path`: only an active lexical
+            // binder can mint its branded authority in Typed Core.
+            return Some(self.alloc(
+                ExprKind::LabelValue { name },
+                join(
+                    self.lexed.tokens[start].span,
+                    self.lexed.tokens[self.position - 1].span,
+                ),
+            ));
         }
         if self.word() == Some("label") {
             let start = self.advance()?;

@@ -980,6 +980,15 @@ pub enum MirInstruction {
         /// layout.
         environment: Option<MirCaptureEnvironment>,
     },
+    /// Materialize a first-class lexical label capability. The target and
+    /// destination are frozen CFG facts; the VM records the dynamic frame
+    /// depth at construction so this value can cross generic calls safely.
+    MakeLabel {
+        dst: MirLocal,
+        brand: crate::LabelBrand,
+        target: MirBlockId,
+        destination: MirLocal,
+    },
     CallIndirect {
         dst: MirLocal,
         callee: MirLocal,
@@ -1766,6 +1775,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::I64ToI128Checked { dst, .. }
         | MirInstruction::I64ToI128Wrapping { dst, .. }
         | MirInstruction::MakeCallable { dst, .. }
+        | MirInstruction::MakeLabel { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
         | MirInstruction::CaptureResumption { dst } => Some(*dst),
         MirInstruction::Abort
@@ -1956,6 +1966,7 @@ impl MirLowering {
             },
             resumption_snapshots: BTreeMap::new(),
             label_rejoins: BTreeMap::new(),
+            label_values: BTreeMap::new(),
             direct_resumption: None,
             suspend_completion: false,
             deferred_completion: None,
@@ -2086,6 +2097,25 @@ impl MirLowering {
         // before the generic label probe sees the `Never`-typed transfer.
         if let Some(function) =
             lowerer.lower_root_label_short_circuit_transfer(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(function),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        // A label which is reified as a generic `Label<T>` argument cannot
+        // use the static `Leave` probe below: its transfer executes in an
+        // ordinary callee. Give it a runtime token and a typed rejoin block
+        // before generic value lowering sees the lexical scope as erased.
+        if let Some(function) = lowerer.lower_root_first_class_label(body.root, parameters.clone())
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
@@ -3073,6 +3103,33 @@ impl MirFunction {
             }
             return Ok(());
         }
+        if let MirInstruction::MakeLabel {
+            dst,
+            target,
+            destination,
+            ..
+        } = instruction
+        {
+            let Type::Callable {
+                parameters, result, ..
+            } = self.local_type(*dst)?
+            else {
+                return Err("MIR label value destination is not callable".into());
+            };
+            if parameters.as_slice() != [self.local_type(*destination)?.clone()]
+                || !matches!(result.as_ref(), Type::Never)
+            {
+                return Err("MIR label value callable shape disagrees with its payload".into());
+            }
+            let block = self
+                .blocks
+                .get(target.0 as usize)
+                .ok_or_else(|| "MIR label value target block is absent".to_string())?;
+            if block.parameters.as_slice() != [*destination] {
+                return Err("MIR label value target does not accept its exact payload".into());
+            }
+            return Ok(());
+        }
         if let MirInstruction::Borrow {
             dst,
             src,
@@ -3917,6 +3974,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::LeChar { .. }
         | MirInstruction::GtChar { .. }
         | MirInstruction::GeChar { .. }
+        | MirInstruction::MakeLabel { .. }
         | MirInstruction::CallIndirect { .. } => Ok(()),
     }
 }
@@ -4740,6 +4798,9 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::MakeCallable { dst, captures, .. } => std::iter::once(*dst)
             .chain(captures.iter().copied())
             .collect(),
+        MirInstruction::MakeLabel {
+            dst, destination, ..
+        } => vec![*dst, *destination],
         MirInstruction::CallIndirect {
             dst,
             callee,
@@ -4782,6 +4843,9 @@ struct Lowerer<'a> {
     /// continuation reads this local instead of replaying the lexical label
     /// body (and, critically, instead of encountering its `Transfer` again).
     label_rejoins: BTreeMap<CoreId, MirLocal>,
+    /// Active first-class label values resolve to their exact lexical rejoin
+    /// destination while the owning label body is lowered.
+    label_values: BTreeMap<crate::LabelBrand, (MirBlockId, MirLocal)>,
     /// Active only while lowering a statically specialized handler clause.
     /// The plan makes the captured continuation explicit even when its
     /// representation can be eliminated: either the root identity or a
@@ -5798,13 +5862,12 @@ impl Lowerer<'_> {
             // of an ordinary strict expression.  Its preceding operand is
             // still evaluated before handler installation, while the
             // transfer abandons the enclosing binary continuation.
-            CoreKind::Binary {
+            CoreKind::IntrinsicCall {
                 operator,
-                left,
-                right,
-            } if !matches!(operator.as_str(), "and" | "or") => {
-                let (computation, clauses, nested_prefix) = self.lexical_handle(right)?;
-                let mut prefix = vec![left];
+                arguments,
+            } if !matches!(operator.as_str(), "and" | "or") && arguments.len() == 2 => {
+                let (computation, clauses, nested_prefix) = self.lexical_handle(arguments[1])?;
+                let mut prefix = vec![arguments[0]];
                 prefix.extend(nested_prefix);
                 Some((computation, clauses, prefix))
             }
@@ -6007,18 +6070,19 @@ impl Lowerer<'_> {
             | CoreKind::Borrow { value: base, .. }
             | CoreKind::Deref(base)
             | CoreKind::Move(base)
-            | CoreKind::Unary { value: base, .. }
             | CoreKind::Transfer { value: base, .. } => self.first_strict_completion(base),
             CoreKind::Assign { value, .. } => self.first_strict_completion(value),
-            CoreKind::Binary {
+            CoreKind::IntrinsicCall {
                 operator,
-                left,
-                right,
-            } => self.first_strict_completion(left).or_else(|| {
-                (!matches!(operator.as_str(), "and" | "or"))
-                    .then(|| self.first_strict_completion(right))
-                    .flatten()
-            }),
+                arguments,
+            } => arguments
+                .into_iter()
+                .enumerate()
+                .find_map(|(index, argument)| {
+                    (index == 0 || !matches!(operator.as_str(), "and" | "or"))
+                        .then(|| self.first_strict_completion(argument))
+                        .flatten()
+                }),
             CoreKind::Call {
                 callee, arguments, ..
             } => self.first_strict_completion(callee).or_else(|| {
@@ -6033,6 +6097,7 @@ impl Lowerer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -6283,7 +6348,6 @@ impl Lowerer<'_> {
             | CoreKind::Borrow { value: body, .. }
             | CoreKind::Deref(body)
             | CoreKind::Move(body)
-            | CoreKind::Unary { value: body, .. }
             | CoreKind::Transfer { value: body, .. } => {
                 self.find_plain_label_completion_transfer(body)
             }
@@ -6294,9 +6358,9 @@ impl Lowerer<'_> {
             CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
                 .into_iter()
                 .find_map(|field| self.find_plain_label_completion_transfer(field)),
-            CoreKind::Binary { left, right, .. } => self
-                .find_plain_label_completion_transfer(left)
-                .or_else(|| self.find_plain_label_completion_transfer(right)),
+            CoreKind::IntrinsicCall { arguments, .. } => arguments
+                .into_iter()
+                .find_map(|argument| self.find_plain_label_completion_transfer(argument)),
             CoreKind::Call {
                 callee, arguments, ..
             } => self
@@ -6312,6 +6376,7 @@ impl Lowerer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -6331,26 +6396,31 @@ impl Lowerer<'_> {
             return None;
         };
         let (binary, prefix) = match self.body.expression(body).kind.clone() {
-            CoreKind::Binary { .. } => (body, Vec::new()),
+            CoreKind::IntrinsicCall { .. } => (body, Vec::new()),
             CoreKind::Block(values) => {
                 let (binary, prefix) = values.split_last()?;
-                matches!(self.body.expression(*binary).kind, CoreKind::Binary { .. })
-                    .then_some((*binary, prefix.to_vec()))?
+                matches!(
+                    self.body.expression(*binary).kind,
+                    CoreKind::IntrinsicCall { .. }
+                )
+                .then_some((*binary, prefix.to_vec()))?
             }
             _ => return None,
         };
-        let CoreKind::Binary {
+        let CoreKind::IntrinsicCall {
             operator,
-            left,
-            right,
+            arguments,
         } = self.body.expression(binary).kind.clone()
         else {
             return None;
         };
+        let [left, right] = arguments.as_slice() else {
+            return None;
+        };
         (matches!(operator.as_str(), "and" | "or")
-            && !self.contains_label_transfer(left, brand)
-            && self.contains_label_transfer(right, brand))
-        .then_some((brand, prefix, operator, left, right))
+            && !self.contains_label_transfer(*left, brand)
+            && self.contains_label_transfer(*right, brand))
+        .then_some((brand, prefix, operator, *left, *right))
     }
 
     /// Find an executable lazy label even when the label itself is used as an
@@ -6372,7 +6442,6 @@ impl Lowerer<'_> {
             | CoreKind::Borrow { value: body, .. }
             | CoreKind::Deref(body)
             | CoreKind::Move(body)
-            | CoreKind::Unary { value: body, .. }
             | CoreKind::Transfer { value: body, .. } => {
                 self.find_label_short_circuit_transfer(body)
             }
@@ -6383,9 +6452,9 @@ impl Lowerer<'_> {
             CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
                 .into_iter()
                 .find_map(|field| self.find_label_short_circuit_transfer(field)),
-            CoreKind::Binary { left, right, .. } => self
-                .find_label_short_circuit_transfer(left)
-                .or_else(|| self.find_label_short_circuit_transfer(right)),
+            CoreKind::IntrinsicCall { arguments, .. } => arguments
+                .into_iter()
+                .find_map(|argument| self.find_label_short_circuit_transfer(argument)),
             CoreKind::Call {
                 callee, arguments, ..
             } => self.find_label_short_circuit_transfer(callee).or_else(|| {
@@ -6399,6 +6468,7 @@ impl Lowerer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -6558,6 +6628,124 @@ impl Lowerer<'_> {
     /// and then runs the lexical continuation after the label.  Consequently
     /// `let value = label done { transfer done 40 }; value + 2` preserves both
     /// the label result and the code that follows the label expression.
+    /// Lower a root lexical label whose branded capability is passed as an
+    /// ordinary generic value. A static `Transfer` has a syntactic path to
+    /// its join; a first-class label deliberately does not, so execution
+    /// records the target as a VM token and the token invocation unwinds back
+    /// to this typed rejoin block.
+    fn lower_root_first_class_label(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let label = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => root,
+            // A function body is ordinarily represented as a structural
+            // block.  This first dynamic form claims the tail label, whose
+            // rejoin is also the block result; non-tail label expressions
+            // retain the existing static CFG path until their continuation
+            // lowering is generalized in the same way.
+            CoreKind::Block(values) => values.last().copied().filter(|value| {
+                matches!(self.body.expression(*value).kind, CoreKind::Label { .. })
+            })?,
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            unreachable!("label selection was checked above");
+        };
+        if !self.contains_label_value(body, brand) {
+            return None;
+        }
+        let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
+        self.label_values.insert(brand, (MirBlockId(1), join));
+        let lowered = self.value(body);
+        self.label_values.remove(&brand);
+        lowered?;
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.clone(),
+            result: self.body.expression(root).ty.clone(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    parameters: vec![],
+                    instructions: entry_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+            ],
+        })
+    }
+
+    fn contains_label_value(&self, id: CoreId, target: crate::LabelBrand) -> bool {
+        match self.body.expression(id).kind.clone() {
+            CoreKind::LabelValue { brand } => brand == target,
+            CoreKind::Closure { .. } => false,
+            CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
+                .into_iter()
+                .any(|value| self.contains_label_value(value, target)),
+            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => fields
+                .into_iter()
+                .any(|field| self.contains_label_value(field, target)),
+            CoreKind::Field { base, .. }
+            | CoreKind::PatternTest { subject: base, .. }
+            | CoreKind::Let { value: base, .. }
+            | CoreKind::Borrow { value: base, .. }
+            | CoreKind::Deref(base)
+            | CoreKind::Move(base)
+            | CoreKind::Label { body: base, .. }
+            | CoreKind::Transfer { value: base, .. } => self.contains_label_value(base, target),
+            CoreKind::Assign { value, .. } => self.contains_label_value(value, target),
+            CoreKind::IntrinsicCall { arguments, .. } => arguments
+                .into_iter()
+                .any(|argument| self.contains_label_value(argument, target)),
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
+                self.contains_label_value(callee, target)
+                    || arguments
+                        .into_iter()
+                        .any(|argument| self.contains_label_value(argument, target))
+            }
+            CoreKind::Perform { arguments, .. } => arguments
+                .into_iter()
+                .any(|argument| self.contains_label_value(argument, target)),
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => {
+                self.contains_label_value(computation, target)
+                    || clauses
+                        .into_iter()
+                        .any(|clause| self.contains_label_value(clause.body, target))
+            }
+            CoreKind::Completion {
+                computation,
+                clauses,
+            } => {
+                self.contains_label_value(computation, target)
+                    || clauses
+                        .into_iter()
+                        .any(|clause| self.contains_label_value(clause.body, target))
+            }
+            CoreKind::Literal(_)
+            | CoreKind::Local(_)
+            | CoreKind::Resumption { .. }
+            | CoreKind::Function { .. }
+            | CoreKind::TraitMethod { .. }
+            | CoreKind::Constant { .. }
+            | CoreKind::Error => false,
+        }
+    }
+
     fn lower_root_label_transfer(
         &mut self,
         root: CoreId,
@@ -6718,16 +6906,15 @@ impl Lowerer<'_> {
                 self.error("G6012", "label scope has no transfer to its target brand");
                 None
             }
-            CoreKind::Binary {
+            CoreKind::IntrinsicCall {
                 operator,
-                left,
-                right,
-            } if !matches!(operator.as_str(), "and" | "or") => {
-                if self.contains_label_transfer(left, target) {
-                    self.lower_label_transfer_path(left, target)
+                arguments,
+            } if !matches!(operator.as_str(), "and" | "or") && arguments.len() == 2 => {
+                if self.contains_label_transfer(arguments[0], target) {
+                    self.lower_label_transfer_path(arguments[0], target)
                 } else {
-                    self.value(left)?;
-                    self.lower_label_transfer_path(right, target)
+                    self.value(arguments[0])?;
+                    self.lower_label_transfer_path(arguments[1], target)
                 }
             }
             CoreKind::Call {
@@ -6761,8 +6948,10 @@ impl Lowerer<'_> {
             | CoreKind::Let { value: base, .. }
             | CoreKind::Borrow { value: base, .. }
             | CoreKind::Deref(base)
-            | CoreKind::Move(base)
-            | CoreKind::Unary { value: base, .. } => self.lower_label_transfer_path(base, target),
+            | CoreKind::Move(base) => self.lower_label_transfer_path(base, target),
+            CoreKind::IntrinsicCall { arguments, .. } if arguments.len() == 1 => {
+                self.lower_label_transfer_path(arguments[0], target)
+            }
             // Assignment lowering evaluates the source before it resolves
             // and writes the destination. A transfer in that source therefore
             // exits before any store or destination-place action is emitted.
@@ -6808,7 +6997,6 @@ impl Lowerer<'_> {
             | CoreKind::Borrow { value: base, .. }
             | CoreKind::Deref(base)
             | CoreKind::Move(base)
-            | CoreKind::Unary { value: base, .. }
             | CoreKind::Transfer { value: base, .. } => self.find_transfer_label(base),
             CoreKind::Assign { place, value } => match place {
                 CorePlace::Deref { reference, .. } => self
@@ -6842,12 +7030,13 @@ impl Lowerer<'_> {
                     .into_iter()
                     .find_map(|clause| self.find_transfer_label(clause.body))
             }),
-            CoreKind::Binary { left, right, .. } => self
-                .find_transfer_label(left)
-                .or_else(|| self.find_transfer_label(right)),
+            CoreKind::IntrinsicCall { arguments, .. } => arguments
+                .into_iter()
+                .find_map(|argument| self.find_transfer_label(argument)),
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -6900,12 +7089,16 @@ impl Lowerer<'_> {
                 }
                 false
             }
-            CoreKind::Binary { left, right, .. } => {
-                if self.prepare_label_path(left, target) {
-                    true
-                } else {
-                    self.value(left).is_some() && self.prepare_label_path(right, target)
+            CoreKind::IntrinsicCall { arguments, .. } => {
+                for argument in arguments {
+                    if self.prepare_label_path(argument, target) {
+                        return true;
+                    }
+                    if self.value(argument).is_none() {
+                        return false;
+                    }
                 }
+                false
             }
             CoreKind::Call {
                 callee, arguments, ..
@@ -6943,7 +7136,6 @@ impl Lowerer<'_> {
             | CoreKind::Borrow { value: base, .. }
             | CoreKind::Deref(base)
             | CoreKind::Move(base)
-            | CoreKind::Unary { value: base, .. }
             | CoreKind::Transfer { value: base, .. } => self.prepare_label_path(base, target),
             CoreKind::Assign { value, .. } => self.prepare_label_path(value, target),
             // Handler/completion clauses introduce independently checked
@@ -6955,6 +7147,7 @@ impl Lowerer<'_> {
             | CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -6981,16 +7174,13 @@ impl Lowerer<'_> {
             | CoreKind::PatternTest { subject: body, .. }
             | CoreKind::Borrow { value: body, .. }
             | CoreKind::Deref(body)
-            | CoreKind::Move(body)
-            | CoreKind::Unary { value: body, .. } => self.contains_label_transfer(*body, target),
-            CoreKind::Binary {
+            | CoreKind::Move(body) => self.contains_label_transfer(*body, target),
+            CoreKind::IntrinsicCall {
                 operator,
-                left,
-                right,
-            } if !matches!(operator.as_str(), "and" | "or") => {
-                self.contains_label_transfer(*left, target)
-                    || self.contains_label_transfer(*right, target)
-            }
+                arguments,
+            } if !matches!(operator.as_str(), "and" | "or") => arguments
+                .iter()
+                .any(|argument| self.contains_label_transfer(*argument, target)),
             CoreKind::Call {
                 callee, arguments, ..
             } => {
@@ -7539,25 +7729,26 @@ impl Lowerer<'_> {
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
         let binary = match self.body.expression(root).kind.clone() {
-            CoreKind::Binary {
+            CoreKind::IntrinsicCall {
                 operator,
-                left,
-                right,
-            } => Some((operator, left, right)),
+                arguments,
+            } if arguments.len() == 2 => Some((operator, arguments[0], arguments[1])),
             CoreKind::Block(values) => {
                 let (last, prefix) = values.split_last()?;
                 for value in prefix {
                     self.statement(*value)?;
                 }
-                let CoreKind::Binary {
+                let CoreKind::IntrinsicCall {
                     operator,
-                    left,
-                    right,
+                    arguments,
                 } = self.body.expression(*last).kind.clone()
                 else {
                     return None;
                 };
-                Some((operator, left, right))
+                let [left, right] = arguments.as_slice() else {
+                    return None;
+                };
+                Some((operator, *left, *right))
             }
             _ => None,
         };
@@ -13913,16 +14104,14 @@ impl Lowerer<'_> {
             | CoreKind::Borrow { value: base, .. }
             | CoreKind::Deref(base)
             | CoreKind::Move(base)
-            | CoreKind::Unary { value: base, .. }
             | CoreKind::Label { body: base, .. }
             | CoreKind::Transfer { value: base, .. } => self.contains_evaluated_completion(base),
             CoreKind::Let { value, .. } | CoreKind::Assign { value, .. } => {
                 self.contains_evaluated_completion(value)
             }
-            CoreKind::Binary { left, right, .. } => {
-                self.contains_evaluated_completion(left)
-                    || self.contains_evaluated_completion(right)
-            }
+            CoreKind::IntrinsicCall { arguments, .. } => arguments
+                .into_iter()
+                .any(|argument| self.contains_evaluated_completion(argument)),
             CoreKind::Call {
                 callee, arguments, ..
             } => {
@@ -13938,6 +14127,7 @@ impl Lowerer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -14914,6 +15104,24 @@ impl Lowerer<'_> {
                     self.resumption_snapshots.insert(id, dst);
                 }
             }
+            CoreKind::LabelValue { brand } => {
+                let Some((target, destination)) = self.label_values.get(&brand).copied() else {
+                    self.error(
+                        "G6012",
+                        &format!(
+                            "first-class label value escaped its lexical lowering scope ({brand:?}; active: {:?})",
+                            self.label_values.keys().collect::<Vec<_>>()
+                        ),
+                    );
+                    return None;
+                };
+                self.instructions.push(MirInstruction::MakeLabel {
+                    dst,
+                    brand,
+                    target,
+                    destination,
+                });
+            }
             // Named callables are first-class values just like anonymous
             // closures. Their environment is statically empty, while the
             // function identity selects the verified code target.
@@ -15103,8 +15311,11 @@ impl Lowerer<'_> {
                 let src = self.capability_value(value)?;
                 self.instructions.push(MirInstruction::Move { dst, src });
             }
-            CoreKind::Unary { operator, value } => {
-                let value = self.value(value)?;
+            CoreKind::IntrinsicCall {
+                operator,
+                arguments,
+            } if arguments.len() == 1 => {
+                let value = self.value(arguments[0])?;
                 match (operator.as_str(), &ty) {
                     (
                         "+",
@@ -15147,13 +15358,14 @@ impl Lowerer<'_> {
                     }
                 }
             }
-            CoreKind::Binary {
+            CoreKind::IntrinsicCall {
                 operator,
-                left,
-                right,
-            } if matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%") => {
-                let left = self.value(left)?;
-                let right = self.value(right)?;
+                arguments,
+            } if arguments.len() == 2
+                && matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%") =>
+            {
+                let left = self.value(arguments[0])?;
+                let right = self.value(arguments[1])?;
                 let instruction = match (&ty, operator.as_str()) {
                     (Type::Scalar(crate::types::ScalarType::I64), "+") => {
                         MirInstruction::AddI64 { dst, left, right }
@@ -15195,14 +15407,15 @@ impl Lowerer<'_> {
                 };
                 self.instructions.push(instruction);
             }
-            CoreKind::Binary {
+            CoreKind::IntrinsicCall {
                 operator,
-                left,
-                right,
-            } if matches!(operator.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=") => {
-                let operand_ty = self.body.expression(left).ty.clone();
-                let left = self.value(left)?;
-                let right = self.value(right)?;
+                arguments,
+            } if arguments.len() == 2
+                && matches!(operator.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=") =>
+            {
+                let operand_ty = self.body.expression(arguments[0]).ty.clone();
+                let left = self.value(arguments[0])?;
+                let right = self.value(arguments[1])?;
                 let instruction = match (&operand_ty, operator.as_str()) {
                     (Type::Scalar(crate::types::ScalarType::I64), "==") => {
                         MirInstruction::EqI64 { dst, left, right }
@@ -17544,6 +17757,7 @@ impl Lowerer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. } => true,
             CoreKind::Constant { .. }
@@ -17558,15 +17772,15 @@ impl Lowerer<'_> {
             }),
             CoreKind::Borrow { unique, value } => !unique && self.core_is_replay_safe(value),
             CoreKind::Deref(value) => self.core_is_replay_safe(value),
-            CoreKind::Unary { value, .. }
-            | CoreKind::Field { base: value, .. }
-            | CoreKind::PatternTest { subject: value, .. } => self.core_is_replay_safe(value),
+            CoreKind::Field { base: value, .. } | CoreKind::PatternTest { subject: value, .. } => {
+                self.core_is_replay_safe(value)
+            }
             CoreKind::Let { value, .. } => self.core_is_replay_safe(value),
             CoreKind::Label { body, .. } => self.core_is_replay_safe(body),
             CoreKind::Transfer { .. } => false,
-            CoreKind::Binary { left, right, .. } => {
-                self.core_is_replay_safe(left) && self.core_is_replay_safe(right)
-            }
+            CoreKind::IntrinsicCall { arguments, .. } => arguments
+                .into_iter()
+                .all(|argument| self.core_is_replay_safe(argument)),
             CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => values
                 .into_iter()
                 .all(|value| self.core_is_replay_safe(value)),
@@ -17593,6 +17807,7 @@ impl Lowerer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. } => true,
             CoreKind::Constant { .. }
@@ -17610,16 +17825,15 @@ impl Lowerer<'_> {
             | CoreKind::PatternTest { subject: base, .. }
             | CoreKind::Move(base)
             | CoreKind::Borrow { value: base, .. }
-            | CoreKind::Deref(base)
-            | CoreKind::Unary { value: base, .. } => self.core_is_effect_free(base),
+            | CoreKind::Deref(base) => self.core_is_effect_free(base),
             CoreKind::Let { value, .. } | CoreKind::Assign { value, .. } => {
                 self.core_is_effect_free(value)
             }
             CoreKind::Label { body, .. } => self.core_is_effect_free(body),
             CoreKind::Transfer { .. } => false,
-            CoreKind::Binary { left, right, .. } => {
-                self.core_is_effect_free(left) && self.core_is_effect_free(right)
-            }
+            CoreKind::IntrinsicCall { arguments, .. } => arguments
+                .into_iter()
+                .all(|argument| self.core_is_effect_free(argument)),
             CoreKind::Closure { .. } => true,
             CoreKind::Call {
                 callee, arguments, ..
@@ -17681,11 +17895,13 @@ impl Lowerer<'_> {
             CoreKind::Borrow { value, .. }
             | CoreKind::Deref(value)
             | CoreKind::Move(value)
-            | CoreKind::Unary { value, .. }
             | CoreKind::Field { base: value, .. }
             | CoreKind::PatternTest { subject: value, .. }
             | CoreKind::Let { value, .. }
             | CoreKind::Assign { value, .. } => self.terminal_operation(value),
+            CoreKind::IntrinsicCall { arguments, .. } if arguments.len() == 1 => {
+                self.terminal_operation(arguments[0])
+            }
             _ => {
                 self.error(
                     "G6005",
@@ -18071,6 +18287,7 @@ impl Lowerer<'_> {
             },
             resumption_snapshots: BTreeMap::new(),
             label_rejoins: BTreeMap::new(),
+            label_values: BTreeMap::new(),
             direct_resumption: None,
             suspend_completion: false,
             deferred_completion: None,

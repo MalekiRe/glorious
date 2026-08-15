@@ -141,13 +141,13 @@ impl Analyzer<'_> {
         match expression.kind {
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
             | CoreKind::Error
             | CoreKind::PatternTest { .. }
-            | CoreKind::Unary { .. }
-            | CoreKind::Binary { .. } => Value::None,
+            | CoreKind::IntrinsicCall { .. } => Value::None,
             CoreKind::Local(name) => self.values.get(&name).cloned().unwrap_or(Value::None),
             CoreKind::Borrow { value, .. } => self.borrowed_value(value),
             CoreKind::Deref(value) => {

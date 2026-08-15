@@ -1003,6 +1003,15 @@ pub enum VmInstruction {
         /// captures. The verifier recomputes `callee` from this brand.
         environment: Option<VmCaptureEnvironment>,
     },
+    /// A runtime token for a compiler-minted lexical label. The dynamic
+    /// frame/handler depth is attached when this instruction executes.
+    MakeLabel {
+        dst: u32,
+        brand_owner: DefKey,
+        brand_label: u32,
+        target: u32,
+        destination: u32,
+    },
     CallIndirect {
         dst: u32,
         callee: u32,
@@ -4343,6 +4352,13 @@ impl<'a> Decoder<'a> {
                     environment: self.capture_environment()?,
                 })
             }
+            71 => Ok(VmInstruction::MakeLabel {
+                dst: self.u32()?,
+                brand_owner: self.def_key()?,
+                brand_label: self.u32()?,
+                target: self.u32()?,
+                destination: self.u32()?,
+            }),
             30 => {
                 let dst = self.u32()?;
                 let callee = self.u32()?;
@@ -5990,6 +6006,20 @@ fn lower_instruction(
                     })
                 })
                 .transpose()?,
+        },
+        MirInstruction::MakeLabel {
+            dst,
+            brand,
+            target,
+            destination,
+        } => VmInstruction::MakeLabel {
+            dst: dst.0,
+            brand_owner: brand.owner,
+            brand_label: brand.label,
+            target: *starts
+                .get(target.0 as usize)
+                .expect("validated MIR label target exists"),
+            destination: destination.0,
         },
         MirInstruction::CallIndirect {
             dst,
@@ -8010,6 +8040,29 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }
                 write(&mut states, *dst)?
             }
+            VmInstruction::MakeLabel {
+                dst,
+                target,
+                destination,
+                ..
+            } => {
+                let VmType::Callable {
+                    parameters, result, ..
+                } = register_type(function, *dst)?
+                else {
+                    return Err(VmArtifactError::NotCallable { register: *dst });
+                };
+                if parameters.as_slice() != [register_type(function, *destination)?]
+                    // VM represents source `!` as its zero-sized Unit leaf.
+                    || !matches!(result.as_ref(), VmType::Unit)
+                {
+                    return Err(VmArtifactError::NotCallable { register: *dst });
+                }
+                if *target as usize >= function.instructions.len() {
+                    return Err(VmArtifactError::InvalidRegister { register: *target });
+                }
+                write(&mut states, *dst)?
+            }
             VmInstruction::CallIndirect {
                 dst,
                 callee,
@@ -8652,6 +8705,18 @@ enum VmValue {
         captures: Arc<[VmValue]>,
         signature: VmType,
     },
+    /// A dynamic instance of one verified lexical label destination. It is
+    /// callable only through the ordinary one-argument `Label<T>` contract;
+    /// invocation unwinds to the captured frame rather than returning here.
+    Label {
+        owner: DefKey,
+        label: u32,
+        target: u32,
+        destination: u32,
+        call_depth: usize,
+        handler_depth: usize,
+        signature: VmType,
+    },
     /// A frame-branded callable token. Only `ResumeSnapshot` may consume it;
     /// ordinary indirect calls reject it.
     Resumption {
@@ -8774,6 +8839,7 @@ impl VmValue {
             Self::Record { signature, .. } => signature.clone(),
             Self::Enum { signature, .. } => signature.clone(),
             Self::Callable { signature, .. } => signature.clone(),
+            Self::Label { signature, .. } => signature.clone(),
             Self::Resumption { signature, .. } => signature.clone(),
             Self::Reference {
                 unique, referent, ..
@@ -9570,6 +9636,7 @@ fn format_vm_value(value: &VmValue) -> String {
         VmValue::Callable {
             callee, captures, ..
         } => format!("callable@{callee:?}[captures={}]", captures.len()),
+        VmValue::Label { owner, label, .. } => format!("label@{owner:?}#{label}"),
         VmValue::Resumption { frame, .. } => format!("resumption@{frame}"),
         VmValue::Reference { target, fields, .. } => {
             let target = match target {
@@ -12432,9 +12499,51 @@ fn execute(
                     op,
                 )))
             }
-            VmInstruction::Call { .. }
-            | VmInstruction::MakeCallable { .. }
-            | VmInstruction::CallIndirect { .. } => {
+            VmInstruction::MakeLabel {
+                dst,
+                brand_owner,
+                brand_label,
+                target,
+                destination,
+            } => {
+                let signature = register_type(function, dst)?;
+                registers[dst as usize] = Some(VmValue::Label {
+                    owner: brand_owner,
+                    label: brand_label,
+                    target,
+                    destination,
+                    call_depth: 0,
+                    handler_depth: handlers.len(),
+                    signature,
+                });
+            }
+            VmInstruction::CallIndirect {
+                callee, arguments, ..
+            } => {
+                let VmValue::Label {
+                    target,
+                    destination,
+                    handler_depth,
+                    ..
+                } = registers[callee as usize]
+                    .as_ref()
+                    .expect("verified register")
+                    .clone()
+                else {
+                    return Err(VmArtifactError::CallRequiresProgram);
+                };
+                let [argument] = arguments.as_slice() else {
+                    return Err(VmArtifactError::CallArity {
+                        expected: 1,
+                        found: arguments.len() as u32,
+                    });
+                };
+                registers[destination as usize] = registers[*argument as usize].clone();
+                handlers.truncate(handler_depth);
+                pc = target as usize;
+                continue;
+            }
+            VmInstruction::Call { .. } | VmInstruction::MakeCallable { .. } => {
                 return Err(VmArtifactError::CallRequiresProgram);
             }
             VmInstruction::HostCall {
@@ -13505,6 +13614,20 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 output.extend_from_slice(&capture.to_le_bytes());
             }
             encode_capture_environment(environment.as_ref(), output);
+        }
+        VmInstruction::MakeLabel {
+            dst,
+            brand_owner,
+            brand_label,
+            target,
+            destination,
+        } => {
+            output.push(71);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&brand_owner.0.as_bytes());
+            output.extend_from_slice(&brand_label.to_le_bytes());
+            output.extend_from_slice(&target.to_le_bytes());
+            output.extend_from_slice(&destination.to_le_bytes());
         }
         VmInstruction::CallIndirect {
             dst,
@@ -15449,17 +15572,74 @@ fn execute_with_arguments(
                     signature,
                 });
             }
+            VmInstruction::MakeLabel {
+                dst,
+                brand_owner,
+                brand_label,
+                target,
+                destination,
+            } => {
+                let signature = register_type(function, *dst)?;
+                registers[*dst as usize] = Some(VmValue::Label {
+                    owner: *brand_owner,
+                    label: *brand_label,
+                    target: *target,
+                    destination: *destination,
+                    call_depth: callers.len(),
+                    handler_depth: handlers.len(),
+                    signature,
+                });
+            }
             VmInstruction::CallIndirect {
                 dst,
                 callee,
                 arguments,
             } => {
-                let VmValue::Callable {
-                    callee, captures, ..
-                } = registers[*callee as usize]
+                let callee_value = registers[*callee as usize]
                     .as_ref()
                     .expect("verified register")
-                    .clone()
+                    .clone();
+                if let VmValue::Label {
+                    owner,
+                    target,
+                    destination,
+                    call_depth,
+                    handler_depth,
+                    ..
+                } = callee_value
+                {
+                    let [argument] = arguments.as_slice() else {
+                        return Err(VmArtifactError::CallArity {
+                            expected: 1,
+                            found: arguments.len() as u32,
+                        });
+                    };
+                    let payload = registers[*argument as usize].clone().ok_or(
+                        VmArtifactError::ReadBeforeWrite {
+                            register: *argument,
+                        },
+                    )?;
+                    while callers.len() > call_depth {
+                        let caller = callers.pop().expect("checked dynamic call depth");
+                        definition = caller.definition;
+                        registers = caller.registers;
+                    }
+                    if callers.len() != call_depth || definition != owner {
+                        return Err(VmArtifactError::HandlerStateMismatch);
+                    }
+                    let slot = registers.get_mut(destination as usize).ok_or(
+                        VmArtifactError::InvalidRegister {
+                            register: destination,
+                        },
+                    )?;
+                    *slot = Some(payload);
+                    handlers.truncate(handler_depth);
+                    pc = target as usize;
+                    continue;
+                }
+                let VmValue::Callable {
+                    callee, captures, ..
+                } = callee_value
                 else {
                     return Err(VmArtifactError::NotCallable { register: *callee });
                 };

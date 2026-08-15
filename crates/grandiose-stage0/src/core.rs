@@ -528,6 +528,13 @@ pub enum CoreKind {
         brand: LabelBrand,
         body: CoreId,
     },
+    /// The compiler-minted, first-class capability for one live lexical
+    /// label.  Its callable shape is `(payload) -> !`; the nominal brand is
+    /// retained instead of a source spelling so generic forwarding cannot
+    /// retarget a shadowed destination.
+    LabelValue {
+        brand: LabelBrand,
+    },
     Transfer {
         brand: LabelBrand,
         value: CoreId,
@@ -586,10 +593,13 @@ pub enum CoreKind {
         computation: CoreId,
         clauses: Vec<CoreCompletionClause>,
     },
-    Binary {
+    /// A call to a compiler-owned primitive implementation.  Surface
+    /// operators either elaborate to a source-selected trait method or this
+    /// uniform intrinsic-call form; Typed Core deliberately has no distinct
+    /// arithmetic or prefix-expression node family.
+    IntrinsicCall {
         operator: String,
-        left: CoreId,
-        right: CoreId,
+        arguments: Vec<CoreId>,
     },
     Block(Vec<CoreId>),
     Borrow {
@@ -599,10 +609,6 @@ pub enum CoreKind {
     /// Read through a shared or unique reference without consuming the loan.
     Deref(CoreId),
     Move(CoreId),
-    Unary {
-        operator: String,
-        value: CoreId,
-    },
     Error,
 }
 impl CoreKind {
@@ -913,6 +919,7 @@ fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProje
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
+        | CoreKind::LabelValue { .. }
         | CoreKind::Tuple(_)
         | CoreKind::Array(_)
         | CoreKind::Record { .. }
@@ -922,12 +929,11 @@ fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProje
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
         | CoreKind::Call { .. }
-        | CoreKind::Binary { .. }
+        | CoreKind::IntrinsicCall { .. }
         | CoreKind::Block(_)
         | CoreKind::Borrow { .. }
         | CoreKind::Deref(_)
         | CoreKind::Move(_)
-        | CoreKind::Unary { .. }
         | CoreKind::Error => {}
     }
 }
@@ -1201,6 +1207,10 @@ impl CoreFingerprintEncoder<'_> {
                 self.debug(id);
                 self.bytes(name.as_bytes());
             }
+            CoreKind::LabelValue { brand } => {
+                self.bytes(b"label-value");
+                self.debug(brand);
+            }
             CoreKind::Function {
                 definition,
                 arguments,
@@ -1408,15 +1418,16 @@ impl CoreFingerprintEncoder<'_> {
                     self.id(clause.body);
                 }
             }
-            CoreKind::Binary {
+            CoreKind::IntrinsicCall {
                 operator,
-                left,
-                right,
+                arguments,
             } => {
-                self.bytes(b"binary");
+                self.bytes(b"intrinsic-call");
                 self.bytes(operator.as_bytes());
-                self.id(*left);
-                self.id(*right);
+                self.bytes(&(arguments.len() as u64).to_le_bytes());
+                for argument in arguments {
+                    self.id(*argument);
+                }
             }
             CoreKind::Block(values) => {
                 self.bytes(b"block");
@@ -1435,11 +1446,6 @@ impl CoreFingerprintEncoder<'_> {
                 self.bytes(b"move");
                 self.id(*value);
             }
-            CoreKind::Unary { operator, value } => {
-                self.bytes(b"unary");
-                self.bytes(operator.as_bytes());
-                self.id(*value);
-            }
             CoreKind::Error => self.bytes(b"error"),
         }
     }
@@ -1455,7 +1461,6 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
         | CoreKind::PatternTest { subject: base, .. }
         | CoreKind::Borrow { value: base, .. }
         | CoreKind::Deref(base)
-        | CoreKind::Unary { value: base, .. }
         | CoreKind::Move(base) => vec![*base],
         CoreKind::Closure { body, .. }
         | CoreKind::Let { value: body, .. }
@@ -1486,10 +1491,11 @@ fn core_children(kind: &CoreKind) -> Vec<CoreId> {
         } => std::iter::once(*computation)
             .chain(clauses.iter().map(|clause| clause.body))
             .collect(),
-        CoreKind::Binary { left, right, .. } => vec![*left, *right],
+        CoreKind::IntrinsicCall { arguments, .. } => arguments.clone(),
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
+        | CoreKind::LabelValue { .. }
         | CoreKind::Function { .. }
         | CoreKind::TraitMethod { .. }
         | CoreKind::Constant { .. }
@@ -2353,6 +2359,7 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
+        | CoreKind::LabelValue { .. }
         | CoreKind::Tuple(_)
         | CoreKind::Array(_)
         | CoreKind::Record { .. }
@@ -2362,12 +2369,11 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
         | CoreKind::Call { .. }
-        | CoreKind::Binary { .. }
+        | CoreKind::IntrinsicCall { .. }
         | CoreKind::Block(_)
         | CoreKind::Borrow { .. }
         | CoreKind::Deref(_)
         | CoreKind::Move(_)
-        | CoreKind::Unary { .. }
         | CoreKind::Error => false,
     }
 }
@@ -2471,6 +2477,7 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
+        | CoreKind::LabelValue { .. }
         | CoreKind::Tuple(_)
         | CoreKind::Array(_)
         | CoreKind::Record { .. }
@@ -2480,12 +2487,11 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
         | CoreKind::Call { .. }
-        | CoreKind::Binary { .. }
+        | CoreKind::IntrinsicCall { .. }
         | CoreKind::Block(_)
         | CoreKind::Borrow { .. }
         | CoreKind::Deref(_)
         | CoreKind::Move(_)
-        | CoreKind::Unary { .. }
         | CoreKind::Error => false,
     }
 }
@@ -2623,6 +2629,7 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
         CoreKind::Literal(_)
         | CoreKind::Local(_)
         | CoreKind::Resumption { .. }
+        | CoreKind::LabelValue { .. }
         | CoreKind::Tuple(_)
         | CoreKind::Array(_)
         | CoreKind::Record { .. }
@@ -2632,12 +2639,11 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
         | CoreKind::Call { .. }
-        | CoreKind::Binary { .. }
+        | CoreKind::IntrinsicCall { .. }
         | CoreKind::Block(_)
         | CoreKind::Borrow { .. }
         | CoreKind::Deref(_)
         | CoreKind::Move(_)
-        | CoreKind::Unary { .. }
         | CoreKind::Error => false,
     }
 }
@@ -2972,7 +2978,12 @@ impl TypedBody {
             let mut transfers = Vec::new();
             collect_transfer_brands(&elaborator.expressions, body_root, &mut transfers);
             let rejoined_by_own_transfer = transfers.into_iter().any(|target| target == brand);
-            let label_type = if matches!(body_type, Type::Never) && !rejoined_by_own_transfer {
+            let rejoined_by_own_value =
+                contains_label_value_brand(&elaborator.expressions, body_root, brand);
+            let label_type = if matches!(body_type, Type::Never)
+                && !rejoined_by_own_transfer
+                && !rejoined_by_own_value
+            {
                 Type::Never
             } else {
                 result
@@ -3596,6 +3607,8 @@ impl Elaborator<'_> {
                 let mut transfers = Vec::new();
                 collect_transfer_brands(&self.expressions, body, &mut transfers);
                 let rejoined_by_own_transfer = transfers.into_iter().any(|target| target == brand);
+                let rejoined_by_own_value =
+                    contains_label_value_brand(&self.expressions, body, brand);
                 // A transfer does not produce the label result at its source
                 // location: it abandons that continuation.  Its payload was
                 // unified with `result` while elaborating the transfer, so a
@@ -3620,12 +3633,41 @@ impl Elaborator<'_> {
                 // exits through an enclosing brand remains terminal; leaving
                 // its fresh result variable in the frozen Core would turn a
                 // valid nested transfer into an inference-hole diagnostic.
-                let label_type = if matches!(body_type, Type::Never) && !rejoined_by_own_transfer {
+                let label_type = if matches!(body_type, Type::Never)
+                    && !rejoined_by_own_transfer
+                    && !rejoined_by_own_value
+                {
                     Type::Never
                 } else {
                     result
                 };
                 self.alloc(CoreKind::Label { brand, body }, label_type, expression.span)
+            }
+            ExprKind::LabelValue { name } => {
+                let Some(label) = self
+                    .active_labels
+                    .iter()
+                    .rev()
+                    .find(|label| label.name == name)
+                    .cloned()
+                else {
+                    return self.fail(
+                        expression.span,
+                        "G4177",
+                        "label value is outside its lexical scope",
+                    );
+                };
+                self.alloc(
+                    CoreKind::LabelValue { brand: label.brand },
+                    Type::Callable {
+                        lifetime_binders: 0,
+                        parameters: vec![label.result],
+                        result: Box::new(Type::Never),
+                        effects: EffectRow::empty(),
+                        invocation: crate::Quantity::ONCE,
+                    },
+                    expression.span,
+                )
             }
             ExprKind::Transfer { name, value } => {
                 let value = self.expression(value);
@@ -5741,9 +5783,7 @@ impl Elaborator<'_> {
                     self.collect_captures(*value, locals, captures);
                 }
             }
-            CoreKind::Unary { value, .. } | CoreKind::Deref(value) => {
-                self.collect_captures(*value, locals, captures)
-            }
+            CoreKind::Deref(value) => self.collect_captures(*value, locals, captures),
             CoreKind::Borrow { unique, value } => {
                 if let CoreKind::Local(name) = &self.expressions[value.0 as usize].kind {
                     record_capture(
@@ -5841,9 +5881,10 @@ impl Elaborator<'_> {
             CoreKind::PatternTest { subject, .. } => {
                 self.collect_captures(*subject, locals, captures)
             }
-            CoreKind::Binary { left, right, .. } => {
-                self.collect_captures(*left, locals, captures);
-                self.collect_captures(*right, locals, captures);
+            CoreKind::IntrinsicCall { arguments, .. } => {
+                for argument in arguments {
+                    self.collect_captures(*argument, locals, captures);
+                }
             }
             CoreKind::Block(values) => {
                 let mut scoped = locals.clone();
@@ -5869,6 +5910,7 @@ impl Elaborator<'_> {
             }
             CoreKind::Literal(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -5919,7 +5961,7 @@ impl Elaborator<'_> {
                 }
             }
             CoreKind::Assign { place, .. } => self.zonk_place(place, span),
-            CoreKind::Label { .. } | CoreKind::Transfer { .. } => {}
+            CoreKind::Label { .. } | CoreKind::LabelValue { .. } | CoreKind::Transfer { .. } => {}
             CoreKind::Function { arguments, .. } | CoreKind::Constant { arguments, .. } => {
                 *arguments = arguments
                     .iter()
@@ -6061,12 +6103,11 @@ impl Elaborator<'_> {
             | CoreKind::Field { .. }
             | CoreKind::Enum { .. }
             | CoreKind::Let { .. }
-            | CoreKind::Binary { .. }
+            | CoreKind::IntrinsicCall { .. }
             | CoreKind::Block(_)
             | CoreKind::Borrow { .. }
             | CoreKind::Deref(_)
             | CoreKind::Move(_)
-            | CoreKind::Unary { .. }
             | CoreKind::Error => {}
         }
         kind
@@ -7466,7 +7507,14 @@ impl Elaborator<'_> {
         let value = self.expression(value);
         let value_ty = self.expressions[value.0 as usize].ty.clone();
         if matches!(value_ty, Type::Never) {
-            return self.alloc(CoreKind::Unary { operator, value }, Type::Never, span);
+            return self.alloc(
+                CoreKind::IntrinsicCall {
+                    operator,
+                    arguments: vec![value],
+                },
+                Type::Never,
+                span,
+            );
         }
         let result = match (operator.as_str(), &value_ty) {
             ("+" | "-", Type::Scalar(ScalarType::I64 | ScalarType::F64)) => value_ty.clone(),
@@ -7475,7 +7523,14 @@ impl Elaborator<'_> {
                 return self.operator_trait_call(operator, vec![value], span);
             }
         };
-        self.alloc(CoreKind::Unary { operator, value }, result, span)
+        self.alloc(
+            CoreKind::IntrinsicCall {
+                operator,
+                arguments: vec![value],
+            },
+            result,
+            span,
+        )
     }
 
     /// Lower a source-declared operator through the same identity-carrying
@@ -10659,10 +10714,9 @@ impl Elaborator<'_> {
             }
         };
         values.push(self.alloc(
-            CoreKind::Binary {
+            CoreKind::IntrinsicCall {
                 operator,
-                left,
-                right,
+                arguments: vec![left, right],
             },
             result,
             span,
@@ -10782,6 +10836,22 @@ fn collect_transfer_brands(expressions: &[CoreExpr], id: CoreId, brands: &mut Ve
     for child in core_children(&expression.kind) {
         collect_transfer_brands(expressions, child, brands);
     }
+}
+
+/// A first-class label capability may transfer only after crossing an
+/// ordinary generic call.  Its Core body is therefore `Never` at the source
+/// site even though the owning label regains its declared result at the
+/// dynamic rejoin.  Preserve that result contract just as direct branded
+/// transfers do, without treating a same-spelled label in another scope as
+/// evidence.
+fn contains_label_value_brand(expressions: &[CoreExpr], id: CoreId, target: LabelBrand) -> bool {
+    let Some(expression) = expressions.get(id.0 as usize) else {
+        return false;
+    };
+    matches!(expression.kind, CoreKind::LabelValue { brand } if brand == target)
+        || core_children(&expression.kind)
+            .into_iter()
+            .any(|child| contains_label_value_brand(expressions, child, target))
 }
 
 /// Align the lifetime leaves of two structurally corresponding types while

@@ -982,6 +982,45 @@ impl StageZeroCompiler {
                 ));
             }
         }
+        // `Drop` is an opaque zero-use destruction hook, not another way to
+        // satisfy ownership. Its interface must therefore be available at
+        // zero use and its hook cannot expose effects before a body is ever
+        // lowered into cleanup machinery.
+        for implementation in signatures
+            .definitions
+            .values()
+            .filter_map(|header| match header {
+                ElaboratedHeader::Implementation(implementation)
+                    if implementation.relation.definition
+                        == crate::resolution::language_drop_trait_definition() =>
+                {
+                    Some(implementation)
+                }
+                _ => None,
+            })
+        {
+            if !signatures
+                .principal_use_interval(&implementation.self_ty)
+                .is_some_and(|quantity| quantity.contains(crate::Quantity::ZERO))
+            {
+                diagnostics.push(CompileDiagnostic::source(
+                    "G4197",
+                    "custom `Drop` requires a zero-use `Use<[0,0]>` path; a positive lower bound cannot be destroyed",
+                    None,
+                ));
+            }
+            if implementation.methods.get("drop").is_some_and(|method| {
+                !method.effects.effects.is_empty()
+                    || !method.effects.projections.is_empty()
+                    || method.effects.tail.is_some()
+            }) {
+                diagnostics.push(CompileDiagnostic::source(
+                    "G4197",
+                    "custom `Drop` destructor must be pure and cannot expose effects or suspension",
+                    None,
+                ));
+            }
+        }
         // Host declarations are source-visible only when their exact frozen
         // capability is present in this request world.  This check happens
         // before bodies/Core are produced, so an unauthorized import can
@@ -1498,6 +1537,18 @@ impl StageZeroCompiler {
                             Some(diagnostic.span),
                         )
                     }));
+                    if implementation_signature.relation.definition
+                        == crate::resolution::language_drop_trait_definition()
+                        && core.expressions.iter().any(|expression| {
+                            matches!(expression.kind, crate::CoreKind::Transfer { .. })
+                        })
+                    {
+                        diagnostics.push(CompileDiagnostic::source(
+                            "G4197",
+                            "custom `Drop` destructor cannot perform a label transfer or otherwise expose control",
+                            Some(method.span),
+                        ));
+                    }
                     if core.recovered {
                         diagnostics.push(CompileDiagnostic::source(
                             "G7007",

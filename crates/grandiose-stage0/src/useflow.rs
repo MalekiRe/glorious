@@ -545,6 +545,7 @@ impl Analyzer<'_> {
             CoreKind::Literal(_)
             | CoreKind::Local(_)
             | CoreKind::Resumption { .. }
+            | CoreKind::LabelValue { .. }
             | CoreKind::Function { .. }
             | CoreKind::TraitMethod { .. }
             | CoreKind::Constant { .. }
@@ -656,7 +657,6 @@ impl Analyzer<'_> {
             }
             CoreKind::Deref(value) => self.expression(value, environment),
             CoreKind::Move(value)
-            | CoreKind::Unary { value, .. }
             | CoreKind::Field { base: value, .. }
             | CoreKind::PatternTest { subject: value, .. } => self.expression(value, environment),
             CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
@@ -665,8 +665,8 @@ impl Analyzer<'_> {
             CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
                 self.sequence(fields, environment, expression.span)
             }
-            CoreKind::Binary { left, right, .. } => {
-                self.sequence(vec![left, right], environment, expression.span)
+            CoreKind::IntrinsicCall { arguments, .. } => {
+                self.sequence(arguments, environment, expression.span)
             }
             CoreKind::Perform {
                 arguments,
@@ -2250,10 +2250,9 @@ mod tests {
                 },
                 call(CoreId(4), CoreId(5), CoreId(6)),
                 CoreExpr {
-                    kind: CoreKind::Binary {
+                    kind: CoreKind::IntrinsicCall {
                         operator: "+".into(),
-                        left: CoreId(3),
-                        right: CoreId(7),
+                        arguments: vec![CoreId(3), CoreId(7)],
                     },
                     ty: i64,
                     span: span(),
@@ -2465,10 +2464,9 @@ mod tests {
                     span: span(),
                 },
                 CoreExpr {
-                    kind: CoreKind::Binary {
+                    kind: CoreKind::IntrinsicCall {
                         operator: "+".into(),
-                        left: CoreId(2),
-                        right: CoreId(6),
+                        arguments: vec![CoreId(2), CoreId(6)],
                     },
                     ty: i64,
                     span: span(),
