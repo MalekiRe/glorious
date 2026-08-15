@@ -10400,6 +10400,121 @@ fn service_rolls_back_private_reference_closure_facade_revisions() {
 }
 
 #[test]
+fn service_preserves_hrtb_returned_closure_environments_through_nested_facade_revisions() {
+    // The nested public facades expose one constructor whose returned closure
+    // captures an HRTB callback, a shared caller borrow, and a unique local
+    // capture.  Its eventual indirect call must retain the exact environment
+    // capabilities from source through Core, MIR, VM emission, and decode.
+    let root = "use top_facade::{make, Callback}; pub fn identity<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 { let source = 41; let closure = make(identity, &source, 0); closure() }";
+    let provider = "pub type Callback = for<'a> (&'a i64) -> &'a i64; pub fn make<'a>(callback: Callback, shared: &'a i64, seed: i64) -> () -> i64 { () -> i64 { seed = *callback(shared) + 1; seed } } pub fn accepts_short(slot: &mut &i64) -> i64 { 0 }";
+    let world = |root: &str, provider: &str| {
+        let mut input = request(root);
+        for (package, source) in [
+            ("closure-core@0.1.0", provider),
+            (
+                "middle-facade@0.1.0",
+                "pub use closure_core::{Callback, accepts_short, make};",
+            ),
+            ("top-facade@0.1.0", "pub use middle_facade::*;"),
+        ] {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                source.as_bytes(),
+            ));
+        }
+        input
+    };
+
+    let mut reordered = world(root, provider);
+    let artifact = StageZeroCompiler::new()
+        .compile(reordered.clone())
+        .expect("nested facades must preserve the returned HRTB closure environment")
+        .artifact
+        .unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("source ordering must not alter returned closure environments")
+        .artifact
+        .unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("returned HRTB closure artifact must decode and verify");
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered_artifact.run_i64().unwrap(), 42);
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(root, provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let middle = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("middle-facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let top = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("top-facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let middle_trace = compiler
+        .dependency_trace(parent, &middle)
+        .expect("legal middle closure facade must freeze");
+    let top_trace = compiler
+        .dependency_trace(parent, &top)
+        .expect("legal top closure facade must freeze");
+
+    // `&mut` is invariant.  A facade client may not shorten the static inner
+    // reference while passing a short outer unique borrow, even though a
+    // shared reference alone remains covariant.
+    let invariant_root = "use top_facade::accepts_short; pub fn bad(value: &'static i64) -> i64 { let long = value; accepts_short(&mut long) } pub fn main() -> i64 { let candidate = bad; 0 }";
+    // The provider revision independently strengthens the returned closure's
+    // shared input to static. Both rejected worlds remain transactional.
+    let static_slot = provider.replace("shared: &'a i64", "shared: &'static i64");
+    for (label, candidate_root, candidate_provider) in [
+        ("invariant client", invariant_root, provider),
+        ("static provider input", root, static_slot.as_str()),
+    ] {
+        let rejected_world = world(candidate_root, candidate_provider);
+        let rejected = compiler
+            .import_revision(rejected_world.clone(), Some(parent))
+            .unwrap();
+        let error = compiler
+            .compile_session(&compiler.open_session(rejected).unwrap())
+            .expect_err("invalid closure environment region revision must not publish");
+        assert!(
+            error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5017"),
+            "{label} revision missing invariant/outlives diagnostic: {:#?}",
+            error.diagnostics()
+        );
+        assert_eq!(compiler.interface_cache_stats(), cached, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &middle), Some(middle_trace.clone()));
+        assert_eq!(compiler.dependency_trace(parent, &top), Some(top_trace.clone()));
+        let mut reordered_rejection = rejected_world;
+        reordered_rejection.sources.reverse();
+        assert_eq!(
+            error.diagnostics(),
+            StageZeroCompiler::new()
+                .compile(reordered_rejection)
+                .expect_err("source order cannot admit invalid returned closure regions")
+                .diagnostics(),
+            "{label} diagnostics must remain canonical"
+        );
+    }
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .canonical_bytes(),
+        parent_artifact.canonical_bytes(),
+        "failed closure-region revisions disturbed the legal parent artifact"
+    );
+}
+
+#[test]
 fn service_dynamic_label_rejoin_returns_a_shared_reference_closure() {
     // The returned closure borrows a caller-owned outer value immutably. The
     // dynamic label crosses the nested Ask frames, then the completion closes
