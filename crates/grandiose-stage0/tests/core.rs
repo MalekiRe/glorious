@@ -1200,6 +1200,76 @@ fn typed_core_validation_rejects_inference_hidden_in_closure_metadata() {
 }
 
 #[test]
+fn placeflow_does_not_freeze_a_capture_loan_without_source_storage() {
+    let package = PackageKey("core-unbound-capture-loan@0.1.0".into());
+    let span = Span {
+        file: FileKey::new(&package, "src/main.glorious"),
+        start: 0,
+        end: 1,
+    };
+    let owner = DefKey(Digest::of_bytes(b"core-unbound-capture-loan"));
+    let brand = EnvironmentBrand {
+        owner,
+        callable: CallableId(0),
+    };
+    let body = TypedBody {
+        parameters: vec![],
+        expressions: vec![
+            CoreExpr {
+                kind: CoreKind::Closure {
+                    callable: CallableId(0),
+                    parameters: vec![],
+                    environment: CaptureEnvironment {
+                        brand,
+                        captures: vec![ClosureCapture {
+                            name: "wire_key".into(),
+                            mode: CaptureMode::SharedBorrow,
+                            ty: Type::Scalar(ScalarType::I64),
+                        }],
+                        post_states: vec![CapturePostState {
+                            name: "wire_key".into(),
+                            mode: CaptureMode::SharedBorrow,
+                        }],
+                        runs_in: RunsInEvidence {
+                            environment: brand,
+                            callable: CallableId(0),
+                            effects: EffectRow::empty(),
+                            post_states: vec![CapturePostState {
+                                name: "wire_key".into(),
+                                mode: CaptureMode::SharedBorrow,
+                            }],
+                            sealed: true,
+                        },
+                        sealed: true,
+                    },
+                    body: CoreId(1),
+                },
+                ty: Type::Unit,
+                span,
+            },
+            CoreExpr {
+                kind: CoreKind::Literal("0".into()),
+                ty: Type::Scalar(ScalarType::I64),
+                span,
+            },
+        ],
+        root: CoreId(0),
+        diagnostics: vec![],
+        recovered: false,
+    };
+
+    let flow = PlaceFlow::analyze(&body);
+    assert!(
+        flow.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5002"),
+        "the forged capture must remain an ownership error: {flow:#?}"
+    );
+    assert!(
+        flow.active_loans.is_empty(),
+        "a capture without lexical storage must not become a frozen cleanup loan: {flow:#?}"
+    );
+}
+
+#[test]
 fn typed_core_validation_rejects_inference_in_callable_effect_arguments() {
     let package = PackageKey("core-callable-effect-inference@0.1.0".into());
     let span = Span {

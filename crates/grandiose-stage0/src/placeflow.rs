@@ -292,10 +292,12 @@ impl PlaceBindingArena {
         id
     }
 
+    fn get(&self, identity: &str) -> Option<PlaceBindingId> {
+        self.ids.get(identity).copied()
+    }
+
     fn id(&self, identity: &str) -> PlaceBindingId {
-        *self
-            .ids
-            .get(identity)
+        self.get(identity)
             .expect("every PlaceFlow projection root has a binding identity")
     }
 
@@ -463,12 +465,20 @@ impl PlaceFlow {
         let active_loans = a
             .projection_loans
             .iter()
-            .map(|loan| LoanFact {
-                owner: loan.owner.clone(),
-                binding: a.bindings.id(&loan.place.root),
-                root: loan.place.root.clone(),
-                fields: loan.place.fields.clone(),
-                unique: loan.unique,
+            .filter_map(|loan| {
+                // A flow product may retain a conservative temporary/capture
+                // provenance entry after the lexical owner that introduced it
+                // has gone out of scope.  Such an entry has no source-storage
+                // identity, so it cannot become a frozen MIR loan or a VM
+                // cleanup obligation.  Keep only live, addressable roots;
+                // `end_scope` remains responsible for releasing owned loans.
+                a.bindings.get(&loan.place.root).map(|binding| LoanFact {
+                    owner: loan.owner.clone(),
+                    binding,
+                    root: loan.place.root.clone(),
+                    fields: loan.place.fields.clone(),
+                    unique: loan.unique,
+                })
             })
             .collect();
         let final_move_paths = a
