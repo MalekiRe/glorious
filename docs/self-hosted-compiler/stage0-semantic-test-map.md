@@ -460,6 +460,7 @@ bridges executable:
 | Multi-operation resume then cancellation to a label | `service_multi_operation_handler_may_cancel_to_an_enclosing_label_after_a_resume` |
 | Partial-handler forwarding to an outer label transfer | `service_partial_handler_forwarding_may_reach_an_outer_label_transfer` |
 | Finite replay followed by label transfer | `service_replayed_resumption_result_may_transfer_to_an_enclosing_label` |
+| A custom-`Drop` aggregate survives partial-handler forwarding and is destroyed exactly once when the enclosing `[0,1]` handler cancels the suspended continuation | `service_drops_a_custom_aggregate_once_across_forward_and_cancellation` |
 | Completion after resumption transfers to an enclosing label | `service_completion_after_a_resumption_may_transfer_to_an_enclosing_label` |
 | Reentrant replayed completion cancels through nested facades to a branded label | `service_reentrant_completion_cancels_to_label_through_nested_facades` |
 | Outer completion leaves while a nested replay has a forwarded dependency continuation | `service_outer_completion_leaves_after_reentrant_forwarded_replay_through_facades` |
