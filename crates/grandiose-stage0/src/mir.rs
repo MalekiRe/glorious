@@ -11400,11 +11400,30 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let label = match self.body.expression(root).kind.clone() {
-            CoreKind::Label { .. } => root,
-            CoreKind::Block(values) => values.last().copied().filter(|value| {
+        let completion_label = |computation| match self.body.expression(computation).kind {
+            CoreKind::Label { .. } => Some(computation),
+            CoreKind::Block(ref values) => values.last().copied().filter(|value| {
                 matches!(self.body.expression(*value).kind, CoreKind::Label { .. })
-            })?,
+            }),
+            _ => None,
+        };
+        let (label, completion) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => (root, None),
+            CoreKind::Completion {
+                computation,
+                clauses,
+            } => (completion_label(computation)?, Some(clauses)),
+            CoreKind::Block(values) => {
+                let last = values.last().copied()?;
+                match self.body.expression(last).kind.clone() {
+                    CoreKind::Label { .. } => (last, None),
+                    CoreKind::Completion {
+                        computation,
+                        clauses,
+                    } => (completion_label(computation)?, Some(clauses)),
+                    _ => return None,
+                }
+            }
             _ => return None,
         };
         let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
@@ -11607,6 +11626,20 @@ impl Lowerer<'_> {
         let inner_instructions = std::mem::take(&mut self.instructions);
         let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), performed);
         let pattern = lower_pattern(inner.patterns[0].clone())?;
+        let (join_instructions, join_result) = if let Some(clauses) = completion {
+            let [clause] = clauses.as_slice() else {
+                return None;
+            };
+            if !pattern_is_irrefutable(&clause.pattern) {
+                return None;
+            }
+            self.instructions = Vec::new();
+            self.bind_completion_clause(clause, join)?;
+            let completed = self.value(clause.body)?;
+            (std::mem::take(&mut self.instructions), completed)
+        } else {
+            (Vec::new(), join)
+        };
         self.label_values.remove(&brand);
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
@@ -11627,8 +11660,8 @@ impl Lowerer<'_> {
                 MirBlock {
                     scope: MirScopeId::ROOT,
                     parameters: vec![join],
-                    instructions: vec![],
-                    terminator: MirTerminator::Return { value: join },
+                    instructions: join_instructions,
+                    terminator: MirTerminator::Return { value: join_result },
                 },
                 MirBlock {
                     scope: MirScopeId::ROOT,

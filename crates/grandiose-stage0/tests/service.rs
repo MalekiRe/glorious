@@ -8138,6 +8138,44 @@ fn service_dynamic_label_call_leaves_a_nested_partial_handler_forwarding_chain()
 }
 
 #[test]
+fn service_dynamic_label_rejoins_through_outer_completion_after_three_handler_frames() {
+    // The label is captured after the outer completion boundary but before
+    // the two operation handlers. The inner partial handler forwards to the
+    // exact outer one, whose resumed continuation invokes `exit`. The label
+    // jump abandons those operation frames while still delivering 42 to the
+    // outer completion arm, which runs afterward and adds 100.
+    let source = r#"
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub fn main() -> i64 {
+            handle {
+                @done: i64 {
+                    let exit = @done;
+                    handle {
+                        handle {
+                            let answer = Ask::ask(1);
+                            exit(answer + 1)
+                        } {
+                            Ask::ask(0) with k => k(0),
+                        }
+                    } {
+                        Ask::ask(value) with k => k(41),
+                    }
+                }
+            } {
+                value => value + 100,
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 142);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 142);
+}
+
+#[test]
 fn service_allows_an_immediately_invoked_closure_to_capture_a_resumption() {
     let source = r#"
         effect Ask { [1, 1] ask() -> i64; }
