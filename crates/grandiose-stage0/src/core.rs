@@ -4212,6 +4212,33 @@ impl Elaborator<'_> {
             ExprKind::Block(values) => self.block_expected(values, expected, expression.span),
             ExprKind::Tuple(values) => self.tuple_expected(values, expected, expression.span),
             ExprKind::Array(values) => self.array_expected(values, expected, expression.span),
+            // A signed numeric literal is parsed as a prefix expression, so
+            // carry a direct call's scalar parameter contract through the
+            // prefix before the literal selects its default integer type.
+            // Canonical checked float conversions use this for lower bounds
+            // such as `-128.0`.
+            ExprKind::Prefix { operator, value }
+                if matches!(operator.as_str(), "+" | "-")
+                    && matches!(expected, Some(Type::Scalar(scalar)) if scalar_is_numeric(scalar)) =>
+            {
+                let value = self.expression_expected(value, expected.clone());
+                let ty = self.expressions[value.0 as usize].ty.clone();
+                if matches!(
+                    ty,
+                    Type::Scalar(ScalarType::I64 | ScalarType::F32 | ScalarType::F64)
+                ) {
+                    self.alloc(
+                        CoreKind::IntrinsicCall {
+                            operator,
+                            arguments: vec![value],
+                        },
+                        ty,
+                        expression.span,
+                    )
+                } else {
+                    self.operator_trait_call(operator, vec![value], expression.span)
+                }
+            }
             // A direct call can carry result evidence backwards into a
             // generic callback argument.  This is essential for canonical
             // `if(condition) { body } else { fallback }`: the outer declared
@@ -8671,7 +8698,9 @@ impl Elaborator<'_> {
             );
         }
         let result = match (operator.as_str(), &value_ty) {
-            ("+" | "-", Type::Scalar(ScalarType::I64 | ScalarType::F64)) => value_ty.clone(),
+            ("+" | "-", Type::Scalar(ScalarType::I64 | ScalarType::F32 | ScalarType::F64)) => {
+                value_ty.clone()
+            }
             ("!", Type::Scalar(ScalarType::Bool)) => Type::Scalar(ScalarType::Bool),
             _ => {
                 return self.operator_trait_call(operator, vec![value], span);
@@ -11605,6 +11634,14 @@ impl Elaborator<'_> {
             {
                 continue;
             }
+            // `Fn` is a compiler-owned structural contract, not an ordinary
+            // implementation lookup. Its parameter, result, and effect
+            // equalities are checked below from the concrete callable value;
+            // asking the implementation solver for a synthetic `Fn` impl
+            // rejects valid contextual blocks such as canonical `if` arms.
+            if crate::is_intrinsic_callable_trait(&relation) {
+                continue;
+            }
             let subject = match self.inference.zonk(subject) {
                 Ok(subject) => subject,
                 Err(_) => {
@@ -11646,6 +11683,19 @@ impl Elaborator<'_> {
                 },
                 subject,
             };
+            // `Use<Q>` is likewise structural for closed values.  The
+            // frozen interface owns its sole principal interval, including
+            // scalars and `()`, so this proof must not depend on a fictional
+            // source implementation being selected by the general solver.
+            if goal.relation.definition == crate::resolution::language_use_trait_definition()
+                && let [GenericArgument::ConstQuantity(required)] = goal.relation.arguments.as_slice()
+                && self
+                    .signatures
+                    .principal_use_interval(&goal.subject)
+                    .is_some_and(|principal| principal.contains(*required))
+            {
+                continue;
+            }
             match self
                 .trait_query()
                 .solve_with_assumptions(goal, &assumptions)

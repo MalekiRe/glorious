@@ -4136,6 +4136,30 @@ fn canonical_option_some_alias_lowers_to_its_enum_constructor() {
 }
 
 #[test]
+fn contextual_if_accepts_structurally_zero_use_condition_payloads() {
+    let core = core_for(
+        "core-contextual-if-structural-use@0.1.0",
+        "enum Result<T, E> { Ok(T), Err(E) } if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E> where F: Fn<(), Output = B>, A: Use<[0, 0]> { condition } pub fn main() -> Result<i64, ()> { if(Result::Ok(())) { 7 } }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
+fn direct_float_calls_contextualize_signed_numeric_literals() {
+    let core = core_for(
+        "core-contextual-signed-float-literal@0.1.0",
+        "fn accept(value: f32) -> f32 { value } pub fn main() -> f32 { accept(-128.0) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            expression.kind,
+            CoreKind::IntrinsicCall { ref operator, .. } if operator == "-"
+        )
+    }));
+}
+
+#[test]
 fn handler_pattern_matrix_rejects_duplicate_unbounded_literal_rows() {
     let core = core_for(
         "core-handler-pattern-unbounded-literal@0.1.0",

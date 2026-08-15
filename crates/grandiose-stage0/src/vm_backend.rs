@@ -1684,6 +1684,14 @@ pub enum VmArtifactError {
         capability: String,
         symbol: String,
     },
+    /// The embedding host explicitly received a frozen host call but could
+    /// not complete it.  This is deliberately distinct from an absent host:
+    /// a verified artifact never obtains process authority by itself.
+    HostCallFailed {
+        capability: String,
+        symbol: String,
+        message: String,
+    },
     CallArity {
         expected: u32,
         found: u32,
@@ -1771,6 +1779,52 @@ pub enum VmArtifactError {
     HandlerResumeUnavailable,
     HandlerStateMismatch,
     HandlerStillActive,
+}
+
+/// Explicit authority for a verified VM program's frozen host imports.
+///
+/// The VM itself has no ambient process, filesystem, or diagnostic access.
+/// An embedding application must pass this adapter to one of the
+/// `run_*_with_host` entry points, and only the exact capability/symbol pairs
+/// carried by the verified artifact can reach these methods.
+pub trait VmHost {
+    fn process_args(&mut self) -> Result<Vec<String>, String>;
+    fn read_file(&mut self, path: &str) -> Result<Vec<u8>, String>;
+    fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), String>;
+    fn write_diagnostic(&mut self, text: &str) -> Result<(), String>;
+}
+
+/// A deliberately opt-in host adapter for command-line embeddings.  It is
+/// never installed by ordinary `run_*` methods; callers must construct and
+/// pass it at the program boundary.
+#[derive(Clone, Debug)]
+pub struct SystemVmHost {
+    arguments: Vec<String>,
+}
+
+impl SystemVmHost {
+    pub fn new(arguments: Vec<String>) -> Self {
+        Self { arguments }
+    }
+}
+
+impl VmHost for SystemVmHost {
+    fn process_args(&mut self) -> Result<Vec<String>, String> {
+        Ok(self.arguments.clone())
+    }
+
+    fn read_file(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        std::fs::read(path).map_err(|error| error.to_string())
+    }
+
+    fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        std::fs::write(path, bytes).map_err(|error| error.to_string())
+    }
+
+    fn write_diagnostic(&mut self, text: &str) -> Result<(), String> {
+        eprint!("{text}");
+        Ok(())
+    }
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VmExecutionLimits {
@@ -2172,6 +2226,29 @@ impl VerifiedVmProgram {
             &mut budget,
         )?))
     }
+
+    /// Execute a verified program with an explicit, capability-bound host.
+    /// The returned rendering preserves the ordinary embedding boundary: VM
+    /// ownership values never escape into the host API.
+    pub fn run_display_with_host(
+        &self,
+        host: &mut dyn VmHost,
+    ) -> Result<String, VmArtifactError> {
+        let mut budget = ExecutionBudget {
+            limits: VmExecutionLimits::default(),
+            instructions: 0,
+            allocated_elements: 0,
+        };
+        let mut host = Some(host);
+        Ok(format_vm_value(&execute_with_arguments_with_host(
+            &self.program,
+            self.program.entry,
+            &[],
+            0,
+            &mut budget,
+            &mut host,
+        )?))
+    }
     pub fn runtime_manifest(&self) -> Option<Digest> {
         self.program.runtime_manifest
     }
@@ -2403,6 +2480,25 @@ impl VerifiedVmProgram {
             &[],
             0,
             &mut budget,
+        )?)
+    }
+
+    /// Execute a unit-returning verified program with explicit host authority.
+    /// This is the entry point used by the self-host compiler application.
+    pub fn run_unit_with_host(&self, host: &mut dyn VmHost) -> Result<(), VmArtifactError> {
+        let mut budget = ExecutionBudget {
+            limits: VmExecutionLimits::default(),
+            instructions: 0,
+            allocated_elements: 0,
+        };
+        let mut host = Some(host);
+        expect_unit(execute_with_arguments_with_host(
+            &self.program,
+            self.program.entry,
+            &[],
+            0,
+            &mut budget,
+            &mut host,
         )?)
     }
     pub fn run_i64_with_limits(&self, limits: VmExecutionLimits) -> Result<i64, VmArtifactError> {
@@ -15812,6 +15908,18 @@ fn execute_with_arguments(
     depth: u32,
     budget: &mut ExecutionBudget,
 ) -> Result<VmValue, VmArtifactError> {
+    let mut host = None;
+    execute_with_arguments_with_host(program, definition, arguments, depth, budget, &mut host)
+}
+
+fn execute_with_arguments_with_host(
+    program: &CandidateVmProgram,
+    definition: DefKey,
+    arguments: &[VmValue],
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+) -> Result<VmValue, VmArtifactError> {
     if depth >= budget.limits.max_call_depth {
         return Err(VmArtifactError::CallDepthLimit {
             limit: budget.limits.max_call_depth,
@@ -17616,12 +17724,35 @@ fn execute_with_arguments(
                 )))
             }
             VmInstruction::HostCall {
-                capability, symbol, ..
+                dst,
+                capability,
+                symbol,
+                arguments,
+                ..
             } => {
-                return Err(VmArtifactError::HostCallRequiresAuthority {
-                    capability: capability.clone(),
-                    symbol: symbol.clone(),
-                });
+                let Some(host) = host.as_deref_mut() else {
+                    return Err(VmArtifactError::HostCallRequiresAuthority {
+                        capability: capability.clone(),
+                        symbol: symbol.clone(),
+                    });
+                };
+                let values = arguments
+                    .iter()
+                    .map(|argument| {
+                        registers[*argument as usize]
+                            .as_ref()
+                            .cloned()
+                            .ok_or(VmArtifactError::ReadBeforeWrite {
+                                register: *argument,
+                            })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                registers[*dst as usize] = Some(execute_host_call(
+                    host,
+                    capability,
+                    symbol,
+                    &values,
+                )?);
             }
             VmInstruction::Call {
                 dst,
@@ -17925,6 +18056,52 @@ fn execute_with_arguments(
             VmInstruction::Trap => return Err(VmArtifactError::Trap),
         }
         pc += 1;
+    }
+}
+
+fn execute_host_call(
+    host: &mut dyn VmHost,
+    capability: &str,
+    symbol: &str,
+    arguments: &[VmValue],
+) -> Result<VmValue, VmArtifactError> {
+    let failed = |message| VmArtifactError::HostCallFailed {
+        capability: capability.to_owned(),
+        symbol: symbol.to_owned(),
+        message,
+    };
+    match (capability, symbol, arguments) {
+        ("process_args", "__g1_process_args_get", []) => {
+            let arguments = host.process_args().map_err(failed)?;
+            let values = arguments
+                .into_iter()
+                .map(|value| VmValue::Text(Arc::from(value)))
+                .collect::<Vec<_>>();
+            Ok(VmValue::Array {
+                capacity: values.len(),
+                values: Arc::from(values),
+            })
+        }
+        ("file_read", "__g1_fs_read", [path]) => {
+            let path = expect_text(path)?.to_owned();
+            let bytes = host.read_file(&path).map_err(failed)?;
+            Ok(VmValue::Bytes(Arc::from(bytes)))
+        }
+        ("file_write", "__g1_fs_write", [path, bytes]) => {
+            let path = expect_text(path)?.to_owned();
+            let bytes = expect_bytes(bytes)?;
+            host.write_file(&path, &bytes).map_err(failed)?;
+            Ok(VmValue::Unit)
+        }
+        ("diagnostic", "__g1_diagnostic_write", [text]) => {
+            let text = expect_text(text)?.to_owned();
+            host.write_diagnostic(&text).map_err(failed)?;
+            Ok(VmValue::Unit)
+        }
+        _ => Err(VmArtifactError::HostCallRequiresAuthority {
+            capability: capability.to_owned(),
+            symbol: symbol.to_owned(),
+        }),
     }
 }
 struct ExecutionBudget {

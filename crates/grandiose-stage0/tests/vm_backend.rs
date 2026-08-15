@@ -7,13 +7,37 @@ use grandiose_stage0::{
     PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCapture, VmCaptureEnvironment,
     VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmContinuationPolicy,
     VmEffectRow, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction,
-    VmNominalCopyDescriptor, VmPattern, VmPatternField, VmStorageErasureWitness, VmType,
+    VmHost, VmNominalCopyDescriptor, VmPattern, VmPatternField, VmStorageErasureWitness, VmType,
     VmStorageErasureAction, VmStorageErasureStorage,
     decode_and_verify_artifact,
     decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
     encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
 use std::collections::BTreeMap;
+
+#[derive(Default)]
+struct RecordingVmHost {
+    diagnostics: Vec<String>,
+}
+
+impl VmHost for RecordingVmHost {
+    fn process_args(&mut self) -> Result<Vec<String>, String> {
+        Ok(vec![])
+    }
+
+    fn read_file(&mut self, _path: &str) -> Result<Vec<u8>, String> {
+        Err("read_file was not expected".into())
+    }
+
+    fn write_file(&mut self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err("write_file was not expected".into())
+    }
+
+    fn write_diagnostic(&mut self, text: &str) -> Result<(), String> {
+        self.diagnostics.push(text.into());
+        Ok(())
+    }
+}
 
 #[test]
 fn text_byte_len_is_a_capability_free_verified_vm_primitive() {
@@ -1886,6 +1910,51 @@ fn program_host_capability_declarations_are_canonical_exact_and_fingerprinted() 
         verify_vm_program(fingerprint_tamper),
         Err(VmArtifactError::FingerprintMismatch)
     ));
+}
+
+#[test]
+fn program_host_execution_requires_and_uses_an_explicit_adapter() {
+    let entry = DefKey(Digest::of_bytes(b"host-execution-entry"));
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Text, VmType::Unit],
+        instructions: vec![
+            VmInstruction::ConstText {
+                dst: 0,
+                value: "stage one says hello".into(),
+            },
+            VmInstruction::HostCall {
+                dst: 1,
+                capability: "diagnostic".into(),
+                symbol: "__g1_diagnostic_write".into(),
+                parameters: vec![VmType::Text],
+                result: VmType::Unit,
+                arguments: vec![0],
+            },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec!["diagnostic".into()],
+        entry,
+        functions: BTreeMap::from([(entry, function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"stale-host-execution-fingerprint"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let verified = verify_vm_program(program).unwrap();
+    assert!(matches!(
+        verified.run_unit(),
+        Err(VmArtifactError::HostCallRequiresAuthority { .. })
+    ));
+    let mut host = RecordingVmHost::default();
+    verified.run_unit_with_host(&mut host).unwrap();
+    assert_eq!(host.diagnostics, ["stage one says hello"]);
 }
 
 #[test]

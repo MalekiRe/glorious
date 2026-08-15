@@ -174,7 +174,8 @@ pub use useflow::{
 pub use vm_backend::{
     CandidateVmArtifact, CandidateVmProgram, STAGE0_MAX_DECODE_FUNCTIONS,
     STAGE0_MAX_DECODE_INSTRUCTIONS, STAGE0_MAX_DECODE_REGISTERS, STAGE0_MAX_DECODE_TEXT_BYTES,
-    STAGE0_VM_SCHEMA, VerifiedVmArtifact, VerifiedVmProgram, VmArtifactError, VmCapture,
+    STAGE0_VM_SCHEMA, SystemVmHost, VerifiedVmArtifact, VerifiedVmProgram, VmArtifactError,
+    VmCapture, VmHost,
     VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmCompare,
     VmContinuationPolicy, VmEffectInstance, VmEffectRow, VmEffectRowProjection, VmExecutionLimits,
     VmFunction, VmGenericArgument, VmInstruction, VmNominalCopyDescriptor, VmPattern,
