@@ -3865,11 +3865,14 @@ fn visible_fixities_for_module(
     let mut table = FixityTable::with_prelude();
     for (definition, header) in declarations {
         let path = vec![header.operator.clone()];
-        if matches!(
-            index.resolve_path(crate::DefinitionNamespace::Operator, module, &path),
-            crate::ResolutionState::Resolved(candidate) if candidate == *definition
-        ) {
-            table.insert_declared(*definition, header);
+        match index.resolve_path(crate::DefinitionNamespace::Operator, module, &path) {
+            crate::ResolutionState::Resolved(candidate) if candidate == *definition => {
+                table.insert_declared(*definition, header);
+            }
+            crate::ResolutionState::Ambiguous(candidates) if candidates.contains(definition) => {
+                table.mark_ambiguous(header);
+            }
+            _ => {}
         }
     }
     table.freeze();

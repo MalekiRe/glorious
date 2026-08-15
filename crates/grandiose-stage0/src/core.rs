@@ -7945,7 +7945,11 @@ impl Elaborator<'_> {
             return self.fail(
                 span,
                 "G4111",
-                "operator has no visible prefix fixity declaration",
+                if self.fixities.prefix_is_ambiguous(&operator) {
+                    "operator has ambiguous visible prefix fixity declarations"
+                } else {
+                    "operator has no visible prefix fixity declaration"
+                },
             );
         }
         let value = self.expression(value);
@@ -11149,7 +11153,11 @@ impl Elaborator<'_> {
                 return self.fail(
                     span,
                     "G4111",
-                    "operator has no visible infix fixity declaration",
+                    if self.fixities.infix_is_ambiguous(&operator) {
+                        "operator has ambiguous visible infix fixity declarations"
+                    } else {
+                        "operator has no visible infix fixity declaration"
+                    },
                 );
             };
             if fixity.form == FixityForm::Prefix {

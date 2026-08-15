@@ -10368,6 +10368,32 @@ fn service_links_transitive_dependency_callable_bodies() {
 }
 
 #[test]
+fn service_rejects_ambiguous_dependency_fixity_imports() {
+    let mut request = request("use left::*; use right::*; pub fn main() -> i64 { 1 ** 2 }");
+    for (package, source) in [
+        ("left@0.1.0", b"pub infixl 30 **;".as_slice()),
+        ("right@0.1.0", b"pub infixr 30 **;".as_slice()),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source,
+        ));
+    }
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("ambiguous imported fixity declarations unexpectedly compiled")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4111" && diagnostic.message.contains("ambiguous")),
+        "missing ambiguous imported-fixity diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_materializes_dependency_generic_function_values_for_indirect_calls() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(

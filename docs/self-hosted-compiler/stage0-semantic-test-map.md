@@ -99,6 +99,9 @@ coarse. The composite fixtures cover:
   with their operator traits. The importing body's grouping table therefore
   observes the resolved operator identity rather than only declarations in its
   own source file (`service_imports_public_fixities_with_their_operator_traits_across_modules`).
+- competing public fixity declarations imported from separate dependency
+  packages remain an explicit body-grouping ambiguity rather than degrading
+  into a missing declaration (`service_rejects_ambiguous_dependency_fixity_imports`).
 - dependency manifest names retain their exact package identity while crossing
   the source boundary through the required hyphen-to-underscore module alias;
   malformed and colliding aliases fail while the immutable request world is

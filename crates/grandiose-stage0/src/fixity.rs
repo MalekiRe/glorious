@@ -4,7 +4,7 @@
 //! their owning module interface after all declaration headers are available;
 //! no parser heuristic is permitted to choose associativity or precedence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     header::{FixityForm, ParsedHeader},
@@ -28,6 +28,7 @@ pub struct Fixity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FixityTable {
     entries: BTreeMap<(FixityPosition, String), Fixity>,
+    ambiguous: BTreeSet<(FixityPosition, String)>,
     fingerprint: Digest,
 }
 
@@ -113,12 +114,34 @@ impl FixityTable {
         self.refresh_fingerprint();
     }
 
+    /// Retain an import-level ambiguity instead of degrading it into an
+    /// absent declaration. Bodies can then distinguish a missing fixity from
+    /// two visible declarations which cannot be selected deterministically.
+    pub(crate) fn mark_ambiguous(&mut self, header: &crate::FixityHeader) {
+        let position = if header.form.is_prefix() {
+            FixityPosition::Prefix
+        } else {
+            FixityPosition::Infix
+        };
+        self.ambiguous.insert((position, header.operator.clone()));
+    }
+
     pub fn infix(&self, operator: &str) -> Option<&Fixity> {
         self.entries.get(&(FixityPosition::Infix, operator.into()))
     }
 
     pub fn prefix(&self, operator: &str) -> Option<&Fixity> {
         self.entries.get(&(FixityPosition::Prefix, operator.into()))
+    }
+
+    pub fn infix_is_ambiguous(&self, operator: &str) -> bool {
+        self.ambiguous
+            .contains(&(FixityPosition::Infix, operator.into()))
+    }
+
+    pub fn prefix_is_ambiguous(&self, operator: &str) -> bool {
+        self.ambiguous
+            .contains(&(FixityPosition::Prefix, operator.into()))
     }
 
     pub fn fingerprint(&self) -> Digest {
@@ -128,6 +151,7 @@ impl FixityTable {
     fn from_entries(entries: BTreeMap<(FixityPosition, String), Fixity>) -> Self {
         let mut value = Self {
             entries,
+            ambiguous: BTreeSet::new(),
             fingerprint: Digest::of_bytes(b""),
         };
         value.refresh_fingerprint();
@@ -154,6 +178,15 @@ impl FixityTable {
                 Some(key) => bytes.extend_from_slice(&key.0.as_bytes()),
                 None => bytes.extend_from_slice(&[0; 32]),
             }
+        }
+        for (position, operator) in &self.ambiguous {
+            bytes.push(2);
+            bytes.push(match position {
+                FixityPosition::Prefix => 0,
+                FixityPosition::Infix => 1,
+            });
+            bytes.extend_from_slice(&(operator.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(operator.as_bytes());
         }
         self.fingerprint = Digest::of_bytes(&bytes);
     }
