@@ -227,6 +227,10 @@ coarse. The composite fixtures cover:
 - an imported two-operation callable can resume its first one-shot effect,
   then cancel its later effect without leaking the now-inactive earlier
   handler frame (`service_cancels_a_second_imported_operation_after_resuming_the_first`).
+- a nested partial replay handler can forward an imported read to an outer
+  replay frame; each resumed dependency path then cancels its inner write and
+  closes the inactive nested frames before returning to the outer clause
+  (`service_replays_a_forwarded_imported_read_then_cancels_its_nested_write`).
 
 ## Previously enabled red semantic cases
 
