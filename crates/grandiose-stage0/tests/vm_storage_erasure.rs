@@ -133,6 +133,53 @@ fn witnessed_storage_exit() -> CandidateVmArtifact {
     artifact
 }
 
+/// Two source owners must be cleaned in reverse storage order. The later
+/// owner is destroyed while the earlier one is the protected leave payload;
+/// their distinct bindings, flags, and VM value registers make this the
+/// positive counterpart to the hostile aliasing fixtures below.
+fn witnessed_two_storage_exit() -> CandidateVmArtifact {
+    let mut artifact = witnessed_storage_exit();
+    let VmInstruction::Leave { cleanup, .. } = &mut artifact.function.instructions[1] else {
+        panic!("fixture must retain its leave instruction");
+    };
+    let VmStorageErasureWitness::Verified {
+        storages,
+        actions,
+        ..
+    } = &mut cleanup.storage_erasure
+    else {
+        panic!("fixture must carry a verified storage witness");
+    };
+    storages.push(VmStorageErasureStorage {
+        storage: 1,
+        binding: 1,
+        value_register: 1,
+        initialized: true,
+        drop_flag: Some(1),
+    });
+    *actions = vec![
+        VmStorageErasureAction::EndBorrow { storage: 1 },
+        VmStorageErasureAction::Destroy { storage: 1 },
+        VmStorageErasureAction::SetDropFlag {
+            drop_flag: 1,
+            initialized: false,
+        },
+        VmStorageErasureAction::StorageDead { storage: 1 },
+        VmStorageErasureAction::EndBorrow { storage: 0 },
+        VmStorageErasureAction::Protect {
+            storage: 0,
+            register: 0,
+        },
+        VmStorageErasureAction::SetDropFlag {
+            drop_flag: 0,
+            initialized: false,
+        },
+        VmStorageErasureAction::StorageDead { storage: 0 },
+    ];
+    artifact.fingerprint = artifact.computed_fingerprint();
+    artifact
+}
+
 #[test]
 fn source_storage_erasure_witness_round_trips_and_malformed_actions_fail_decode() {
     let artifact = witnessed_storage_exit();
@@ -149,6 +196,17 @@ fn source_storage_erasure_witness_round_trips_and_malformed_actions_fail_decode(
     let first_action_tag = malformed.len() - 5 - 12 - (5 + 9 + 6 + 5);
     malformed[first_action_tag] = 9;
     assert!(decode_artifact(&malformed).is_err());
+}
+
+#[test]
+fn verifier_accepts_distinct_multi_owner_storage_witness_in_reverse_cleanup_order() {
+    let artifact = witnessed_two_storage_exit();
+    let bytes = encode_artifact(&artifact);
+    assert_eq!(decode_artifact(&bytes).unwrap(), artifact);
+    assert!(
+        decode_and_verify_artifact(&bytes).is_ok(),
+        "a distinct multi-owner witness must retain reverse terminal cleanup order"
+    );
 }
 
 #[test]
