@@ -7008,6 +7008,28 @@ impl MirFunction {
                 self.require_scalar_locals(&[*dst], ScalarType::I128, "i64-to-i128 result")?;
                 self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-i128 input")?;
             }
+            MirInstruction::FloatIntrinsic {
+                dst,
+                primitive,
+                arguments,
+            } => {
+                let (parameters, result) = primitive.scalar_signature();
+                if arguments.len() != parameters.len() {
+                    return Err("MIR floating runtime primitive has the wrong arity".into());
+                }
+                self.require_scalar_locals(
+                    &[*dst],
+                    result,
+                    "floating runtime primitive result",
+                )?;
+                for (argument, parameter) in arguments.iter().zip(parameters) {
+                    self.require_scalar_locals(
+                        &[*argument],
+                        parameter,
+                        "floating runtime primitive operand",
+                    )?;
+                }
+            }
             MirInstruction::TextByteLen { dst, value } => {
                 self.require_scalar_locals(&[*dst], ScalarType::Usize, "Text byte length result")?;
                 self.require_scalar_locals(&[*value], ScalarType::Text, "Text byte length input")?;

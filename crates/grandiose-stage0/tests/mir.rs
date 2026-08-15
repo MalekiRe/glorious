@@ -13,6 +13,7 @@ use grandiose_stage0::{
     PlaceBindingOrigin, Quantity, ScalarType, Type, VmArtifactError, emit_vm, emit_vm_program,
     optimize_mir, verify_vm,
 };
+use grandiose_stage0::runtime_manifest::{FloatPrimitive, FloatWidth};
 
 fn local(ty: Type) -> MirLocalDecl {
     MirLocalDecl {
@@ -657,6 +658,41 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
             .validate()
             .is_err_and(|error| error.contains("u32 operation")),
         "an i64 register must not be accepted as a u32 arithmetic operand"
+    );
+
+    let mut float_result = graph();
+    float_result.blocks[0]
+        .instructions
+        .push(MirInstruction::FloatIntrinsic {
+            dst: MirLocal(1),
+            primitive: FloatPrimitive::Neg {
+                width: FloatWidth::F64,
+            },
+            arguments: vec![MirLocal(1)],
+        });
+    assert!(
+        float_result
+            .validate()
+            .is_err_and(|error| error.contains("floating runtime primitive result")),
+        "an i64 register must not be accepted as an f64 floating-leaf result"
+    );
+
+    let mut float_operand = graph();
+    float_operand.locals.push(local(Type::Scalar(ScalarType::F64)));
+    float_operand.blocks[0]
+        .instructions
+        .push(MirInstruction::FloatIntrinsic {
+            dst: MirLocal(5),
+            primitive: FloatPrimitive::Neg {
+                width: FloatWidth::F64,
+            },
+            arguments: vec![MirLocal(1)],
+        });
+    assert!(
+        float_operand
+            .validate()
+            .is_err_and(|error| error.contains("floating runtime primitive operand")),
+        "an i64 register must not be accepted as an f64 floating-leaf operand"
     );
 
     let mut text = graph();
