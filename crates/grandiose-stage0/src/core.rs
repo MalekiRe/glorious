@@ -3758,6 +3758,10 @@ impl Elaborator<'_> {
                 clauses,
             } => self.handle(computation, clauses, None, expression.span),
             ExprKind::Call { callee, arguments } => {
+                if matches!(self.body.expression(callee).kind, ExprKind::Path(ref path) if path.len() == 1 && path[0] == "available_to_unit")
+                {
+                    return self.available_to_unit(arguments, expression.span);
+                }
                 // `resume(k, value)` is migration syntax for the ordinary
                 // generated-resumption callable form `k(value)`. Normalize it
                 // before general call elaboration so both spellings receive
@@ -7690,6 +7694,58 @@ impl Elaborator<'_> {
             result,
             span,
         )
+    }
+
+    /// Consume the compiler-issued witness for an unselected owned execution
+    /// environment.  This is intentionally an elaborator intrinsic rather
+    /// than a source function: `Available` has no runtime representation and
+    /// releasing it is legal only with an exact zero-use proof.
+    fn available_to_unit(&mut self, arguments: Vec<ExprId>, span: Span) -> CoreId {
+        let [argument] = arguments.as_slice() else {
+            return self.fail(
+                span,
+                "G4188",
+                "intrinsic `available_to_unit` requires exactly one `Available` witness",
+            );
+        };
+        let argument = self.expression(*argument);
+        let witness = self.expressions[argument.0 as usize].ty.clone();
+        let Type::Nominal {
+            definition,
+            arguments,
+        } = witness
+        else {
+            return self.fail(
+                span,
+                "G4188",
+                "intrinsic `available_to_unit` requires compiler-generated `Available` evidence",
+            );
+        };
+        let Some(GenericArgument::Type(environment)) = arguments.get(1) else {
+            return self.fail(
+                span,
+                "G4188",
+                "intrinsic `available_to_unit` requires compiler-generated `Available` evidence",
+            );
+        };
+        let has_zero_use_proof = definition == crate::intrinsic_available_type_definition()
+            && self.ambient_where_bounds.iter().any(|(subject, relation)| {
+                self.inference.zonk(subject.clone()).is_ok_and(|subject| {
+                    subject == *environment
+                        && relation.definition == crate::resolution::language_use_trait_definition()
+                        && relation.arguments
+                            == [GenericArgument::ConstQuantity(crate::Quantity::ZERO)]
+                })
+            });
+        if !has_zero_use_proof {
+            return self.fail(
+                span,
+                "G4188",
+                "releasing `Available<E>` requires an exact `E: Use<[0,0]>` proof",
+            );
+        }
+        let unit = self.alloc(CoreKind::Tuple(vec![]), Type::Unit, span);
+        self.alloc(CoreKind::Block(vec![argument, unit]), Type::Unit, span)
     }
 
     /// Elaborate direct-call operands left-to-right while carrying each

@@ -20,7 +20,7 @@ use crate::{
 /// contracts are part of the language generation, just like scalar types.
 /// A source declaration with either name still wins normal resolution, which
 /// keeps the prelude from silently changing a package's declared interface.
-fn language_use_trait() -> DefKey {
+pub(crate) fn language_use_trait_definition() -> DefKey {
     DefKey(crate::Digest::of_bytes(
         b"grandiose-stage0-language-prelude-use-v1",
     ))
@@ -34,7 +34,7 @@ fn language_drop_trait() -> DefKey {
 
 fn language_prelude_trait(path: &[String]) -> Option<DefKey> {
     match path {
-        [name] if name == "Use" => Some(language_use_trait()),
+        [name] if name == "Use" => Some(language_use_trait_definition()),
         [name] if name == "Drop" => Some(language_drop_trait()),
         _ => None,
     }
@@ -42,7 +42,7 @@ fn language_prelude_trait(path: &[String]) -> Option<DefKey> {
 
 fn language_prelude_trait_kinds(definition: DefKey) -> Option<&'static [GenericKind]> {
     match definition {
-        value if value == language_use_trait() => {
+        value if value == language_use_trait_definition() => {
             Some(&[GenericKind::Const(crate::types::ConstKind::Quantity)])
         }
         value if value == language_drop_trait() => Some(&[]),

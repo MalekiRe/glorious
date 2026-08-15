@@ -64,6 +64,27 @@ pub fn is_intrinsic_runs_in_trait(reference: &ElaboratedTraitReference) -> bool 
     reference.definition == intrinsic_runs_in_trait_definition()
 }
 
+/// Stable identity for compiler-generated execution-environment brands.
+/// Source may name the trait in bounds, but implementations are sealed and
+/// only the canonical empty environment has compiler-provided evidence.
+pub fn intrinsic_environment_trait_definition() -> DefKey {
+    DefKey(crate::Digest::of_bytes(
+        b"grandiose-stage0-intrinsic-environment-trait-v1",
+    ))
+}
+
+pub fn is_intrinsic_environment_trait(reference: &ElaboratedTraitReference) -> bool {
+    reference.definition == intrinsic_environment_trait_definition()
+}
+
+/// Stable nominal identity for the erased incremental-alternative witness.
+/// It deliberately has no source declaration or runtime layout.
+pub fn intrinsic_available_type_definition() -> DefKey {
+    DefKey(crate::Digest::of_bytes(
+        b"grandiose-stage0-intrinsic-available-type-v1",
+    ))
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableSignature {
     pub generics: u32,
@@ -4401,6 +4422,19 @@ impl Elaborator<'_> {
                         arguments,
                     };
                 }
+                if path == ["Environment"] {
+                    let arguments = self.elaborate_unresolved_generic_arguments(source_arguments);
+                    if !matches!(arguments.as_slice(), [GenericArgument::Lifetime(_)]) {
+                        self.error(
+                            "G4173",
+                            "intrinsic `Environment` requires exactly one lifetime argument".into(),
+                        );
+                    }
+                    return ElaboratedTraitReference {
+                        definition: intrinsic_environment_trait_definition(),
+                        arguments,
+                    };
+                }
                 let arguments = self.elaborate_unresolved_generic_arguments(source_arguments);
                 self.error("G3310", format!("unresolved trait `{}`", path.join("::")));
                 ElaboratedTraitReference {
@@ -4762,6 +4796,23 @@ impl Elaborator<'_> {
             return Type::Error;
         };
         if path.len() == 1 {
+            if name == "Available" {
+                let arguments = self.elaborate_unresolved_generic_arguments(&arguments);
+                if !matches!(
+                    arguments.as_slice(),
+                    [GenericArgument::Lifetime(_), GenericArgument::Type(_)]
+                ) {
+                    self.error(
+                        "G4173",
+                        "intrinsic `Available` requires a lifetime and environment type argument"
+                            .into(),
+                    );
+                }
+                return Type::Nominal {
+                    definition: intrinsic_available_type_definition(),
+                    arguments,
+                };
+            }
             if name == "Self" {
                 return if arguments.is_empty() {
                     match &self.self_type {
