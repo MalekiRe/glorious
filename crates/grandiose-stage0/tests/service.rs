@@ -5091,6 +5091,36 @@ fn service_materializes_inherited_hrtb_static_trait_method_values_through_vm() {
 }
 
 #[test]
+fn service_rejects_ambiguous_aliased_inherited_hrtb_static_method_values() {
+    // Unlike the unique case above, `Gateway<i64>` has two concrete subjects
+    // that inherit the same static HRTB method. Its first callable parameter
+    // is data rather than `Self`, so it must not secretly pick either subject
+    // while crossing the public alias and supertrait edges.
+    let mut request = request(
+        "use bridge::Gateway as Capability; pub fn apply(callback: for<'a> (&'a i64) -> i64) -> i64 { let value = 41; callback(&value) + 1 } pub fn main() -> i64 { apply(Capability<i64>::relay) }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::Top as Gateway;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub trait Base<T> { fn relay<'a>(value: &'a i64) -> i64; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Base<i64> for i64 { fn relay<'a>(value: &'a i64) -> i64 { *value } } impl Base<i64> for u64 { fn relay<'a>(value: &'a i64) -> i64 { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Middle<i64> for u64 where u64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl Top<i64> for u64 where u64: Middle<i64> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("ambiguous static trait method value unexpectedly entered VM emission");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4169"),
+        "missing ambiguous static trait method-value rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
