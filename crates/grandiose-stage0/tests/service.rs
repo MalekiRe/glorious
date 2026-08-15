@@ -12026,6 +12026,69 @@ fn service_intercepts_a_nontransparent_terminal_callee_through_a_vm_frame() {
 }
 
 #[test]
+fn service_rejoins_a_terminal_generic_callee_through_nested_completion_and_label() {
+    let source = "effect Stop<T> { stop(value: T) -> !; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Stop<i64>}; } pub fn leaf(value: i64) -> ! / { <i64 as Capability>::Effects } { Stop<i64>::stop(value) } pub fn run(value: i64) -> i64 { label done { handle { handle leaf(value) { Stop<i64>::stop(value) => value } } { value => transfer done value } } } pub fn main() -> i64 { run(42) }";
+    let outcome = StageZeroCompiler::new().compile(request(source));
+    let outcome = outcome.expect("terminal generic callee must rejoin its enclosing completion and label");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(
+        program.functions.values().any(|function| function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Leave { .. }))),
+        "the completion result must retain its labelled rejoin edge: {program:#?}"
+    );
+    let verified = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("the projected terminal completion/label program must verify");
+    assert_eq!(verified.fingerprint(), artifact.fingerprint());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(verified.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_intercepts_a_nontransparent_projected_terminal_callee_through_a_vm_frame() {
+    let source = "effect Stop<T> { stop(value: T) -> !; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Stop<i64>}; } pub fn leaf(value: i64) -> ! / Stop<i64> { Stop<i64>::stop(value) } pub fn helper(value: i64) -> ! / { <i64 as Capability>::Effects } { let copied = value; leaf(copied) } pub fn main() -> i64 { handle helper(42) { Stop<i64>::stop(value) => value } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("a concrete projected terminal row must lower through a caller VM frame");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Call { .. })),
+        "the nontransparent projected terminal callee must retain its call boundary: {entry:#?}"
+    );
+    assert!(
+        entry.instructions.iter().any(|instruction| matches!(
+            instruction,
+            VmInstruction::InstallHandler {
+                continuation: VmContinuationPolicy::Terminal,
+                effect_arguments,
+                ..
+            } if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
+        )),
+        "the normalized projected contract must install a Stop<i64> terminal frame: {entry:#?}"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Cancel)),
+        "the terminal arm must cancel its caller frame: {entry:#?}"
+    );
+    let verified = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("the projected terminal VM program must verify");
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(verified.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_intercepts_an_indirect_terminal_callee_through_a_vm_frame() {
     let source = "effect Stop { stop(value: i64) -> !; } pub fn leaf(value: i64) -> ! / Stop { Stop::stop(value) } pub fn helper(value: i64) -> ! / Stop { let copied = value; leaf(copied) } pub fn main() -> i64 { let operation = helper; handle operation(42) { Stop::stop(value) => value } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

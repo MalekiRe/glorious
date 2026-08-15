@@ -8,7 +8,7 @@ use grandiose_stage0::{
     Quantity, RunsInEvidence, ScalarType, Span, StructuralU32Expr, Type, TypedBody, UseFlow,
     implementation_method_key,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
     let package = PackageKey(package_name.into());
@@ -8449,6 +8449,93 @@ fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
             .expect("verify completion leave")
             .run_i64()
             .expect("run completion leave"),
+        42
+    );
+}
+
+#[test]
+fn projected_terminal_contract_rejoins_nested_completion_through_a_label() {
+    let source = "effect Stop<T> { stop(value: T) -> !; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Stop<i64>}; } pub fn leaf(value: i64) -> ! / { <i64 as Capability>::Effects } { Stop<i64>::stop(value) } pub fn main() -> i64 { label done { handle { handle leaf(42) { Stop<i64>::stop(value) => value } } { value => transfer done value } } }";
+    let package = PackageKey("core-projected-terminal-completion-label@0.1.0".into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let index = DefinitionIndex::from_interface(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(definition, &body, &index, &signatures);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let effects = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Call { callee, .. } => match &core.expression(callee).ty {
+                Type::Callable { effects, .. } => Some(effects),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the terminal helper call has a callable effect contract");
+    assert!(
+        effects.projections.is_empty() && effects.effects.len() == 1,
+        "the concrete associated effect-row contract must normalize before MIR: {effects:#?}"
+    );
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label owner");
+    let leaf = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("leaf"))
+        .expect("leaf definition");
+    let leaf_body = BodySyntax::parse(&lexed, source, leaf.body.expect("leaf body"));
+    let leaf_core = TypedBody::elaborate(leaf, &leaf_body, &index, &signatures);
+    assert!(leaf_core.diagnostics.is_empty(), "{:#?}", leaf_core.diagnostics);
+    let mut bodies = BTreeMap::new();
+    bodies.insert(leaf.key, leaf_core);
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        owner,
+        &core,
+        &flow,
+        &bodies,
+        Some(&signatures),
+    );
+    let mir = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "projected terminal completion/label must lower: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    mir.validate().unwrap_or_else(|error| {
+        panic!("projected terminal completion/label MIR validates: {error}\n{mir:#?}")
+    });
+    assert!(mir.blocks.iter().any(|block| matches!(
+        block.terminator,
+        grandiose_stage0::MirTerminator::Leave { .. }
+    )));
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("projected terminal label MIR emits VM");
+    assert_eq!(
+        grandiose_stage0::verify_vm(artifact)
+            .expect("projected terminal label VM verifies")
+            .run_i64()
+            .expect("projected terminal label VM runs"),
         42
     );
 }
