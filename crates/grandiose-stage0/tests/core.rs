@@ -479,6 +479,29 @@ fn typed_core_accepts_generic_subtrait_impls_proven_by_their_where_contract() {
 }
 
 #[test]
+fn typed_core_normalizes_all_selected_items_through_recursive_generic_supertraits() {
+    let core = core_for(
+        "core-recursive-generic-supertrait-projections@0.1.0",
+        "effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } trait Root<T> { const Width: u32; type Item<U, n: u32>; type Effects<U, n: u32>: EffectRow; } trait Left<T>: Root<T> + Right<T> { fn relay<U>(receiver: T, value: U) -> <Self as Root<T>>::Item<U, <Self as Root<T>>::Width> / { <Self as Root<T>>::Effects<U, <Self as Root<T>>::Width> }; } trait Right<T>: Root<T> {} impl<T> Root<T> for i64 { const Width = 7; type Item<U, n: u32> = i64; type Effects<U, n: u32> = {Trace<n, U>}; } impl<T> Right<T> for i64 {} impl<T> Left<T> for i64 where i64: Right<T> { fn relay<U>(receiver: T, value: U) -> i64 / Trace<7, U> { receiver; 42 } } pub fn main() -> i64 / Trace<7, i64> { Left<i64>::relay(0, 42) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert_eq!(core.expression(core.root).ty, Type::Scalar(ScalarType::I64));
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::TraitMethod { .. }
+                if matches!(
+                    &expression.ty,
+                    Type::Callable { result, effects, .. }
+                        if **result == Type::Scalar(ScalarType::I64)
+                            && effects.projections.is_empty()
+                            && effects.effects.len() == 1
+                )
+        )
+    }), "selected type, effect, and const projections must be frozen in Core: {:#?}", core.expressions);
+}
+
+#[test]
 fn recovered_source_elaborates_to_core_error_and_is_rejected_before_mir() {
     let source = "pub fn main() -> i64 { let = ; }";
     let core = core_for("core-recovered-source@0.1.0", source);

@@ -5822,6 +5822,49 @@ fn service_bounds_recursive_supertrait_and_generic_overlap_revisions() {
 }
 
 #[test]
+fn service_materializes_all_selected_items_through_recursive_generic_supertrait_facades() {
+    // `Left` reaches Root both directly and through `Right`; the compiler must
+    // canonicalize that recursive supertrait closure before using every kind
+    // of selected item in a public, generic callback contract.
+    let root = "use facade::{Callback, Gateway, Trace}; pub fn apply(callback: Callback<i64>) -> i64 / Trace<7, i64> { Trace<7, i64>::note(callback(0, 41)) } pub fn main() -> i64 { handle apply(Gateway<i64>::relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }";
+    let provider = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Root<T> { const Width: u32; type Item<U, n: u32>; type Effects<U, n: u32>: EffectRow; } pub trait Left<T>: Root<T> + Right<T> { fn relay<U>(receiver: T, value: U) -> <Self as Root<T>>::Item<U, <Self as Root<T>>::Width> / { <Self as Root<T>>::Effects<U, <Self as Root<T>>::Width> }; } pub trait Right<T>: Root<T> {} pub type Callback<U> = (i64, U) -> <i64 as Left<i64>>::Item<U, <i64 as Left<i64>>::Width> / { <i64 as Left<i64>>::Effects<U, <i64 as Left<i64>>::Width> }; impl<T> Root<T> for i64 { const Width = 7; type Item<U, n: u32> = i64; type Effects<U, n: u32> = {Trace<n, U>}; } impl<T> Right<T> for i64 {} impl<T> Left<T> for i64 where i64: Right<T> { fn relay<U>(receiver: T, value: U) -> i64 / Trace<7, U> { receiver; Trace<7, U>::note(value) } }";
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Left as Gateway, Trace};".as_slice()));
+        input.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+        input
+    };
+    let mut reordered = world(provider);
+    let first = StageZeroCompiler::new().compile(reordered.clone()).expect("selected type, effect, and const projections must materialize through the recursive generic facade").artifact.unwrap();
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new().compile(reordered).expect("source ordering must not perturb recursive generic supertrait selection").artifact.unwrap();
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 43);
+
+    let recursive = provider.replace("pub trait Right<T>: Root<T> {}", "pub trait Right<T>: Root<T> + Left<T> {}");
+    let overlap = format!("{provider} impl Root<i64> for i64 {{ const Width = 7; type Item<U, n: u32> = i64; type Effects<U, n: u32> = {{Trace<n, U>}}; }}");
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey { package: PackageKey("facade@0.1.0".into()), path: "crate".into() });
+    let trace = compiler.dependency_trace(parent, &facade).expect("legal recursive generic facade must be frozen");
+    for (label, candidate, code) in [("recursive", recursive.as_str(), "G4175"), ("overlap", overlap.as_str(), "G3404")] {
+        let rejected_world = world(candidate);
+        let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+        let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("invalid recursive generic trait revision must not publish");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{label} revision missing {code}: {:#?}", error.diagnostics());
+        assert_eq!(compiler.interface_cache_stats(), cached, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()), "{label} revision disturbed the legal facade trace");
+        let mut reordered = rejected_world;
+        reordered.sources.reverse();
+        assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source ordering cannot change recursive generic trait diagnostics").diagnostics(), "{label} diagnostics must be canonical");
+    }
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
+}
+
+#[test]
 fn service_executes_shared_gat_hrtb_reborrows_through_facades() {
     let legal = "use facade::{relay, Callback}; pub fn apply(callback: Callback) -> i64 { let value = 41; let shared = &value; let closure = () -> i64 { *callback(shared) + 1 }; closure() } pub fn main() -> i64 { apply(relay) }";
     let provider = "pub trait Gate { type Item<'a>; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a>; impl Gate for i64 { type Item<'a> = &'a i64; } pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> { value }";

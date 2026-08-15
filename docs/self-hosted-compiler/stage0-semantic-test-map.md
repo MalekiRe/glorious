@@ -91,6 +91,12 @@ coarse. The composite fixtures cover:
   same-entry construction/projection and rejected cross-entry access;
 - mixed-polarity trait coherence at the service boundary, so contradictory
   positive and negative implementations cannot reach executable lowering.
+- recursive generic supertrait closures carry one selected associated type,
+  effect row, and const identity through a public callback facade, Core, VM,
+  source-order replay, and transactional rejection of both a recursive edge
+  and an overlapping implementation
+  (`typed_core_normalizes_all_selected_items_through_recursive_generic_supertraits`,
+  `service_materializes_all_selected_items_through_recursive_generic_supertrait_facades`).
 - package-level orphan coherence through public re-export facades: a local
   self type remains a valid anchor for an imported trait and reaches VM
   execution, while an imported trait plus imported self type is rejected
