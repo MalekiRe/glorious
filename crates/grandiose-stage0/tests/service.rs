@@ -5509,6 +5509,41 @@ fn service_lowers_concrete_associated_effect_gats_through_vm_handlers() {
 }
 
 #[test]
+fn service_specializes_generic_associated_effect_abis_through_a_public_facade() {
+    let mut request = request(
+        "use facade::{Trace, relay}; pub fn main() -> i64 { handle relay(41) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Trace, relay};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> T; } pub trait Capability { type Effects<T>: EffectRow; } impl Capability for i64 { type Effects<T> = {Trace<T>}; } pub fn relay<T>(value: T) -> T / { <i64 as Capability>::Effects<T> } { Trace<T>::note(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("generic facade effect ABI must materialize before VM verification");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(
+        program.functions.values().any(|function| function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(
+                instruction,
+                VmInstruction::Perform { effect_arguments, .. }
+                    if effect_arguments.as_slice() == [VmGenericArgument::Type(VmType::I64)]
+            ))),
+        "the public generic relay must materialize Trace<i64> in its VM operation ABI"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_lowers_defaulted_associated_effect_gats_through_vm_handlers() {
     // As above, this uses the trait-level GAT default, but its normalized row
     // crosses method-effect checking, handler selection, VM emission, and
