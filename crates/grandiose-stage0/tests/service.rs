@@ -11500,6 +11500,25 @@ fn service_replays_effectful_completion_after_facade_cancellation_through_outer_
 }
 
 #[test]
+fn service_reentrant_tick_resume_forwards_nested_facade_ask_through_completion() {
+    let mut request = request(
+        "use bridge::Ask; use bridge::Tick; use bridge::invoke; pub fn main() -> i64 { handle { handle { handle invoke() { Ask::ask(true) with k => k(1) + k(2) } } { value => value + 1; Tick::tick() with k => k(10) + k(20) } } { Ask::ask(_) with k => k(30) + k(40) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Ask, Tick, relay}; pub fn invoke() -> i64 / {Ask, Tick} { relay() }"
+            .as_slice(),
+    ));
+    request.sources.push(SourceInput::new(PackageKey("provider@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub effect Ask { [2,2] ask(value: Bool) -> i64; } pub effect Tick { [2,2] tick() -> i64; } pub fn relay() -> i64 / {Ask, Tick} { let tick = Tick::tick(); let asked = Ask::ask(false); tick + asked }".as_slice()));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("reentrant replay must execute");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 204);
+}
+
+#[test]
 fn service_links_private_helpers_reached_from_specialized_dependency_generics() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(

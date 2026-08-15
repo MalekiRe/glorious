@@ -3988,6 +3988,35 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        if let Some(function) = lowerer
+            .lower_root_reentrant_interprocedural_partial_replay_completion(
+                body.root,
+                parameters.clone(),
+            )
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         // Two nested refutable replay frames can forward an imported
         // performance to an outer replay frame, whose resumed path may reach
         // the innermost cancellation arm.
@@ -18412,6 +18441,257 @@ impl Lowerer<'_> {
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
+        })
+    }
+
+    /// The resumed Tick continuation returns through the entry's completion
+    /// edge. Its later Ask performance first visits the refutable inner row
+    /// and forwards to the outer Ask replayer on a miss.
+    fn lower_root_reentrant_interprocedural_partial_replay_completion(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (completion, outer_clauses, root_prefix) = self.lexical_handle(root)?;
+        let completion = match self.body.expression(completion).kind.clone() {
+            CoreKind::Completion { .. } => completion,
+            CoreKind::Block(values) => {
+                let tail = *values.last()?;
+                matches!(self.body.expression(tail).kind, CoreKind::Completion { .. })
+                    .then_some(tail)?
+            }
+            _ => return None,
+        };
+        let CoreKind::Completion {
+            computation: middle,
+            clauses: completion_clauses,
+        } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+        let [completion_clause] = completion_clauses.as_slice() else {
+            return None;
+        };
+        let (inner, middle_clauses, middle_prefix) = self.lexical_handle(middle)?;
+        let (computation, inner_clauses, inner_prefix) = self.lexical_handle(inner)?;
+        let ([outer], [middle_clause], [inner_clause]) = (
+            outer_clauses.as_slice(),
+            middle_clauses.as_slice(),
+            inner_clauses.as_slice(),
+        ) else {
+            return None;
+        };
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        let replay = |clause: &CoreHandlerClause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Explicit { quantity, .. }
+                    if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
+            )
+        };
+        if !root_prefix.is_empty()
+            || !middle_prefix.is_empty()
+            || outer.terminal
+            || middle_clause.terminal
+            || inner_clause.terminal
+            || !pattern_is_irrefutable(&completion_clause.pattern)
+            || !outer.patterns.iter().all(pattern_is_irrefutable)
+            || !inner_clause
+                .patterns
+                .iter()
+                .any(|pattern| !pattern_is_irrefutable(pattern))
+            || outer.patterns.len() != outer.payload_types.len()
+            || middle_clause.patterns.len() != middle_clause.payload_types.len()
+            || inner_clause.patterns.len() != inner_clause.payload_types.len()
+            || outer.continuation.is_none()
+            || middle_clause.continuation.is_none()
+            || inner_clause.continuation.is_none()
+            || !replay(outer)
+            || !replay(middle_clause)
+            || !replay(inner_clause)
+            || outer.effect == middle_clause.effect
+            || outer.effect != inner_clause.effect
+            || effects.effects.len() != 2
+            || effects.tail.is_some()
+            || !effects.effects.contains(&outer.effect)
+            || !effects.effects.contains(&middle_clause.effect)
+            || self.handler_body_uses_snapshot_alias(outer.body)
+            || self.handler_body_uses_snapshot_alias(middle_clause.body)
+            || self.handler_body_uses_snapshot_alias(inner_clause.body)
+        {
+            return None;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|id| self.value(id))
+            .collect::<Option<Vec<_>>>()?;
+        let result = self.alloc(self.body.expression(computation).ty.clone(), root);
+        let payloads = |lowerer: &mut Self, clause: &CoreHandlerClause| {
+            clause
+                .payload_types
+                .iter()
+                .map(|ty| lowerer.alloc(ty.clone(), root))
+                .collect::<Vec<_>>()
+        };
+        let outer_payloads = payloads(self, outer);
+        let middle_payloads = payloads(self, middle_clause);
+        let inner_payloads = payloads(self, inner_clause);
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (clause, payloads, target) in [
+            (outer, outer_payloads.clone(), MirBlockId(1)),
+            (middle_clause, middle_payloads.clone(), MirBlockId(2)),
+            (inner_clause, inner_payloads.clone(), MirBlockId(3)),
+        ] {
+            entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads,
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Replay {
+                    uses: exact_replay_uses(&clause.resumption)?,
+                },
+                target,
+            });
+        }
+        for expression in inner_prefix {
+            self.statement(expression)?;
+        }
+        entry.extend(std::mem::take(&mut self.instructions));
+        let CoreKind::Function {
+            definition,
+            arguments: generic_arguments,
+            ..
+        } = self.body.expression(callee).kind.clone()
+        else {
+            return None;
+        };
+        entry.push(MirInstruction::Call {
+            dst: result,
+            callee: definition,
+            generic_arguments,
+            trait_instance: None,
+            arguments,
+        });
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        self.instructions = Vec::new();
+        self.bind_completion_clause(completion_clause, result)?;
+        let completed = self.value(completion_clause.body)?;
+        entry.extend(std::mem::take(&mut self.instructions));
+        for _ in 0..3 {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+
+        let arm = |lowerer: &mut Self,
+                   clause: &CoreHandlerClause,
+                   payloads: &[MirLocal]|
+         -> Option<(Vec<MirInstruction>, MirLocal)> {
+            lowerer.instructions = Vec::new();
+            lowerer.named = boundary_named.clone();
+            lowerer.values = boundary_values.clone();
+            lowerer.bind_handler_patterns(&clause.patterns, payloads)?;
+            let value = lowerer.direct_handler_clause_value(clause)?;
+            // `direct_handler_clause_value` lowers each finite continuation
+            // invocation to `ResumeReturn`.  A replay frame must then be
+            // cancelled before its clause returns; `Resume` is only valid for
+            // a consumed, one-shot continuation and rejects replay state in
+            // the VM.
+            lowerer.instructions.push(MirInstruction::Cancel {
+                site: MirResumptionSiteId::UNASSIGNED,
+            });
+            Some((std::mem::take(&mut lowerer.instructions), value))
+        };
+        let (outer_instructions, outer_result) = arm(self, outer, &outer_payloads)?;
+        let (mut middle_instructions, middle_result) = arm(self, middle_clause, &middle_payloads)?;
+        // The Tick clause finishes the nested handler computation. Its
+        // enclosing Ask frame never acquired a continuation on this route,
+        // so normal handler completion removes it before returning the root
+        // value.
+        middle_instructions.push(MirInstruction::UninstallHandler);
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        let pattern = lower_pattern(inner_clause.patterns.first()?.clone())?;
+        let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+        let test = vec![MirInstruction::PatternTest {
+            dst: condition,
+            subject: *inner_payloads.first()?,
+            pattern,
+        }];
+        let (inner_instructions, inner_result) = arm(self, inner_clause, &inner_payloads)?;
+        self.named = boundary_named;
+        self.values = boundary_values;
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: completed },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: outer_instructions,
+                    terminator: MirTerminator::Return {
+                        value: outer_result,
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: middle_instructions,
+                    terminator: MirTerminator::Return {
+                        value: middle_result,
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: test,
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: MirBlockId(4),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(5),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: inner_instructions,
+                    terminator: MirTerminator::Return {
+                        value: inner_result,
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
         })
     }
 
