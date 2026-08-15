@@ -7161,6 +7161,147 @@ fn handler_clause_label_transfer_preserves_brand_cleanup_and_vm_frame_exit() {
 }
 
 #[test]
+fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
+    let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let value = Pair { left: 1, right: 2 }; { let value = Pair { left: 3, right: 4 }; move value.left; 0 }; label done { move value.left; transfer done 42; 0 } }";
+    let core = core_for("core-frozen-mir-shadowed-move-paths@0.1.0", source);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    assert_eq!(
+        flow.bindings
+            .iter()
+            .filter(|binding| binding.spelling == "value")
+            .count(),
+        2
+    );
+    assert_eq!(flow.final_move_paths.len(), flow.moved_places.len());
+    for (&path, fact) in flow.final_move_paths.iter().zip(&flow.moved_places) {
+        let mut fields = Vec::new();
+        let mut cursor = Some(path);
+        let mut binding = None;
+        while let Some(current) = cursor {
+            let node = &flow.move_paths[current.0 as usize];
+            binding.get_or_insert(node.binding);
+            assert_eq!(binding, Some(node.binding));
+            if let Some(field) = node.field {
+                fields.push(field);
+            }
+            cursor = node.parent;
+        }
+        fields.reverse();
+        assert_eq!(fields, fact.fields);
+        assert_eq!(
+            flow.bindings[binding.expect("move binding").0 as usize].spelling,
+            fact.root
+        );
+    }
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("label owner");
+    let mut mir = MirLowering::lower(owner, &core, &flow)
+        .function
+        .expect("shadowed cleanup lowers");
+    let grandiose_stage0::MirTerminator::Leave { cleanup, .. } = &mir.blocks[0].terminator else {
+        panic!("label transfer must retain cleanup")
+    };
+    assert_eq!(cleanup.moved_paths.len(), cleanup.moved_places.len());
+    let cleanup_path = cleanup.moved_paths[0];
+    let node = &mir.control.move_paths.paths[cleanup_path.0 as usize];
+    let binding = &mir.control.move_paths.bindings[node.binding.0 as usize];
+    assert_eq!(
+        binding.source,
+        flow.move_paths[flow.final_move_paths[0].0 as usize].binding
+    );
+    assert_eq!(binding.spelling, "value");
+    assert!(
+        node.parent.is_some(),
+        "a field move must retain its root parent"
+    );
+    assert!(mir.validate().is_ok());
+    assert_eq!(
+        grandiose_stage0::verify_vm(grandiose_stage0::emit_vm(&mir).expect("VM cleanup lowering"))
+            .expect("VM cleanup verification")
+            .run_i64()
+            .expect("shadowed cleanup result"),
+        42
+    );
+
+    let root_path = mir
+        .control
+        .move_paths
+        .paths
+        .iter()
+        .position(|path| path.parent.is_none())
+        .expect("move-path root");
+    let mut forged_root = mir.clone();
+    forged_root.control.move_paths.paths[root_path].field = Some(0);
+    assert!(
+        forged_root
+            .validate()
+            .is_err_and(|error| error.contains("root with a field")),
+        "a forged root must not gain a projection field"
+    );
+
+    let mut forged_parent = mir.clone();
+    forged_parent.control.move_paths.paths[cleanup_path.0 as usize].parent = Some(cleanup_path);
+    assert!(
+        forged_parent
+            .validate()
+            .is_err_and(|error| error.contains("non-ancestral parent")),
+        "a move path must not form a cycle"
+    );
+
+    let mut forged_binding = mir.clone();
+    forged_binding.control.move_paths.paths[cleanup_path.0 as usize].binding =
+        grandiose_stage0::MirPlaceBindingId(u32::MAX);
+    assert!(
+        forged_binding
+            .validate()
+            .is_err_and(|error| error.contains("absent binding")),
+        "a move path must not target an absent binding"
+    );
+
+    let mut forged_provenance = mir.clone();
+    forged_provenance.control.move_paths.bindings[0].source =
+        grandiose_stage0::PlaceBindingId(u32::MAX);
+    assert!(
+        forged_provenance
+            .validate()
+            .is_err_and(|error| error.contains("non-dense PlaceFlow source")),
+        "binding provenance must retain its dense source identity"
+    );
+
+    let mut mismatched_cleanup = mir.clone();
+    let grandiose_stage0::MirTerminator::Leave { cleanup, .. } =
+        &mut mismatched_cleanup.blocks[0].terminator
+    else {
+        unreachable!()
+    };
+    cleanup.moved_paths[0] = node.parent.expect("field path parent");
+    assert!(
+        mismatched_cleanup
+            .validate()
+            .is_err_and(|error| error.contains("disagrees with its legacy fields")),
+        "cleanup paths must pair one-to-one with their legacy move facts"
+    );
+
+    let grandiose_stage0::MirTerminator::Leave { cleanup, .. } = &mut mir.blocks[0].terminator
+    else {
+        unreachable!()
+    };
+    cleanup.moved_paths[0] = grandiose_stage0::MirMovePathId(u32::MAX);
+    assert!(
+        mir.validate()
+            .is_err_and(|error| error.contains("absent move path")),
+        "stale typed cleanup identities must be rejected"
+    );
+}
+
+#[test]
 fn nested_handler_leave_preserves_the_outer_label_destination_contract() {
     let core = core_for(
         "core-nested-handler-label-contract@0.1.0",

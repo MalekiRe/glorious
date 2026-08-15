@@ -103,6 +103,7 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
                     target: MirBlockId(3),
                     arguments: vec![MirLocal(1)],
                     cleanup: MirCleanupPlan {
+                        moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
                     },
@@ -121,6 +122,7 @@ fn mir_rejects_one_label_brand_with_contradictory_destinations() {
                     target: MirBlockId(4),
                     arguments: vec![MirLocal(2)],
                     cleanup: MirCleanupPlan {
+                        moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
                     },
@@ -250,6 +252,7 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
         ],
     };
     let overlapping_moves = MirCleanupPlan {
+        moved_paths: vec![],
         moved_places: vec![
             MoveFact {
                 root: "pair".into(),
@@ -269,6 +272,7 @@ fn mir_rejects_overlapping_or_live_loan_cleanup_paths() {
     );
 
     let moved_live_loan = MirCleanupPlan {
+        moved_paths: vec![],
         moved_places: vec![MoveFact {
             root: "pair".into(),
             fields: vec![0],

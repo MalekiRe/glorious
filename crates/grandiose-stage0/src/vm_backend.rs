@@ -1080,8 +1080,9 @@ pub struct VmCleanupLoan {
     pub unique: bool,
 }
 impl VmCleanupProof {
-    pub fn from_mir(plan: &crate::MirCleanupPlan) -> Self {
+    pub fn from_mir(plan: &crate::MirCleanupPlan, paths: &crate::MirMovePathTables) -> Self {
         debug_assert!(plan.validate().is_ok());
+        debug_assert!(plan.validate_with_paths(paths).is_ok());
         let moved_places = plan
             .moved_places
             .iter()
@@ -2104,7 +2105,7 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
                         .iter()
                         .map(|parameter| parameter.0)
                         .collect(),
-                    cleanup: VmCleanupProof::from_mir(cleanup),
+                    cleanup: VmCleanupProof::from_mir(cleanup, &function.control.move_paths),
                 });
             }
             MirTerminator::SwitchBool {

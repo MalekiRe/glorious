@@ -8,7 +8,7 @@ use crate::{
     },
     identity::{DefKey, Digest},
     instance::InstanceKey,
-    placeflow::PlaceFlow,
+    placeflow::{PlaceBindingId, PlaceBindingOrigin, PlaceFlow},
     runtime_manifest::{FloatPrimitive, PrimitiveRole},
     signature::{
         ElaboratedEnumVariantPayload, ElaboratedHeader, ElaboratedInterface,
@@ -49,6 +49,18 @@ pub struct MirPerformSiteId(pub u32);
 /// or cancellation site.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MirResumptionSiteId(pub u32);
+
+/// Typed, body-local identity for one frozen ownership move path.  Unlike a
+/// PlaceFlow `MovePathId`, this may only be used with the MIR body that owns
+/// its arena.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirMovePathId(pub u32);
+
+/// Typed MIR identity for a PlaceFlow lexical binding imported into a frozen
+/// function.  `source` retains traceability while preventing a consumer from
+/// accidentally using an ID from a different body analysis.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirPlaceBindingId(pub u32);
 
 impl MirScopeId {
     pub const ROOT: Self = Self(0);
@@ -133,6 +145,32 @@ pub struct MirResumptionSiteData {
     pub originating_handler: Option<MirHandlerSiteId>,
 }
 
+/// Frozen local-storage identity imported from PlaceFlow.  `origin` is an
+/// exact Typed-Core construction site, never a source spelling lookup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirPlaceBindingData {
+    pub source: PlaceBindingId,
+    pub origin: PlaceBindingOrigin,
+    pub spelling: String,
+}
+
+/// One immutable node in MIR's ownership path arena.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirMovePathData {
+    pub parent: Option<MirMovePathId>,
+    pub binding: MirPlaceBindingId,
+    pub field: Option<u32>,
+}
+
+/// Persistent ownership identities for a frozen MIR body.  The compact
+/// cleanup facts stay alongside these tables temporarily for VM artifact
+/// compatibility, but every MIR cleanup names these typed paths as well.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MirMovePathTables {
+    pub bindings: Vec<MirPlaceBindingData>,
+    pub paths: Vec<MirMovePathData>,
+}
+
 /// Frozen control identity tables for a MIR body.  Instructions and
 /// terminators refer to these typed IDs; validation checks the relationship in
 /// both directions so no pass can add an executable control edge without its
@@ -148,6 +186,7 @@ pub struct MirControlTables {
     /// control identities.  This keeps existing raw `MirFunction` literals
     /// source-compatible while still serializing one stable, body-local arena.
     pub operations: MirOperationArena,
+    pub move_paths: MirMovePathTables,
 }
 
 /// One lexical frame while the raw CFG is frozen.  These markers are only a
@@ -173,6 +212,7 @@ impl Default for MirControlTables {
             performs: vec![],
             resumptions: vec![],
             operations: MirOperationArena::default(),
+            move_paths: MirMovePathTables::default(),
         }
     }
 }
@@ -1513,6 +1553,10 @@ pub enum MirTerminator {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirCleanupPlan {
+    /// Body-local ownership paths which are disarmed by this exit.  These are
+    /// authoritative in MIR; `moved_places` is retained only until the VM
+    /// artifact has a typed cleanup encoding.
+    pub moved_paths: Vec<MirMovePathId>,
     pub moved_places: Vec<crate::MoveFact>,
     pub active_loans: Vec<crate::LoanFact>,
 }
@@ -1556,6 +1600,56 @@ impl MirCleanupPlan {
             })
         }) {
             return Err("MIR leave cleanup plan moves a place with a live loan");
+        }
+        Ok(())
+    }
+
+    pub fn validate_with_paths(&self, tables: &MirMovePathTables) -> Result<(), String> {
+        if self.moved_paths.len() != self.moved_places.len() {
+            return Err("MIR cleanup plan has mismatched typed and legacy move paths".into());
+        }
+        let mut seen = BTreeSet::new();
+        for (index, (&path, fact)) in self.moved_paths.iter().zip(&self.moved_places).enumerate() {
+            if !seen.insert(path) {
+                return Err("MIR cleanup plan repeats a typed move path".into());
+            }
+            let data = tables.paths.get(path.0 as usize).ok_or_else(|| {
+                format!("MIR cleanup plan references absent move path {}", path.0)
+            })?;
+            let binding = tables
+                .bindings
+                .get(data.binding.0 as usize)
+                .ok_or_else(|| {
+                    format!(
+                        "MIR move path {} references absent binding {}",
+                        path.0, data.binding.0
+                    )
+                })?;
+            if binding.spelling != fact.root {
+                return Err(format!(
+                    "MIR cleanup path {index} disagrees with binding spelling"
+                ));
+            }
+            let mut fields = Vec::new();
+            let mut cursor = Some(path);
+            while let Some(current) = cursor {
+                let node = tables.paths.get(current.0 as usize).ok_or_else(|| {
+                    format!("MIR cleanup path {index} has stale parent {}", current.0)
+                })?;
+                if node.binding != data.binding {
+                    return Err("MIR move path changes binding across a parent edge".into());
+                }
+                if let Some(field) = node.field {
+                    fields.push(field);
+                }
+                cursor = node.parent;
+            }
+            fields.reverse();
+            if fields != fact.fields {
+                return Err(format!(
+                    "MIR cleanup path {index} disagrees with its legacy fields"
+                ));
+            }
         }
         Ok(())
     }
@@ -2537,6 +2631,11 @@ pub struct MirLowering {
 }
 
 impl MirLowering {
+    fn freeze(function: MirFunction, flow: &PlaceFlow) -> MirFunction {
+        function
+            .with_frozen_move_paths(flow)
+            .with_frozen_control_tables()
+    }
     pub fn lower(definition: DefKey, body: &TypedBody, flow: &PlaceFlow) -> Self {
         Self::lower_with_bodies_and_signatures(definition, body, flow, &BTreeMap::new(), None)
     }
@@ -2637,6 +2736,7 @@ impl MirLowering {
             instructions: vec![],
             diagnostics: vec![],
             leave_cleanup: MirCleanupPlan {
+                moved_paths: vec![],
                 moved_places: flow.moved_places.clone(),
                 active_loans: flow.active_loans.clone(),
             },
@@ -2664,7 +2764,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2682,7 +2782,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2701,7 +2801,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2717,7 +2817,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2737,7 +2837,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2754,7 +2854,7 @@ impl MirLowering {
         ) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2770,7 +2870,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2790,7 +2890,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2810,7 +2910,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2830,7 +2930,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2849,7 +2949,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2865,7 +2965,7 @@ impl MirLowering {
         if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2881,7 +2981,7 @@ impl MirLowering {
         {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2907,7 +3007,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2937,7 +3037,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2966,7 +3066,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -2992,7 +3092,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3018,7 +3118,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3044,7 +3144,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3070,7 +3170,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3095,7 +3195,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: lowerer.diagnostics,
                 };
@@ -3121,7 +3221,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3152,7 +3252,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3178,7 +3278,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3204,7 +3304,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3230,7 +3330,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3256,7 +3356,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3282,7 +3382,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3313,7 +3413,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3346,7 +3446,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3372,7 +3472,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3396,7 +3496,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3422,7 +3522,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3448,7 +3548,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3474,7 +3574,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3500,7 +3600,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3526,7 +3626,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3552,7 +3652,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3577,7 +3677,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3607,7 +3707,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3631,7 +3731,7 @@ impl MirLowering {
                     };
                 }
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3645,7 +3745,7 @@ impl MirLowering {
         if let Some(function) = lowerer.lower_root_label_transfer(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
                 return Self {
-                    function: Some(function.with_frozen_control_tables()),
+                    function: Some(Self::freeze(function, flow)),
                     lifted: lowerer.lifted,
                     diagnostics: vec![],
                 };
@@ -3695,7 +3795,7 @@ impl MirLowering {
                 };
             }
             Self {
-                function: Some(function.with_frozen_control_tables()),
+                function: Some(Self::freeze(function, flow)),
                 lifted: lowerer.lifted,
                 diagnostics: vec![],
             }
@@ -3709,6 +3809,86 @@ impl MirLowering {
     }
 }
 impl MirFunction {
+    /// Import the immutable PlaceFlow ownership graph at the MIR boundary.
+    /// This consumes the exact analysis IDs and never resolves a path from a
+    /// source spelling, so nested bindings with the same spelling remain
+    /// distinct in the frozen artifact.
+    pub fn with_frozen_move_paths(mut self, flow: &PlaceFlow) -> Self {
+        let bindings = flow
+            .bindings
+            .iter()
+            .enumerate()
+            .map(|(_index, binding)| MirPlaceBindingData {
+                source: binding.id,
+                origin: binding.origin.clone(),
+                spelling: binding.spelling.clone(),
+            })
+            .collect::<Vec<_>>();
+        let paths = flow
+            .move_paths
+            .iter()
+            .enumerate()
+            .map(|(_index, path)| MirMovePathData {
+                parent: path.parent.map(|parent| MirMovePathId(parent.0)),
+                binding: MirPlaceBindingId(path.binding.0),
+                field: path.field,
+            })
+            .collect::<Vec<_>>();
+        debug_assert!(
+            bindings
+                .iter()
+                .enumerate()
+                .all(|(index, binding)| { binding.source.0 as usize == index })
+        );
+        debug_assert!(paths.iter().enumerate().all(|(index, path)| {
+            path.parent.is_none_or(|parent| (parent.0 as usize) < index)
+                && (path.binding.0 as usize) < bindings.len()
+        }));
+        let cleanup_paths = (|| {
+            if flow.final_move_paths.len() != flow.moved_places.len() {
+                return None;
+            }
+            let mut seen = BTreeSet::new();
+            flow.final_move_paths
+                .iter()
+                .zip(&flow.moved_places)
+                .map(|(path, fact)| {
+                    if !seen.insert(*path) {
+                        return None;
+                    }
+                    let node = flow.move_paths.get(path.0 as usize)?;
+                    let binding = flow.bindings.get(node.binding.0 as usize)?;
+                    if binding.id != node.binding || binding.spelling != fact.root {
+                        return None;
+                    }
+                    let mut fields = Vec::new();
+                    let mut cursor = Some(*path);
+                    while let Some(current) = cursor {
+                        let node = flow.move_paths.get(current.0 as usize)?;
+                        if node.binding != binding.id {
+                            return None;
+                        }
+                        if let Some(field) = node.field {
+                            fields.push(field);
+                        }
+                        cursor = node.parent;
+                    }
+                    fields.reverse();
+                    (fields == fact.fields).then_some(MirMovePathId(path.0))
+                })
+                .collect::<Option<Vec<_>>>()
+        })();
+        self.control.move_paths = MirMovePathTables { bindings, paths };
+        for block in &mut self.blocks {
+            if let MirTerminator::Leave { cleanup, .. } = &mut block.terminator {
+                if cleanup.moved_places == flow.moved_places {
+                    cleanup.moved_paths = cleanup_paths.clone().unwrap_or_default();
+                }
+            }
+        }
+        self
+    }
+
     /// Freeze the body-local control arena after lowering has finished
     /// constructing its CFG.  Allocation deliberately happens once, at the
     /// MIR artifact boundary: all instruction and terminator references are
@@ -3716,7 +3896,10 @@ impl MirFunction {
     /// identities, while VM lowering continues to select exactly the same
     /// wire instructions as before.
     pub fn with_frozen_control_tables(mut self) -> Self {
-        let mut control = MirControlTables::default();
+        let mut control = MirControlTables {
+            move_paths: self.control.move_paths.clone(),
+            ..MirControlTables::default()
+        };
         let mut labels = BTreeMap::<crate::LabelBrand, MirLabelId>::new();
 
         for (block_index, block) in self.blocks.iter_mut().enumerate() {
@@ -3863,6 +4046,7 @@ impl MirFunction {
             return Err(format!("MIR entry block {} is absent", self.entry.0));
         }
         validate_nominal_copy_descriptors(&self.nominal_copy_descriptors)?;
+        self.validate_move_path_tables()?;
         validate_mir_type(&self.result, &mut vec![])?;
         for local in &self.locals {
             validate_mir_type(&local.ty, &mut vec![])?;
@@ -3938,6 +4122,67 @@ impl MirFunction {
                     "MIR operation {index} names absent instruction {} in block {}",
                     data.instruction_index, data.block.0
                 ));
+            }
+        }
+        Ok(())
+    }
+    fn validate_move_path_tables(&self) -> Result<(), String> {
+        let tables = &self.control.move_paths;
+        let mut origins = BTreeSet::new();
+        for (index, binding) in tables.bindings.iter().enumerate() {
+            if binding.source.0 as usize != index {
+                return Err(format!(
+                    "MIR move binding {index} has a non-dense PlaceFlow source identity"
+                ));
+            }
+            if binding.spelling.is_empty() {
+                return Err(format!("MIR move binding {index} has an empty spelling"));
+            }
+            if !origins.insert(binding.origin.clone()) {
+                return Err("MIR move binding table repeats typed-core provenance".into());
+            }
+        }
+        let mut roots = BTreeSet::new();
+        let mut children = BTreeSet::new();
+        for (index, path) in tables.paths.iter().enumerate() {
+            if path.binding.0 as usize >= tables.bindings.len() {
+                return Err(format!(
+                    "MIR move path {index} references absent binding {}",
+                    path.binding.0
+                ));
+            }
+            match (path.parent, path.field) {
+                (None, None) => {
+                    if !roots.insert(path.binding) {
+                        return Err("MIR move-path table repeats a binding root".into());
+                    }
+                }
+                (Some(parent), Some(field)) => {
+                    if parent.0 as usize >= index {
+                        return Err(format!(
+                            "MIR move path {index} has a non-ancestral parent {}",
+                            parent.0
+                        ));
+                    }
+                    let parent = tables.paths.get(parent.0 as usize).ok_or_else(|| {
+                        format!(
+                            "MIR move path {index} references absent parent {}",
+                            parent.0
+                        )
+                    })?;
+                    if parent.binding != path.binding {
+                        return Err("MIR move path changes binding across a parent edge".into());
+                    }
+                    if !children.insert((path.parent, path.binding, field)) {
+                        return Err("MIR move-path table repeats a projected child".into());
+                    }
+                }
+                (None, Some(_)) => {
+                    return Err(format!("MIR move path {index} is a root with a field"));
+                }
+                (Some(_), None) => {
+                    return Err(format!("MIR move path {index} is a child without a field"));
+                }
             }
         }
         Ok(())
@@ -4577,6 +4822,7 @@ impl MirFunction {
                 ..
             } => {
                 cleanup.validate()?;
+                cleanup.validate_with_paths(&self.control.move_paths)?;
                 self.validate_edge(*target, arguments)
             }
             MirTerminator::SwitchBool {
@@ -6712,6 +6958,7 @@ impl Lowerer<'_> {
                         target: MirBlockId(join_block),
                         arguments: vec![value],
                         cleanup: MirCleanupPlan {
+                            moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
                         },
@@ -6741,6 +6988,7 @@ impl Lowerer<'_> {
                     target: MirBlockId(join_block),
                     arguments: vec![value],
                     cleanup: MirCleanupPlan {
+                        moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
                     },
@@ -6981,6 +7229,7 @@ impl Lowerer<'_> {
                             target: MirBlockId(5),
                             arguments: vec![completed],
                             cleanup: MirCleanupPlan {
+                                moved_paths: vec![],
                                 moved_places: self.leave_cleanup.moved_places.clone(),
                                 active_loans: self.leave_cleanup.active_loans.clone(),
                             },
@@ -7028,6 +7277,7 @@ impl Lowerer<'_> {
                             target: MirBlockId(3),
                             arguments: vec![completed],
                             cleanup: MirCleanupPlan {
+                                moved_paths: vec![],
                                 moved_places: self.leave_cleanup.moved_places.clone(),
                                 active_loans: self.leave_cleanup.active_loans.clone(),
                             },
@@ -7286,6 +7536,7 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![value],
                         cleanup: MirCleanupPlan {
+                            moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
                         },
@@ -7447,6 +7698,7 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![transferred],
                         cleanup: MirCleanupPlan {
+                            moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
                         },
@@ -7652,6 +7904,7 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![transferred],
                         cleanup: MirCleanupPlan {
+                            moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
                         },
@@ -7859,6 +8112,7 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![value],
                         cleanup: MirCleanupPlan {
+                            moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
                         },
@@ -8107,6 +8361,7 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![transferred],
                         cleanup: MirCleanupPlan {
+                            moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
                         },
@@ -8274,6 +8529,7 @@ impl Lowerer<'_> {
                     target: MirBlockId(1),
                     arguments: vec![value],
                     cleanup: MirCleanupPlan {
+                        moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
                     },
@@ -8532,6 +8788,7 @@ impl Lowerer<'_> {
                     target: MirBlockId(1),
                     arguments: vec![value],
                     cleanup: MirCleanupPlan {
+                        moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
                     },
@@ -8933,6 +9190,7 @@ impl Lowerer<'_> {
                         target: MirBlockId(2),
                         arguments: vec![transferred],
                         cleanup: MirCleanupPlan {
+                            moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
                         },
@@ -9178,6 +9436,7 @@ impl Lowerer<'_> {
                         target: MirBlockId(1),
                         arguments: vec![value],
                         cleanup: MirCleanupPlan {
+                            moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
                         },
@@ -21159,6 +21418,7 @@ impl Lowerer<'_> {
             instructions: vec![],
             diagnostics: vec![],
             leave_cleanup: MirCleanupPlan {
+                moved_paths: vec![],
                 moved_places: vec![],
                 active_loans: vec![],
             },

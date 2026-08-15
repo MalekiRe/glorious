@@ -5751,6 +5751,7 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
                     target: MirBlockId(1),
                     arguments: vec![MirLocal(0)],
                     cleanup: MirCleanupPlan {
+                        moved_paths: vec![],
                         moved_places: vec![],
                         active_loans: vec![],
                     },

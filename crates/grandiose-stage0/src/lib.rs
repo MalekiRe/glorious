@@ -83,9 +83,10 @@ pub use mir::{
     MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment,
     MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirDiagnostic, MirEditor, MirFunction,
     MirHandlerSiteData, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelData, MirLabelId,
-    MirLocal, MirLocalDecl, MirLowering, MirNominalCopyDescriptor, MirOperationArena,
-    MirOperationData, MirOperationId, MirOptimizationReport, MirPattern, MirPatternField,
-    MirPerformSiteData, MirPerformSiteId, MirProgram, MirResumptionSiteData, MirResumptionSiteId,
+    MirLocal, MirLocalDecl, MirLowering, MirMovePathData, MirMovePathId, MirMovePathTables,
+    MirNominalCopyDescriptor, MirOperationArena, MirOperationData, MirOperationId,
+    MirOptimizationReport, MirPattern, MirPatternField, MirPerformSiteData, MirPerformSiteId,
+    MirPlaceBindingData, MirPlaceBindingId, MirProgram, MirResumptionSiteData, MirResumptionSiteId,
     MirResumptionSiteKind, MirScopeData, MirScopeId, MirTerminator, MirTraitMethodInstance,
     optimize as optimize_mir,
 };
@@ -97,7 +98,7 @@ pub use pattern::{
 };
 pub use placeflow::{
     FlowDiagnostic, FlowEvent, FlowEventKind, LoanFact, LocalState, MoveFact, MovePathData,
-    MovePathId, PlaceBinding, PlaceBindingId, PlaceFlow, RefinementFact,
+    MovePathId, PlaceBinding, PlaceBindingId, PlaceBindingOrigin, PlaceFlow, RefinementFact,
 };
 pub use quantity::{Quantity, QuantityError};
 pub use request::{
