@@ -122,6 +122,10 @@ coarse. The composite fixtures cover:
   being masked. `service.rs::generic_integer_shift_wrappers_materialize_signed_unsigned_and_trapping_widths`
   and `service.rs::manifest_bound_generic_int_shift_left_rejects_an_i64_width_count`
   cover both generic and frozen source-to-VM paths.
+- contextual decimal literals retain an `f32` expectation through MIR, frozen
+  bytecode, independent verification, and manifest-bound floating execution;
+  `service.rs::manifest_bound_f32_leaf_accepts_contextual_decimal_literals_through_vm`
+  covers the width that cannot reuse an `f64` raw-bit constant.
 - exact move-captured closure consumption through local and imported callable
   transfers, including rejection of sequential activation and acceptance of
   mutually exclusive handler-arm transfers.

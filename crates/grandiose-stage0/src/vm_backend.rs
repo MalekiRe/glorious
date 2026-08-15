@@ -17,8 +17,9 @@ use crate::{
     identity::{DefKey, Digest},
     mir::{
         MirCleanupAction, MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern,
-        MirPatternField, MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f64_bits,
-        lifted_callable_definition, parse_char_literal, parse_f64_literal, parse_text_literal,
+        MirPatternField, MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f32_bits,
+        is_canonical_f64_bits, lifted_callable_definition,
+        parse_char_literal, parse_f64_literal, parse_text_literal,
     },
     runtime_manifest::{FloatBinaryOp, FloatCompareOp, FloatPrimitive, FloatWidth, PrimitiveRole},
     source::{TokenKind, exact_scalar_literal_kind},
@@ -302,6 +303,10 @@ pub enum VmInstruction {
     ConstF64 {
         dst: u32,
         bits: u64,
+    },
+    ConstF32 {
+        dst: u32,
+        bits: u32,
     },
     /// Sealed float leaf selected by the trusted runtime manifest.  It uses a
     /// selector-shaped payload only as an artifact opcode operand; no source
@@ -2368,6 +2373,20 @@ impl VerifiedVmProgram {
             allocated_elements: 0,
         };
         expect_f64(execute_with_arguments(
+            &self.program,
+            self.program.entry,
+            &[],
+            0,
+            &mut budget,
+        )?)
+    }
+    pub fn run_f32(&self) -> Result<f32, VmArtifactError> {
+        let mut budget = ExecutionBudget {
+            limits: VmExecutionLimits::default(),
+            instructions: 0,
+            allocated_elements: 0,
+        };
+        expect_f32(execute_with_arguments(
             &self.program,
             self.program.entry,
             &[],
@@ -4502,6 +4521,16 @@ impl<'a> Decoder<'a> {
                 }
                 Ok(VmInstruction::ConstF64 { dst, bits })
             }
+            171 => {
+                let dst = self.u32()?;
+                let bits = self.u32()?;
+                if !is_canonical_f32_bits(bits) {
+                    return Err(VmArtifactError::NonCanonicalFloat {
+                        bits: u64::from(bits),
+                    });
+                }
+                Ok(VmInstruction::ConstF32 { dst, bits })
+            }
             138 => {
                 let dst = self.u32()?;
                 let selector = self.text()?;
@@ -5674,6 +5703,10 @@ fn lower_instruction(
             value: *value,
         },
         MirInstruction::ConstF64 { dst, bits } => VmInstruction::ConstF64 {
+            dst: dst.0,
+            bits: *bits,
+        },
+        MirInstruction::ConstF32 { dst, bits } => VmInstruction::ConstF32 {
             dst: dst.0,
             bits: *bits,
         },
@@ -7127,6 +7160,15 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::NonCanonicalFloat { bits: *bits });
                 }
                 expect_type(function, *dst, VmType::F64)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::ConstF32 { dst, bits } => {
+                if !is_canonical_f32_bits(*bits) {
+                    return Err(VmArtifactError::NonCanonicalFloat {
+                        bits: u64::from(*bits),
+                    });
+                }
+                expect_type(function, *dst, VmType::F32)?;
                 write(&mut states, *dst)?
             }
             VmInstruction::FloatIntrinsic {
@@ -11735,6 +11777,9 @@ fn execute(
             VmInstruction::ConstF64 { dst, bits } => {
                 registers[dst as usize] = Some(VmValue::F64(canonical_vm_f64(f64::from_bits(bits))))
             }
+            VmInstruction::ConstF32 { dst, bits } => {
+                registers[dst as usize] = Some(VmValue::F32(canonical_vm_f32(f32::from_bits(bits))))
+            }
             VmInstruction::FloatIntrinsic {
                 dst,
                 primitive,
@@ -13599,6 +13644,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&bits.to_le_bytes())
         }
+        VmInstruction::ConstF32 { dst, bits } => {
+            output.push(171);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&bits.to_le_bytes())
+        }
         VmInstruction::FloatIntrinsic {
             dst,
             primitive,
@@ -14791,6 +14841,10 @@ fn execute_with_arguments(
             VmInstruction::ConstF64 { dst, bits } => {
                 registers[*dst as usize] =
                     Some(VmValue::F64(canonical_vm_f64(f64::from_bits(*bits))))
+            }
+            VmInstruction::ConstF32 { dst, bits } => {
+                registers[*dst as usize] =
+                    Some(VmValue::F32(canonical_vm_f32(f32::from_bits(*bits))))
             }
             VmInstruction::FloatIntrinsic {
                 dst,

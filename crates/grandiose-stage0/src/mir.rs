@@ -547,6 +547,19 @@ pub struct MirPatternField {
 /// retaining arbitrary payloads would therefore let semantically equivalent
 /// source programs acquire host-dependent artifact bytes and fingerprints.
 pub const CANONICAL_F64_NAN_BITS: u64 = 0x7ff8_0000_0000_0000;
+pub const CANONICAL_F32_NAN_BITS: u32 = 0x7fc0_0000;
+
+pub fn canonical_f32_bits(bits: u32) -> u32 {
+    if f32::from_bits(bits).is_nan() {
+        CANONICAL_F32_NAN_BITS
+    } else {
+        bits
+    }
+}
+
+pub fn is_canonical_f32_bits(bits: u32) -> bool {
+    canonical_f32_bits(bits) == bits
+}
 
 /// Canonicalize the one non-value-equivalent part of an IEEE-754 `f64`
 /// representation before it crosses a frozen compiler boundary.
@@ -622,6 +635,10 @@ pub enum MirInstruction {
     ConstF64 {
         dst: MirLocal,
         bits: u64,
+    },
+    ConstF32 {
+        dst: MirLocal,
+        bits: u32,
     },
     /// A finite manifest-authorized IEEE-754 operation.  The primitive
     /// selector is retained as sealed semantic data (not a callable name),
@@ -2841,6 +2858,7 @@ fn merge_constant_entry(
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Constant {
     I64(i64),
+    F32(u32),
     F64(u64),
     Bool(bool),
     Char(u32),
@@ -2964,6 +2982,9 @@ fn fold_block(
             MirInstruction::ConstF64 { dst, bits } => {
                 constants.insert(dst, Constant::F64(bits));
             }
+            MirInstruction::ConstF32 { dst, bits } => {
+                constants.insert(dst, Constant::F32(bits));
+            }
             MirInstruction::ConstBool { dst, value } => {
                 constants.insert(dst, Constant::Bool(value));
             }
@@ -3007,6 +3028,7 @@ fn invalidates_alias_visible_constants(instruction: &MirInstruction) -> bool {
 fn constant_instruction(dst: MirLocal, value: Option<&Constant>) -> Option<MirInstruction> {
     match value {
         Some(Constant::I64(value)) => Some(MirInstruction::ConstI64 { dst, value: *value }),
+        Some(Constant::F32(bits)) => Some(MirInstruction::ConstF32 { dst, bits: *bits }),
         Some(Constant::F64(bits)) => Some(MirInstruction::ConstF64 { dst, bits: *bits }),
         Some(Constant::Bool(value)) => Some(MirInstruction::ConstBool { dst, value: *value }),
         Some(Constant::Char(value)) => Some(MirInstruction::ConstChar { dst, value: *value }),
@@ -3053,6 +3075,9 @@ fn literal_pattern_matches_constant(value: &Constant, pattern: &MirPattern) -> O
     };
     Some(match value {
         Constant::I64(value) => parse_i64_literal(pattern).is_ok_and(|pattern| pattern == *value),
+        Constant::F32(bits) => {
+            parse_f32_literal(pattern).is_ok_and(|pattern| pattern == f32::from_bits(*bits))
+        }
         // Match the VM's IEEE equality rather than comparing bit patterns:
         // `-0.0` and `0.0` compare equal, while NaN never matches itself.
         Constant::F64(bits) => {
@@ -3138,6 +3163,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::ConstI32 { dst, .. }
         | MirInstruction::ConstIsize { dst, .. }
         | MirInstruction::ConstI128 { dst, .. }
+        | MirInstruction::ConstF32 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
         | MirInstruction::FloatIntrinsic { dst, .. }
         | MirInstruction::IntIntrinsic { dst, .. }
@@ -5920,6 +5946,15 @@ impl MirFunction {
             }
             return Ok(());
         }
+        if let MirInstruction::ConstF32 { dst, bits } = instruction {
+            if self.local_type(*dst)? != &Type::Scalar(crate::types::ScalarType::F32) {
+                return Err("MIR f32 constant destination is not f32".into());
+            }
+            if !is_canonical_f32_bits(*bits) {
+                return Err("MIR f32 constant has a non-canonical NaN payload".into());
+            }
+            return Ok(());
+        }
         if let MirInstruction::MakeCallable {
             callee,
             captures,
@@ -7126,6 +7161,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::ConstI32 { .. }
         | MirInstruction::ConstIsize { .. }
         | MirInstruction::ConstI128 { .. }
+        | MirInstruction::ConstF32 { .. }
         | MirInstruction::ConstF64 { .. }
         | MirInstruction::ConstBool { .. }
         | MirInstruction::ConstChar { .. }
@@ -7839,6 +7875,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::ConstI32 { dst, .. }
         | MirInstruction::ConstIsize { dst, .. }
         | MirInstruction::ConstI128 { dst, .. }
+        | MirInstruction::ConstF32 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
@@ -19876,6 +19913,16 @@ impl Lowerer<'_> {
                         return None;
                     }
                 },
+                Type::Scalar(crate::types::ScalarType::F32) => match parse_f32_literal(&text) {
+                    Ok(value) => self.instructions.push(MirInstruction::ConstF32 {
+                        dst,
+                        bits: canonical_f32_bits(value.to_bits()),
+                    }),
+                    Err(_) => {
+                        self.error("G6003", "invalid f32 literal at MIR lowering");
+                        return None;
+                    }
+                },
                 Type::Scalar(crate::types::ScalarType::Bool) => match text.as_str() {
                     "true" => self
                         .instructions
@@ -24028,6 +24075,11 @@ pub(crate) fn parse_f64_literal(text: &str) -> Result<f64, ()> {
     // overflows while becoming an f64 is therefore a rejected literal rather
     // than an accidental alternate spelling for infinity.  IEEE infinities
     // and NaNs remain valid *runtime results* of float arithmetic.
+    value.is_finite().then_some(value).ok_or(())
+}
+
+pub(crate) fn parse_f32_literal(text: &str) -> Result<f32, ()> {
+    let value = text.replace('_', "").parse::<f32>().map_err(|_| ())?;
     value.is_finite().then_some(value).ok_or(())
 }
 

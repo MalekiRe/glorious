@@ -9601,6 +9601,31 @@ fn service_lowers_f64_arithmetic_and_typed_calls_to_the_verified_vm() {
 }
 
 #[test]
+fn manifest_bound_f32_leaf_accepts_contextual_decimal_literals_through_vm() {
+    // Decimal source literals receive the parameter's width.  The trusted
+    // f32 leaf then proves that this path retains f32 rather than falling
+    // back to the default f64 literal representation.
+    let source = "fn __g1_f32_add(left: f32, right: f32) -> f32 { () } pub fn main() -> f32 { __g1_f32_add(40.5, 1.5) }";
+    let mut input = request(source);
+    input.runtime_manifest = Some(int_runtime_manifest(
+        PrimitiveRole::parse_selector_name("f32-add").unwrap(),
+        "__g1_f32_add",
+    ));
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("contextual f32 literals must reach the trusted f32 primitive")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_f32().unwrap(), 42.0);
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function.instructions.iter().any(|instruction| {
+            matches!(instruction, VmInstruction::ConstF32 { .. })
+        })
+    }));
+}
+
+#[test]
 fn source_float_arithmetic_canonicalizes_runtime_nan_results() {
     let artifact = StageZeroCompiler::new()
         .compile(request("pub fn main() -> f64 { 0.0 / 0.0 }"))
