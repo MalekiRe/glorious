@@ -11057,6 +11057,152 @@ fn service_rejects_recursive_hyphenated_dependency_facades_with_generic_effect_g
 }
 
 #[test]
+fn service_seals_dag_hrtb_alias_interfaces_before_private_facade_transactions() {
+    let root = "use top_facade::*; pub fn apply(callback: Relay<i64>) -> i64 / Audit<i64> { let value = 41; let result = callback(&value); *result } pub fn effect_value() -> i64 { handle apply(relay) { Audit<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let ambiguous_root = "use left_facade::*; use right_facade::*; pub fn main() -> i64 { 1 ** 2 }";
+    let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Effects<U>: EffectRow; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; } impl Child<i64> for i64 {} pub type Callback<U> = for<'a> (&'a i64) -> &'a i64 / { <i64 as Child<i64>>::Effects<U> }; pub fn relay<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value }";
+    let world = |root: &str,
+                 providers: Vec<(&str, &str)>,
+                 left_alias: &str,
+                 right_alias: &str,
+                 private_left_aliases: bool| {
+        let mut input = request(root);
+        for (package, source) in providers {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                source.as_bytes(),
+            ));
+        }
+        let left = if private_left_aliases {
+            format!(
+                "use {left_alias}::{{Callback as Relay, Child as Capability, Combine as Operator, Trace as Audit}}; pub use {left_alias}::*;"
+            )
+        } else {
+            format!(
+                "pub use {left_alias}::{{Callback as Relay, Child as Capability, Combine as Operator, Trace as Audit}}; pub use {left_alias}::*;"
+            )
+        };
+        for (package, source) in [
+            ("left-facade@0.1.0", left),
+            (
+                "right-facade@0.1.0",
+                format!(
+                    "pub use {right_alias}::{{Callback as Relay, Child as Capability, Combine as Operator, Trace as Audit}}; pub use {right_alias}::*;"
+                ),
+            ),
+            (
+                "top-facade@0.1.0",
+                "pub use left_facade::{Audit, Capability, Operator, Relay}; pub use right_facade::*;"
+                    .to_owned(),
+            ),
+        ] {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                source.into_bytes(),
+            ));
+        }
+        input
+    };
+
+    let public = world(
+        root,
+        vec![("semantic-core@0.1.0", provider)],
+        "semantic_core",
+        "semantic_core",
+        false,
+    );
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(public.clone(), None).unwrap();
+    let first = compiler
+        .compile_revision(parent)
+        .expect("same provider identities must deduplicate across DAG facade paths")
+        .artifact
+        .unwrap();
+    assert_eq!(first.run_i64().unwrap(), 50);
+    let top = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("top-facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let published_top = compiler
+        .dependency_trace(parent, &top)
+        .expect("the public top facade must freeze");
+    let mut reordered_public = public.clone();
+    reordered_public.sources.reverse();
+    let replay = compiler.import_revision(reordered_public, Some(parent)).unwrap();
+    assert_eq!(replay, parent);
+    let replay_artifact = compiler.compile_revision(replay).unwrap().artifact.unwrap();
+    assert_eq!(first.fingerprint(), replay_artifact.fingerprint());
+    assert_eq!(first.canonical_bytes(), replay_artifact.canonical_bytes());
+    let cached = compiler.interface_cache_stats();
+
+    let ambiguous = world(
+        ambiguous_root,
+        vec![("alpha-core@0.1.0", provider), ("beta-core@0.1.0", provider)],
+        "alpha_core",
+        "beta_core",
+        false,
+    );
+    let mut ambiguous_reordered = ambiguous.clone();
+    ambiguous_reordered.sources.reverse();
+    let first_ambiguity = StageZeroCompiler::new()
+        .compile(ambiguous)
+        .expect_err("distinct same-named providers must not deduplicate by spelling");
+    let second_ambiguity = StageZeroCompiler::new()
+        .compile(ambiguous_reordered)
+        .expect_err("source order cannot resolve distinct provider aliases");
+    assert!(
+        first_ambiguity
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| matches!(diagnostic.code, "G3314" | "G3318" | "G4111")),
+        "missing distinct-provider public-interface ambiguity: {:#?}",
+        first_ambiguity.diagnostics()
+    );
+    assert_eq!(first_ambiguity.diagnostics(), second_ambiguity.diagnostics());
+
+    let private = world(
+        root,
+        vec![("semantic-core@0.1.0", provider)],
+        "semantic_core",
+        "semantic_core",
+        true,
+    );
+    let child = compiler.import_revision(private.clone(), Some(parent)).unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(child).unwrap())
+        .expect_err("a private left alias cannot satisfy an unchanged public top facade");
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| matches!(diagnostic.code, "G3317" | "G3326")),
+        "missing private facade alias authority diagnostic: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached);
+    assert!(compiler.dependency_traces(child).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &top), Some(published_top));
+    let mut private_reordered = private;
+    private_reordered.sources.reverse();
+    assert_eq!(
+        error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(private_reordered)
+            .expect_err("source order cannot make a private alias public")
+            .diagnostics(),
+        "private facade alias diagnostics must be canonical"
+    );
+
+    let repaired = compiler.import_revision(public, Some(parent)).unwrap();
+    assert_eq!(repaired, parent);
+    let repaired_artifact = compiler.compile_revision(repaired).unwrap().artifact.unwrap();
+    assert_eq!(first.canonical_bytes(), repaired_artifact.canonical_bytes());
+    assert_eq!(repaired_artifact.run_i64().unwrap(), 50);
+}
+
+#[test]
 fn service_isolates_illegal_hyphenated_package_cycles_from_legal_hrtb_module_sccs() {
     let legal_root = "use legal_facade::*; pub fn apply(callback: Callback<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); *result } pub fn effect_value() -> i64 { handle apply(relay) { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
     let illegal_root = "use legal_facade::*; use effects_lib::Callback as RejectedCallback; pub fn apply(callback: Callback<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); *result } pub fn effect_value() -> i64 { handle apply(relay) { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";

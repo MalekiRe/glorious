@@ -161,6 +161,12 @@ coarse. The composite fixtures cover:
   SCC emits only canonical cycle diagnostics and publishes nothing; removing
   it reuses exactly the still-valid module-SCC identities and VM bytes
   (`service_isolates_illegal_hyphenated_package_cycles_from_legal_hrtb_module_sccs`).
+- legal package DAG paths that export same-named generic HRTB callable aliases,
+  GAT effect contracts, and fixity metadata deduplicate only when they retain
+  one provider identity; distinct providers remain canonically ambiguous.
+  Making one facade's aliases private is transactional, and repair restores
+  the exact public artifact without stale products
+  (`service_seals_dag_hrtb_alias_interfaces_before_private_facade_transactions`).
 - generic dependency effect identity through exact replay and optional
   cancellation, including rejection when the imported handler's concrete
   effect instance does not match the performed one.
