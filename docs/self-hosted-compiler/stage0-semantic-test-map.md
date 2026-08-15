@@ -134,6 +134,10 @@ coarse. The composite fixtures cover:
   fresh `for<'a>` placeholders before becoming a first-class callback; the
   callback is then invoked and its returned reference dereferenced through the
   VM (`service_executes_hrtb_function_values_through_reference_returning_calls`).
+- contextual compact closures can likewise inhabit an HRTB callback contract:
+  their universal value type remains frozen while the lifted closure body uses
+  caller-local regions, and an invoked reference result reaches the VM
+  (`service_executes_contextual_hrtb_closure_values_through_reference_calls`).
 - generic integer wrappers preserve their operand width through deferred MIR
   materialization: signed right shift remains arithmetic, unsigned right shift
   remains logical, and every count at least the operand width traps rather than

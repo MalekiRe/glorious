@@ -4540,21 +4540,43 @@ impl Elaborator<'_> {
         // implicit conversion: arity must still match exactly, and annotated
         // closures retain their own explicit contract.
         let parameter_count = parameters.len();
-        let expected_callable = expected.and_then(|expected| match expected {
-            Type::Callable {
-                lifetime_binders: 0,
+        let expected_callable = expected.as_ref().and_then(|expected| {
+            let Type::Callable {
+                lifetime_binders: _,
                 parameters,
                 result,
                 effects,
                 invocation,
-            } if parameters.len() == parameter_count => {
-                Some((parameters, *result, effects, invocation))
+            } = expected
+            else {
+                return None;
+            };
+            if parameters.len() != parameter_count {
+                return None;
             }
-            _ => None,
+            // A closure body executes only after its own `for<'a>` contract
+            // has been opened for one call.  Keep the universal contract on
+            // the closure value, while its body-local parameter/result types
+            // use caller-local regions.  This mirrors `call`'s HRTB opening
+            // and, crucially, prevents a bound placeholder from leaking into
+            // the flat Core expression arena or the lifted VM body.
+            let body_parameters = parameters
+                .iter()
+                .cloned()
+                .map(|parameter| open_hrtb_callable_body_type(parameter, 0))
+                .collect::<Vec<_>>();
+            let body_result = open_hrtb_callable_body_type((**result).clone(), 0);
+            Some((
+                expected.clone(),
+                body_parameters,
+                body_result,
+                effects.clone(),
+                *invocation,
+            ))
         });
         let expected_parameters = expected_callable
             .as_ref()
-            .map(|(parameters, _, _, _)| parameters);
+            .map(|(_, parameters, _, _, _)| parameters);
         let parameters = parameters
             .into_iter()
             .enumerate()
@@ -4574,7 +4596,7 @@ impl Elaborator<'_> {
             .collect::<Vec<_>>();
         let effects = expected_callable
             .as_ref()
-            .map(|(_, _, effects, _)| effects.clone())
+            .map(|(_, _, _, effects, _)| effects.clone())
             .unwrap_or_else(|| self.closure_effects(&effects, span));
         self.locals.enter();
         for (name, ty) in &parameters {
@@ -4592,7 +4614,7 @@ impl Elaborator<'_> {
             .or_else(|| {
                 expected_callable
                     .as_ref()
-                    .map(|(_, result, _, _)| result.clone())
+                    .map(|(_, _, result, _, _)| result.clone())
             });
         let body = self.expression_expected(body, expected_result.clone());
         self.declared_effects = previous_effects;
@@ -4616,6 +4638,16 @@ impl Elaborator<'_> {
         self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
+        let callable_type = expected_callable
+            .as_ref()
+            .map(|(contract, _, _, _, _)| contract.clone())
+            .unwrap_or_else(|| Type::Callable {
+                lifetime_binders: 0,
+                parameters: parameters.iter().map(|(_, ty)| ty.clone()).collect(),
+                result: Box::new(result.clone()),
+                effects: effects.clone(),
+                invocation: crate::quantity::Quantity::ONCE,
+            });
         self.alloc(
             CoreKind::Closure {
                 callable,
@@ -4628,13 +4660,7 @@ impl Elaborator<'_> {
                 ),
                 body,
             },
-            Type::Callable {
-                lifetime_binders: 0,
-                parameters: parameters.into_iter().map(|(_, ty)| ty).collect(),
-                result: Box::new(result),
-                effects,
-                invocation: crate::quantity::Quantity::ONCE,
-            },
+            callable_type,
             span,
         )
     }
@@ -11642,6 +11668,58 @@ fn align_lifetime_types(
         // mismatch. Returning `expected` here keeps generic type variables
         // inferable at the same locations as before this lifetime pass.
         _ => Ok(expected.clone()),
+    }
+}
+
+/// Open the selected binder of a higher-ranked callable for elaborating its
+/// own body. The callable value retains the original universally quantified
+/// type; only body-local Core terms use `Elided` regions, which are erased
+/// after ordinary lifetime/escape checking during VM lowering.
+fn open_hrtb_callable_body_type(value: Type, binder_depth: u32) -> Type {
+    match value {
+        Type::Reference {
+            mutability,
+            lifetime,
+            referent,
+        } => Type::Reference {
+            mutability,
+            lifetime: match lifetime {
+                Lifetime::Bound { depth, .. } if depth == binder_depth => Lifetime::Elided,
+                Lifetime::Bound { depth, index } if depth > binder_depth => Lifetime::Bound {
+                    depth: depth - 1,
+                    index,
+                },
+                lifetime => lifetime,
+            },
+            referent: Box::new(open_hrtb_callable_body_type(*referent, binder_depth)),
+        },
+        Type::Tuple(values) => Type::Tuple(
+            values
+                .into_iter()
+                .map(|value| open_hrtb_callable_body_type(value, binder_depth))
+                .collect(),
+        ),
+        Type::Array(value) => Type::Array(Box::new(open_hrtb_callable_body_type(
+            *value,
+            binder_depth,
+        ))),
+        Type::Callable {
+            lifetime_binders,
+            parameters,
+            result,
+            effects,
+            invocation,
+        } => Type::Callable {
+            lifetime_binders,
+            parameters: parameters
+                .into_iter()
+                .map(|parameter| open_hrtb_callable_body_type(parameter, binder_depth + 1))
+                .collect(),
+            result: Box::new(open_hrtb_callable_body_type(*result, binder_depth + 1)),
+            effects,
+            invocation,
+        },
+        value => value,
     }
 }
 

@@ -4203,6 +4203,14 @@ fn service_executes_hrtb_function_values_through_reference_returning_calls() {
 }
 
 #[test]
+fn service_executes_contextual_hrtb_closure_values_through_reference_calls() {
+    let source = "pub fn apply(callback: for<'a> (&'a i64) -> &'a i64) -> i64 { let value = 41; let result = callback(&value); *result + 1 } pub fn main() -> i64 { apply({ value => value }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_proves_and_enforces_direct_callable_trait_bounds() {
     let accepted = "trait Sendable {} impl Sendable for i64 {} pub fn identity<T>(value: T) -> T where T: Sendable { value } pub fn main() -> i64 { identity(42) }";
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
