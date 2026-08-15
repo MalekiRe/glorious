@@ -99,6 +99,11 @@ coarse. The composite fixtures cover:
   effect instance does not match the performed one.
 - imported reference lifetime relations through a local closure and handler,
   including rejection of a closure escape after the imported call.
+- whole-referent `move *reference` retains its direct unique-reference handle
+  only for an exact later `*reference = value` restoration; reads, shared
+  referents, handler boundaries, and body/scope completion while the referent
+  hole is open are rejected
+  (`whole_unique_referent_move_requires_exact_restoration_before_reuse`).
 - defaulted generic associated types and associated effect rows through source
   layout construction, outward-effect checking, handler lowering, VM execution,
   and dependency-interface serialization. The selected local impl may omit both

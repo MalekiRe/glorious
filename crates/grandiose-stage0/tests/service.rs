@@ -3191,6 +3191,84 @@ fn unique_reborrow_reuses_the_original_vm_place() {
 }
 
 #[test]
+fn whole_unique_referent_move_requires_exact_restoration_before_reuse() {
+    let restored = "pub fn relay(value: i64) -> i64 { value } pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; let retained = relay(moved); *reference = retained + 41; *reference }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(restored))
+        .expect("a whole unique referent may be moved and exactly restored");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let read_before_restore = "pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; *reference + moved }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(read_before_restore))
+    else {
+        panic!("a unique-reference referent hole unexpectedly permitted a read");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5001" || diagnostic.code == "G5004"),
+        "missing use-through-open-referent diagnostic: {diagnostics:#?}"
+    );
+
+    let incomplete = "pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; moved }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(incomplete))
+    else {
+        panic!("a body unexpectedly completed with an open unique-reference referent hole");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G5004"),
+        "missing open-referent scope-exit diagnostic: {diagnostics:#?}"
+    );
+
+    let alias = "pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; let alias = reference; *alias = moved; *alias }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(alias))
+    else {
+        panic!("an alias unexpectedly observed an open unique-reference referent hole");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G5004"),
+        "missing alias-through-open-referent diagnostic: {diagnostics:#?}"
+    );
+
+    let nested_scope = "pub fn main() -> i64 { { let value = 1; let reference = &mut value; let moved = move *reference; moved }; 0 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(nested_scope))
+    else {
+        panic!("a nested scope unexpectedly ended with an open unique-reference referent hole");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G5004"),
+        "missing nested scope referent-hole diagnostic: {diagnostics:#?}"
+    );
+
+    let shared = "pub fn main() -> i64 { let value = 1; let reference = &value; move *reference }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(shared))
+    else {
+        panic!("a shared-reference referent unexpectedly moved out");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G5004"),
+        "missing shared-referent move diagnostic: {diagnostics:#?}"
+    );
+
+    let handler_boundary = "effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let value = 1; let reference = &mut value; let moved = move *reference; handle Tick::tick() { Tick::tick() with _ => moved } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(handler_boundary))
+    else {
+        panic!("a handler unexpectedly captured an open unique-reference referent hole");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G5004"),
+        "missing handler-boundary referent-hole diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn nested_projection_reborrows_preserve_origin_and_reject_suspension_escape() {
     let source = r#"
         pub struct Inner { value: i64 }

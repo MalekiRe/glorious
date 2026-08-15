@@ -416,6 +416,7 @@ impl PlaceFlow {
             projection_loans: vec![],
             reborrow_parents: BTreeMap::new(),
             reference_origins: BTreeMap::new(),
+            open_referent_holes: BTreeMap::new(),
             moved_places: BTreeSet::new(),
             move_paths: MovePathArena::default(),
             bindings: PlaceBindingArena::default(),
@@ -454,6 +455,10 @@ impl PlaceFlow {
         // without inventing a body-local backing place.
         a.record_parameter_reference_origins(parameters);
         a.visit_with_live_after(root, &BTreeSet::new());
+        a.reject_open_referent_holes(
+            body.expression(root).span,
+            "cannot complete a body while a unique-reference referent is moved out",
+        );
         a.diagnostics.sort_by_key(|d| d.span.start);
         let active_loans = a
             .projection_loans
@@ -508,6 +513,12 @@ struct Analyzer<'a> {
     /// Provenance outlives one compact active-loan entry.  It is consulted
     /// only when a live descendant proves the parent region remains open.
     reference_origins: BTreeMap<String, ProjectionLoan>,
+    /// A direct `move *reference` leaves its unique referent uninitialized
+    /// while retaining the reference handle.  The key is the exact lexical
+    /// reference binding, never the referent root: a parameter reference may
+    /// name caller storage which the local move-path arena cannot represent.
+    /// Only `*reference = value` may close this hole.
+    open_referent_holes: BTreeMap<String, Span>,
     /// Canonical paths that have been moved and have not since been
     /// reinitialized. Whole-local moves are mirrored in `states`; field moves
     /// deliberately are not, because their siblings remain usable.
@@ -543,6 +554,7 @@ type HandlerExit = (
     BTreeSet<Projection>,
     BTreeMap<String, String>,
     BTreeMap<String, ProjectionLoan>,
+    BTreeMap<String, Span>,
 );
 
 impl Analyzer<'_> {
@@ -661,6 +673,22 @@ impl Analyzer<'_> {
             .expect("refinement journal follows PlaceFlow scopes");
         self.refinements.truncate(refinement_start);
         let locals = scope.into_values().collect::<BTreeSet<_>>();
+        let holes = self
+            .open_referent_holes
+            .keys()
+            .filter(|reference| belongs_to_scope(&locals, reference))
+            .cloned()
+            .collect::<Vec<_>>();
+        for reference in holes {
+            self.error(
+                span,
+                "G5004",
+                format!(
+                    "cannot leave the scope of unique reference `{reference}` while its referent is uninitialized"
+                ),
+            );
+            self.open_referent_holes.remove(&reference);
+        }
         let owners = self
             .projection_loans
             .iter()
@@ -846,20 +874,23 @@ impl Analyzer<'_> {
                     return;
                 }
                 if let CorePlace::Deref { reference, .. } = &place {
+                    self.restore_whole_referent_hole(&place, e.span);
                     self.use_deref_reference(*reference, e.span, true);
                 }
                 self.assign_place(&place, e.span);
                 self.record_assigned_reference_origin(&place, value);
             }
             CoreKind::Move(v) => {
-                // A move of a static place is validated directly. Visiting a
-                // field first would turn a second move into an unrelated
-                // read-after-move diagnostic and obscure the precise path
-                // being consumed.
-                if self.projection(v).is_none() {
-                    self.visit_with_live_after(v, live_after);
+                if !self.open_whole_referent_hole(v, e.span) {
+                    // A move of a static place is validated directly. Visiting a
+                    // field first would turn a second move into an unrelated
+                    // read-after-move diagnostic and obscure the precise path
+                    // being consumed.
+                    if self.projection(v).is_none() {
+                        self.visit_with_live_after(v, live_after);
+                    }
+                    self.move_place(v, e.span)
                 }
-                self.move_place(v, e.span)
             }
             CoreKind::IntrinsicCall { arguments, .. } => {
                 self.visit_sequence(&arguments, live_after);
@@ -905,6 +936,10 @@ impl Analyzer<'_> {
                 reference_shape,
                 ..
             } => {
+                self.reject_open_referent_holes(
+                    e.span,
+                    "cannot perform an effect while a unique-reference referent is moved out",
+                );
                 self.reject_opaque_reference_result(
                     reference_shape,
                     &e.ty,
@@ -917,6 +952,10 @@ impl Analyzer<'_> {
                 computation,
                 clauses,
             } => {
+                self.reject_open_referent_holes(
+                    e.span,
+                    "cannot enter a handler while a unique-reference referent is moved out",
+                );
                 let mut inside_handler = live_after.clone();
                 for clause in &clauses {
                     self.collect_local_uses(clause.body, &mut inside_handler);
@@ -932,6 +971,7 @@ impl Analyzer<'_> {
                 let incoming_moves = self.moved_places.clone();
                 let incoming_parents = self.reborrow_parents.clone();
                 let incoming_origins = self.reference_origins.clone();
+                let incoming_holes = self.open_referent_holes.clone();
                 let incoming_refinements = self.refinements.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
@@ -940,6 +980,7 @@ impl Analyzer<'_> {
                     self.moved_places = incoming_moves.clone();
                     self.reborrow_parents = incoming_parents.clone();
                     self.reference_origins = incoming_origins.clone();
+                    self.open_referent_holes = incoming_holes.clone();
                     self.refinements = incoming_refinements.clone();
                     self.begin_scope();
                     let resumption = match &clause.resumption {
@@ -975,18 +1016,20 @@ impl Analyzer<'_> {
                         self.moved_places.clone(),
                         self.reborrow_parents.clone(),
                         self.reference_origins.clone(),
+                        self.open_referent_holes.clone(),
                     ));
                 }
                 if !exits.is_empty() {
                     self.states = join_handler_exits(
                         &exits
                             .iter()
-                            .map(|(states, _, _, _, _)| states.clone())
+                            .map(|(states, _, _, _, _, _)| states.clone())
                             .collect::<Vec<_>>(),
                     );
                     self.projection_loans = join_handler_projection_loans(&exits, &incoming);
                     self.moved_places = join_handler_moves(&exits, &incoming);
                     self.join_reborrow_facts(&exits, &incoming);
+                    self.open_referent_holes = join_handler_referent_holes(&exits, &incoming);
                     self.refinements = incoming_refinements;
                 }
             }
@@ -1008,6 +1051,7 @@ impl Analyzer<'_> {
                 let incoming_moves = self.moved_places.clone();
                 let incoming_parents = self.reborrow_parents.clone();
                 let incoming_origins = self.reference_origins.clone();
+                let incoming_holes = self.open_referent_holes.clone();
                 let incoming_refinements = self.refinements.clone();
                 let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
@@ -1016,6 +1060,7 @@ impl Analyzer<'_> {
                     self.moved_places = incoming_moves.clone();
                     self.reborrow_parents = incoming_parents.clone();
                     self.reference_origins = incoming_origins.clone();
+                    self.open_referent_holes = incoming_holes.clone();
                     self.refinements = incoming_refinements.clone();
                     self.begin_scope();
                     // `bindings` includes the positive refinement
@@ -1045,18 +1090,20 @@ impl Analyzer<'_> {
                         self.moved_places.clone(),
                         self.reborrow_parents.clone(),
                         self.reference_origins.clone(),
+                        self.open_referent_holes.clone(),
                     ));
                 }
                 if !exits.is_empty() {
                     self.states = join_handler_exits(
                         &exits
                             .iter()
-                            .map(|(states, _, _, _, _)| states.clone())
+                            .map(|(states, _, _, _, _, _)| states.clone())
                             .collect::<Vec<_>>(),
                     );
                     self.projection_loans = join_handler_projection_loans(&exits, &incoming);
                     self.moved_places = join_handler_moves(&exits, &incoming);
                     self.join_reborrow_facts(&exits, &incoming);
+                    self.open_referent_holes = join_handler_referent_holes(&exits, &incoming);
                     self.refinements = incoming_refinements;
                 }
             }
@@ -1418,6 +1465,16 @@ impl Analyzer<'_> {
     /// widening `&pair.left` to an imprecise whole-record loan.
     fn capture_reference_loan(&mut self, name: &str, span: Span, owner: Option<&str>) {
         let name = self.resolve_name(name);
+        if self.open_referent_holes.contains_key(&name) {
+            self.error(
+                span,
+                "G5004",
+                format!(
+                    "cannot capture unique reference `{name}` while its referent is uninitialized"
+                ),
+            );
+            return;
+        }
         let reborrows = self
             .projection_loans
             .iter()
@@ -1637,6 +1694,17 @@ impl Analyzer<'_> {
         let Some(place) = self.projection(id) else {
             return;
         };
+        if self.open_referent_holes.contains_key(&place.root) {
+            self.error(
+                span,
+                "G5004",
+                format!(
+                    "cannot use unique reference `{}` while its referent is uninitialized",
+                    place.root
+                ),
+            );
+            return;
+        }
         if let Some(moved) = self.moved_place_overlapping(&place) {
             self.error(
                 span,
@@ -2297,10 +2365,131 @@ impl Analyzer<'_> {
         }
     }
 
+    /// Detect the intentionally narrow source form `move *reference`.
+    /// `reference` must be one lexical unique-reference local; moving through
+    /// an aggregate field, temporary, or arbitrary dereference expression is
+    /// not a whole-referent move and remains subject to the ordinary move
+    /// rules.
+    fn direct_unique_reference_key(&self, id: CoreId) -> Option<String> {
+        let CoreKind::Local(name) = &self.body.expression(id).kind else {
+            return None;
+        };
+        matches!(
+            self.body.expression(id).ty,
+            crate::types::Type::Reference {
+                mutability: crate::types::Mutability::Unique,
+                ..
+            }
+        )
+        .then(|| self.resolve_name(name))
+    }
+
+    /// Open the temporary uninitialized-referent state produced by
+    /// `move *reference`.  The reference handle itself remains initialized,
+    /// but no ordinary use, alias, call argument, effect boundary, or scope
+    /// exit may observe it until the exact dereference place is restored.
+    /// Returns `true` when `value` was this dedicated source form, including
+    /// a malformed use which has already received its focused diagnostic.
+    fn open_whole_referent_hole(&mut self, value: CoreId, span: Span) -> bool {
+        let CoreKind::Deref(reference) = self.body.expression(value).kind else {
+            return false;
+        };
+        let Some(reference) = self.direct_unique_reference_key(reference) else {
+            self.error(
+                span,
+                "G5004",
+                "move through a dereference requires one direct live unique-reference local"
+                    .into(),
+            );
+            return true;
+        };
+        if self.open_referent_holes.contains_key(&reference) {
+            self.error(
+                span,
+                "G5004",
+                format!(
+                    "cannot move through unique reference `{reference}` while its referent is uninitialized"
+                ),
+            );
+            return true;
+        }
+        if !matches!(self.states.get(&reference), Some(LocalState::Initialized)) {
+            self.error(
+                span,
+                "G5004",
+                format!("cannot move through unavailable unique reference `{reference}`"),
+            );
+            return true;
+        }
+        if self.live_child_reborrow_descends_from(&reference) {
+            self.error(
+                span,
+                "G5004",
+                format!(
+                    "cannot move through unique reference `{reference}` while a child reborrow is live"
+                ),
+            );
+            return true;
+        }
+        self.open_referent_holes.insert(reference, span);
+        true
+    }
+
+    /// The only operation which closes a whole-referent hole is assignment to
+    /// the exact direct `*reference` place.  A field projection below that
+    /// dereference remains an ordinary partial write and cannot make the
+    /// uninitialized whole referent usable again.
+    fn restore_whole_referent_hole(&mut self, place: &CorePlace, span: Span) {
+        let CorePlace::Deref { reference, unique, .. } = place else {
+            return;
+        };
+        if !unique {
+            return;
+        }
+        let Some(reference) = self.direct_unique_reference_key(*reference) else {
+            return;
+        };
+        if !self.open_referent_holes.contains_key(&reference) {
+            return;
+        }
+        if self.live_child_reborrow_descends_from(&reference) {
+            self.error(
+                span,
+                "G5004",
+                format!(
+                    "cannot restore unique reference `{reference}` while a child reborrow is live"
+                ),
+            );
+            return;
+        }
+        self.open_referent_holes.remove(&reference);
+    }
+
+    fn reject_open_referent_holes(&mut self, span: Span, message: &str) {
+        let references = self
+            .open_referent_holes
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        for reference in references {
+            self.error(span, "G5004", format!("{message}: `{reference}`"));
+        }
+    }
+
     fn use_deref_reference(&mut self, id: CoreId, span: Span, mutation: bool) {
         let Some(name) = self.reference_origin_key(id) else {
             return;
         };
+        if self.open_referent_holes.contains_key(&name) {
+            self.error(
+                span,
+                "G5004",
+                format!(
+                    "cannot access through unique reference `{name}` while its referent is uninitialized"
+                ),
+            );
+            return;
+        }
         let Some(parent) = self
             .projection_loans
             .iter()
@@ -2486,6 +2675,31 @@ impl Analyzer<'_> {
         })
     }
 
+    /// Unlike replacing a reference carrier, moving or restoring its
+    /// *referent* is compatible with the carrier's own loan.  Only a distinct
+    /// live child reborrow suspends that operation.
+    fn live_child_reborrow_descends_from(&self, carrier: &str) -> bool {
+        self.projection_loans.iter().any(|loan| {
+            let Some(mut ancestor) = loan.owner.clone() else {
+                return false;
+            };
+            if ancestor == carrier {
+                return false;
+            }
+            let mut seen = BTreeSet::new();
+            while seen.insert(ancestor.clone()) {
+                let Some(parent) = self.reborrow_parents.get(&ancestor) else {
+                    return false;
+                };
+                if parent == carrier {
+                    return true;
+                }
+                ancestor = parent.clone();
+            }
+            false
+        })
+    }
+
     fn root_name(&self, id: CoreId) -> String {
         self.projection(id)
             .map(|place| place.root)
@@ -2499,13 +2713,13 @@ impl Analyzer<'_> {
     ) {
         self.reborrow_parents = exits
             .iter()
-            .flat_map(|(_, _, _, parents, _)| parents)
+            .flat_map(|(_, _, _, parents, _, _)| parents)
             .filter(|(child, _)| incoming.contains_key(*child))
             .map(|(child, parent)| (child.clone(), parent.clone()))
             .collect();
         self.reference_origins = exits
             .iter()
-            .flat_map(|(_, _, _, _, origins)| origins)
+            .flat_map(|(_, _, _, _, origins, _)| origins)
             .filter(|(_, loan)| incoming.contains_key(&loan.place.root))
             .map(|(name, loan)| (name.clone(), loan.clone()))
             .collect();
@@ -2707,7 +2921,7 @@ fn join_handler_projection_loans(
 ) -> Vec<ProjectionLoan> {
     let mut loans = exits
         .iter()
-        .flat_map(|(_, loans, _, _, _)| loans)
+        .flat_map(|(_, loans, _, _, _, _)| loans)
         .filter(|loan| incoming.contains_key(&loan.place.root))
         .cloned()
         .collect::<Vec<_>>();
@@ -2727,7 +2941,7 @@ fn join_handler_moves(
 ) -> BTreeSet<Projection> {
     let mut moves = exits
         .iter()
-        .flat_map(|(_, _, moves, _, _)| moves)
+        .flat_map(|(_, _, moves, _, _, _)| moves)
         .filter(|place| incoming.contains_key(&place.root))
         .cloned()
         .collect::<Vec<_>>();
@@ -2744,4 +2958,20 @@ fn join_handler_moves(
         canonical.insert(place);
     }
     canonical
+}
+
+/// A dynamically selected handler/completion arm can leave a direct unique
+/// reference's referent moved out.  Retain that hole after the join whenever
+/// any reachable arm leaves an incoming reference open; a sibling restoration
+/// is not proof that the next ordinary expression may use the handle.
+fn join_handler_referent_holes(
+    exits: &[HandlerExit],
+    incoming: &BTreeMap<String, LocalState>,
+) -> BTreeMap<String, Span> {
+    exits
+        .iter()
+        .flat_map(|(_, _, _, _, _, holes)| holes)
+        .filter(|(reference, _)| incoming.contains_key(*reference))
+        .map(|(reference, span)| (reference.clone(), *span))
+        .collect()
 }
