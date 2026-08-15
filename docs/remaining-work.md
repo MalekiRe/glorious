@@ -86,7 +86,12 @@ retained below but scheduled after the core language and tooling tranche.
   verified action sequence or prove its compact erasure preserves both true and
   false flag arms exactly; a candidate artifact must be rejected unless its
   decode-time witness is derived from validated MIR rather than a register
-  cleanup shape alone.
+  cleanup shape alone. Source-driven red coverage in
+  `source_storage_lowering.rs` additionally requires the contract to survive
+  parameter shadowing, partial moves, handler payload/resumption and completion
+  binders, captured closures, and nonlocal `Leave` exits; current lowering has
+  no completion-form MIR path for the composite fixture and does not map
+  handler payload/resumption storage to executable locals in lifted closures.
 
 ### 5.4 Bytecode peepholes and validation
 
