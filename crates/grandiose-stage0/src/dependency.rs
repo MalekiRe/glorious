@@ -43,7 +43,9 @@ pub enum DependencyStatus {
     /// SCC/fixed-point policy rather than reuse this fact as ordinary cache
     /// evidence.
     Cycle {
-        parent: RevisionId,
+        /// A cycle is structural evidence in the staged graph and can occur
+        /// even in an initial revision with no parent ledger to compare.
+        parent: Option<RevisionId>,
         member: DependencyNode,
     },
     /// A product refers to a dependency which this transaction did not stage.
@@ -196,26 +198,11 @@ fn validate(
             missing: node.clone(),
         };
     };
-    let Some(parent_id) = parent_id else {
-        if let Some(missing) = fact
-            .dependencies
-            .iter()
-            .find(|dependency| !facts.contains_key(*dependency))
-        {
-            return DependencyStatus::Incomplete {
-                missing: missing.clone(),
-            };
-        }
-        return DependencyStatus::Cold;
-    };
-    let Some(parent_fact) = parent.and_then(|ledger| ledger.traces.get(node)) else {
-        return DependencyStatus::Cold;
-    };
     // Dependency edges are normally produced by the acyclic phase pipeline,
     // but the ledger is an internal trust boundary: a malformed or future
-    // cyclic query graph must never turn validation into unbounded recursion.
-    // Treat the back edge as a deterministic red dependency. The enclosing
-    // node records the first canonical cycle member as its invalidation cause.
+    // cyclic query graph must never turn validation into unbounded recursion
+    // or a misleading cold-cache result. Treat the back edge as structural
+    // evidence before asking whether a parent retained the node.
     if !visiting.insert(node.clone()) {
         return DependencyStatus::Cycle {
             parent: parent_id,
@@ -235,7 +222,7 @@ fn validate(
             dependency,
             facts,
             parent,
-            Some(parent_id),
+            parent_id,
             statuses,
             visiting,
         );
@@ -260,19 +247,21 @@ fn validate(
             parent: parent_id,
             member,
         }
-    } else if parent_fact.fingerprint == fact.fingerprint
-        && parent_fact.dependencies == fact.dependencies
-    {
-        DependencyStatus::Green { parent: parent_id }
-    } else if let Some(changed) = first_changed {
-        DependencyStatus::Red {
-            parent: parent_id,
-            first_changed: changed,
-        }
     } else {
-        DependencyStatus::Red {
-            parent: parent_id,
-            first_changed: node.clone(),
+        match (parent_id, parent.and_then(|ledger| ledger.traces.get(node))) {
+            (Some(parent), Some(parent_fact))
+                if parent_fact.fingerprint == fact.fingerprint
+                    && parent_fact.dependencies == fact.dependencies =>
+            {
+                DependencyStatus::Green { parent }
+            }
+            (Some(parent), Some(_)) => DependencyStatus::Red {
+                parent,
+                first_changed: first_changed.unwrap_or_else(|| node.clone()),
+            },
+            // The dependency shape was still checked above.  A complete,
+            // acyclic product without parent evidence is cold, not green.
+            _ => DependencyStatus::Cold,
         }
     };
     visiting.remove(node);
@@ -371,6 +360,17 @@ mod tests {
             vec![left.clone()],
         );
         first.commit();
+        assert!(matches!(
+            ledger.trace(revision(0), &left).unwrap().status,
+            DependencyStatus::Cycle {
+                parent: None,
+                member,
+            } if member == left
+        ));
+        assert!(matches!(
+            ledger.trace(revision(0), &right).unwrap().status,
+            DependencyStatus::Cycle { parent: None, .. }
+        ));
 
         let mut second = ledger.transaction(revision(1), Some(revision(0)));
         second.record(left.clone(), Digest::of_bytes(b"left"), vec![right.clone()]);
@@ -383,7 +383,10 @@ mod tests {
 
         assert!(matches!(
             ledger.trace(revision(1), &left).unwrap().status,
-            DependencyStatus::Cycle { member, .. } if member == left
+            DependencyStatus::Cycle {
+                parent: Some(parent),
+                member,
+            } if parent == revision(0) && member == left
         ));
         assert!(matches!(
             ledger.trace(revision(1), &right).unwrap().status,
