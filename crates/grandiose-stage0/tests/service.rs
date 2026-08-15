@@ -6692,6 +6692,46 @@ fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_
 }
 
 #[test]
+fn service_executes_hrtb_gat_const_trait_method_values_through_capturing_closures() {
+    // A selected type GAT carries both the HRTB lifetime and a selected
+    // associated const.  The trait method becomes a first-class callback,
+    // crosses an indirect call inside a closure that captures its argument,
+    // and its projected result must remain layout-correct through VM
+    // encode/decode.
+    let root = "use facade::{Callback, Gateway as Capability}; pub fn select() -> Callback { Capability::relay } pub fn apply(callback: Callback) -> i64 { let value = 41; let closure = () -> i64 { callback(&value) + 1 }; closure() } pub fn main() -> i64 { apply(select()) }";
+    let provider = "pub trait Gate { const Width: u32; type Input<'a, n: u32>; type Output<'a, n: u32>; fn relay<'a>(value: <Self as Gate>::Input<'a, <Self as Gate>::Width>) -> <Self as Gate>::Output<'a, <Self as Gate>::Width>; } impl Gate for i64 { const Width = 7; type Input<'a, n: u32> = &'a i64; type Output<'a, n: u32> = i64; fn relay<'a>(value: &'a i64) -> i64 { *value } } pub type Callback = for<'a> (<i64 as Gate>::Input<'a, <i64 as Gate>::Width>) -> <i64 as Gate>::Output<'a, <i64 as Gate>::Width>;";
+    let mut request = request(root);
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Callback, Gate as Gateway};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        provider.as_bytes(),
+    ));
+    let artifact = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("HRTB GAT/const trait method closure contract must materialize")
+        .artifact
+        .unwrap();
+    request.sources.reverse();
+    let reordered = StageZeroCompiler::new()
+        .compile(request)
+        .expect("source ordering must preserve HRTB GAT/const trait method closure contracts")
+        .artifact
+        .unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("HRTB GAT/const closure program must decode and verify");
+    assert_eq!(artifact.fingerprint(), reordered.fingerprint());
+    assert_eq!(artifact.canonical_bytes(), reordered.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered.run_i64().unwrap(), 42);
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_static_hrtb_method_values_with_overlapping_gat_constrained_blankets() {
     // The exact `i64` implementation and the blanket implementation both
     // apply: `i64` proves `Gate` with precisely the row required by the

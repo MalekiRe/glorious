@@ -438,6 +438,12 @@ coarse. The composite fixtures cover:
   the normalized borrowed item flows through a compact closure, dereference,
   and verified VM execution
   (`service_executes_hrtb_closures_with_lifetime_gat_projections`).
+- a selected HRTB trait-method value can carry associated type GATs whose
+  parameter and result both include the selected associated const. It remains
+  valid when stored as an indirect callback and invoked from a closure capture;
+  the source artifact and a decoded canonical artifact execute identically,
+  independent of facade/provider source order
+  (`service_executes_hrtb_gat_const_trait_method_values_through_capturing_closures`).
 - generic integer wrappers preserve their operand width through deferred MIR
   materialization: signed right shift remains arithmetic, unsigned right shift
   remains logical, and every count at least the operand width traps rather than
