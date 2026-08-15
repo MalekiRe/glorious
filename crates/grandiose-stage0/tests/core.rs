@@ -7301,6 +7301,69 @@ fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
     );
 }
 
+/// This is the source-side counterpart to the hostile-MIR storage contracts.
+/// A real body must run through a handler, move one aggregate projection,
+/// retain the disjoint projection, and leave the
+/// surrounding lexical label with a computed payload. It deliberately drives
+/// the ordinary source/Core/PlaceFlow/MIR/VM path rather than constructing an
+/// artificial MIR body.
+#[test]
+fn source_lowering_executes_handler_partial_move_and_label_leave() {
+    let source = r#"
+        effect Ask { [1,1] ask() -> i64; }
+        pub struct Pair { left: i64, right: i64 }
+        pub fn main() -> i64 {
+            label done {
+                let pair = Pair { left: 1, right: 2 };
+                move pair.left;
+                handle Ask::ask() {
+                    Ask::ask() => transfer done pair.right + 40
+                }
+            }
+        }
+    "#;
+    let core = core_for("core-source-storage-handler-capture-label@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    assert!(
+        flow.events.iter().any(|event| matches!(
+            (&event.kind, &event.place),
+            (FlowEventKind::Move(root), Some(place))
+                if root == "pair" && place.root == "pair" && place.fields == vec![0]
+        )),
+        "the label/handler path must retain the moved aggregate projection: {flow:#?}"
+    );
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("source label owner");
+    let lowered = MirLowering::lower(owner, &core, &flow);
+    let mir = lowered
+        .function
+        .unwrap_or_else(|| panic!("source body must lower: {:#?}", lowered.diagnostics));
+    mir.validate()
+        .unwrap_or_else(|error| panic!("source-produced MIR must validate: {error}\n{mir:#?}"));
+    assert!(
+        mir.blocks
+            .iter()
+            .any(|block| matches!(block.terminator, grandiose_stage0::MirTerminator::Leave { .. })),
+        "the source label transfer must remain a MIR Leave: {mir:#?}"
+    );
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("source-produced MIR must emit");
+    assert_eq!(
+        grandiose_stage0::verify_vm(artifact)
+            .expect("source-produced VM must verify")
+            .run_i64()
+            .expect("source-produced VM must execute"),
+        42
+    );
+}
+
 #[test]
 fn nested_handler_leave_preserves_the_outer_label_destination_contract() {
     let core = core_for(

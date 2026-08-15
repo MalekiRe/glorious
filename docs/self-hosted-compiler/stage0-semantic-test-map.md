@@ -54,7 +54,7 @@ replacing them.
 | 17. Regions, lifetimes, borrowing, reborrowing | `core.rs` PlaceFlow fixtures and service tests cover projected loans, unique writeback, NLL, reborrowing, HRTBs, variance, escape, and handler/label boundaries. |
 | 18. Callables, captures, brands, environments, refinements | `core.rs` and `service.rs` cover closure brands, sealed capture layouts, shared/unique/move modes, callable aggregates, handler payloads, replayed captures, and refinement scopes. |
 | 19. Typed Core | `core.rs` covers frozen call/effect provenance, Core validation, labels, structural patterns, host primitives, inference sealing, and semantic fingerprints. |
-| 20. PlaceFlow and executable lowering | `core.rs` and `mir.rs` cover initialization, partial moves, branch joins, loans, cleanup plans, continuation snapshots, forged-MIR rejection, VM verification, and execution. |
+| 20. PlaceFlow and executable lowering | `core.rs` and `mir.rs` cover initialization, partial moves, branch joins, loans, cleanup plans, continuation snapshots, forged-MIR rejection, VM verification, and execution. `core.rs::source_lowering_executes_handler_partial_move_and_label_leave` inspects an ordinary source body across Core, PlaceFlow, frozen MIR, VM emission, verification, and execution; `service.rs::service_executes_handler_partial_move_and_label_leave` proves the same shape through a published service artifact. |
 
 ## Newly explicit cross-cutting conformance cases
 
@@ -101,6 +101,17 @@ coarse. The composite fixtures cover:
 - source-storage lifecycle at the hostile-MIR boundary: nested lexical exits
   must execute `EndBorrow`, reverse-order destruction, and `StorageDead` in
   order while preserving protected label/effect payloads.
+- source-produced ownership/control paths: a handler arm transfers from a
+  label after a partial aggregate move while retaining the disjoint field;
+  `source_lowering_executes_handler_partial_move_and_label_leave` and
+  `service_executes_handler_partial_move_and_label_leave` prove this crosses
+  Core, PlaceFlow, frozen MIR, VM emission, verification, and published
+  runtime execution.
+  Existing service cases separately cover closure/handler captures
+  (`service_move_captures_aggregate_roots_for_partial_closure_moves` and
+  `service_joins_partial_aggregate_move_captures_across_handler_arms`), while
+  `semantic_drop_runs_once_on_normal_and_nonlocal_cleanup` covers custom-Drop
+  cleanup through real source compilation.
 
 ## Previously enabled red semantic cases
 
@@ -120,6 +131,7 @@ The established service suite also keeps these implementation gaps enabled:
 | Completion after resumption transfers to an enclosing label | `service_completion_after_a_resumption_may_transfer_to_an_enclosing_label` |
 | G1 source boundary rejects deferred non-exact and unbounded resumption quantities such as `[1,2]`, `[0,2]`, and `[1,infinity]` | `service_rejects_deferred_resumption_quantities_at_the_g1_source_boundary` |
 | Source-storage cleanup emits ordered actions, excludes protected payloads, ends loans before storage release, and preserves branch-correlated drop-flag erasure | `source_storage_cleanup.rs::mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave`, `source_storage_cleanup.rs::mir_requires_end_borrow_before_source_storage_cleanup`, `source_storage_cleanup.rs::mir_requires_drop_flag_for_divergent_source_storage_initialization` |
+| **Red: source-produced MIR has no executable storage lifecycle witness yet.** The source-path anchors can prove lowering and runtime behavior, but cannot prove `StorageLive`/`StorageDead`, drop-flag transitions, or ordered actions until those are represented in frozen MIR and serialized into the artifact. | `mir.rs::mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering`, `mir.rs::mir_rejects_path_dependent_source_storage_initialization_at_a_join`, `source_storage_cleanup.rs`, and `vm_storage_erasure.rs` |
 
 ## Acceptance condition
 

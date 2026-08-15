@@ -3471,6 +3471,40 @@ fn service_preserves_disjoint_aggregate_fields_after_a_partial_move() {
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 2);
 }
 
+/// Exercise the ordinary service path for the source-level shape that reaches
+/// a handler, a partial aggregate move, and a nonlocal lexical exit together.
+/// The Core test inspects the intermediate frozen MIR; this companion proves
+/// that the same shape is published, encoded, verified, and executed by a
+/// normal compilation request.
+#[test]
+fn service_executes_handler_partial_move_and_label_leave() {
+    let source = r#"
+        effect Ask { [1,1] ask() -> i64; }
+        pub struct Pair { left: i64, right: i64 }
+        pub fn main() -> i64 {
+            label done {
+                let pair = Pair { left: 1, right: 2 };
+                move pair.left;
+                handle Ask::ask() {
+                    Ask::ask() => transfer done pair.right + 40
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("source ownership/control shape must compile");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(
+        outcome
+            .artifact
+            .expect("a successful build must publish an artifact")
+            .run_i64()
+            .expect("published artifact must execute"),
+        42
+    );
+}
+
 #[test]
 fn service_reports_overlapping_use_after_a_partial_move() {
     let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair.left }";
