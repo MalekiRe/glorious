@@ -6986,6 +6986,65 @@ fn verifier_rejects_ordinary_control_flow_into_handler_clauses() {
 }
 
 #[test]
+fn verifier_rejects_dynamic_label_targets_at_private_handler_clauses() {
+    let owner = DefKey(Digest::of_bytes(b"label-into-handler-clause"));
+    let effect = DefKey(Digest::of_bytes(b"label-into-handler-clause-effect"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // The label is created before the handler and is otherwise never invoked.
+    // Its target alone must be rejected: a later indirect invocation would
+    // enter the private clause without `Perform` materializing its payload and
+    // continuation evidence.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, label],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeLabel {
+                    dst: 1,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 5,
+                    destination: 0,
+                },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::Unit,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 5,
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Return { value: 0 },
+                VmInstruction::Cancel,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"label-into-handler-clause-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerTargetReachedByControlFlow { target: 5 })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::HandlerTargetReachedByControlFlow { target: 5 })
+    ));
+}
+
+#[test]
 fn vm_emits_and_executes_the_checked_mir_unreachable_terminal_as_a_trap() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let local = |ty| MirLocalDecl {

@@ -9278,10 +9278,10 @@ fn validate_vm_effect_row(row: &VmEffectRow) -> Result<(), VmArtifactError> {
 }
 
 /// Handler clause entry points are private control-flow boundaries.  Reaching
-/// one through an ordinary jump, branch, or fallthrough would let hostile
-/// bytecode execute a clause without the `Perform` transition that initializes
-/// payload destinations and records the continuation consumed by `Resume`,
-/// `Forward`, or `Cancel`.
+/// one through an ordinary jump, branch, fallthrough, or dynamic label would
+/// let hostile bytecode execute a clause without the `Perform` transition that
+/// initializes payload destinations and records the continuation consumed by
+/// `Resume`, `Forward`, or `Cancel`.
 ///
 /// This compact VM encodes no separate handler-region table, so the
 /// `InstallHandler` instruction is the authoritative declaration of the entry.
@@ -9301,7 +9301,9 @@ fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifa
 
     for (pc, instruction) in function.instructions.iter().enumerate() {
         let enters_handler = match instruction {
-            VmInstruction::Jump { target } | VmInstruction::Leave { target, .. } => {
+            VmInstruction::Jump { target }
+            | VmInstruction::Leave { target, .. }
+            | VmInstruction::MakeLabel { target, .. } => {
                 targets.contains(target)
             }
             VmInstruction::BranchBool {
@@ -9319,7 +9321,9 @@ fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifa
         };
         if enters_handler {
             let target = match instruction {
-                VmInstruction::Jump { target } | VmInstruction::Leave { target, .. } => *target,
+                VmInstruction::Jump { target }
+                | VmInstruction::Leave { target, .. }
+                | VmInstruction::MakeLabel { target, .. } => *target,
                 VmInstruction::BranchBool {
                     then_target,
                     else_target,
