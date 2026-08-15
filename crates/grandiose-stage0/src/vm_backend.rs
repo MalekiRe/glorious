@@ -1300,68 +1300,101 @@ impl VmStorageErasureWitness {
             return false;
         }
 
-        // Each storage has one complete, adjacent cleanup group, emitted in
-        // reverse lexical order.  This makes the wire proof independently
-        // checkable without retaining arbitrary source action graphs.
-        let mut cursor = 0;
-        for storage in storages.iter().rev() {
-            if actions.get(cursor) != Some(&VmStorageErasureAction::EndBorrow {
-                storage: storage.storage,
-            }) {
-                return false;
-            }
-            cursor += 1;
-            let protected = protected_registers.binary_search(&storage.value_register).is_ok();
-            if storage.initialized {
-                if protected {
-                    if actions.get(cursor)
-                        != Some(&VmStorageErasureAction::Protect {
-                            storage: storage.storage,
-                            register: storage.value_register,
-                        })
-                    {
-                        return false;
-                    }
-                } else if actions.get(cursor)
-                    != Some(&VmStorageErasureAction::Destroy {
-                        storage: storage.storage,
-                    })
-                {
-                    return false;
-                }
-                cursor += 1;
-                if let Some(drop_flag) = storage.drop_flag {
-                    if actions.get(cursor)
-                        != Some(&VmStorageErasureAction::SetDropFlag {
-                            drop_flag,
-                            initialized: false,
-                        })
-                    {
-                        return false;
-                    }
-                    cursor += 1;
-                }
-            } else if storage.drop_flag.is_some() {
-                // An uninitialized local cannot carry a live compiler drop
-                // flag into cleanup.  Requiring no transition makes forged
-                // paths fail closed rather than silently disarming one.
-                return false;
-            }
-            if actions.get(cursor) != Some(&VmStorageErasureAction::StorageDead {
-                storage: storage.storage,
-            }) {
-                return false;
-            }
-            cursor += 1;
+        // Keep the source action order in the artifact rather than reducing
+        // it to a register-cleanup shape. EndBorrow operations may be
+        // scheduled before another storage's terminal action, so validate the
+        // same per-storage state machine used at the MIR boundary while still
+        // requiring terminal actions in reverse lexical-storage order.
+        #[derive(Clone, Copy, Eq, PartialEq)]
+        enum Progress {
+            Start,
+            BorrowEnded,
+            Terminal,
+            FlagCleared,
+            Dead,
         }
-        cursor == actions.len()
-            && actions.iter().all(|action| match action {
+        let mut progress = storages
+            .iter()
+            .map(|storage| (storage.storage, Progress::Start))
+            .collect::<BTreeMap<_, _>>();
+        let flag_storage = storages
+            .iter()
+            .filter_map(|storage| storage.drop_flag.map(|flag| (flag, storage.storage)))
+            .collect::<BTreeMap<_, _>>();
+        let mut terminal_order = Vec::new();
+        for action in actions {
+            let storage = match *action {
                 VmStorageErasureAction::EndBorrow { storage }
                 | VmStorageErasureAction::Destroy { storage }
                 | VmStorageErasureAction::StorageDead { storage }
-                | VmStorageErasureAction::Protect { storage, .. } => storage_by_id.contains_key(storage),
-                VmStorageErasureAction::SetDropFlag { drop_flag, .. } => drop_flags.contains(drop_flag),
-            })
+                | VmStorageErasureAction::Protect { storage, .. } => storage,
+                VmStorageErasureAction::SetDropFlag { drop_flag, .. } => {
+                    let Some(storage) = flag_storage.get(&drop_flag) else {
+                        return false;
+                    };
+                    *storage
+                }
+            };
+            let Some(state) = progress.get_mut(&storage) else {
+                return false;
+            };
+            match *action {
+                VmStorageErasureAction::EndBorrow { .. } => {
+                    if !matches!(*state, Progress::Start | Progress::BorrowEnded) {
+                        return false;
+                    }
+                    *state = Progress::BorrowEnded;
+                }
+                VmStorageErasureAction::Destroy { .. } => {
+                    let Some(data) = storage_by_id.get(&storage) else {
+                        return false;
+                    };
+                    if !data.initialized
+                        || protected_registers.binary_search(&data.value_register).is_ok()
+                        || !matches!(*state, Progress::Start | Progress::BorrowEnded)
+                    {
+                        return false;
+                    }
+                    *state = Progress::Terminal;
+                    terminal_order.push(storage);
+                }
+                VmStorageErasureAction::Protect { register, .. } => {
+                    let Some(data) = storage_by_id.get(&storage) else {
+                        return false;
+                    };
+                    if !data.initialized
+                        || data.value_register != register
+                        || protected_registers.binary_search(&register).is_err()
+                        || !matches!(*state, Progress::Start | Progress::BorrowEnded)
+                    {
+                        return false;
+                    }
+                    *state = Progress::Terminal;
+                    terminal_order.push(storage);
+                }
+                VmStorageErasureAction::SetDropFlag {
+                    drop_flag,
+                    initialized,
+                } => {
+                    if initialized
+                        || storage_by_id.get(&storage).and_then(|data| data.drop_flag)
+                            != Some(drop_flag)
+                        || *state != Progress::Terminal
+                    {
+                        return false;
+                    }
+                    *state = Progress::FlagCleared;
+                }
+                VmStorageErasureAction::StorageDead { .. } => {
+                    if *state != Progress::FlagCleared {
+                        return false;
+                    }
+                    *state = Progress::Dead;
+                }
+            }
+        }
+        progress.values().all(|state| *state == Progress::Dead)
+            && terminal_order == storages.iter().rev().map(|storage| storage.storage).collect::<Vec<_>>()
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
