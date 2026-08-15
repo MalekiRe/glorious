@@ -18817,6 +18817,30 @@ fn service_rejoins_statement_suffix_after_opaque_mixed_consuming_control() {
 }
 
 #[test]
+fn service_evaluates_opaque_handler_as_a_strict_operand() {
+    // A handler expression is a value expression even when its protected
+    // computation is an opaque callback call; an enclosing strict operand
+    // must be evaluated once after the frame has completed.
+    let source = "effect Signal { [1,1] ping(value: i64) -> i64; } pub fn relay(value: i64) -> i64 / Signal { Signal::ping(value) } pub fn apply(callback: (i64) -> i64 / Signal, value: i64) -> i64 / Signal { callback(value) } pub fn main() -> i64 { let callback = relay; 1 + handle apply(callback, 40) { Signal::ping(value) with k => k(value) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_evaluates_terminal_opaque_handler_as_a_strict_call_argument() {
+    // A terminal frame has no normal call return edge. Its selected clause
+    // must therefore supply the strict caller operand itself, rather than
+    // only supporting handlers that are whole roots or block statements.
+    let source = "effect Signal { [1,1] ping(value: i64) -> i64; halt(value: i64) -> !; } pub fn relay(value: i64) -> i64 / Signal { let ping = Signal::ping(value); Signal::halt(ping) } pub fn apply(callback: (i64) -> i64 / Signal, value: i64) -> i64 / Signal { callback(value) } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn main() -> i64 { let callback = relay; add_one(handle apply(callback, 40) { Signal::ping(value) with k => k(value + 2); Signal::halt(value) => value }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 43);
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through

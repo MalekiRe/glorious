@@ -21987,13 +21987,13 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let (computation, clauses, root_prefix, result_binding, suffix) = match self.body.expression(root).kind.clone() {
+        let (computation, clauses, root_prefix, result_binding, suffix, strict_operand, strict_prefix) = match self.body.expression(root).kind.clone() {
             CoreKind::Handle {
                 computation,
                 clauses,
-            } => (computation, clauses, Vec::new(), None, Vec::new()),
+            } => (computation, clauses, Vec::new(), None, Vec::new(), None, Vec::new()),
             CoreKind::Block(values) => {
-                let (handler_index, handler, result_binding) = values
+                let candidate = values
                     .iter()
                     .enumerate()
                     .find_map(|(index, id)| match self.body.expression(*id).kind.clone() {
@@ -22004,7 +22004,50 @@ impl Lowerer<'_> {
                             Some((index, value, Some((name, *id))))
                         }
                         _ => None,
+                    });
+                if candidate.is_none() {
+                    let (strict_root, prefix) = values.split_last()?;
+                    let (arguments, mut strict_prefix) =
+                        match self.body.expression(*strict_root).kind.clone() {
+                            CoreKind::IntrinsicCall { arguments, .. } => (arguments, Vec::new()),
+                            CoreKind::Call {
+                                callee, arguments, ..
+                            } if !matches!(self.body.expression(callee).kind, CoreKind::Handle { .. }) => {
+                                (arguments, vec![callee])
+                            }
+                            _ => return None,
+                        };
+                    let handler_index = arguments.iter().position(|argument| {
+                        matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
                     })?;
+                    if handler_index + 1 != arguments.len()
+                        || arguments[..handler_index].iter().any(|argument| {
+                            matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
+                        })
+                    {
+                        return None;
+                    }
+                    let handler = arguments[handler_index];
+                    let CoreKind::Handle {
+                        computation,
+                        clauses,
+                    } = self.body.expression(handler).kind.clone()
+                    else {
+                        return None;
+                    };
+                    strict_prefix.extend_from_slice(&arguments[..handler_index]);
+                    (
+                        computation,
+                        clauses,
+                        prefix.to_vec(),
+                        None,
+                        Vec::new(),
+                        Some(handler),
+                        strict_prefix,
+                    )
+                } else {
+                    let (handler_index, handler, result_binding) =
+                        candidate.expect("checked above");
                 if values[handler_index + 1..]
                     .iter()
                     .any(|id| match self.body.expression(*id).kind {
@@ -22030,6 +22073,79 @@ impl Lowerer<'_> {
                     values[..handler_index].to_vec(),
                     result_binding,
                     values[handler_index + 1..].to_vec(),
+                    None,
+                    Vec::new(),
+                )
+                }
+            }
+            // Preserve left-to-right strict evaluation when the handled
+            // computation is the final operand of an intrinsic expression.
+            // The earlier operands execute before the dynamic frame is
+            // installed; after either normal call completion or a terminal
+            // clause, the same Core operand is supplied from `values` and
+            // the intrinsic finishes once.
+            CoreKind::IntrinsicCall { arguments, .. } => {
+                let handler_index = arguments.iter().position(|argument| {
+                    matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
+                })?;
+                if handler_index + 1 != arguments.len()
+                    || arguments[..handler_index].iter().any(|argument| {
+                        matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
+                    })
+                {
+                    return None;
+                }
+                let handler = arguments[handler_index];
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(handler).kind.clone()
+                else {
+                    return None;
+                };
+                (
+                    computation,
+                    clauses,
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    Some(handler),
+                    arguments[..handler_index].to_vec(),
+                )
+            }
+            CoreKind::Call {
+                callee, arguments, ..
+            } => {
+                let handler_index = arguments.iter().position(|argument| {
+                    matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
+                })?;
+                if handler_index + 1 != arguments.len()
+                    || matches!(self.body.expression(callee).kind, CoreKind::Handle { .. })
+                    || arguments[..handler_index].iter().any(|argument| {
+                        matches!(self.body.expression(*argument).kind, CoreKind::Handle { .. })
+                    })
+                {
+                    return None;
+                }
+                let handler = arguments[handler_index];
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(handler).kind.clone()
+                else {
+                    return None;
+                };
+                let mut strict_prefix = Vec::with_capacity(handler_index + 1);
+                strict_prefix.push(callee);
+                strict_prefix.extend_from_slice(&arguments[..handler_index]);
+                (
+                    computation,
+                    clauses,
+                    Vec::new(),
+                    None,
+                    Vec::new(),
+                    Some(handler),
+                    strict_prefix,
                 )
             }
             _ => return None,
@@ -22097,6 +22213,9 @@ impl Lowerer<'_> {
         frames.extend(active.iter().cloned());
         for expression in root_prefix {
             self.statement(expression)?;
+        }
+        for expression in strict_prefix {
+            self.value(expression)?;
         }
         let arguments = arguments
             .into_iter()
@@ -22192,7 +22311,13 @@ impl Lowerer<'_> {
             });
             self.named.insert(name.clone(), handler_value);
         }
-        let result = if suffix.is_empty() {
+        let result = if let Some(handler) = strict_operand {
+            self.instructions = Vec::new();
+            self.values.insert(handler, call_result);
+            let result = self.value(root)?;
+            entry.extend(std::mem::take(&mut self.instructions));
+            result
+        } else if suffix.is_empty() {
             call_result
         } else {
             self.instructions = Vec::new();
@@ -22236,7 +22361,10 @@ impl Lowerer<'_> {
                     });
                     self.named.insert(name.clone(), handler_value);
                 }
-                let result = if suffix.is_empty() {
+                let result = if let Some(handler) = strict_operand {
+                    self.values.insert(handler, handler_result);
+                    self.value(root)?
+                } else if suffix.is_empty() {
                     handler_result
                 } else {
                     let (last, statements) = suffix.split_last()?;
