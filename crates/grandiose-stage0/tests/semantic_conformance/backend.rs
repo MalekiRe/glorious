@@ -29,8 +29,8 @@ fn semantic_typed_core_excludes_builtin_control_and_arithmetic_nodes() {
         })
         .collect::<BTreeSet<_>>();
     let forbidden = [
-        "If", "Else", "Match", "Loop", "For", "Break", "Continue", "Return", "Yield",
-        "Await", "Fail", "Add", "Compare", "And", "Or", "Binary", "Unary",
+        "If", "Else", "Match", "Loop", "For", "Break", "Continue", "Return", "Yield", "Await",
+        "Fail", "Add", "Compare", "And", "Or", "Binary", "Unary",
     ];
     let present = forbidden
         .into_iter()
@@ -104,19 +104,33 @@ fn semantic_brand_escape_diagnostics_use_source_terms() {
         ),
         (
             concat!(
-                "pub fn main() -> i64 { let captured = 42; ",
-                "let once = () -> i64 { move captured }; once(); once() }",
+                "pub fn add_one(value: i64) -> i64 { value + 1 } ",
+                "pub fn twice(function: (i64) -> i64) -> i64 { ",
+                "function(20) + function(21) } ",
+                "pub fn main() -> i64 { twice(add_one) }",
             ),
-            &["captured", "once", "callable", "closure", "use"][..],
+            &["callable", "function", "use"][..],
         ),
     ];
     for (source, source_terms) in fixtures {
         let diagnostics = rejection(source);
-        let source_diagnostic = diagnostics
+        let source_diagnostics = diagnostics
             .iter()
-            .find(|diagnostic| diagnostic.class == DiagnosticClass::Source)
-            .unwrap_or_else(|| panic!("missing source diagnostic: {diagnostics:#?}"));
-        let text = published_diagnostic_text(source_diagnostic);
+            .filter(|diagnostic| diagnostic.class == DiagnosticClass::Source)
+            .collect::<Vec<_>>();
+        assert!(
+            !source_diagnostics.is_empty(),
+            "missing source diagnostic: {diagnostics:#?}"
+        );
+        // Recovery adds a broad release-boundary diagnostic after the
+        // source-level cause.  Source diagnostics are a set, not an ordered
+        // promise, so inspect the complete public diagnostic product rather
+        // than accidentally requiring that wrapper to mention the label.
+        let text = source_diagnostics
+            .iter()
+            .map(|diagnostic| published_diagnostic_text(diagnostic))
+            .collect::<Vec<_>>()
+            .join("\n");
         let lower = text.to_ascii_lowercase();
         assert!(
             source_terms.iter().any(|term| lower.contains(term)),
@@ -151,7 +165,10 @@ fn semantic_one_shot_resumptions_cannot_resume_twice() {
     assert_semantic_rejection(
         source,
         "one-shot resumption cannot be resumed twice",
-        &[&["resumption", "continuation"], &["quantity", "use", "twice", "upper"]],
+        &[
+            &["resumption", "continuation"],
+            &["quantity", "use", "twice", "upper"],
+        ],
     );
 }
 
@@ -174,7 +191,10 @@ fn semantic_multishot_resumptions_reject_unique_and_label_captures() {
     assert_semantic_rejection(
         unique,
         "multi-shot resumption cannot capture a unique borrow",
-        &[&["unique", "borrow"], &["resumption", "continuation", "replay", "multi-shot"]],
+        &[
+            &["unique", "borrow"],
+            &["resumption", "continuation", "replay", "multi-shot"],
+        ],
     );
 
     let label = r#"
@@ -193,6 +213,9 @@ fn semantic_multishot_resumptions_reject_unique_and_label_captures() {
     assert_semantic_rejection(
         label,
         "multi-shot resumption cannot capture an active label",
-        &[&["label"], &["resumption", "continuation", "replay", "multi-shot"]],
+        &[
+            &["label"],
+            &["resumption", "continuation", "replay", "multi-shot"],
+        ],
     );
 }

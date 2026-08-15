@@ -28,7 +28,7 @@ fn semantic_only_struct_and_enum_are_nominal_declaration_spellings() {
         "enum Choice { Pair(Pair), Empty } ",
         "pub main() -> i64 { ",
         "handle Choice::Pair(Pair { left: 40, right: 2 }) { ",
-        "Choice::Pair(Pair { left, right }) => left + right, ",
+        "Choice::Pair(Pair { left: left, right: right }) => left + right, ",
         "Choice::Empty => 0 } }",
     );
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -139,7 +139,10 @@ fn semantic_label_generic_effects_route_only_with_their_brand() {
     assert_semantic_rejection(
         rejected,
         "a handler cannot intercept another label brand",
-        &[&["effect", "protocol"], &["row", "unhandled", "brand", "instance"]],
+        &[
+            &["effect", "protocol"],
+            &["row", "unhandled", "brand", "instance"],
+        ],
     );
 }
 
@@ -263,4 +266,3 @@ fn semantic_runs_in_access_is_expressed_with_ordinary_types() {
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
-
