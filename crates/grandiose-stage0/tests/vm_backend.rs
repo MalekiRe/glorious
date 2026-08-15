@@ -4284,7 +4284,7 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
 }
 
 #[test]
-fn verifier_rejects_label_callable_capture_before_dynamic_rejoin_can_escape() {
+fn verifier_rejects_nested_label_callable_capture_before_dynamic_rejoin_can_escape() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-label-capture-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-label-capture-facade"));
     let label = VmType::Callable {
@@ -4305,7 +4305,21 @@ fn verifier_rejects_label_callable_capture_before_dynamic_rejoin_can_escape() {
             definition: owner,
             captures: 0,
             parameters: 0,
-            registers: vec![VmType::I64, label, closure, VmType::Unit],
+            registers: vec![
+                VmType::I64,
+                label.clone(),
+                VmType::Tuple(vec![label.clone(), VmType::I64]),
+                VmType::Array(Box::new(VmType::Tuple(vec![
+                    VmType::Callable {
+                        parameters: vec![VmType::I64],
+                        result: Box::new(VmType::Unit),
+                        effects: Box::<VmEffectRow>::default(),
+                    },
+                    VmType::I64,
+                ]))),
+                closure,
+                VmType::Unit,
+            ],
             instructions: vec![
                 VmInstruction::ConstI64 { dst: 0, value: 42 },
                 // The label is minted before the facade, so invoking it
@@ -4314,8 +4328,17 @@ fn verifier_rejects_label_callable_capture_before_dynamic_rejoin_can_escape() {
                     dst: 1,
                     brand_owner: owner,
                     brand_label: 0,
-                    target: 7,
+                    target: 9,
                     destination: 0,
+                },
+                VmInstruction::MakeTuple {
+                    dst: 2,
+                    fields: vec![1, 0],
+                },
+                VmInstruction::MakeArray {
+                    dst: 3,
+                    fields: vec![2],
+                    element_type: VmType::Tuple(vec![label.clone(), VmType::I64]),
                 },
                 VmInstruction::InstallHandler {
                     effect: facade,
@@ -4324,22 +4347,22 @@ fn verifier_rejects_label_callable_capture_before_dynamic_rejoin_can_escape() {
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
                     continuation: VmContinuationPolicy::Consume,
-                    target: 9,
+                    target: 11,
                 },
                 VmInstruction::MakeCallable {
-                    dst: 2,
+                    dst: 4,
                     callee: DefKey(Digest::of_bytes(b"forged-label-closure")),
-                    captures: vec![1],
+                    captures: vec![3],
                     environment: None,
                 },
                 VmInstruction::CallIndirect {
-                    dst: 3,
+                    dst: 5,
                     callee: 1,
                     arguments: vec![0],
                 },
                 VmInstruction::UninstallHandler,
-                VmInstruction::Jump { target: 7 },
-                VmInstruction::Return { value: 2 },
+                VmInstruction::Jump { target: 9 },
+                VmInstruction::Return { value: 4 },
                 VmInstruction::Trap,
                 VmInstruction::Trap,
             ],
@@ -4360,7 +4383,7 @@ fn verifier_rejects_label_callable_capture_before_dynamic_rejoin_can_escape() {
 }
 
 #[test]
-fn verifier_rejects_resumption_callable_capture_before_dynamic_rejoin_can_escape() {
+fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can_escape() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-facade"));
     let effect = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-effect"));
@@ -4387,14 +4410,23 @@ fn verifier_rejects_resumption_callable_capture_before_dynamic_rejoin_can_escape
             definition: owner,
             captures: 0,
             parameters: 0,
-            registers: vec![VmType::I64, label, VmType::I64, snapshot, closure, VmType::Unit],
+            registers: vec![
+                VmType::I64,
+                label,
+                VmType::I64,
+                snapshot.clone(),
+                VmType::Tuple(vec![snapshot.clone()]),
+                VmType::Array(Box::new(VmType::Tuple(vec![snapshot.clone()]))),
+                closure,
+                VmType::Unit,
+            ],
             instructions: vec![
                 VmInstruction::ConstI64 { dst: 0, value: 42 },
                 VmInstruction::MakeLabel {
                     dst: 1,
                     brand_owner: owner,
                     brand_label: 0,
-                    target: 11,
+                    target: 13,
                     destination: 0,
                 },
                 VmInstruction::InstallHandler {
@@ -4404,7 +4436,7 @@ fn verifier_rejects_resumption_callable_capture_before_dynamic_rejoin_can_escape
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
                     continuation: VmContinuationPolicy::Consume,
-                    target: 13,
+                    target: 15,
                 },
                 VmInstruction::InstallHandler {
                     effect,
@@ -4424,20 +4456,29 @@ fn verifier_rejects_resumption_callable_capture_before_dynamic_rejoin_can_escape
                 },
                 VmInstruction::UninstallHandler,
                 VmInstruction::UninstallHandler,
-                VmInstruction::Jump { target: 11 },
+                VmInstruction::Jump { target: 13 },
                 VmInstruction::CaptureResumption { dst: 3 },
-                VmInstruction::MakeCallable {
+                VmInstruction::MakeTuple {
                     dst: 4,
+                    fields: vec![3],
+                },
+                VmInstruction::MakeArray {
+                    dst: 5,
+                    fields: vec![4],
+                    element_type: VmType::Tuple(vec![snapshot]),
+                },
+                VmInstruction::MakeCallable {
+                    dst: 6,
                     callee: DefKey(Digest::of_bytes(b"forged-resumption-closure")),
-                    captures: vec![3],
+                    captures: vec![5],
                     environment: None,
                 },
                 VmInstruction::CallIndirect {
-                    dst: 5,
+                    dst: 7,
                     callee: 1,
                     arguments: vec![0],
                 },
-                VmInstruction::Return { value: 4 },
+                VmInstruction::Return { value: 6 },
                 VmInstruction::Trap,
                 VmInstruction::Trap,
             ],
@@ -4454,6 +4495,291 @@ fn verifier_rejects_resumption_callable_capture_before_dynamic_rejoin_can_escape
     assert!(matches!(
         decode_and_verify_artifact(&bytes),
         Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
+fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
+    let owner = DefKey(Digest::of_bytes(b"nested-shared-capture-owner"));
+    let entry = DefKey(Digest::of_bytes(b"nested-shared-capture-entry"));
+    let closure = DefKey(Digest::of_bytes(b"nested-shared-capture-closure"));
+    let facade = DefKey(Digest::of_bytes(b"nested-shared-capture-facade"));
+    let shared = VmType::Reference {
+        unique: false,
+        referent: Box::new(VmType::I64),
+    };
+    let tuple = VmType::Tuple(vec![shared.clone(), VmType::I64]);
+    let array = VmType::Array(Box::new(tuple.clone()));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let callable = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let environment = VmCaptureEnvironment {
+        owner,
+        callable: 0,
+        captures: vec![VmCapture {
+            mode: VmCaptureMode::Move,
+            ty: array.clone(),
+        }],
+    };
+    let closure_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: closure,
+        captures: 1,
+        parameters: 1,
+        registers: vec![
+            array.clone(),
+            VmType::Reference {
+                unique: false,
+                referent: Box::new(array.clone()),
+            },
+            VmType::Usize,
+            tuple.clone(),
+            VmType::Reference {
+                unique: false,
+                referent: Box::new(shared.clone()),
+            },
+            shared.clone(),
+            VmType::I64,
+        ],
+        instructions: vec![
+            VmInstruction::Borrow {
+                dst: 1,
+                src: 0,
+                fields: vec![],
+                unique: false,
+                reborrow: false,
+            },
+            VmInstruction::ConstUsize { dst: 2, value: 0 },
+            VmInstruction::ArrayGetCopy {
+                dst: 3,
+                value: 1,
+                index: 2,
+                element_type: tuple.clone(),
+            },
+            VmInstruction::Borrow {
+                dst: 4,
+                src: 3,
+                fields: vec![0],
+                unique: false,
+                reborrow: false,
+            },
+            VmInstruction::DerefCopy {
+                dst: 5,
+                reference: 4,
+            },
+            VmInstruction::DerefCopy {
+                dst: 6,
+                reference: 5,
+            },
+            VmInstruction::Return { value: 6 },
+        ],
+    };
+    let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::I64,
+            shared,
+            VmType::I64,
+            tuple.clone(),
+            array.clone(),
+            label,
+            callable,
+            VmType::Unit,
+            VmType::I64,
+        ],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 40 },
+            VmInstruction::Borrow {
+                dst: 1,
+                src: 0,
+                fields: vec![],
+                unique: false,
+                reborrow: false,
+            },
+            VmInstruction::ConstI64 { dst: 2, value: 2 },
+            VmInstruction::MakeTuple {
+                dst: 3,
+                fields: vec![1, 2],
+            },
+            VmInstruction::MakeArray {
+                dst: 4,
+                fields: vec![3],
+                element_type: tuple.clone(),
+            },
+            VmInstruction::MakeLabel {
+                dst: 5,
+                brand_owner: entry,
+                brand_label: 0,
+                target: 9,
+                destination: 0,
+            },
+            VmInstruction::InstallHandler {
+                effect: facade,
+                effect_arguments: vec![],
+                operation: 0,
+                payload_destinations: vec![],
+                resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume,
+                target: 12,
+            },
+            VmInstruction::CallIndirect {
+                dst: 7,
+                callee: 5,
+                arguments: vec![0],
+            },
+            VmInstruction::UninstallHandler,
+            VmInstruction::MakeCallable {
+                dst: 6,
+                callee: closure,
+                captures: vec![4],
+                environment: Some(environment.clone()),
+            },
+            VmInstruction::CallIndirect {
+                dst: 8,
+                callee: 6,
+                arguments: vec![],
+            },
+            VmInstruction::Return { value: 8 },
+            VmInstruction::Trap,
+        ],
+    };
+    let mut candidate = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(entry, entry_function), (closure, closure_function)]),
+        callable_environments: BTreeMap::from([(closure, environment)]),
+        fingerprint: Digest::of_bytes(b"nested-shared-capture-program"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_program(&candidate);
+    assert_eq!(decode_program(&bytes).unwrap(), candidate);
+    assert_eq!(verify_vm_program(candidate.clone()).unwrap().run_i64().unwrap(), 40);
+    assert_eq!(decode_and_verify_program(&bytes).unwrap().run_i64().unwrap(), 40);
+}
+
+#[test]
+fn verifier_rejects_unique_reference_nested_behind_shared_array_capture_at_dynamic_rejoin() {
+    let owner = DefKey(Digest::of_bytes(b"nested-shared-unique-owner"));
+    let facade = DefKey(Digest::of_bytes(b"nested-shared-unique-facade"));
+    let unique = VmType::Reference {
+        unique: true,
+        referent: Box::new(VmType::I64),
+    };
+    let tuple = VmType::Tuple(vec![unique.clone()]);
+    let shared_tuple = VmType::Reference {
+        unique: false,
+        referent: Box::new(tuple.clone()),
+    };
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let closure = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                unique,
+                tuple.clone(),
+                shared_tuple.clone(),
+                VmType::Array(Box::new(shared_tuple.clone())),
+                label,
+                closure,
+                VmType::Unit,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::Borrow {
+                    dst: 1,
+                    src: 0,
+                    fields: vec![],
+                    unique: true,
+                    reborrow: false,
+                },
+                VmInstruction::MakeTuple {
+                    dst: 2,
+                    fields: vec![1],
+                },
+                VmInstruction::Borrow {
+                    dst: 3,
+                    src: 2,
+                    fields: vec![],
+                    unique: false,
+                    reborrow: false,
+                },
+                VmInstruction::MakeArray {
+                    dst: 4,
+                    fields: vec![3],
+                    element_type: shared_tuple.clone(),
+                },
+                VmInstruction::MakeLabel {
+                    dst: 5,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 9,
+                    destination: 0,
+                },
+                VmInstruction::InstallHandler {
+                    effect: facade,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 12,
+                },
+                VmInstruction::CallIndirect {
+                    dst: 7,
+                    callee: 5,
+                    arguments: vec![0],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::MakeCallable {
+                    dst: 6,
+                    callee: DefKey(Digest::of_bytes(b"nested-shared-unique-closure")),
+                    captures: vec![4],
+                    environment: None,
+                },
+                VmInstruction::Return { value: 6 },
+                VmInstruction::Trap,
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"nested-shared-unique-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::UnsupportedEscapingUniqueReference)
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::UnsupportedEscapingUniqueReference)
     ));
 }
 

@@ -6934,6 +6934,10 @@ struct VerifierContinuation {
     storage_live: Vec<bool>,
     snapshots: Vec<Option<u32>>,
     labels: Vec<bool>,
+    /// Whether a value contains a frame-branded resumption token.  This is
+    /// separate from `snapshots`: a token nested in an aggregate cannot be
+    /// invoked directly, but it still cannot cross a retained-frame boundary.
+    resumptions: Vec<bool>,
     performed: VerifierPerformed,
     /// Frames crossed while looking for the selected outer handler. They are
     /// absent while its clause runs and are restored when the continuation
@@ -6964,9 +6968,14 @@ struct VerifierState {
     /// is what prevents capability forgery through an equally typed callable.
     snapshots: Vec<Option<u32>>,
     /// A first-class lexical label shares the callable ABI but can only be
-    /// invoked in the frame that minted it. It cannot be frozen into another
-    /// callable environment.
+    /// invoked in the frame that minted it. This taint is propagated through
+    /// aggregates because a label cannot be frozen into another callable
+    /// environment even when nested inside an otherwise ordinary value.
     labels: Vec<bool>,
+    /// Aggregate-aware counterpart to `snapshots`.  The exact brand remains
+    /// in `snapshots` for `ResumeSnapshot`; this bit prevents a brand from
+    /// being smuggled through a tuple, array, record, or shared snapshot.
+    resumptions: Vec<bool>,
     handlers: Vec<VerifierHandlerFrame>,
     pending_leave: Option<PendingLeave>,
     /// Number of dynamic clause-return continuations currently being checked.
@@ -7130,6 +7139,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             storage_live: initial_storage_live,
             snapshots: vec![None; function.registers.len()],
             labels: vec![false; function.registers.len()],
+            resumptions: vec![false; function.registers.len()],
             handlers: Vec::new(),
             pending_leave: None,
             resumption_return_depth: 0,
@@ -7769,7 +7779,13 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         });
                     }
                 }
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = fields
+                    .iter()
+                    .any(|field| states.labels[*field as usize]);
+                states.resumptions[*dst as usize] = fields
+                    .iter()
+                    .any(|field| states.resumptions[*field as usize]);
             }
             VmInstruction::MakeArray {
                 dst,
@@ -7796,7 +7812,13 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         });
                     }
                 }
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = fields
+                    .iter()
+                    .any(|field| states.labels[*field as usize]);
+                states.resumptions[*dst as usize] = fields
+                    .iter()
+                    .any(|field| states.resumptions[*field as usize]);
             }
             VmInstruction::MakeRecord {
                 dst,
@@ -7836,7 +7858,13 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         });
                     }
                 }
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = fields
+                    .iter()
+                    .any(|field| states.labels[*field as usize]);
+                states.resumptions[*dst as usize] = fields
+                    .iter()
+                    .any(|field| states.resumptions[*field as usize]);
             }
             VmInstruction::MakeEnum {
                 dst,
@@ -7877,7 +7905,13 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         });
                     }
                 }
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = fields
+                    .iter()
+                    .any(|field| states.labels[*field as usize]);
+                states.resumptions[*dst as usize] = fields
+                    .iter()
+                    .any(|field| states.resumptions[*field as usize]);
             }
             VmInstruction::ProjectRecord {
                 dst,
@@ -8066,6 +8100,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         storage_live: states.storage_live.clone(),
                         snapshots: states.snapshots.clone(),
                         labels: states.labels.clone(),
+                        resumptions: states.resumptions.clone(),
                         performed: VerifierPerformed {
                             effect: *effect,
                             effect_arguments: effect_arguments.clone(),
@@ -8190,6 +8225,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         storage_live: continuation.storage_live,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
+                        resumptions: continuation.resumptions,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
                         resumption_return_depth: states.resumption_return_depth,
@@ -8251,6 +8287,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     storage_live: continuation.storage_live,
                     snapshots: continuation.snapshots,
                     labels: continuation.labels,
+                    resumptions: continuation.resumptions,
                     handlers: resumed_handlers,
                     pending_leave: continuation.pending_leave,
                     resumption_return_depth: states.resumption_return_depth.saturating_add(1),
@@ -8299,6 +8336,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 write(&mut states, *dst)?;
                 states.snapshots[*dst as usize] = Some(frame_id);
                 states.labels[*dst as usize] = false;
+                states.resumptions[*dst as usize] = true;
             }
             VmInstruction::ResumeSnapshot { snapshot, value } => {
                 read(&states, *snapshot)?;
@@ -8360,6 +8398,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         storage_live: continuation.storage_live,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
+                        resumptions: continuation.resumptions,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
                         resumption_return_depth: states.resumption_return_depth,
@@ -8403,6 +8442,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     forwarded.registers = continuation.registers.clone();
                     forwarded.storage_live = continuation.storage_live.clone();
                     forwarded.snapshots = continuation.snapshots.clone();
+                    forwarded.labels = continuation.labels.clone();
+                    forwarded.resumptions = continuation.resumptions.clone();
                     for (destination, argument) in outer
                         .payload_destinations
                         .iter()
@@ -8421,6 +8462,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         storage_live: continuation.storage_live,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
+                        resumptions: continuation.resumptions,
                         performed: continuation.performed,
                         above: crossed,
                         pending_leave: continuation.pending_leave,
@@ -8452,6 +8494,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 write(&mut states, *dst)?;
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
                 states.labels[*dst as usize] = states.labels[*src as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*src as usize];
             }
             VmInstruction::StorageLive { local, .. } => {
                 let index = *local as usize;
@@ -8466,6 +8509,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.storage_live[index] = true;
                 states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
+                states.resumptions[*local as usize] = false;
             }
             VmInstruction::StorageDead { local, .. } => {
                 let index = *local as usize;
@@ -8480,6 +8524,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.storage_live[index] = false;
                 states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
+                states.resumptions[*local as usize] = false;
             }
             VmInstruction::SetDropFlag { flag, .. } => {
                 expect_type(function, *flag, VmType::Bool)?;
@@ -8493,6 +8538,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 *slot = Some(true);
                 states.snapshots[*flag as usize] = None;
                 states.labels[*flag as usize] = false;
+                states.resumptions[*flag as usize] = false;
             }
             VmInstruction::DestroyIf { local, flag } => {
                 read(&states, *flag)?;
@@ -8508,6 +8554,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 *slot = Some(false);
                 states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
+                states.resumptions[*local as usize] = false;
             }
             VmInstruction::Store { dst, src } => {
                 read(&states, *src)?;
@@ -8520,6 +8567,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 *state = Some(true);
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
                 states.labels[*dst as usize] = states.labels[*src as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*src as usize];
             }
             VmInstruction::Move { dst, src } => {
                 read(&states, *src)?;
@@ -8529,6 +8577,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.snapshots[*src as usize] = None;
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.labels[*src as usize] = false;
+                states.resumptions[*dst as usize] = states.resumptions[*src as usize];
+                states.resumptions[*src as usize] = false;
                 write(&mut states, *dst)?
             }
             VmInstruction::Borrow {
@@ -8620,7 +8670,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         found: *destination_referent,
                     });
                 }
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = states.labels[*src as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*src as usize];
             }
             VmInstruction::DerefCopy { dst, reference } => {
                 read(&states, *reference)?;
@@ -8636,7 +8688,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     });
                 };
                 expect_type(function, *dst, *referent)?;
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = states.labels[*reference as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*reference as usize];
             }
             VmInstruction::DerefStore { reference, src } => {
                 read(&states, *reference)?;
@@ -8871,12 +8925,16 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             message: "callable capture cannot retain a lexical label",
                         });
                     }
+                    if states.resumptions[capture as usize] {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
                 }
                 if !matches!(register_type(function, *dst)?, VmType::Callable { .. }) {
                     return Err(VmArtifactError::NotCallable { register: *dst });
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = false;
+                states.resumptions[*dst as usize] = false;
             }
             VmInstruction::MakeLabel {
                 dst,
@@ -8901,6 +8959,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = true;
+                states.resumptions[*dst as usize] = false;
             }
             VmInstruction::CallIndirect {
                 dst,
@@ -9471,7 +9530,11 @@ fn vm_type_contains_unique_reference(ty: &VmType, descriptors: &[VmNominalCopyDe
         active: &mut Vec<(DefKey, Vec<VmType>)>,
     ) -> bool {
         match ty {
-            VmType::Reference { unique, .. } => *unique,
+            // Freezing a shared reference retains a recursively frozen
+            // snapshot of its referent. A unique capability nested behind
+            // that otherwise benign shared carrier is therefore just as
+            // invalid as a directly captured `&mut`.
+            VmType::Reference { unique, referent } => *unique || visit(referent, descriptors, active),
             VmType::Tuple(elements) => elements.iter().any(|element| visit(element, descriptors, active)),
             VmType::Array(element) => visit(element, descriptors, active),
             VmType::Nominal {
@@ -10308,9 +10371,9 @@ fn freeze_frame_value(
             unique: false,
             referent,
         } => Ok(VmValue::Reference {
-            target: ReferenceTarget::Captured(Arc::new(project_reference(
-                reference_target(registers, &[], target)?,
-                fields,
+            target: ReferenceTarget::Captured(Arc::new(freeze_frame_value(
+                &project_reference(reference_target(registers, &[], target)?, fields)?,
+                registers,
             )?)),
             fields: Arc::from([]),
             unique: false,
@@ -10359,6 +10422,10 @@ fn freeze_frame_value(
                 .into(),
             signature: signature.clone(),
         }),
+        VmValue::Label { .. } => Err(VmArtifactError::InvalidLabelContract {
+            message: "callable capture cannot retain a lexical label",
+        }),
+        VmValue::Resumption { .. } => Err(VmArtifactError::HandlerResumeUnavailable),
         value => Ok(value.clone()),
     }
 }
