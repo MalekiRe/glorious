@@ -3857,6 +3857,50 @@ fn service_selects_conditional_drop_through_generic_nominal_facades() {
     assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
 }
 
+#[test]
+fn service_selects_defaulted_nominal_drop_through_recursive_facade_revisions() {
+    // `Family` owns the nominal associated-type default. The recursive facade
+    // must retain that identity through `make`, so conditional Drop selection
+    // sees the selected `Packet<Token>` rather than an opaque projection.
+    let root = "pub mod left; pub mod right; use left::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
+    let left = "pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } pub trait Mark: Use<[0, 0]> {} impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T> = Packet<T>; } pub use crate::right::{make, Top as Capability};";
+    let right = "pub use crate::left::{Family, Mark, Packet, Token}; pub trait Top: Family {} pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } impl Family for i64 {} impl Top for i64 where i64: Family {}";
+    let selected = format!("{right} impl Use<[0, 0]> for Token {{}} impl Mark for Token {{}}");
+    let world = |right: &str| request_with_logical_sources(root, &[("src/left/left.glorious", left), ("src/right/right.glorious", right)]);
+
+    let mut reordered = world(right);
+    let artifact = StageZeroCompiler::new().compile(reordered.clone()).expect("the unselected defaulted nominal must remain partially movable through the facade").artifact.unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new().compile(reordered).expect("source ordering must not perturb defaulted nominal Drop selection").artifact.unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+
+    let cleanup_root = "pub mod left; pub mod right; use left::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet; 42 }";
+    let cleanup = StageZeroCompiler::new().compile(request_with_logical_sources(cleanup_root, &[("src/left/left.glorious", left), ("src/right/right.glorious", selected.as_str())])).expect("selected defaulted nominal permits whole-value transfer and its cleanup must execute in the VM").artifact.unwrap();
+    assert_eq!(cleanup.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(right), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let left_node = DependencyNode::Interface(ModuleKey { package: PackageKey("app@0.1.0".into()), path: "crate::left".into() });
+    let right_node = DependencyNode::Interface(ModuleKey { package: PackageKey("app@0.1.0".into()), path: "crate::right".into() });
+    let left_trace = compiler.dependency_trace(parent, &left_node).expect("legal defaulted nominal left facade must freeze");
+    let right_trace = compiler.dependency_trace(parent, &right_node).expect("legal defaulted nominal right facade must freeze");
+    let rejected_world = world(&selected);
+    let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+    let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("selected conditional Drop must make the defaulted nominal opaque");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4188"), "selected defaulted nominal Drop missing G4188: {:#?}", error.diagnostics());
+    assert_eq!(compiler.interface_cache_stats(), cached, "rejected defaulted Drop revision published cache state");
+    assert!(compiler.dependency_traces(rejected).is_empty(), "rejected defaulted Drop revision published traces");
+    assert_eq!(compiler.dependency_trace(parent, &left_node), Some(left_trace));
+    assert_eq!(compiler.dependency_trace(parent, &right_node), Some(right_trace));
+    let mut reordered = rejected_world;
+    reordered.sources.reverse();
+    assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source ordering cannot admit selected defaulted Drop partial moves").diagnostics());
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
+}
+
 /// Exercise the ordinary service path for the source-level shape that reaches
 /// a handler, a partial aggregate move, and a nonlocal lexical exit together.
 /// The Core test inspects the intermediate frozen MIR; this companion proves

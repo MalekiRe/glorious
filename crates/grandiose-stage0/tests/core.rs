@@ -525,6 +525,23 @@ fn typed_core_normalizes_all_selected_items_through_recursive_generic_supertrait
 }
 
 #[test]
+fn typed_core_materializes_defaulted_nominal_items_before_partial_move_analysis() {
+    let source = "struct Token {} struct Packet<T> { head: T, tail: i64 } trait Mark: Use<[0, 0]> {} impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } trait Family { type Item<T> = Packet<T>; } impl Family for i64 {} fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
+    let core = core_for("core-defaulted-nominal-partial-move@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert_eq!(core.expression(core.root).ty, Type::Scalar(ScalarType::I64));
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            expression.kind,
+            CoreKind::Move(value)
+                if matches!(core.expression(value).kind, CoreKind::Field { .. })
+        )
+    }), "the defaulted nominal projection must materialize to a movable field place: {:#?}", core.expressions);
+    let flow = flow_for("core-defaulted-nominal-partial-move@0.1.0", source);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+}
+
+#[test]
 fn recovered_source_elaborates_to_core_error_and_is_rejected_before_mir() {
     let source = "pub fn main() -> i64 { let = ; }";
     let core = core_for("core-recovered-source@0.1.0", source);

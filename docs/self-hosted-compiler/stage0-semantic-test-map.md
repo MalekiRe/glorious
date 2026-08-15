@@ -83,6 +83,13 @@ coarse. The composite fixtures cover:
   a selected instantiation remains opaque
   (`service_allows_partial_move_when_a_conditional_drop_impl_is_not_selected`,
   `service_rejects_partial_move_when_a_conditional_drop_impl_is_selected`);
+- a nominal associated-type default remains a real selected `Packet<T>` across
+  a reciprocal public facade. Its unselected conditional destructor permits
+  partial movement through Core and the VM; a revision that selects the bound
+  rejects that move, publishes no child cache/traces, and still permits
+  whole-value cleanup execution
+  (`typed_core_materializes_defaulted_nominal_items_before_partial_move_analysis`,
+  `service_selects_defaulted_nominal_drop_through_recursive_facade_revisions`);
 - the absence of compiler-known control/arithmetic variants in `CoreKind`;
 - a small independent evaluator/verified-VM differential for branded label
   execution;
