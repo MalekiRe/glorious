@@ -2222,6 +2222,9 @@ impl MirEditor {
                 .blocks
                 .get(block.0 as usize)
                 .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?;
+            if function.control.tombstoned_blocks.contains(&block) {
+                return Err("MIR cannot split a tombstoned block".into());
+            }
             if at > source.instructions.len() {
                 return Err(format!(
                     "MIR split index {at} exceeds block {} instruction count {}",
@@ -2252,6 +2255,13 @@ impl MirEditor {
                 instructions,
                 terminator,
             });
+            // This table is an explicit VM lowering contract, keyed by the
+            // block that owns the `Leave` terminator.  Splitting moves that
+            // terminator to the suffix, so retaining the old key would make
+            // VM lowering reconstruct a different handler prefix.
+            if let Some(depth) = function.control.leave_handler_depths.remove(&block) {
+                function.control.leave_handler_depths.insert(suffix, depth);
+            }
             relocate_operations_after_split(function, block, suffix, at);
             refresh_control_block_sites(function, suffix)?;
             Ok(suffix)
@@ -2316,6 +2326,12 @@ impl MirEditor {
                 return Err("MIR merge successor has block parameters".into());
             }
             let instruction_offset = predecessor_block.instructions.len() as u32;
+            // A valid table entry can only name the successor's `Leave`
+            // terminator. That terminator is about to become the
+            // predecessor's terminator, so carry its explicit VM unwind
+            // prefix to the surviving block identity before tombstoning the
+            // successor.
+            let leave_handler_depth = function.control.leave_handler_depths.remove(&successor);
             let (instructions, terminator) = {
                 let successor_block = function.blocks.get_mut(successor.0 as usize).unwrap();
                 let instructions = std::mem::take(&mut successor_block.instructions);
@@ -2326,6 +2342,12 @@ impl MirEditor {
             let predecessor_block = function.blocks.get_mut(predecessor.0 as usize).unwrap();
             predecessor_block.instructions.extend(instructions);
             predecessor_block.terminator = terminator;
+            if let Some(depth) = leave_handler_depth {
+                function
+                    .control
+                    .leave_handler_depths
+                    .insert(predecessor, depth);
+            }
             for entry in &mut function.control.operations.entries {
                 if let Some(data) = entry.as_mut().filter(|data| data.block == successor) {
                     data.block = predecessor;
@@ -6600,6 +6622,23 @@ impl MirFunction {
         for (index, resumption) in self.control.resumptions.iter().enumerate() {
             if self.control.tombstoned_blocks.contains(&resumption.block) {
                 return Err(format!("MIR resumption {index} is in a tombstoned block"));
+            }
+        }
+        for (&block, _) in &self.control.leave_handler_depths {
+            if self.control.tombstoned_blocks.contains(&block) {
+                return Err(format!(
+                    "MIR leave-handler depth names tombstoned block {}",
+                    block.0
+                ));
+            }
+            let block_data = self.blocks.get(block.0 as usize).ok_or_else(|| {
+                format!("MIR leave-handler depth names absent block {}", block.0)
+            })?;
+            if !matches!(block_data.terminator, MirTerminator::Leave { .. }) {
+                return Err(format!(
+                    "MIR leave-handler depth names block {} without a leave terminator",
+                    block.0
+                ));
             }
         }
         for (index, resumption) in self.control.resumptions.iter().enumerate() {

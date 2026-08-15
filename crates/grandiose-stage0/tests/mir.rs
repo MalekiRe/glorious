@@ -2364,6 +2364,116 @@ fn checked_mir_editor_splits_leave_edges_and_updates_the_label_rejoin() {
 }
 
 #[test]
+fn checked_mir_editor_relocates_leave_handler_depth_when_splitting_a_block() {
+    let mut function = externally_visible_label_merge_function();
+    function.control.leave_handler_depths.insert(MirBlockId(0), 1);
+    function.validate().unwrap();
+
+    let mut editor = MirEditor::open(function).unwrap();
+    let suffix = editor.split_block(MirBlockId(0), 1).unwrap();
+    let split = editor.finish();
+
+    assert_eq!(suffix, MirBlockId(3));
+    assert_eq!(split.control.leave_handler_depths.get(&suffix), Some(&1));
+    assert!(!split.control.leave_handler_depths.contains_key(&MirBlockId(0)));
+    assert!(matches!(
+        split.blocks[suffix.0 as usize].terminator,
+        MirTerminator::Leave { .. }
+    ));
+    assert!(split.validate().is_ok(), "{:#?}", split.validate());
+}
+
+fn leave_handler_depth_merge_function() -> MirFunction {
+    let owner = DefKey(Digest::of_bytes(b"editor-merge-leave-handler-depth"));
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let mut function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: owner,
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(i64_ty.clone())],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 1,
+                }],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Leave {
+                    label: MirLabelId::UNASSIGNED,
+                    brand: grandiose_stage0::LabelBrand { owner, label: 0 },
+                    target: MirBlockId(2),
+                    arguments: vec![MirLocal(0)],
+                    cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
+                        moved_paths: vec![],
+                        moved_places: vec![],
+                        active_loans: vec![],
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
+                    },
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(0)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(0) },
+            },
+        ],
+    }
+    .with_frozen_control_tables();
+    function.control.leave_handler_depths.insert(MirBlockId(1), 1);
+    function
+}
+
+#[test]
+fn checked_mir_editor_relocates_leave_handler_depth_when_merging_blocks() {
+    let function = leave_handler_depth_merge_function();
+    function.validate().unwrap();
+
+    let mut editor = MirEditor::open(function).unwrap();
+    editor.merge_blocks(MirBlockId(0), MirBlockId(1)).unwrap();
+    let merged = editor.finish();
+
+    assert_eq!(merged.control.leave_handler_depths.get(&MirBlockId(0)), Some(&1));
+    assert!(!merged.control.leave_handler_depths.contains_key(&MirBlockId(1)));
+    assert!(merged.control.tombstoned_blocks.contains(&MirBlockId(1)));
+    assert!(matches!(
+        merged.blocks[0].terminator,
+        MirTerminator::Leave { .. }
+    ));
+    assert!(merged.validate().is_ok(), "{:#?}", merged.validate());
+}
+
+#[test]
+fn mir_rejects_leave_handler_depth_for_a_block_without_a_leave() {
+    let mut function = externally_visible_label_merge_function();
+    function.control.leave_handler_depths.insert(MirBlockId(1), 1);
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("without a leave terminator")),
+        "an unwind-prefix entry must remain tied to the Leave it describes"
+    );
+}
+
+#[test]
 fn checked_mir_editor_rejects_merging_externally_visible_control_entries() {
     for function in [
         externally_visible_handler_merge_function(),
