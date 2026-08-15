@@ -3757,6 +3757,16 @@ impl Elaborator<'_> {
     }
     fn implementation(&mut self, header: &ImplementationHeader) -> ElaboratedImplementation {
         self.bind_generics(&header.generics);
+        if matches!(header.relation.path.as_slice(), [name] if name == "Environment" || name == "RunsIn")
+        {
+            self.error(
+                "G4173",
+                format!(
+                    "compiler-generated intrinsic `{}` trait is sealed and cannot be manually implemented",
+                    header.relation.path.join("::")
+                ),
+            );
+        }
         let relation = self.trait_ref(&header.relation);
         let self_ty = self.ty(&header.self_ty);
         let outer_self_type = self.self_type.replace(self_ty.clone());

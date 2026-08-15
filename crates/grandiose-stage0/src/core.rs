@@ -6631,6 +6631,20 @@ impl Elaborator<'_> {
         source_arguments: Vec<crate::header::HeaderGenericArgument>,
         span: Span,
     ) -> CoreId {
+        if matches!(path.as_slice(), [name] if name == "Available") {
+            return self.fail(
+                span,
+                "G4188",
+                "compiler-generated intrinsic `Available` evidence cannot be constructed by source code",
+            );
+        }
+        if matches!(path.as_slice(), [name] if name == "Bindings") {
+            return self.fail(
+                span,
+                "G4188",
+                "compiler-generated intrinsic `Bindings` evidence cannot be constructed by source code",
+            );
+        }
         if path.len() == 1 && self.locals.lookup(&path[0]).is_some() {
             return self.fail(
                 span,
