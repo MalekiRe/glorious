@@ -6976,6 +6976,172 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
 }
 
 #[test]
+fn verifier_retains_resumption_provenance_across_handler_clause_joins() {
+    let effect = DefKey(Digest::of_bytes(b"joined-resumption-effect"));
+    let owner = DefKey(Digest::of_bytes(b"joined-resumption-owner"));
+    let snapshot = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let closure = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::Bool,
+                VmType::I64,
+                VmType::I64,
+                snapshot,
+                closure,
+                VmType::I64,
+            ],
+            instructions: vec![
+                VmInstruction::ConstBool { dst: 0, value: true },
+                VmInstruction::ConstI64 { dst: 1, value: 7 },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![5],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 5,
+                },
+                VmInstruction::Perform {
+                    dst: 2,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![1],
+                },
+                VmInstruction::Trap,
+                // Process the ordinary callable branch first. The other
+                // branch carries a frame-branded snapshot into the same
+                // register and joins at instruction 10.
+                VmInstruction::BranchBool {
+                    condition: 0,
+                    then_target: 8,
+                    else_target: 6,
+                },
+                VmInstruction::MakeCallable {
+                    dst: 3,
+                    callee: DefKey(Digest::of_bytes(b"joined-ordinary-callable")),
+                    captures: vec![],
+                    environment: None,
+                },
+                VmInstruction::Jump { target: 10 },
+                VmInstruction::CaptureResumption { dst: 3 },
+                VmInstruction::Jump { target: 10 },
+                VmInstruction::MakeCallable {
+                    dst: 4,
+                    callee: DefKey(Digest::of_bytes(b"joined-capture-sink")),
+                    captures: vec![3],
+                    environment: None,
+                },
+                VmInstruction::Cancel,
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"joined-resumption-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    let direct = verify_vm(candidate);
+    assert!(
+        matches!(direct, Err(VmArtifactError::HandlerResumeUnavailable)),
+        "unexpected direct verification result: {direct:?}"
+    );
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
+fn verifier_retains_label_provenance_across_callable_joins() {
+    let owner = DefKey(Digest::of_bytes(b"joined-label-owner"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let closure = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::Bool, label, VmType::I64, closure],
+            instructions: vec![
+                VmInstruction::ConstBool { dst: 0, value: true },
+                // The ordinary callable path is explored first; the label
+                // branch then merges into its register slot at instruction 6.
+                VmInstruction::BranchBool {
+                    condition: 0,
+                    then_target: 4,
+                    else_target: 2,
+                },
+                VmInstruction::MakeCallable {
+                    dst: 1,
+                    callee: DefKey(Digest::of_bytes(b"joined-label-ordinary-callable")),
+                    captures: vec![],
+                    environment: None,
+                },
+                VmInstruction::Jump { target: 6 },
+                VmInstruction::MakeLabel {
+                    dst: 1,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 8,
+                    destination: 2,
+                },
+                VmInstruction::Jump { target: 6 },
+                VmInstruction::MakeCallable {
+                    dst: 3,
+                    callee: DefKey(Digest::of_bytes(b"joined-label-capture-sink")),
+                    captures: vec![1],
+                    environment: None,
+                },
+                VmInstruction::Trap,
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"joined-label-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::InvalidLabelContract {
+            message: "callable capture cannot retain a lexical label"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::InvalidLabelContract {
+            message: "callable capture cannot retain a lexical label"
+        })
+    ));
+}
+
+#[test]
 fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
     let owner = DefKey(Digest::of_bytes(b"callable-environment-owner"));
     let brand = EnvironmentBrand {

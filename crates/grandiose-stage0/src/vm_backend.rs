@@ -9627,6 +9627,23 @@ fn propagate_state(
                 .zip(&state.snapshots)
                 .map(|(left, right)| if left == right { *left } else { None })
                 .collect::<Vec<_>>();
+            // Labels and captured resumptions are capability facts, not
+            // ordinary register initialization. A join must retain either
+            // taint whenever one predecessor carries it; otherwise a
+            // continuation minted in just one handler-clause branch can be
+            // repackaged as an innocent callable after the merge.
+            let labels = existing
+                .labels
+                .iter()
+                .zip(&state.labels)
+                .map(|(left, right)| *left || *right)
+                .collect::<Vec<_>>();
+            let resumptions = existing
+                .resumptions
+                .iter()
+                .zip(&state.resumptions)
+                .map(|(left, right)| *left || *right)
+                .collect::<Vec<_>>();
             let pending_leave = if existing.pending_leave == state.pending_leave {
                 existing.pending_leave.clone()
             } else {
@@ -9634,11 +9651,15 @@ fn propagate_state(
             };
             if existing.registers != joined
                 || existing.snapshots != snapshots
+                || existing.labels != labels
+                || existing.resumptions != resumptions
                 || existing.pending_leave != pending_leave
                 || handler_changed
             {
                 existing.registers = joined;
                 existing.snapshots = snapshots;
+                existing.labels = labels;
+                existing.resumptions = resumptions;
                 existing.pending_leave = pending_leave;
                 worklist.push(target as usize);
             }
