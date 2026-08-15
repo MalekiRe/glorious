@@ -5318,6 +5318,15 @@ fn service_rejects_mutual_selected_hrtb_effect_gat_callbacks_canonically() {
 }
 
 #[test]
+fn service_rejects_mutual_selected_const_hrtb_callbacks_canonically() {
+    let mut request = request("use facade::Callback; pub fn apply(callback: Callback) -> i64 { let value = 41; callback(&value) } pub fn main() -> i64 { apply(facade::relay) }");
+    request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::relay; pub type Callback = provider::Callback;".as_slice()));
+    request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub trait First { const Width: u32; } pub trait Second { const Width: u32; } pub trait Gate { type Item<'a, n: u32>; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a, <i64 as First>::Width>; impl First for i64 { const Width = <i64 as Second>::Width; } impl Second for i64 { const Width = <i64 as First>::Width; } impl Gate for i64 { type Item<'a, n: u32> = i64; } pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a, <i64 as First>::Width> { *value }".as_slice()));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new().compile(request) else { panic!("mutual selected const callback entered an artifact"); };
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4157"), "missing mutual selected-const finite-normal-form rejection: {diagnostics:#?}");
+}
+
+#[test]
 fn service_normalizes_generic_associated_consts_in_hrtb_gat_body_results() {
     let mut request = request(
         "use facade::layout; pub fn main() -> i64 { layout() }",
