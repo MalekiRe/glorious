@@ -4194,6 +4194,144 @@ fn service_preserves_hrtb_associated_nominal_partial_moves_through_closure_revis
     );
 }
 
+#[test]
+fn service_preserves_closure_storage_and_conditional_drop_through_facade_handler_revisions() {
+    // The unselected packet permits a partial move of `head` while an indirect
+    // returned closure retains a shared borrow of disjoint `tail`. The
+    // closure is invoked from a handler arm, exercising the source-storage
+    // cleanup boundary across package import, Core, MIR, VM, and decoding.
+    let root = "use facade::{capture, make}; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let packet = make<i64>(2); let closure = capture(&packet.tail); move packet.head; handle Tick::tick() { Tick::tick() with _ => closure() } }";
+    let provider = "pub trait Mark: Use<[0, 0]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub fn make<T>(value: T) -> Packet<T> { Packet<T> { head: value, tail: 2 } } pub fn capture<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value + 40 } } pub fn capture_unique<'a>(value: &'a mut i64) -> () -> i64 { () -> i64 { *value = *value + 1; *value } }";
+    let selected = format!("{provider} impl Use<[0, 0]> for Token {{}} impl Mark for Token {{}}");
+    let world = |root: &str, provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{capture, capture_unique, make, Packet, Token};".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@1.0.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+
+    let mut reordered = world(root, provider);
+    let artifact = StageZeroCompiler::new()
+        .compile(reordered.clone())
+        .expect("shared returned closure must survive handler storage cleanup")
+        .artifact
+        .unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("source order must preserve closure storage cleanup")
+        .artifact
+        .unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("closure storage/handler artifact must decode and verify");
+    let decoded_program = decode_program(&artifact.canonical_bytes())
+        .expect("decoded closure storage artifact must retain its VM program");
+    assert!(
+        decoded_program.functions.values().any(|function| function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::StorageLive { .. }))),
+        "closure storage artifact lost StorageLive ownership identity: {decoded_program:#?}"
+    );
+    assert!(
+        decoded_program.functions.values().any(|function| function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::DestroyIf { .. }))),
+        "closure storage artifact lost drop-flag cleanup evidence: {decoded_program:#?}"
+    );
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered_artifact.run_i64().unwrap(), 42);
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+
+    // Selecting Drop still permits a whole packet transfer once the shared
+    // closure has had its last use. That is the positive custom-Drop cleanup
+    // half of the same facade contract.
+    let selected_whole_root = "use facade::{capture, make, Token}; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let shared = 2; let answer = { let closure = capture(&shared); closure() }; let packet = make<Token>(Token {}); handle Tick::tick() { Tick::tick() with _ => { move packet; answer } } }";
+    let selected_whole = StageZeroCompiler::new()
+        .compile(world(selected_whole_root, &selected))
+        .expect("selected Drop must retain whole-value cleanup after a closure's last use")
+        .artifact
+        .unwrap();
+    let selected_whole_decoded = decode_and_verify_program(&selected_whole.canonical_bytes())
+        .expect("selected Drop handler cleanup artifact must decode");
+    assert_eq!(selected_whole.run_i64().unwrap(), 42);
+    assert_eq!(selected_whole_decoded.run_i64().unwrap(), 42);
+
+    // A returned callable may not retain an external `&mut`: its creator
+    // frame is gone before indirect invocation, so the VM must reject the
+    // artifact rather than severing the write-back target.
+    let unique_root = "use facade::capture_unique; pub fn main() -> i64 { let value = 41; let closure = capture_unique(&mut value); closure() }";
+    let Err(grandiose_stage0::ServiceError::Failed(unique_diagnostics)) =
+        StageZeroCompiler::new().compile(world(unique_root, provider))
+    else {
+        panic!("a returned facade closure unexpectedly retained an external unique borrow");
+    };
+    assert!(
+        unique_diagnostics.iter().any(|diagnostic| diagnostic.code == "G7005"),
+        "unique closure escape must fail at the verified VM boundary: {unique_diagnostics:#?}"
+    );
+
+    // A later provider revision that selects Drop makes the old partial move
+    // illegal. No rejected child product may disturb the frozen legal facade
+    // or its executable source-storage artifact.
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(root, provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let trace = compiler
+        .dependency_trace(parent, &facade)
+        .expect("legal closure storage facade must freeze");
+    let selected_partial_root = "use facade::{capture, make, Token}; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let packet = make<Token>(Token {}); let closure = capture(&packet.tail); move packet.head; handle Tick::tick() { Tick::tick() with _ => closure() } }";
+    let rejected_world = world(selected_partial_root, &selected);
+    let rejected = compiler
+        .import_revision(rejected_world.clone(), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(rejected).unwrap())
+        .expect_err("selected Drop must reject the facaded partial move");
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4188"),
+        "selected Drop revision missing partial-move rejection: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached);
+    assert!(compiler.dependency_traces(rejected).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace));
+    let mut reordered_rejection = rejected_world;
+    reordered_rejection.sources.reverse();
+    assert_eq!(
+        error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(reordered_rejection)
+            .expect_err("source ordering cannot admit the selected Drop partial move")
+            .diagnostics()
+    );
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .canonical_bytes(),
+        parent_artifact.canonical_bytes(),
+        "rejected closure/Drop revision disturbed the legal artifact"
+    );
+}
+
 /// Exercise the ordinary service path for the source-level shape that reaches
 /// a handler, a partial aggregate move, and a nonlocal lexical exit together.
 /// The Core test inspects the intermediate frozen MIR; this companion proves
