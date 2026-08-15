@@ -5380,6 +5380,7 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                         });
                     }
                 }
+                verify_effect_operation_specialization(target, &generic_bindings)?;
                 let expected = instantiate_vm_type(&return_type(target)?, &generic_bindings);
                 let found = register_type(function, *dst)?;
                 if expected != found {
@@ -5490,6 +5491,7 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                         });
                     }
                 }
+                verify_effect_operation_specialization(target, &generic_bindings)?;
                 let expected = instantiate_vm_type(&return_type(target)?, &generic_bindings);
                 if expected != *result {
                     return Err(VmArtifactError::TypeMismatch {
@@ -5502,6 +5504,82 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
         }
     }
     Ok(VerifiedVmProgram { program })
+}
+
+/// Direct calls and lifted callable construction infer a target-local generic
+/// substitution from their concrete ABI.  Effect operations cross dynamic VM
+/// handler frames, however, so their identity and payload/resumption ABI must
+/// have been materialized with that very substitution as well.  Without this
+/// check, a hostile artifact can call `helper<i64>` whose body still performs
+/// `Ask<T>`: signature verification accepts the call while runtime handler
+/// lookup compares `Ask<T>` and `Ask<i64>` as distinct identities.
+fn verify_effect_operation_specialization(
+    function: &VmFunction,
+    bindings: &BTreeMap<u32, VmType>,
+) -> Result<(), VmArtifactError> {
+    for instruction in &function.instructions {
+        match instruction {
+            VmInstruction::Perform {
+                dst,
+                effect_arguments,
+                arguments,
+                ..
+            } => {
+                let specialized_arguments = effect_arguments
+                    .iter()
+                    .map(|argument| instantiate_vm_generic_argument(argument, bindings))
+                    .collect::<Vec<_>>();
+                let result = register_type(function, *dst)?;
+                let specialized_result = instantiate_vm_type(&result, bindings);
+                let payloads = arguments
+                    .iter()
+                    .map(|argument| register_type(function, *argument))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let specialized_payloads = payloads
+                    .iter()
+                    .map(|payload| instantiate_vm_type(payload, bindings))
+                    .collect::<Vec<_>>();
+                if *effect_arguments != specialized_arguments
+                    || result != specialized_result
+                    || payloads != specialized_payloads
+                {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "generic effect operation ABI was not specialized for call",
+                    });
+                }
+            }
+            VmInstruction::InstallHandler {
+                effect_arguments,
+                payload_destinations,
+                resume_type,
+                ..
+            } => {
+                let specialized_arguments = effect_arguments
+                    .iter()
+                    .map(|argument| instantiate_vm_generic_argument(argument, bindings))
+                    .collect::<Vec<_>>();
+                let payloads = payload_destinations
+                    .iter()
+                    .map(|destination| register_type(function, *destination))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let specialized_payloads = payloads
+                    .iter()
+                    .map(|payload| instantiate_vm_type(payload, bindings))
+                    .collect::<Vec<_>>();
+                let specialized_resume_type = instantiate_vm_type(resume_type, bindings);
+                if *effect_arguments != specialized_arguments
+                    || payloads != specialized_payloads
+                    || *resume_type != specialized_resume_type
+                {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "generic effect operation ABI was not specialized for call",
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// An effect performance may suspend in an ordinary callee and select a
