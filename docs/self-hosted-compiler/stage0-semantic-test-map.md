@@ -82,6 +82,10 @@ coarse. The composite fixtures cover:
 - source-oriented diagnostics for label/environment escape;
 - one-shot over-resume, multi-shot unique-borrow capture, and multi-shot active
   label capture.
+- private nominal-field authority across source entries, including a permitted
+  same-entry construction/projection and rejected cross-entry access;
+- mixed-polarity trait coherence at the service boundary, so contradictory
+  positive and negative implementations cannot reach executable lowering.
 
 ## Previously enabled red semantic cases
 

@@ -4076,6 +4076,26 @@ fn service_uses_declared_auto_traits_at_callable_boundaries() {
 }
 
 #[test]
+fn service_rejects_overlapping_positive_and_negative_trait_implementations() {
+    // Coherence must reject the conflicting pair before any source body can
+    // rely on either answer.  The solver and coherence unit suites cover the
+    // head-unification algorithm; this confirms that a user program cannot
+    // reach the executable artifact boundary with contradictory evidence.
+    let source = "trait Marker<T> {} struct Box<T> {} impl<T> Marker<T> for Box<T> {} impl !Marker<i64> for Box<i64> {} pub fn main() -> i64 { 42 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("contradictory positive and negative trait implementations unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3406"),
+        "missing mixed-polarity coherence diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_uses_implementation_where_bounds_while_type_checking_method_bodies() {
     let source = "trait Mark {} pub fn requires_mark<T>(value: T) -> T where T: Mark { value } trait Relay<T> { fn relay(value: T) -> T; } impl<T> Relay<T> for i64 where T: Mark { fn relay(value: T) -> T { requires_mark(value) } } impl Mark for i64 {} pub fn main() -> i64 { Relay<i64>::relay(42) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -10134,6 +10154,31 @@ fn service_rejects_public_members_reached_through_a_private_nested_module() {
             .iter()
             .any(|diagnostic| diagnostic.code == "G4104"),
         "{diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_enforces_private_nominal_field_authority_at_source_boundaries() {
+    // A private field is usable by the source entry that declared the nominal
+    // type, but it must remain opaque to another entry even when the nominal
+    // type itself is public.  This exercises the source-to-interface-to-body
+    // boundary; header-only tests cannot establish that field authority is
+    // retained into construction, projection, and executable lowering.
+    let local = "pub struct Secret { private value: i64 } pub fn main() -> i64 { let secret = Secret { value: 42 }; secret.value }";
+    let outcome = StageZeroCompiler::new().compile(request(local)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let cross_entry = StageZeroCompiler::new().compile(request_with_module(
+        "pub mod api; use api::Secret; pub fn main() -> i64 { let secret = Secret { value: 42 }; secret.value }",
+        "pub struct Secret { private value: i64 }",
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = cross_entry else {
+        panic!("a private nominal field unexpectedly crossed its source authority");
+    };
+    assert!(
+        !diagnostics.is_empty(),
+        "private-field rejection must produce a structured diagnostic"
     );
 }
 
