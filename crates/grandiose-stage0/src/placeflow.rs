@@ -103,6 +103,71 @@ pub struct MoveFact {
     pub root: String,
     pub fields: Vec<u32>,
 }
+
+/// Body-local identity for one statically distinguishable owned move path.
+/// Identities are dense and append-only for the duration of one PlaceFlow
+/// analysis; they are never inferred from a source spelling or a final-fact
+/// position.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MovePathId(pub u32);
+
+/// One node in the canonical move-path tree published by PlaceFlow.
+///
+/// The root node of a source storage place has no `parent` or `field`; every
+/// projected child names the immediately preceding path and the selected
+/// field.  Keeping this tree alongside the compact `MoveFact` exit summary
+/// lets later MIR cleanup/lowering use stable identities without retaining
+/// mutable analyzer state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MovePathData {
+    pub parent: Option<MovePathId>,
+    pub root: String,
+    pub field: Option<u32>,
+}
+
+/// Append-only construction arena for canonical owned projection paths.
+///
+/// It stores each prefix exactly once, so a nested partial move has stable
+/// parent identities even when only the leaf remains moved at the body exit.
+#[derive(Clone, Debug, Default)]
+struct MovePathArena {
+    entries: Vec<MovePathData>,
+    ids: BTreeMap<Projection, MovePathId>,
+}
+
+impl MovePathArena {
+    fn intern(&mut self, path: &Projection) -> MovePathId {
+        if let Some(id) = self.ids.get(path) {
+            return *id;
+        }
+
+        let (parent, field) = match path.fields.split_last() {
+            Some((field, prefix)) => {
+                let parent = self.intern(&Projection {
+                    root: path.root.clone(),
+                    fields: prefix.to_vec(),
+                });
+                (Some(parent), Some(*field))
+            }
+            None => (None, None),
+        };
+        let id = MovePathId(
+            u32::try_from(self.entries.len())
+                .expect("PlaceFlow move-path arena exceeded the representable identity space"),
+        );
+        self.entries.push(MovePathData {
+            parent,
+            root: path.root.clone(),
+            field,
+        });
+        self.ids.insert(path.clone(), id);
+        id
+    }
+
+    fn into_entries(self) -> Vec<MovePathData> {
+        self.entries
+    }
+}
 /// A lexical positive refinement observed while interpreting Core. It is an
 /// inspection fact, not a persistent binding: joins and callable boundaries
 /// intentionally do not retain it unless a later branch lowering proves the
@@ -160,6 +225,11 @@ pub struct PlaceFlow {
     /// compact whole-local summary for existing consumers; this retains the
     /// information needed for partial moves and aggregate cleanup.
     pub moved_places: Vec<MoveFact>,
+    /// The append-only, prefix-closed identity tree for every owned path that
+    /// became moved during this body analysis. It is distinct from
+    /// `moved_places`, which intentionally retains only final uninitialized
+    /// leaves for cleanup.
+    pub move_paths: Vec<MovePathData>,
     pub active_loans: Vec<LoanFact>,
     pub refinements: Vec<RefinementFact>,
     pub events: Vec<FlowEvent>,
@@ -174,6 +244,7 @@ impl PlaceFlow {
             reborrow_parents: BTreeMap::new(),
             reference_origins: BTreeMap::new(),
             moved_places: BTreeSet::new(),
+            move_paths: MovePathArena::default(),
             scopes: vec![BTreeMap::new()],
             scope_refinement_starts: vec![0],
             next_shadow: 0,
@@ -214,6 +285,7 @@ impl PlaceFlow {
         Self {
             final_states: a.states,
             moved_places,
+            move_paths: a.move_paths.into_entries(),
             active_loans,
             refinements: a.refinements,
             events: a.events,
@@ -238,6 +310,7 @@ struct Analyzer<'a> {
     /// reinitialized. Whole-local moves are mirrored in `states`; field moves
     /// deliberately are not, because their siblings remain usable.
     moved_places: BTreeSet<Projection>,
+    move_paths: MovePathArena,
     /// Source spellings remain useful in frozen Core diagnostics, while
     /// ownership facts need lexical identities so an inner `let value` does
     /// not alias an outer loan of the same spelling.
@@ -1189,6 +1262,7 @@ impl Analyzer<'_> {
     }
 
     fn record_move(&mut self, place: Projection) {
+        self.move_paths.intern(&place);
         // A whole/parent move subsumes any child facts. Conversely, a child
         // fact under an already moved parent cannot add information.
         if self

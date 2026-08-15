@@ -92,8 +92,8 @@ pub use pattern::{
     PatternGenericScope, PatternPlan, elaborate_pattern, elaborate_pattern_with_scope,
 };
 pub use placeflow::{
-    FlowDiagnostic, FlowEvent, FlowEventKind, LoanFact, LocalState, MoveFact, PlaceFlow,
-    RefinementFact,
+    FlowDiagnostic, FlowEvent, FlowEventKind, LoanFact, LocalState, MoveFact, MovePathData,
+    MovePathId, PlaceFlow, RefinementFact,
 };
 pub use quantity::{Quantity, QuantityError};
 pub use request::{

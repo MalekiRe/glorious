@@ -2222,6 +2222,16 @@ fn placeflow_tracks_partial_moves_without_consuming_disjoint_fields() {
     assert_eq!(flow.moved_places.len(), 1, "{:#?}", flow.moved_places);
     assert_eq!(flow.moved_places[0].root, "pair");
     assert_eq!(flow.moved_places[0].fields, vec![0]);
+    assert_eq!(flow.move_paths.len(), 2, "{:#?}", flow.move_paths);
+    assert_eq!(flow.move_paths[0].parent, None);
+    assert_eq!(flow.move_paths[0].root, "pair");
+    assert_eq!(flow.move_paths[0].field, None);
+    assert_eq!(
+        flow.move_paths[1].parent,
+        Some(grandiose_stage0::MovePathId(0))
+    );
+    assert_eq!(flow.move_paths[1].root, "pair");
+    assert_eq!(flow.move_paths[1].field, Some(0));
     assert!(
         flow.events.iter().any(|event| matches!(
             (&event.kind, &event.place),
