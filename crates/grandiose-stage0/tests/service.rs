@@ -5284,6 +5284,14 @@ fn service_rejects_recursive_selected_hrtb_type_gat_callbacks_canonically() {
 }
 
 #[test]
+fn service_rejects_recursive_selected_hrtb_effect_gat_callbacks_canonically() {
+    let root = "pub mod provider; use provider::Callback; pub fn apply(callback: Callback) -> i64 { let value = 41; callback(&value) } pub fn main() -> i64 { apply(provider::relay) }";
+    let provider = "pub trait Gate { type Effects<'a>: EffectRow; } pub type Callback = for<'a> (&'a i64) -> i64 / { <i64 as Gate>::Effects<'a> }; impl Gate for i64 { type Effects<'a> = { <i64 as Gate>::Effects<'a> }; } pub fn relay<'a>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a> } { *value }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new().compile(request_with_logical_sources(root, &[("src/provider/provider.glorious", provider)])) else { panic!("recursive selected effect callback entered an artifact"); };
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "missing bounded recursive selected-effect rejection: {diagnostics:#?}");
+}
+
+#[test]
 fn service_normalizes_generic_associated_consts_in_hrtb_gat_body_results() {
     let mut request = request(
         "use facade::layout; pub fn main() -> i64 { layout() }",
