@@ -10327,6 +10327,55 @@ fn service_preserves_generic_dependency_effect_identity_through_replay() {
 }
 
 #[test]
+fn service_preserves_generic_effect_identity_through_dependency_reexport_facades() {
+    let public = {
+        let mut request = request(
+            "use bridge::Ask; use bridge::relay; pub fn main() -> i64 { handle relay(20) { Ask<i64>::ask(value, k) => k(value) + k(value + 1) } }",
+        );
+        request.sources.push(SourceInput::new(
+            PackageKey("bridge@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Ask, relay};".as_slice(),
+        ));
+        request.sources.push(SourceInput::new(
+            PackageKey("provider@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub effect Ask<T> { [2,2] ask(value: T) -> T; } pub fn relay<T>(value: T) -> T / Ask<T> { Ask<T>::ask(value) }".as_slice(),
+        ));
+        StageZeroCompiler::new().compile(request)
+    };
+    let public = public.expect(
+        "a generic effect reexport must retain one instantiated operation identity through replay",
+    );
+    assert!(public.diagnostics.is_empty(), "{:#?}", public.diagnostics);
+    assert_eq!(public.artifact.unwrap().run_i64().unwrap(), 41);
+
+    let private = {
+        let mut request = request("pub fn main() -> i64 { 42 }");
+        request.sources.push(SourceInput::new(
+            PackageKey("bridge@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{Ask, relay};".as_slice(),
+        ));
+        request.sources.push(SourceInput::new(
+            PackageKey("provider@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"effect Ask<T> { [2,2] ask(value: T) -> T; } pub fn relay<T>(value: T) -> T / Ask<T> { Ask<T>::ask(value) }".as_slice(),
+        ));
+        StageZeroCompiler::new().compile(request)
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = private else {
+        panic!("a private generic effect unexpectedly leaked through a public facade")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "missing private generic-effect facade diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_cancels_an_optional_generic_dependency_resumption() {
     // Cancellation has a separate runtime edge from replay.  Keep the effect
     // and generic helper in a dependency so the imported `Ask<i64>` identity

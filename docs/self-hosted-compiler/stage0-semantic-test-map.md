@@ -117,6 +117,10 @@ coarse. The composite fixtures cover:
 - generic dependency effect identity through exact replay and optional
   cancellation, including rejection when the imported handler's concrete
   effect instance does not match the performed one.
+- generic effect re-export facades preserve one instantiated operation
+  identity from provider performance through root replay and VM execution;
+  the facade cannot expose the corresponding private effect declaration
+  (`service_preserves_generic_effect_identity_through_dependency_reexport_facades`).
 - imported reference lifetime relations through a local closure and handler,
   including rejection of a closure escape after the imported call.
 - whole-referent `move *reference` retains its direct unique-reference handle
