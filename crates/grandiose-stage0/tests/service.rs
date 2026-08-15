@@ -18805,6 +18805,18 @@ fn service_rejoins_statement_suffix_after_opaque_projected_resumption() {
 }
 
 #[test]
+fn service_rejoins_statement_suffix_after_opaque_mixed_consuming_control() {
+    // A resumptive operation followed by a non-terminal cancelling operation
+    // crosses two dynamic frames. Its handler result remains a normal lexical
+    // value, so the suffix must run after the cancelling frame completes.
+    let source = "effect Signal { [1,1] ping(value: i64) -> i64; pong(value: i64) -> i64; } pub fn relay(value: i64) -> i64 / Signal { let ping = Signal::ping(value); Signal::pong(ping) } pub fn apply(callback: (i64) -> i64 / Signal, value: i64) -> i64 / Signal { callback(value) } pub fn main() -> i64 { let callback = relay; let ignored = handle apply(callback, 40) { Signal::ping(value) with k => k(value + 2); Signal::pong(value) => value }; ignored }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through
