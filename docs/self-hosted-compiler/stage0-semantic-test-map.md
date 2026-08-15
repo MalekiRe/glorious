@@ -90,6 +90,9 @@ coarse. The composite fixtures cover:
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate
   modules, carried through record construction, projection, and VM execution.
+- generic dependency effect identity through exact replay and optional
+  cancellation, including rejection when the imported handler's concrete
+  effect instance does not match the performed one.
 
 ## Previously enabled red semantic cases
 

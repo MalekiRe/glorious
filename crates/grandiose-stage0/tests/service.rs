@@ -9710,6 +9710,61 @@ fn service_materializes_reachable_generic_dependency_callables() {
 }
 
 #[test]
+fn service_preserves_generic_dependency_effect_identity_through_replay() {
+    // The imported generic effect must be instantiated once as `Ask<i64>`
+    // across the dependency callable, the caller's handler frame, and both
+    // replayed continuation invocations.  A same-spelled `Ask<Text>` handler
+    // cannot discharge that outward effect.
+    let dependency = "pub effect Ask<T> { [2,2] ask(value: T) -> T; } pub fn relay<T>(value: T) -> T / Ask<T> { Ask<T>::ask(value) }";
+    let accepted = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::Ask; use math::relay; pub fn main() -> i64 { handle relay(20) { Ask<i64>::ask(value, k) => k(value) + k(value + 1) } }",
+            "math@0.1.0",
+            dependency,
+        ))
+        .expect("a generic dependency performance must replay through its exact handler instance");
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:#?}",
+        accepted.diagnostics
+    );
+    assert_eq!(accepted.artifact.unwrap().run_i64().unwrap(), 41);
+
+    let rejected = StageZeroCompiler::new().compile(request_with_dependency(
+        "use math::Ask; use math::relay; pub fn main() -> i64 { handle relay(20) { Ask<Text>::ask(value, k) => k(\"wrong\") + k(\"instance\") } }",
+        "math@0.1.0",
+        dependency,
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = rejected else {
+        panic!("a mismatched generic dependency handler unexpectedly closed Ask<i64>");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4155"),
+        "mismatched imported effect instance must remain outward: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_cancels_an_optional_generic_dependency_resumption() {
+    // Cancellation has a separate runtime edge from replay.  Keep the effect
+    // and generic helper in a dependency so the imported `Ask<i64>` identity
+    // and its optional continuation contract must survive linking before the
+    // caller can consume the continuation with a cancellation clause.
+    let dependency = "pub effect Ask<T> { [0,1] ask(value: T) -> T; } pub fn relay<T>(value: T) -> T / Ask<T> { Ask<T>::ask(value) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::Ask; use math::relay; pub fn main() -> i64 { handle relay(20) { Ask<i64>::ask(_) with _ => 42 } }",
+            "math@0.1.0",
+            dependency,
+        ))
+        .expect("an optional generic dependency continuation must be cancellable");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_links_private_helpers_reached_from_specialized_dependency_generics() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(
