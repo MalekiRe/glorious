@@ -4214,6 +4214,10 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
                     unique: true,
                     referent: Box::new(VmType::I64),
                 },
+                VmType::Tuple(vec![VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::I64),
+                }]),
                 label,
                 closure,
                 VmType::Unit,
@@ -4227,6 +4231,10 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
                     unique: true,
                     reborrow: false,
                 },
+                VmInstruction::MakeTuple {
+                    dst: 2,
+                    fields: vec![1],
+                },
                 VmInstruction::InstallHandler {
                     effect: facade,
                     effect_arguments: vec![],
@@ -4234,29 +4242,29 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
                     continuation: VmContinuationPolicy::Consume,
-                    target: 9,
+                    target: 10,
                 },
                 VmInstruction::MakeLabel {
-                    dst: 2,
+                    dst: 3,
                     brand_owner: owner,
                     brand_label: 0,
-                    target: 7,
+                    target: 8,
                     destination: 0,
                 },
                 VmInstruction::CallIndirect {
-                    dst: 4,
-                    callee: 2,
+                    dst: 5,
+                    callee: 3,
                     arguments: vec![0],
                 },
                 VmInstruction::UninstallHandler,
-                VmInstruction::Jump { target: 7 },
+                VmInstruction::Jump { target: 8 },
                 VmInstruction::MakeCallable {
-                    dst: 3,
+                    dst: 4,
                     callee: DefKey(Digest::of_bytes(b"forged-unique-closure")),
-                    captures: vec![1],
+                    captures: vec![2],
                     environment: None,
                 },
-                VmInstruction::Return { value: 3 },
+                VmInstruction::Return { value: 4 },
                 VmInstruction::Trap,
             ],
         },
@@ -4272,6 +4280,180 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
     assert!(matches!(
         decode_and_verify_artifact(&bytes),
         Err(VmArtifactError::UnsupportedEscapingUniqueReference)
+    ));
+}
+
+#[test]
+fn verifier_rejects_label_callable_capture_before_dynamic_rejoin_can_escape() {
+    let owner = DefKey(Digest::of_bytes(b"dynamic-label-capture-owner"));
+    let facade = DefKey(Digest::of_bytes(b"dynamic-label-capture-facade"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let closure = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, label, closure, VmType::Unit],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                // The label is minted before the facade, so invoking it
+                // would abandon that frame and return the forged closure.
+                VmInstruction::MakeLabel {
+                    dst: 1,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 7,
+                    destination: 0,
+                },
+                VmInstruction::InstallHandler {
+                    effect: facade,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 9,
+                },
+                VmInstruction::MakeCallable {
+                    dst: 2,
+                    callee: DefKey(Digest::of_bytes(b"forged-label-closure")),
+                    captures: vec![1],
+                    environment: None,
+                },
+                VmInstruction::CallIndirect {
+                    dst: 3,
+                    callee: 1,
+                    arguments: vec![0],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Jump { target: 7 },
+                VmInstruction::Return { value: 2 },
+                VmInstruction::Trap,
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"dynamic-label-capture-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+}
+
+#[test]
+fn verifier_rejects_resumption_callable_capture_before_dynamic_rejoin_can_escape() {
+    let owner = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-owner"));
+    let facade = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-facade"));
+    let effect = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-effect"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let snapshot = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let closure = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, label, VmType::I64, snapshot, closure, VmType::Unit],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeLabel {
+                    dst: 1,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 11,
+                    destination: 0,
+                },
+                VmInstruction::InstallHandler {
+                    effect: facade,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 13,
+                },
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 8,
+                },
+                VmInstruction::Perform {
+                    dst: 2,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::UninstallHandler,
+                VmInstruction::Jump { target: 11 },
+                VmInstruction::CaptureResumption { dst: 3 },
+                VmInstruction::MakeCallable {
+                    dst: 4,
+                    callee: DefKey(Digest::of_bytes(b"forged-resumption-closure")),
+                    captures: vec![3],
+                    environment: None,
+                },
+                VmInstruction::CallIndirect {
+                    dst: 5,
+                    callee: 1,
+                    arguments: vec![0],
+                },
+                VmInstruction::Return { value: 4 },
+                VmInstruction::Trap,
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"dynamic-resumption-capture-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::HandlerResumeUnavailable)
     ));
 }
 

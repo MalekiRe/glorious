@@ -6933,6 +6933,7 @@ struct VerifierContinuation {
     /// uninitialized addressable slot.
     storage_live: Vec<bool>,
     snapshots: Vec<Option<u32>>,
+    labels: Vec<bool>,
     performed: VerifierPerformed,
     /// Frames crossed while looking for the selected outer handler. They are
     /// absent while its clause runs and are restored when the continuation
@@ -6962,6 +6963,10 @@ struct VerifierState {
     /// frame. The type system still sees a callable; this parallel proof fact
     /// is what prevents capability forgery through an equally typed callable.
     snapshots: Vec<Option<u32>>,
+    /// A first-class lexical label shares the callable ABI but can only be
+    /// invoked in the frame that minted it. It cannot be frozen into another
+    /// callable environment.
+    labels: Vec<bool>,
     handlers: Vec<VerifierHandlerFrame>,
     pending_leave: Option<PendingLeave>,
     /// Number of dynamic clause-return continuations currently being checked.
@@ -7124,6 +7129,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             registers: initial,
             storage_live: initial_storage_live,
             snapshots: vec![None; function.registers.len()],
+            labels: vec![false; function.registers.len()],
             handlers: Vec::new(),
             pending_leave: None,
             resumption_return_depth: 0,
@@ -8059,6 +8065,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         registers: saved,
                         storage_live: states.storage_live.clone(),
                         snapshots: states.snapshots.clone(),
+                        labels: states.labels.clone(),
                         performed: VerifierPerformed {
                             effect: *effect,
                             effect_arguments: effect_arguments.clone(),
@@ -8182,6 +8189,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
                         snapshots: continuation.snapshots,
+                        labels: continuation.labels,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
                         resumption_return_depth: states.resumption_return_depth,
@@ -8242,6 +8250,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     registers: continuation.registers,
                     storage_live: continuation.storage_live,
                     snapshots: continuation.snapshots,
+                    labels: continuation.labels,
                     handlers: resumed_handlers,
                     pending_leave: continuation.pending_leave,
                     resumption_return_depth: states.resumption_return_depth.saturating_add(1),
@@ -8289,6 +8298,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }
                 write(&mut states, *dst)?;
                 states.snapshots[*dst as usize] = Some(frame_id);
+                states.labels[*dst as usize] = false;
             }
             VmInstruction::ResumeSnapshot { snapshot, value } => {
                 read(&states, *snapshot)?;
@@ -8349,6 +8359,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
                         snapshots: continuation.snapshots,
+                        labels: continuation.labels,
                         handlers: resumed_handlers,
                         pending_leave: continuation.pending_leave,
                         resumption_return_depth: states.resumption_return_depth,
@@ -8409,6 +8420,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
                         snapshots: continuation.snapshots,
+                        labels: continuation.labels,
                         performed: continuation.performed,
                         above: crossed,
                         pending_leave: continuation.pending_leave,
@@ -8439,6 +8451,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 same_type(function, *dst, *src)?;
                 write(&mut states, *dst)?;
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
+                states.labels[*dst as usize] = states.labels[*src as usize];
             }
             VmInstruction::StorageLive { local, .. } => {
                 let index = *local as usize;
@@ -8452,6 +8465,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 *slot = Some(false);
                 states.storage_live[index] = true;
                 states.snapshots[*local as usize] = None;
+                states.labels[*local as usize] = false;
             }
             VmInstruction::StorageDead { local, .. } => {
                 let index = *local as usize;
@@ -8465,6 +8479,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 *slot = None;
                 states.storage_live[index] = false;
                 states.snapshots[*local as usize] = None;
+                states.labels[*local as usize] = false;
             }
             VmInstruction::SetDropFlag { flag, .. } => {
                 expect_type(function, *flag, VmType::Bool)?;
@@ -8477,6 +8492,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 // may occur repeatedly as initialization changes.
                 *slot = Some(true);
                 states.snapshots[*flag as usize] = None;
+                states.labels[*flag as usize] = false;
             }
             VmInstruction::DestroyIf { local, flag } => {
                 read(&states, *flag)?;
@@ -8491,6 +8507,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 }
                 *slot = Some(false);
                 states.snapshots[*local as usize] = None;
+                states.labels[*local as usize] = false;
             }
             VmInstruction::Store { dst, src } => {
                 read(&states, *src)?;
@@ -8502,6 +8519,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     .ok_or(VmArtifactError::InvalidRegister { register: *dst })?;
                 *state = Some(true);
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
+                states.labels[*dst as usize] = states.labels[*src as usize];
             }
             VmInstruction::Move { dst, src } => {
                 read(&states, *src)?;
@@ -8509,6 +8527,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states[*src as usize] = Some(false);
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
                 states.snapshots[*src as usize] = None;
+                states.labels[*dst as usize] = states.labels[*src as usize];
+                states.labels[*src as usize] = false;
                 write(&mut states, *dst)?
             }
             VmInstruction::Borrow {
@@ -8837,17 +8857,26 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     // reject the artifact at verification instead of
                     // deferring this safety failure until a caller observes
                     // the returned callable.
-                    if matches!(
-                        register_type(function, capture)?,
-                        VmType::Reference { unique: true, .. }
+                    if vm_type_contains_unique_reference(
+                        &register_type(function, capture)?,
+                        &function.nominal_copy_descriptors,
                     ) {
                         return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
+                    }
+                    if states.snapshots[capture as usize].is_some() {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
+                    if states.labels[capture as usize] {
+                        return Err(VmArtifactError::InvalidLabelContract {
+                            message: "callable capture cannot retain a lexical label",
+                        });
                     }
                 }
                 if !matches!(register_type(function, *dst)?, VmType::Callable { .. }) {
                     return Err(VmArtifactError::NotCallable { register: *dst });
                 }
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = false;
             }
             VmInstruction::MakeLabel {
                 dst,
@@ -8870,7 +8899,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 if *target as usize >= function.instructions.len() {
                     return Err(VmArtifactError::InvalidRegister { register: *target });
                 }
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = true;
             }
             VmInstruction::CallIndirect {
                 dst,
@@ -9426,6 +9456,47 @@ fn vm_type_is_duplicable(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -
             VmType::Generic(_) => true,
             VmType::Callable { .. } => true,
             _ => true,
+        }
+    }
+    visit(ty, descriptors, &mut Vec::new())
+}
+
+/// A retained callable environment is a snapshot boundary.  It may carry a
+/// shared reference, but a unique reference anywhere in an explicitly known
+/// aggregate would lose its write-back target when frozen.
+fn vm_type_contains_unique_reference(ty: &VmType, descriptors: &[VmNominalCopyDescriptor]) -> bool {
+    fn visit(
+        ty: &VmType,
+        descriptors: &[VmNominalCopyDescriptor],
+        active: &mut Vec<(DefKey, Vec<VmType>)>,
+    ) -> bool {
+        match ty {
+            VmType::Reference { unique, .. } => *unique,
+            VmType::Tuple(elements) => elements.iter().any(|element| visit(element, descriptors, active)),
+            VmType::Array(element) => visit(element, descriptors, active),
+            VmType::Nominal {
+                definition,
+                arguments,
+            } => {
+                let key = (*definition, arguments.clone());
+                let Some(descriptor) = descriptors.iter().find(|candidate| {
+                    candidate.definition == *definition && candidate.arguments == *arguments
+                }) else {
+                    return false;
+                };
+                if active.contains(&key) {
+                    return false;
+                }
+                active.push(key);
+                let result = descriptor.variants.iter().any(|variant| {
+                    variant
+                        .iter()
+                        .any(|field| visit(field, descriptors, active))
+                });
+                active.pop();
+                result
+            }
+            _ => false,
         }
     }
     visit(ty, descriptors, &mut Vec::new())
