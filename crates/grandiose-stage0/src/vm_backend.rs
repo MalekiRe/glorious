@@ -1863,12 +1863,15 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// binding identities, making diagnostic root strings non-semantic. Schema
 /// 82 adds canonical source-storage lifecycle/drop-flag/action witnesses to
 /// every nonlocal Leave, so compact VM cleanup cannot lose its MIR proof.
+/// Schema 86 makes nominal aggregate construction, projection, and update
+/// prove their field layouts against the frozen declaration-owned descriptor,
+/// preventing an embedded callable from being relabelled with a forged ABI.
 /// Schema 85 binds every sealed callable environment to either its canonical
 /// source lift or an explicit enclosing-instance witness, so a decoded
 /// closure descriptor cannot redirect to an ABI-compatible sibling body.
 /// Schema 83 makes all generic and frozen integer shifts reject a count at or
 /// beyond the operand width instead of silently masking it.
-pub const STAGE0_VM_SCHEMA: u32 = 85;
+pub const STAGE0_VM_SCHEMA: u32 = 86;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -7968,10 +7971,11 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 fields,
                 field_types,
             } => {
-                match register_type(function, *dst)? {
+                let destination_type = register_type(function, *dst)?;
+                match &destination_type {
                     VmType::Nominal {
                         definition: actual, ..
-                    } if actual == *definition => {}
+                    } if *actual == *definition => {}
                     found => {
                         return Err(VmArtifactError::TypeMismatch {
                             register: *dst,
@@ -7979,9 +7983,15 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                                 definition: *definition,
                                 arguments: Vec::new(),
                             },
-                            found,
+                            found: found.clone(),
                         });
                     }
+                }
+                let layout = nominal_record_layout(function, &destination_type)?;
+                if field_types != layout {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "record field layout does not match nominal descriptor",
+                    });
                 }
                 if fields.len() != field_types.len() {
                     return Err(VmArtifactError::CallArity {
@@ -8011,14 +8021,15 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::MakeEnum {
                 dst,
                 definition,
+                variant,
                 fields,
                 field_types,
-                ..
             } => {
-                match register_type(function, *dst)? {
+                let destination_type = register_type(function, *dst)?;
+                match &destination_type {
                     VmType::Nominal {
                         definition: actual, ..
-                    } if actual == *definition => {}
+                    } if *actual == *definition => {}
                     found => {
                         return Err(VmArtifactError::TypeMismatch {
                             register: *dst,
@@ -8026,9 +8037,15 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                                 definition: *definition,
                                 arguments: Vec::new(),
                             },
-                            found,
+                            found: found.clone(),
                         });
                     }
+                }
+                let layout = nominal_variant_layout(function, &destination_type, *variant)?;
+                if field_types != layout {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "enum field layout does not match nominal descriptor",
+                    });
                 }
                 if fields.len() != field_types.len() {
                     return Err(VmArtifactError::CallArity {
@@ -8066,7 +8083,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::InvalidRegister { register: *index });
                 }
                 read(&states, *base)?;
-                if !matches!(register_type(function, *base)?, VmType::Nominal { .. }) {
+                let base_type = register_type(function, *base)?;
+                if !matches!(base_type, VmType::Nominal { .. }) {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *base,
                         expected: VmType::Nominal {
@@ -8074,6 +8092,17 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             arguments: Vec::new(),
                         },
                         found: register_type(function, *base)?,
+                    });
+                }
+                if !nominal_projection_matches_layout(
+                    function,
+                    &base_type,
+                    *index,
+                    *field_count,
+                    field_type,
+                )? {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "nominal projection layout does not match frozen descriptor",
                     });
                 }
                 let found = register_type(function, *dst)?;
@@ -8084,9 +8113,6 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         found,
                     });
                 }
-                let VmType::Nominal { .. } = register_type(function, *base)? else {
-                    unreachable!("checked nominal base")
-                };
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*base as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*base as usize];
@@ -8176,6 +8202,14 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                             arguments: Vec::new(),
                         },
                         found: base_type,
+                    });
+                }
+                let layout = nominal_record_layout(function, &base_type)?;
+                if *field_count as usize != layout.len()
+                    || layout.get(*index as usize) != Some(field_type)
+                {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "record update layout does not match nominal descriptor",
                     });
                 }
                 if register_type(function, *dst)? != base_type {
@@ -9693,6 +9727,82 @@ fn validate_vm_nominal_copy_descriptors(
         }
     }
     Ok(())
+}
+
+/// The descriptor is the frozen declaration-owned layout authority for a
+/// nominal value.  VM register types retain only nominal identity, so every
+/// aggregate operation must recover its fields here instead of trusting the
+/// instruction-local `field_type` metadata supplied by a decoded artifact.
+fn nominal_layout_descriptor<'a>(
+    function: &'a VmFunction,
+    nominal: &VmType,
+) -> Result<&'a VmNominalCopyDescriptor, VmArtifactError> {
+    let VmType::Nominal {
+        definition,
+        arguments,
+    } = nominal
+    else {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "nominal aggregate operation has a non-nominal base",
+        });
+    };
+    function
+        .nominal_copy_descriptors
+        .iter()
+        .find(|descriptor| {
+            descriptor.definition == *definition && descriptor.arguments == *arguments
+        })
+        .ok_or(VmArtifactError::MalformedEncoding {
+            message: "nominal aggregate operation lacks a frozen layout descriptor",
+        })
+}
+
+fn nominal_record_layout<'a>(
+    function: &'a VmFunction,
+    nominal: &VmType,
+) -> Result<&'a [VmType], VmArtifactError> {
+    let descriptor = nominal_layout_descriptor(function, nominal)?;
+    if descriptor.variants.len() != 1 {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "record aggregate operation targets an enum descriptor",
+        });
+    }
+    Ok(&descriptor.variants[0])
+}
+
+fn nominal_variant_layout<'a>(
+    function: &'a VmFunction,
+    nominal: &VmType,
+    variant: u32,
+) -> Result<&'a [VmType], VmArtifactError> {
+    nominal_layout_descriptor(function, nominal)?
+        .variants
+        .get(variant as usize)
+        .map(Vec::as_slice)
+        .ok_or(VmArtifactError::MalformedEncoding {
+            message: "enum variant is outside frozen nominal layout",
+        })
+}
+
+/// A source field projection may follow a successful enum-pattern dispatch,
+/// so its static nominal type alone does not retain one selected variant.
+/// Admit only a field type/arity that appears in the declaration-owned
+/// layout. The executor then rechecks the concrete variant value before it
+/// exposes the field, preventing a different variant from relabelling a
+/// callable while preserving legitimate completion-dispatch lowering.
+fn nominal_projection_matches_layout(
+    function: &VmFunction,
+    nominal: &VmType,
+    index: u32,
+    field_count: u32,
+    field_type: &VmType,
+) -> Result<bool, VmArtifactError> {
+    Ok(nominal_layout_descriptor(function, nominal)?
+        .variants
+        .iter()
+        .any(|layout| {
+            layout.len() == field_count as usize && layout.get(index as usize) == Some(field_type)
+        }))
 }
 /// Recover a projected referent when the VM type itself carries the complete
 /// structural layout. Nominal layouts intentionally return `None`: their
@@ -12773,7 +12883,7 @@ fn execute(
                 base,
                 index,
                 field_count,
-                ..
+                field_type,
             } => {
                 let fields = match registers[base as usize]
                     .as_ref()
@@ -12788,12 +12898,17 @@ fn execute(
                         found: fields.len() as u32,
                     });
                 }
-                registers[dst as usize] = Some(
-                    fields
-                        .get(index as usize)
-                        .ok_or(VmArtifactError::InvalidRegister { register: index })?
-                        .clone(),
-                );
+                let value = fields
+                    .get(index as usize)
+                    .ok_or(VmArtifactError::InvalidRegister { register: index })?
+                    .clone();
+                if !value_matches_vm_type(&value, &field_type) {
+                    return Err(VmArtifactError::ResultType {
+                        expected: field_type.clone(),
+                        found: value.ty(),
+                    });
+                }
+                registers[dst as usize] = Some(value);
             }
             VmInstruction::ProjectArray {
                 dst,
@@ -15861,7 +15976,7 @@ fn execute_with_arguments(
                 base,
                 index,
                 field_count,
-                ..
+                field_type,
             } => {
                 let fields = match registers[*base as usize]
                     .as_ref()
@@ -15876,12 +15991,17 @@ fn execute_with_arguments(
                         found: fields.len() as u32,
                     });
                 }
-                registers[*dst as usize] = Some(
-                    fields
-                        .get(*index as usize)
-                        .ok_or(VmArtifactError::InvalidRegister { register: *index })?
-                        .clone(),
-                );
+                let value = fields
+                    .get(*index as usize)
+                    .ok_or(VmArtifactError::InvalidRegister { register: *index })?
+                    .clone();
+                if !value_matches_vm_type(&value, field_type) {
+                    return Err(VmArtifactError::ResultType {
+                        expected: field_type.clone(),
+                        found: value.ty(),
+                    });
+                }
+                registers[*dst as usize] = Some(value);
             }
             VmInstruction::ProjectTuple {
                 dst,

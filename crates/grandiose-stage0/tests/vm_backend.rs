@@ -3788,7 +3788,11 @@ fn vm_verifier_rejects_nominal_pattern_fields_outside_frozen_arity() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
-            nominal_copy_descriptors: vec![],
+            nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                definition,
+                arguments: vec![],
+                variants: vec![vec![VmType::I64]],
+            }],
             definition: DefKey(Digest::of_bytes(b"vm-pattern-arity-function")),
             captures: 0,
             parameters: 0,
@@ -3847,7 +3851,11 @@ fn vm_decoder_verifier_rejects_nominal_pattern_field_type_forgery() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
-            nominal_copy_descriptors: vec![],
+            nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                definition,
+                arguments: vec![],
+                variants: vec![vec![VmType::I64]],
+            }],
             definition: DefKey(Digest::of_bytes(b"vm-pattern-layout-function")),
             captures: 0,
             parameters: 0,
@@ -4711,7 +4719,11 @@ fn verifier_rejects_label_projected_through_record_array_and_tuple_before_callab
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
-            nominal_copy_descriptors: vec![],
+            nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                definition: record,
+                arguments: vec![],
+                variants: vec![vec![array.clone()]],
+            }],
             definition: owner,
             captures: 0,
             parameters: 0,
@@ -6364,7 +6376,11 @@ fn verified_vm_round_trips_and_executes_typed_nominal_records() {
         runtime_manifest: None,
         function: VmFunction {
             definition,
-            nominal_copy_descriptors: vec![],
+            nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                definition,
+                arguments: vec![],
+                variants: vec![vec![VmType::I64, VmType::I64]],
+            }],
             captures: 0,
             parameters: 0,
             registers: vec![
@@ -6409,7 +6425,11 @@ fn verifier_round_trips_record_projection_and_rejects_out_of_bounds_indices() {
         runtime_manifest: None,
         function: VmFunction {
             definition,
-            nominal_copy_descriptors: vec![],
+            nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                definition,
+                arguments: vec![],
+                variants: vec![vec![VmType::I64, VmType::I64]],
+            }],
             captures: 0,
             parameters: 0,
             registers: vec![
@@ -6464,6 +6484,227 @@ fn verifier_round_trips_record_projection_and_rejects_out_of_bounds_indices() {
     assert!(matches!(
         verify_vm(candidate),
         Err(VmArtifactError::InvalidRegister { register: 2 })
+    ));
+}
+
+#[test]
+fn verifier_rejects_callable_signature_forged_through_a_nominal_record_projection() {
+    let entry = DefKey(Digest::of_bytes(b"forged-callable-record-entry"));
+    let closure = DefKey(Digest::of_bytes(b"forged-callable-record-closure"));
+    let record = DefKey(Digest::of_bytes(b"forged-callable-record-layout"));
+    let actual = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let forged = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([
+            (
+                closure,
+                VmFunction {
+                    nominal_copy_descriptors: vec![],
+                    definition: closure,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::I64],
+                    instructions: vec![
+                        VmInstruction::ConstI64 { dst: 0, value: 42 },
+                        VmInstruction::Return { value: 0 },
+                    ],
+                },
+            ),
+            (
+                entry,
+                VmFunction {
+                    nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        definition: record,
+                        arguments: vec![],
+                        variants: vec![vec![actual.clone()]],
+                    }],
+                    definition: entry,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![
+                        actual.clone(),
+                        VmType::Nominal {
+                            definition: record,
+                            arguments: vec![],
+                        },
+                        forged.clone(),
+                        VmType::I64,
+                        VmType::I64,
+                    ],
+                    instructions: vec![
+                        VmInstruction::MakeCallable {
+                            dst: 0,
+                            callee: closure,
+                            captures: vec![],
+                            environment: None,
+                        },
+                        VmInstruction::MakeRecord {
+                            dst: 1,
+                            definition: record,
+                            fields: vec![0],
+                            field_types: vec![actual],
+                        },
+                        // This used to relabel the stored `() -> i64` as an
+                        // `(i64) -> i64` callable and let the following
+                        // indirect invocation cross a false ABI boundary.
+                        VmInstruction::ProjectRecord {
+                            dst: 2,
+                            base: 1,
+                            index: 0,
+                            field_count: 1,
+                            field_type: forged,
+                        },
+                        VmInstruction::ConstI64 { dst: 3, value: 7 },
+                        VmInstruction::CallIndirect {
+                            dst: 4,
+                            callee: 2,
+                            arguments: vec![3],
+                        },
+                        VmInstruction::Return { value: 4 },
+                    ],
+                },
+            ),
+        ]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"forged-callable-record-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    assert!(matches!(
+        verify_vm_program(program),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "nominal projection layout does not match frozen descriptor"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&bytes),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "nominal projection layout does not match frozen descriptor"
+        })
+    ));
+}
+
+#[test]
+fn runtime_rechecks_callable_signature_when_an_enum_projection_is_variant_dependent() {
+    let entry = DefKey(Digest::of_bytes(b"variant-callable-entry"));
+    let closure = DefKey(Digest::of_bytes(b"variant-callable-closure"));
+    let choice = DefKey(Digest::of_bytes(b"variant-callable-choice"));
+    let actual = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let other_variant = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([
+            (
+                closure,
+                VmFunction {
+                    nominal_copy_descriptors: vec![],
+                    definition: closure,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::I64],
+                    instructions: vec![
+                        VmInstruction::ConstI64 { dst: 0, value: 42 },
+                        VmInstruction::Return { value: 0 },
+                    ],
+                },
+            ),
+            (
+                entry,
+                VmFunction {
+                    nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        definition: choice,
+                        arguments: vec![],
+                        variants: vec![vec![actual.clone()], vec![other_variant.clone()]],
+                    }],
+                    definition: entry,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![
+                        actual.clone(),
+                        VmType::Nominal {
+                            definition: choice,
+                            arguments: vec![],
+                        },
+                        other_variant.clone(),
+                        VmType::I64,
+                        VmType::I64,
+                    ],
+                    instructions: vec![
+                        VmInstruction::MakeCallable {
+                            dst: 0,
+                            callee: closure,
+                            captures: vec![],
+                            environment: None,
+                        },
+                        VmInstruction::MakeEnum {
+                            dst: 1,
+                            definition: choice,
+                            variant: 0,
+                            fields: vec![0],
+                            field_types: vec![actual.clone()],
+                        },
+                        // The static projection shape exists in variant 1,
+                        // but the concrete value is variant 0. The runtime
+                        // field guard must retain the actual callable ABI.
+                        VmInstruction::ProjectRecord {
+                            dst: 2,
+                            base: 1,
+                            index: 0,
+                            field_count: 1,
+                            field_type: other_variant.clone(),
+                        },
+                        VmInstruction::ConstI64 { dst: 3, value: 7 },
+                        VmInstruction::CallIndirect {
+                            dst: 4,
+                            callee: 2,
+                            arguments: vec![3],
+                        },
+                        VmInstruction::Return { value: 4 },
+                    ],
+                },
+            ),
+        ]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"variant-callable-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    assert!(matches!(
+        verify_vm_program(program).and_then(|program| program.run_i64()),
+        Err(VmArtifactError::ResultType {
+            expected,
+            found,
+        }) if expected == other_variant && found == actual
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&bytes).and_then(|program| program.run_i64()),
+        Err(VmArtifactError::ResultType {
+            expected,
+            found,
+        }) if expected == other_variant && found == actual
     ));
 }
 
@@ -8574,7 +8815,23 @@ fn lowered_partial_move_leave_keeps_only_the_residual_aggregate_cleanup() {
     let mir = MirLowering::lower(definition.key, &core, &flow)
         .function
         .expect("partial move with leave lowers");
-    let artifact = emit_vm(&mir).expect("partial move cleanup emits");
+    let mut artifact = emit_vm(&mir).expect("partial move cleanup emits");
+    let pair = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("Pair"))
+        .expect("Pair definition")
+        .key;
+    // This direct lowering test intentionally bypasses the package linker,
+    // which normally freezes declaration layouts onto every emitted body.
+    // Supply the same declaration-owned record layout before independently
+    // verifying the raw artifact.
+    artifact.function.nominal_copy_descriptors = vec![VmNominalCopyDescriptor {
+        definition: pair,
+        arguments: vec![],
+        variants: vec![vec![VmType::I64, VmType::I64]],
+    }];
+    artifact.fingerprint = artifact.computed_fingerprint();
     let cleanup = artifact
         .function
         .instructions
