@@ -12595,6 +12595,36 @@ fn service_preserves_source_storage_cleanup_through_resumed_cross_call_handler()
 }
 
 #[test]
+fn service_preserves_one_effect_abi_across_nested_direct_vm_calls() {
+    let source = "effect Ask { [1,1] ask(value: i64) -> i64; } pub fn leaf(value: i64) -> i64 / Ask { Ask::ask(value) } pub fn relay(value: i64) -> i64 / Ask { leaf(value) } pub fn main() -> i64 { handle relay(41) { Ask::ask(value) with k => k(value + 1) } }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("caller handler must resume the nested callee with one operation ABI");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(
+        program.functions.values().any(|function| function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::InstallHandler { .. })))
+            && program.functions.values().any(|function| function
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::Perform { .. })))
+            && program.functions.values().any(|function| function
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, VmInstruction::Call { .. }))),
+        "the source program must retain handler, perform, and direct call frames: {program:#?}"
+    );
+    let verified = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("the cross-call effect artifact must verify");
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(verified.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_intercepts_a_nontransparent_projected_terminal_callee_through_a_vm_frame() {
     let source = "effect Stop<T> { stop(value: T) -> !; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Stop<i64>}; } pub fn leaf(value: i64) -> ! / Stop<i64> { Stop<i64>::stop(value) } pub fn helper(value: i64) -> ! / { <i64 as Capability>::Effects } { let copied = value; leaf(copied) } pub fn main() -> i64 { handle helper(42) { Stop<i64>::stop(value) => value } }";
     let outcome = StageZeroCompiler::new()

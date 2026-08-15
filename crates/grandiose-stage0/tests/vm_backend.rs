@@ -2106,6 +2106,237 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
 }
 
 #[test]
+fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
+    let effect = DefKey(Digest::of_bytes(b"cross-function-effect-abi"));
+    let caller = DefKey(Digest::of_bytes(b"cross-function-effect-caller"));
+    let callee = DefKey(Digest::of_bytes(b"cross-function-effect-callee"));
+    // A caller handler supplies I64 for `Ask`, but the callee records its
+    // suspended result in a Bool register. The callee has no local handler,
+    // so only program-wide dispatch ABI validation can see this mismatch.
+    let mut result_confusion = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: Some(Digest::of_bytes(b"cross-function-effect-manifest")),
+        host_capabilities: vec![],
+        entry: caller,
+        functions: BTreeMap::from([
+            (
+                caller,
+                VmFunction {
+                    nominal_copy_descriptors: vec![],
+                    definition: caller,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::I64, VmType::I64],
+                    instructions: vec![
+                        VmInstruction::InstallHandler {
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            payload_destinations: vec![],
+                            resume_type: VmType::I64,
+                            continuation: VmContinuationPolicy::Consume,
+                            target: 5,
+                        },
+                        VmInstruction::Call {
+                            dst: 0,
+                            callee,
+                            arguments: vec![],
+                        },
+                        VmInstruction::UninstallHandler,
+                        VmInstruction::Return { value: 0 },
+                        VmInstruction::Trap,
+                        VmInstruction::ConstI64 { dst: 1, value: 7 },
+                        VmInstruction::Resume { value: 1 },
+                    ],
+                },
+            ),
+            (
+                callee,
+                VmFunction {
+                    nominal_copy_descriptors: vec![],
+                    definition: callee,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::Bool, VmType::I64],
+                    instructions: vec![
+                        VmInstruction::Perform {
+                            dst: 0,
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            arguments: vec![],
+                        },
+                        VmInstruction::BranchBool {
+                            condition: 0,
+                            then_target: 2,
+                            else_target: 4,
+                        },
+                        VmInstruction::ConstI64 { dst: 1, value: 42 },
+                        VmInstruction::Return { value: 1 },
+                        VmInstruction::ConstI64 { dst: 1, value: 0 },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+        ]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"cross-function-effect-result-stale"),
+    };
+    result_confusion.fingerprint = result_confusion.computed_fingerprint();
+    let result_bytes = encode_program(&result_confusion);
+    assert!(matches!(
+        verify_vm_program(result_confusion),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "program effect operation ABI declarations disagree"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&result_bytes),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "program effect operation ABI declarations disagree"
+        })
+    ));
+
+    let payload_callee = DefKey(Digest::of_bytes(b"cross-function-effect-payload-callee"));
+    let mut payload_confusion = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: Some(Digest::of_bytes(b"cross-function-effect-payload-manifest")),
+        host_capabilities: vec![],
+        entry: caller,
+        functions: BTreeMap::from([
+            (
+                caller,
+                VmFunction {
+                    nominal_copy_descriptors: vec![],
+                    definition: caller,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![
+                        VmType::I64,
+                        VmType::I64,
+                        VmType::Callable {
+                            parameters: vec![],
+                            result: Box::new(VmType::I64),
+                            effects: Box::<VmEffectRow>::default(),
+                        },
+                    ],
+                    instructions: vec![
+                        VmInstruction::MakeCallable {
+                            dst: 2,
+                            callee: payload_callee,
+                            captures: vec![],
+                            environment: None,
+                        },
+                        VmInstruction::InstallHandler {
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            payload_destinations: vec![0],
+                            resume_type: VmType::I64,
+                            continuation: VmContinuationPolicy::Consume,
+                            target: 6,
+                        },
+                        VmInstruction::CallIndirect {
+                            dst: 1,
+                            callee: 2,
+                            arguments: vec![],
+                        },
+                        VmInstruction::UninstallHandler,
+                        VmInstruction::Return { value: 1 },
+                        VmInstruction::Trap,
+                        VmInstruction::Cancel,
+                        VmInstruction::ConstI64 { dst: 1, value: 42 },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+            (
+                payload_callee,
+                VmFunction {
+                    nominal_copy_descriptors: vec![],
+                    definition: payload_callee,
+                    captures: 0,
+                    parameters: 0,
+                    registers: vec![VmType::Bool, VmType::I64],
+                    instructions: vec![
+                        VmInstruction::ConstBool {
+                            dst: 0,
+                            value: true,
+                        },
+                        VmInstruction::Perform {
+                            dst: 1,
+                            effect,
+                            effect_arguments: vec![],
+                            operation: 0,
+                            arguments: vec![0],
+                        },
+                        VmInstruction::Return { value: 1 },
+                    ],
+                },
+            ),
+        ]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"cross-function-effect-payload-stale"),
+    };
+    payload_confusion.fingerprint = payload_confusion.computed_fingerprint();
+    let payload_bytes = encode_program(&payload_confusion);
+    assert!(matches!(
+        verify_vm_program(payload_confusion),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "program effect operation ABI declarations disagree"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&payload_bytes),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "program effect operation ABI declarations disagree"
+        })
+    ));
+
+    let mut non_unit_terminal = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: Some(Digest::of_bytes(b"terminal-policy-manifest")),
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"non-unit-terminal-handler")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 1,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Terminal,
+                    target: 2,
+                },
+                VmInstruction::Trap,
+                VmInstruction::Cancel,
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"non-unit-terminal-handler-stale"),
+    };
+    non_unit_terminal.fingerprint = non_unit_terminal.computed_fingerprint();
+    let terminal_bytes = encode_artifact(&non_unit_terminal);
+    assert!(matches!(
+        verify_vm(non_unit_terminal),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "terminal handler has a non-unit resume type"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&terminal_bytes),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "terminal handler has a non-unit resume type"
+        })
+    ));
+}
+
+#[test]
 fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
     let effect = DefKey(Digest::of_bytes(b"cross-frame-ask"));
     let caller = DefKey(Digest::of_bytes(b"cross-frame-caller"));

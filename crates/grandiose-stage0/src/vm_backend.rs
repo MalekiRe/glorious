@@ -5341,6 +5341,9 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
     }
     for function in program.functions.values() {
         verify_function(function)?;
+    }
+    verify_program_effect_operation_abis(&program.functions)?;
+    for function in program.functions.values() {
         for instruction in &function.instructions {
             if let VmInstruction::Call {
                 dst,
@@ -5499,6 +5502,75 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
         }
     }
     Ok(VerifiedVmProgram { program })
+}
+
+/// An effect performance may suspend in an ordinary callee and select a
+/// handler installed by any caller.  Function-local verification cannot see
+/// that dynamic edge, so freeze one operation ABI for every exact effect
+/// identity in the whole program.  Otherwise a callee can write a resumed
+/// `I64` into a locally declared `Bool` destination (or reinterpret handler
+/// payloads) after crossing a call frame.
+fn verify_program_effect_operation_abis(
+    functions: &BTreeMap<DefKey, VmFunction>,
+) -> Result<(), VmArtifactError> {
+    let mut operations = Vec::<(DefKey, Vec<VmGenericArgument>, u32, Vec<VmType>, VmType)>::new();
+    for function in functions.values() {
+        for instruction in &function.instructions {
+            let (effect, effect_arguments, operation, payloads, resume_type) = match instruction {
+                VmInstruction::Perform {
+                    dst,
+                    effect,
+                    effect_arguments,
+                    operation,
+                    arguments,
+                } => (
+                    *effect,
+                    effect_arguments.clone(),
+                    *operation,
+                    arguments
+                        .iter()
+                        .map(|argument| register_type(function, *argument))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    register_type(function, *dst)?,
+                ),
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments,
+                    operation,
+                    payload_destinations,
+                    resume_type,
+                    ..
+                } => (
+                    *effect,
+                    effect_arguments.clone(),
+                    *operation,
+                    payload_destinations
+                        .iter()
+                        .map(|destination| register_type(function, *destination))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    resume_type.clone(),
+                ),
+                _ => continue,
+            };
+            if let Some((_, _, _, expected_payloads, expected_resume_type)) = operations
+                .iter()
+                .find(|(known_effect, known_arguments, known_operation, _, _)| {
+                    *known_effect == effect
+                        && *known_arguments == effect_arguments
+                        && *known_operation == operation
+                })
+            {
+                if *expected_payloads != payloads || *expected_resume_type != resume_type {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "program effect operation ABI declarations disagree",
+                    });
+                }
+            } else {
+                operations.push((effect, effect_arguments, operation, payloads, resume_type));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Derive the only executable identity a sealed closure environment may
@@ -8345,6 +8417,19 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             } => {
                 if matches!(continuation, VmContinuationPolicy::Replay { uses } if *uses < 2) {
                     return Err(VmArtifactError::HandlerStateMismatch);
+                }
+                validate_vm_type(resume_type)?;
+                // Source `!` is represented by the VM's Unit leaf. A
+                // terminal frame never resumes its protected computation, so
+                // admitting any other result ABI would manufacture a second,
+                // uncheckable interpretation of the same operation identity
+                // at a caller/callee handler boundary.
+                if *continuation == VmContinuationPolicy::Terminal
+                    && *resume_type != VmType::Unit
+                {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "terminal handler has a non-unit resume type",
+                    });
                 }
                 if function.instructions.get(*target as usize).is_none() {
                     return Err(VmArtifactError::InvalidInstructionTarget { target: *target });
