@@ -353,6 +353,21 @@ impl Elaborator<'_> {
         layout: Vec<crate::NominalField>,
         enum_variant: Option<u32>,
     ) -> PatternDecision {
+        // A record pattern is ownership deconstruction even when it omits a
+        // field. Omission therefore cannot turn a private payload into an
+        // externally destructurable public shell.
+        if layout.iter().any(|field| {
+            field
+                .private_authority
+                .is_some_and(|authority| authority != span.file)
+        }) {
+            self.error(
+                span,
+                "G4218",
+                "record pattern deconstructs a private field outside its declaring source entry",
+            );
+            return PatternDecision::Error;
+        }
         let mut selected = Vec::with_capacity(fields.len());
         let mut seen = std::collections::BTreeSet::new();
         for (name, pattern) in fields {

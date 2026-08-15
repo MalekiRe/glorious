@@ -7102,6 +7102,15 @@ impl Elaborator<'_> {
                     self.recovered = true;
                     return CorePlace::Error;
                 };
+                if !self.field_is_accessible(&field, span) {
+                    self.error(
+                        span,
+                        "G4140",
+                        "assignment accesses a private field outside its declaring source entry",
+                    );
+                    self.recovered = true;
+                    return CorePlace::Error;
+                }
                 CorePlace::Field {
                     base: Box::new(base),
                     index: index as u32,
@@ -7307,6 +7316,15 @@ impl Elaborator<'_> {
                 self.recovered = true;
                 continue;
             };
+            if !self.field_is_accessible(&field, span) {
+                self.error(
+                    span,
+                    "G4140",
+                    "record construction names a private field outside its declaring source entry",
+                );
+                self.recovered = true;
+                continue;
+            }
             // A generic nominal layout is instantiated at this constructor
             // boundary.  Its field may contain a now-concrete associated
             // projection, so normalize it before handing the expectation to
@@ -7444,6 +7462,13 @@ impl Elaborator<'_> {
                     "enum record construction omits a required field",
                 ));
             };
+            if !self.field_is_accessible(&field, span) {
+                return Some(self.fail(
+                    span,
+                    "G4140",
+                    "enum record construction names a private field outside its declaring source entry",
+                ));
+            }
             let value = self.expression_expected(value, Some(field.ty.clone()));
             let actual = self.expressions[value.0 as usize].ty.clone();
             if self.unify_rigid_lifetimes(field.ty, actual, span).is_err() {
@@ -7524,6 +7549,13 @@ impl Elaborator<'_> {
                 "aggregate does not declare the requested field or payload index",
             );
         };
+        if !self.field_is_accessible(&field, span) {
+            return self.fail(
+                span,
+                "G4140",
+                "field projection accesses a private field outside its declaring source entry",
+            );
+        }
         // Layout instantiation can turn an interface-owned projection into a
         // concrete goal. Normalize at the same field boundary as record
         // construction so Core and MIR never retain a projection whose
@@ -7593,6 +7625,7 @@ impl Elaborator<'_> {
                         .map(|(index, ty)| crate::signature::NominalField {
                             name: index.to_string(),
                             ty: ty.clone(),
+                            private_authority: None,
                         })
                         .collect()
                 })
@@ -11122,6 +11155,11 @@ impl Elaborator<'_> {
         self.error(span, code, message);
         self.recovered = true;
         self.alloc(CoreKind::Error, Type::Error, span)
+    }
+    fn field_is_accessible(&self, field: &crate::signature::NominalField, span: Span) -> bool {
+        field
+            .private_authority
+            .is_none_or(|authority| authority == span.file)
     }
     fn error(&mut self, span: Span, code: &'static str, message: &str) {
         self.diagnostics.push(CoreDiagnostic {

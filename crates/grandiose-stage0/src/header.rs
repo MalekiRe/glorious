@@ -172,6 +172,17 @@ pub struct HeaderParameter {
     pub span: Span,
 }
 
+/// A field in a nominal layout. Unlike a callable parameter, a field retains
+/// the declaration-entry authority introduced by the `private` modifier so
+/// later body elaboration can prevent structural access from another entry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NominalFieldHeader {
+    pub name: String,
+    pub ty: HeaderType,
+    pub private: bool,
+    pub span: Span,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CallableHeader {
     pub generics: GenericParameters,
@@ -358,8 +369,6 @@ pub struct EffectHeader {
 /// Field declarations are interface facts for records and record-like enum
 /// payloads. They use the same type grammar and source spans as callable
 /// parameters, but are deliberately separate from body-local expressions.
-pub type NominalFieldHeader = HeaderParameter;
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EnumVariantPayloadHeader {
     Unit,
@@ -1319,14 +1328,16 @@ impl Parser<'_> {
         let mut names = BTreeSet::new();
         while self.current().is_some() && !self.at_punctuation(closing) {
             let start = self.current().unwrap();
-            // Field visibility is a declaration-surface modifier. The Stage
-            // 0 nominal layout records field identity and type only, so retain
-            // the modifier's syntax boundary while visibility policy stays in
-            // interface collection.
+            // `private` records authority on the frozen nominal layout. Its
+            // policy is enforced later at each structural access boundary.
             // `public` and `private` remain legal field names. They are a
             // visibility modifier only when another field identifier follows;
             // `public: Bool` is a field named `public`, not a modifier plus a
             // malformed `Bool` field.
+            let private = self.word() == Some("private")
+                && !self.tokens.get(self.position + 1).is_some_and(|next| {
+                    self.lexed.tokens[*next].kind == TokenKind::Punctuation(':')
+                });
             if matches!(self.word(), Some("private" | "public"))
                 && !self.tokens.get(self.position + 1).is_some_and(|next| {
                     self.lexed.tokens[*next].kind == TokenKind::Punctuation(':')
@@ -1346,9 +1357,10 @@ impl Parser<'_> {
                 self.error("G3230", "duplicate nominal field name");
             }
             let end = self.previous().unwrap_or(start);
-            fields.push(HeaderParameter {
+            fields.push(NominalFieldHeader {
                 name,
                 ty,
+                private,
                 span: Span {
                     file: self.lexed.file,
                     start: self.lexed.tokens[start].span.start,

@@ -2765,6 +2765,7 @@ fn forged_interface_nominal_layout_cycle_is_rejected_before_core_or_mir() {
                         definition: node,
                         arguments: vec![],
                     },
+                    private_authority: None,
                 }]),
             },
         )]),

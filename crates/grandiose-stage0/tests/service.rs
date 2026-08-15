@@ -10553,21 +10553,93 @@ fn service_enforces_private_nominal_field_authority_at_source_boundaries() {
     // type itself is public.  This exercises the source-to-interface-to-body
     // boundary; header-only tests cannot establish that field authority is
     // retained into construction, projection, and executable lowering.
-    let local = "pub struct Secret { private value: i64 } pub fn main() -> i64 { let secret = Secret { value: 42 }; secret.value }";
+    let local = "pub struct Secret { private value: i64 } pub fn main() -> i64 { let secret = Secret { value: 42 }; handle secret { Secret { value: found } => found } }";
     let outcome = StageZeroCompiler::new().compile(request(local)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let cross_entry = StageZeroCompiler::new().compile(request_with_module(
+    let cross_entry = StageZeroCompiler::new().compile(request_with_logical_sources(
         "pub mod api; use api::Secret; pub fn main() -> i64 { let secret = Secret { value: 42 }; secret.value }",
-        "pub struct Secret { private value: i64 }",
+        &[("src/api/api.glorious", "pub struct Secret { private value: i64 }")],
     ));
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = cross_entry else {
         panic!("a private nominal field unexpectedly crossed its source authority");
     };
     assert!(
-        !diagnostics.is_empty(),
-        "private-field rejection must produce a structured diagnostic"
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4140"),
+        "missing private-field authority diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_cross_module_private_nominal_field_pattern_deconstruction() {
+    // Patterns are ownership deconstruction, not a read-only reflection
+    // escape hatch. A public nominal shell therefore cannot expose a private
+    // field merely by putting the projection in a completion pattern.
+    let source = "pub mod api; use api::Secret; pub fn main() -> i64 { let secret = api::make(); handle secret { Secret { value: found } => found } }";
+    let result = StageZeroCompiler::new().compile(request_with_logical_sources(
+        source,
+        &[(
+            "src/api/api.glorious",
+            "pub struct Secret { private value: i64 } pub fn make() -> Secret { Secret { value: 42 } }",
+        )],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = result else {
+        panic!("a private nominal field unexpectedly escaped through a pattern");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4218"),
+        "missing private-pattern authority diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_cross_module_private_nominal_field_projections_and_assignments() {
+    // Obtain the value through the public API so both access forms reach their
+    // own Core boundaries instead of being masked by constructor rejection.
+    let source = "pub mod api; use api::Secret; pub fn main() -> i64 { let secret = api::make(); secret.value = 7; secret.value }";
+    let result = StageZeroCompiler::new().compile(request_with_logical_sources(
+        source,
+        &[(
+            "src/api/api.glorious",
+            "pub struct Secret { private value: i64 } pub fn make() -> Secret { Secret { value: 42 } }",
+        )],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = result else {
+        panic!("a private nominal field unexpectedly allowed direct cross-module access");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4140"),
+        "missing private direct-access diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_cross_module_private_enum_payload_pattern_deconstruction() {
+    // Named enum payload fields use the same nominal-field grammar and must
+    // carry the same authority across enum-layout instantiation.
+    let source = "pub mod api; use api::Token; pub fn main() -> i64 { let token = api::make(); handle token { Token::Secret { value: found } => found } }";
+    let result = StageZeroCompiler::new().compile(request_with_logical_sources(
+        source,
+        &[(
+            "src/api/api.glorious",
+            "pub enum Token { Secret { private value: i64 } } pub fn make() -> Token { Token::Secret { value: 42 } }",
+        )],
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = result else {
+        panic!("a private enum payload unexpectedly escaped through a pattern");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4218"),
+        "missing private enum-pattern authority diagnostic: {diagnostics:#?}"
     );
 }
 

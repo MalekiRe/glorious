@@ -8,7 +8,7 @@ use crate::{
         HeaderGenericArgument, HeaderStructuralConst, HeaderStructuralU32Expr, HeaderType,
         ImplementationHeader, NominalLayoutHeader, ParsedHeader, TraitHeader, TraitRefHeader,
     },
-    identity::{DefKey, ModuleKey},
+    identity::{DefKey, FileKey, ModuleKey},
     interface::{Definition, DefinitionNamespace, PackageInterface},
     quantity::Quantity,
     resolution::{DefinitionIndex, ResolutionState},
@@ -264,6 +264,9 @@ pub struct ElaboratedEffect {
 pub struct NominalField {
     pub name: String,
     pub ty: Type,
+    /// The source entry that alone may structurally access this field. `None`
+    /// denotes a public field.
+    pub private_authority: Option<FileKey>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2312,6 +2315,7 @@ impl ElaboratedInterface {
             .map(|field| NominalField {
                 name: field.name.clone(),
                 ty: self.instantiate_runtime_nominal_field(&field.ty, arguments),
+                private_authority: field.private_authority,
             })
             .collect())
     }
@@ -2339,6 +2343,7 @@ impl ElaboratedInterface {
                 .map(|field| NominalField {
                     name: field.name.clone(),
                     ty: substitute_alias_generics(field.ty.clone(), arguments),
+                    private_authority: field.private_authority,
                 })
                 .collect(),
         )
@@ -2659,6 +2664,7 @@ impl ElaboratedInterface {
                 .map(|field| NominalField {
                     name: field.name.clone(),
                     ty: self.instantiate_runtime_nominal_field(&field.ty, arguments),
+                    private_authority: field.private_authority,
                 })
                 .collect(),
         ))
@@ -2696,6 +2702,7 @@ impl ElaboratedInterface {
                 .map(|field| NominalField {
                     name: field.name.clone(),
                     ty: substitute_alias_generics(field.ty.clone(), arguments),
+                    private_authority: field.private_authority,
                 })
                 .collect(),
         ))
@@ -2732,6 +2739,7 @@ impl ElaboratedInterface {
                 .map(|(index, ty)| NominalField {
                     name: index.to_string(),
                     ty: self.instantiate_runtime_nominal_field(ty, arguments),
+                    private_authority: None,
                 })
                 .collect(),
             ElaboratedEnumVariantPayload::Struct(fields) => fields
@@ -2739,6 +2747,7 @@ impl ElaboratedInterface {
                 .map(|field| NominalField {
                     name: field.name.clone(),
                     ty: self.instantiate_runtime_nominal_field(&field.ty, arguments),
+                    private_authority: field.private_authority,
                 })
                 .collect(),
         };
@@ -2772,6 +2781,7 @@ impl ElaboratedInterface {
                 .map(|(index, ty)| NominalField {
                     name: index.to_string(),
                     ty: substitute_alias_generics(ty.clone(), arguments),
+                    private_authority: None,
                 })
                 .collect(),
             ElaboratedEnumVariantPayload::Struct(fields) => fields
@@ -2779,6 +2789,7 @@ impl ElaboratedInterface {
                 .map(|field| NominalField {
                     name: field.name.clone(),
                     ty: substitute_alias_generics(field.ty.clone(), arguments),
+                    private_authority: field.private_authority,
                 })
                 .collect(),
         };
@@ -4836,6 +4847,7 @@ impl Elaborator<'_> {
                     .map(|field| NominalField {
                         name: field.name.clone(),
                         ty: self.ty(&field.ty),
+                        private_authority: field.private.then_some(field.span.file),
                     })
                     .collect(),
             ),
@@ -4858,6 +4870,9 @@ impl Elaborator<'_> {
                                         .map(|field| NominalField {
                                             name: field.name.clone(),
                                             ty: self.ty(&field.ty),
+                                            private_authority: field
+                                                .private
+                                                .then_some(field.span.file),
                                         })
                                         .collect(),
                                 )
