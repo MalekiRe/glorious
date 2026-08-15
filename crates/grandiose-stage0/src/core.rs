@@ -8605,11 +8605,12 @@ impl Elaborator<'_> {
         None
     }
     /// Resolve a qualified trait method used as a first-class callable.  A
-    /// trait selection needs a concrete subject, so unlike an immediately
-    /// applied method the subject is supplied by the expected callable's
-    /// first parameter.  This keeps `Trait::method` principled: an
-    /// unconstrained bare path remains an error rather than guessing among
-    /// implementations.
+    /// trait selection needs a concrete subject. Receiver methods obtain it
+    /// from the expected callable's first parameter. Static methods do not
+    /// have that parameter, so a contextually typed value may instead select
+    /// the one concrete implementation of the qualified trait relation. This
+    /// keeps `Trait::method` principled: an unconstrained bare path remains an
+    /// error rather than guessing among implementations.
     fn trait_method_value(
         &mut self,
         path: Vec<String>,
@@ -8640,6 +8641,7 @@ impl Elaborator<'_> {
             ));
         };
         let Type::Callable {
+            lifetime_binders: expected_lifetime_binders,
             parameters: expected_parameters,
             ..
         } = expected.clone().unwrap_or(Type::Error)
@@ -8691,20 +8693,80 @@ impl Elaborator<'_> {
                 "trait method operation arguments do not match its declaration",
             )?
         };
+        // A declaration-level lifetime method generic and an annotation-level
+        // `for<'a>` binder express the same universal callable contract. Open
+        // the former with fresh bound lifetimes while proving the value, then
+        // retain a concrete `'static` instance for VM lowering just as named
+        // HRTB function values do.
+        let hrtb_method_value = operation_arguments.is_empty()
+            && expected_lifetime_binders > 0
+            && method_generic_kinds.len() == expected_lifetime_binders as usize
+            && method_generic_kinds
+                .iter()
+                .all(|kind| matches!(kind, crate::GenericKind::Lifetime));
+        let selection_method_arguments = if hrtb_method_value {
+            (0..expected_lifetime_binders)
+                .map(|index| GenericArgument::Lifetime(Lifetime::Bound { depth: 0, index }))
+                .collect()
+        } else {
+            method_arguments.clone()
+        };
         let assumptions = self.ambient_trait_solver_assumptions();
-        let subject = self.zonk_type(subject, span);
-        let answer = self.trait_query().select_method_with_assumptions(
+        let relation = crate::ElaboratedTraitReference {
+            definition: trait_definition,
+            arguments: trait_arguments.clone(),
+        };
+        let mut subject = self.zonk_type(subject, span);
+        let mut answer = self.trait_query().select_method_with_assumptions(
             TraitGoal {
-                relation: crate::ElaboratedTraitReference {
-                    definition: trait_definition,
-                    arguments: trait_arguments.clone(),
-                },
-                subject,
+                relation: relation.clone(),
+                subject: subject.clone(),
             },
             name,
-            &method_arguments,
+            &selection_method_arguments,
             &assumptions,
         );
+        // A static trait method has no `Self` receiver to recover from the
+        // contextual callable. If receiver-shaped selection did not find a
+        // solution, recover the subject only when the fully-qualified
+        // relation has exactly one monomorphic positive implementation. The
+        // eventual callable unification still proves that this was genuinely
+        // a static-compatible value; multiple or generic candidates remain
+        // deliberately unconstrained rather than guessed.
+        if matches!(&answer, TraitMethodAnswer::NoSolution) {
+            let candidates = self
+                .signatures
+                .definitions
+                .values()
+                .filter_map(|header| match header {
+                    ElaboratedHeader::Implementation(implementation)
+                        if !implementation.negative
+                            && implementation.generics == 0
+                            && implementation.relation == relation =>
+                    {
+                        Some(implementation.self_ty.clone())
+                    }
+                    _ => None,
+                })
+                .fold(Vec::new(), |mut candidates, candidate| {
+                    if !candidates.contains(&candidate) {
+                        candidates.push(candidate);
+                    }
+                    candidates
+                });
+            if let [candidate] = candidates.as_slice() {
+                subject = candidate.clone();
+                answer = self.trait_query().select_method_with_assumptions(
+                    TraitGoal {
+                        relation,
+                        subject: subject.clone(),
+                    },
+                    name,
+                    &selection_method_arguments,
+                    &assumptions,
+                );
+            }
+        }
         let (evidence, method, signature) = match answer {
             TraitMethodAnswer::Selected {
                 evidence,
@@ -8754,9 +8816,20 @@ impl Elaborator<'_> {
                 ));
             }
         };
-        let effects = self.normalize_concrete_effect_row(signature.effects.clone());
+        let effects = if hrtb_method_value {
+            self.normalize_concrete_hrtb_effect_row(
+                signature.effects.clone(),
+                expected_lifetime_binders,
+            )
+        } else {
+            self.normalize_concrete_effect_row(signature.effects.clone())
+        };
         let callable = Type::Callable {
-            lifetime_binders: 0,
+            lifetime_binders: if hrtb_method_value {
+                expected_lifetime_binders
+            } else {
+                0
+            },
             parameters: signature.parameters.clone(),
             result: Box::new(signature.result.clone()),
             effects,
@@ -8764,6 +8837,27 @@ impl Elaborator<'_> {
         };
         let Some(expected) = expected else {
             unreachable!("the contextual callable was checked above");
+        };
+        let expected = if hrtb_method_value {
+            let Type::Callable {
+                lifetime_binders,
+                parameters,
+                result,
+                effects,
+                invocation,
+            } = expected
+            else {
+                unreachable!("the contextual callable was checked above");
+            };
+            Type::Callable {
+                lifetime_binders,
+                parameters,
+                result,
+                effects: self.normalize_concrete_hrtb_effect_row(effects, lifetime_binders),
+                invocation,
+            }
+        } else {
+            expected
         };
         if self.inference.unify(expected, callable.clone()).is_err() {
             return Some(self.fail(
@@ -8778,7 +8872,13 @@ impl Elaborator<'_> {
                 evidence,
                 method,
                 trait_arguments,
-                method_arguments,
+                method_arguments: if hrtb_method_value {
+                    (0..expected_lifetime_binders)
+                        .map(|_| GenericArgument::Lifetime(Lifetime::Static))
+                        .collect()
+                } else {
+                    method_arguments
+                },
             },
             callable,
             span,
