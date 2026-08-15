@@ -255,3 +255,51 @@ fn verifier_rejects_duplicate_storage_binding_witness_identity() {
     artifact.fingerprint = artifact.computed_fingerprint();
     assert!(decode_and_verify_artifact(&encode_artifact(&artifact)).is_err());
 }
+
+#[test]
+fn verifier_rejects_distinct_storage_bindings_sharing_one_value_register() {
+    let mut artifact = witnessed_storage_exit();
+    let VmInstruction::Leave { cleanup, .. } = &mut artifact.function.instructions[1] else {
+        panic!("fixture must retain its leave instruction");
+    };
+    let VmStorageErasureWitness::Verified {
+        storages,
+        actions,
+        ..
+    } = &mut cleanup.storage_erasure
+    else {
+        panic!("fixture must carry a verified storage witness");
+    };
+    let mut second = storages[0].clone();
+    second.storage = 1;
+    second.binding = 1;
+    second.drop_flag = Some(1);
+    storages.push(second);
+    *actions = vec![
+        VmStorageErasureAction::EndBorrow { storage: 1 },
+        VmStorageErasureAction::Protect {
+            storage: 1,
+            register: 0,
+        },
+        VmStorageErasureAction::SetDropFlag {
+            drop_flag: 1,
+            initialized: false,
+        },
+        VmStorageErasureAction::StorageDead { storage: 1 },
+        VmStorageErasureAction::EndBorrow { storage: 0 },
+        VmStorageErasureAction::Protect {
+            storage: 0,
+            register: 0,
+        },
+        VmStorageErasureAction::SetDropFlag {
+            drop_flag: 0,
+            initialized: false,
+        },
+        VmStorageErasureAction::StorageDead { storage: 0 },
+    ];
+    artifact.fingerprint = artifact.computed_fingerprint();
+    assert!(
+        decode_and_verify_artifact(&encode_artifact(&artifact)).is_err(),
+        "one executable source slot cannot satisfy two source-storage owners"
+    );
+}

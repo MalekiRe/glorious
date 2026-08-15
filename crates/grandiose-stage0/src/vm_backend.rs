@@ -1427,6 +1427,18 @@ impl VmStorageErasureWitness {
         {
             return false;
         }
+        // A frozen source binding owns one exact addressable local. Allowing
+        // two distinct bindings to name one value register would let a
+        // compact artifact forge ambiguous destruction/protection ownership.
+        if storages
+            .iter()
+            .map(|storage| storage.value_register)
+            .collect::<BTreeSet<_>>()
+            .len()
+            != storages.len()
+        {
+            return false;
+        }
         if storages.iter().any(|storage| {
             protected_registers
                 .binary_search(&storage.value_register)
