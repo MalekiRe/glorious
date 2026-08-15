@@ -203,6 +203,12 @@ coarse. The composite fixtures cover:
   the authority error and rolls back all staged interface/cache/dependency facts
   (`service_seals_generic_facade_interface_fingerprints_independent_of_source_enumeration`,
   `service_rolls_back_malformed_private_generic_facade_reexports_before_interface_publication`).
+- after a valid generic provider and facade have populated the frozen-interface
+  cache, a new downstream facade that publishes a fixity while retaining its
+  operator trait privately is still fully transactional: it reports only the
+  authority failure, leaves cache accounting unchanged, publishes no partial
+  dependency traces, and is deterministic under reversed source enumeration
+  (`service_discards_downstream_private_fixity_facade_staging_after_reusing_generic_upstreams`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and

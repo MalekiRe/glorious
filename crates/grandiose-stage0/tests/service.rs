@@ -11249,6 +11249,89 @@ fn service_rolls_back_malformed_private_generic_facade_reexports_before_interfac
 }
 
 #[test]
+fn service_discards_downstream_private_fixity_facade_staging_after_reusing_generic_upstreams() {
+    let provider = "pub infixr 30 **; pub trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let middle = "pub use semantic_core::{Callback, Child as Capability, Trace}; use semantic_core::Combine;";
+    let mut upstream = request("use middle_facade::*; pub fn call(callback: Callback<i64>) -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { callback(0, 41) } pub fn main() -> i64 { handle call(Capability<i64>::relay) { Trace<i64>::note(value) with k => k(value + 1) } }");
+    for (package, source) in [
+        ("semantic-core@0.1.0", provider),
+        ("middle-facade@0.1.0", middle),
+    ] {
+        upstream.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(upstream.clone(), None).unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .expect("generic provider and authorized facade must publish first")
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+    let published = compiler.interface_cache_stats();
+    assert!(published.misses >= 3, "root and both upstream packages must freeze");
+
+    let broken = "pub use middle_facade::{Callback, Capability, Combine, Trace}; pub infixr 30 **;";
+    let mut failing = request("use broken_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
+    for source in upstream.sources.iter().skip(1) {
+        failing.sources.push(source.clone());
+    }
+    failing.sources.push(SourceInput::new(
+        PackageKey("broken-facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        broken.as_bytes(),
+    ));
+    let mut reordered = failing.clone();
+    reordered.sources.reverse();
+    let mut diagnostics_by_order = Vec::new();
+    for input in [failing, reordered] {
+        let revision = compiler.import_revision(input, Some(parent)).unwrap();
+        let session = compiler.open_session(revision).unwrap();
+        let error = compiler
+            .compile_session(&session)
+            .expect_err("a public downstream fixity cannot retain a private operator trait");
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G3317"),
+            "missing private downstream facade authority diagnostic: {:#?}",
+            error.diagnostics()
+        );
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| diagnostic.code == "G3317"),
+            "private fixity authority must fail before body grouping: {:#?}",
+            error.diagnostics()
+        );
+        assert_eq!(
+            compiler.interface_cache_stats(),
+            published,
+            "failed downstream staging must not publish cache hits or misses"
+        );
+        assert!(
+            compiler.dependency_traces(revision).is_empty(),
+            "failed downstream staging must not publish any partial package interfaces"
+        );
+        diagnostics_by_order.push(error.diagnostics().to_vec());
+    }
+    assert_eq!(
+        diagnostics_by_order[0], diagnostics_by_order[1],
+        "downstream private fixity diagnostics must be deterministic under source reordering"
+    );
+}
+
+#[test]
 fn service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping() {
     let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
     let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
