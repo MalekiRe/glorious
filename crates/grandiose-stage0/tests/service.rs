@@ -5327,6 +5327,33 @@ fn service_rejects_mutual_selected_const_hrtb_callbacks_canonically() {
 }
 
 #[test]
+fn service_rejects_cross_kind_selected_hrtb_projection_cycles_canonically() {
+    let mut request = request("use facade::{Callback, Gate}; pub fn accept(callback: Callback) -> i64 / { <i64 as Gate>::Effects<'static> } { let value = 41; callback(&value) } pub fn main() -> i64 { 0 }");
+    request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::Gate; pub type Callback = provider::Callback;".as_slice()));
+    request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub effect Trace<n: u32> { [1,1] note() -> i64; } pub trait Gate { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> }; impl Gate for i64 { const Width = <i64 as Gate>::Width; type Item<'a> = i64; type Effects<'a> = {Trace<<i64 as Gate>::Width>}; }".as_slice()));
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request.clone()) else { panic!("cross-kind recursive selected callback entered an artifact"); };
+    request.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(second)) = StageZeroCompiler::new().compile(request) else { panic!("source reordering must not admit a cross-kind recursive selected callback"); };
+    for diagnostics in [&first, &second] {
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4155"), "missing canonical selected-effect rejection: {diagnostics:#?}");
+    }
+}
+
+#[test]
+fn service_executes_finite_cross_kind_selected_hrtb_callbacks_through_vm() {
+    let mut request = request("use facade::{relay, Callback, Gate, Trace}; pub fn apply(callback: Callback) -> i64 / { <i64 as Gate>::Effects<'static> } { let value = 41; callback(&value) } pub fn main() -> i64 { handle apply(relay) { Trace<1>::note() with resume => resume(0) } }");
+    request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Gate, Trace, relay}; pub type Callback = provider::Callback;".as_slice()));
+    request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub effect Trace<n: u32> { [1,1] note() -> i64; } pub trait Gate { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> }; impl Gate for i64 { const Width = 1; type Item<'a> = i64; type Effects<'a> = {Trace<<i64 as Gate>::Width>}; } pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> } { *value }".as_slice()));
+    let first = StageZeroCompiler::new().compile(request.clone()).expect("finite cross-kind selected projections must materialize").artifact.unwrap();
+    request.sources.reverse();
+    let second = StageZeroCompiler::new().compile(request).expect("source order must preserve finite cross-kind selected projection identities").artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 41);
+    assert_eq!(second.run_i64().unwrap(), 41);
+}
+
+#[test]
 fn service_normalizes_generic_associated_consts_in_hrtb_gat_body_results() {
     let mut request = request(
         "use facade::layout; pub fn main() -> i64 { layout() }",
