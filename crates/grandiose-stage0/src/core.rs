@@ -4902,13 +4902,14 @@ impl Elaborator<'_> {
                     item_arguments,
                     hrtb_binders,
                 );
-                active.remove(&key);
-                match answer {
+                let result = match answer {
                     TraitProjectionAnswer::Normalized { ty, .. } => {
                         self.normalize_selectable_type_projections_inner(ty, active, hrtb_binders)
                     }
                     _ => projection,
-                }
+                };
+                active.remove(&key);
+                result
             }
             Type::Tuple(values) => Type::Tuple(
                 values
