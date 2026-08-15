@@ -392,12 +392,17 @@ coarse. The composite fixtures cover:
 - inherited methods obey the same requested-trait boundary as associated
   items: Parent evidence (including a lexical Parent-only assumption) cannot
   select `Child::method`, and a negative Child implementation cannot enter a
-  method-value path. A reexported `for<'a>` method value is checked through
-  canonical source ordering and failed revisions before the positive facade is
-  allowed to execute on the VM
+  method-value path. Conversely, a lexical Child assumption can select the
+  inherited Parent blanket/concrete implementation rather than being mistaken
+  for method-body evidence itself. Reexported `for<'a>` method values are
+  checked through canonical source ordering and failed revisions before the
+  positive facade is allowed to execute on the VM
   (`inherited_method_selection_requires_the_requested_child_evidence`,
+  `child_lexical_evidence_selects_an_inherited_blanket_method`,
   `typed_core_requires_child_evidence_for_inherited_qualified_methods`,
-  `service_requires_child_evidence_for_inherited_hrtb_method_values_through_facade_revisions`).
+  `typed_core_selects_aliased_hrtb_inherited_method_values_from_child_assumptions`,
+  `service_requires_child_evidence_for_inherited_hrtb_method_values_through_facade_revisions`,
+  `service_materializes_aliased_hrtb_inherited_method_values_from_child_bounds`).
 - a public dependency facade preserves inherited associated effect-GAT
   evidence through a named `for<'a>` callback: the declaration-owned lifetime
   is selectable, its concrete row reaches handler lowering and verified VM

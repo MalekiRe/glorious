@@ -501,7 +501,36 @@ impl TraitSolver {
         solver.tables.clear();
         solver.steps = 0;
         solver
-            .solve_at_with_assumptions(goal, 0, false, &assumptions)
+            .solve_at_with_assumptions(goal, 0, false, &assumptions, true)
+            .into()
+    }
+
+    /// Select a rule-backed implementation under lexical assumptions.  Method
+    /// bodies need an implementation identity, so an assumption that merely
+    /// entails the goal cannot be returned as the final evidence.  The same
+    /// assumptions remain available to discharge the selected rule's where
+    /// obligations.
+    fn solve_implementation_with_assumptions(
+        &self,
+        goal: TraitGoal,
+        assumptions: &[TraitGoal],
+    ) -> TraitAnswer {
+        if trait_goal_contains_escaping_hrtb(&goal) {
+            return TraitAnswer::NoSolution;
+        }
+        let mut solver = self.clone();
+        solver.tables.clear();
+        solver.steps = 0;
+        let assumptions = assumptions
+            .iter()
+            .cloned()
+            .filter_map(|assumption| solver.normalize_goal(assumption).ok())
+            .filter(|assumption| !trait_goal_contains_escaping_hrtb(assumption))
+            .collect::<Vec<_>>();
+        solver.tables.clear();
+        solver.steps = 0;
+        solver
+            .solve_at_with_assumptions(goal, 0, false, &assumptions, false)
             .into()
     }
 
@@ -1756,7 +1785,7 @@ impl TraitSolver {
             Ok(goal) => goal,
             Err(answer) => return answer,
         };
-        let answer = self.solve_with_assumptions(goal.clone(), assumptions);
+        let answer = self.solve_implementation_with_assumptions(goal.clone(), assumptions);
         self.finish_method_selection(goal, name, arguments, answer)
     }
 
@@ -1853,7 +1882,7 @@ impl TraitSolver {
         depth: u32,
         coinductive_edge: bool,
     ) -> TraitAnswerIndex {
-        self.solve_at_with_assumptions(goal, depth, coinductive_edge, &[])
+        self.solve_at_with_assumptions(goal, depth, coinductive_edge, &[], true)
     }
 
     /// The tabled kernel for one fixed lexical assumption environment. The
@@ -1866,6 +1895,7 @@ impl TraitSolver {
         depth: u32,
         coinductive_edge: bool,
         assumptions: &[TraitGoal],
+        accept_direct_assumption: bool,
     ) -> TraitAnswerIndex {
         if depth >= self.limits.max_depth || self.steps >= self.limits.max_steps {
             return TraitAnswerIndex::Overflow;
@@ -1880,7 +1910,7 @@ impl TraitSolver {
             Ok(goal) => goal,
             Err(answer) => return answer,
         };
-        if self.assumption_proves(&goal, assumptions) {
+        if accept_direct_assumption && self.assumption_proves(&goal, assumptions) {
             return TraitAnswerIndex::Proven(assumption_evidence(&goal));
         }
         if is_intrinsic_callable_trait(&goal.relation) {
@@ -1932,7 +1962,13 @@ impl TraitSolver {
                     relation: substitute_relation(relation, &substitution),
                     subject: substitute_type(subject, &substitution),
                 };
-                match self.solve_at_with_assumptions(obligation, depth + 1, false, assumptions) {
+                match self.solve_at_with_assumptions(
+                    obligation,
+                    depth + 1,
+                    false,
+                    assumptions,
+                    true,
+                ) {
                     TraitAnswerIndex::Proven(_) => {}
                     TraitAnswerIndex::Ambiguous => {
                         viable = false;
@@ -2031,7 +2067,13 @@ impl TraitSolver {
             return TraitAnswerIndex::NoSolution;
         };
         for obligation in obligations {
-            match self.solve_at_with_assumptions(obligation, depth + 1, true, assumptions) {
+            match self.solve_at_with_assumptions(
+                obligation,
+                depth + 1,
+                true,
+                assumptions,
+                true,
+            ) {
                 TraitAnswerIndex::Proven(_) => {}
                 TraitAnswerIndex::Overflow => return TraitAnswerIndex::Overflow,
                 TraitAnswerIndex::Ambiguous => return TraitAnswerIndex::Ambiguous,

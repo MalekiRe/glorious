@@ -473,6 +473,26 @@ fn typed_core_requires_child_evidence_for_inherited_qualified_methods() {
 }
 
 #[test]
+fn typed_core_selects_aliased_hrtb_inherited_method_values_from_child_assumptions() {
+    // The only evidence for generic `T` is the lexical Child bound. The
+    // inherited method itself belongs to Parent's blanket implementation, so
+    // this checks that Child assumptions are elaborated to the parent surface
+    // without making parent-only assumptions sufficient in the reverse case.
+    let core = core_for(
+        "core-aliased-hrtb-inherited-method-assumption@0.1.0",
+        "trait Parent<U> { fn relay<'a>(receiver: Self, value: &'a i64) -> i64; } trait Child<U>: Parent<U> {} impl<T> Parent<i64> for T { fn relay<'a>(receiver: T, value: &'a i64) -> i64 { *value } } pub fn main<T>() -> for<'a> (T, &'a i64) -> i64 where T: Child<i64> { Child<i64>::relay }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            &expression.kind,
+            CoreKind::TraitMethod { .. }
+                if matches!(expression.ty, Type::Callable { lifetime_binders: 1, .. })
+        )
+    }), "Child-bound inherited HRTB method value was not retained in Core: {:#?}", core.expressions);
+}
+
+#[test]
 fn typed_core_normalizes_concrete_associated_effect_rows_on_method_values() {
     let core = core_for(
         "core-trait-method-associated-effect-row@0.1.0",

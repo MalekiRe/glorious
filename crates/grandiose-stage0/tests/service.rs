@@ -5434,6 +5434,41 @@ fn service_requires_child_evidence_for_inherited_hrtb_method_values_through_faca
 }
 
 #[test]
+fn service_materializes_aliased_hrtb_inherited_method_values_from_child_bounds() {
+    // The imported `Value: Gateway<i64>` clause gives a lexical Child proof.
+    // That proof entails Parent, but method lowering still needs Parent's
+    // concrete implementation identity to survive the HRTB callable ABI.
+    let root = "use facade::{Gateway, Value}; pub fn select() -> for<'a> (Value, &'a i64) -> i64 where Value: Gateway<i64> { Gateway<i64>::relay } pub fn apply(callback: for<'a> (Value, &'a i64) -> i64) -> i64 { let value = 42; callback(Value {}, &value) } pub fn main() -> i64 { apply(select()) }";
+    let provider = "pub trait Parent<U> { fn relay<'a>(receiver: Self, value: &'a i64) -> i64; } pub trait Child<U>: Parent<U> {} pub struct Value {} impl Parent<i64> for Value { fn relay<'a>(receiver: Value, value: &'a i64) -> i64 { *value } } impl Child<i64> for Value where Value: Parent<i64> {}";
+    let mut request = request(root);
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Child as Gateway, Value};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        provider.as_bytes(),
+    ));
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("Child-bound inherited HRTB method value must materialize");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(request)
+        .expect("source order must preserve Child-bound inherited HRTB method selection");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_keeps_negative_child_inherited_projections_authoritative_through_alias_revisions() {
     // The provider's public callback reaches Parent's type and effect items
     // through Child, and the application uses Child's inherited constant for

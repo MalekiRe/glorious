@@ -457,6 +457,29 @@ fn parent_lexical_evidence_cannot_select_an_inherited_child_method() {
 }
 
 #[test]
+fn child_lexical_evidence_selects_an_inherited_blanket_method() {
+    let (interface, signatures) = signatures(
+        "trait Parent<U> { fn relay(receiver: Self, value: i64) -> i64; } trait Child<U>: Parent<U> {} impl<T> Parent<i64> for T { fn relay(receiver: T, value: i64) -> i64 { value } }",
+    );
+    let child = key(&interface, "Child");
+    let generic = Type::Generic(0);
+    let goal = TraitGoal {
+        relation: ElaboratedTraitReference {
+            definition: child,
+            arguments: vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+        },
+        subject: generic,
+    };
+    let answer = TraitSolver::new(&signatures).select_method_with_assumptions(
+        goal.clone(),
+        "relay",
+        &[],
+        &[goal],
+    );
+    assert!(matches!(answer, TraitMethodAnswer::Selected { .. }), "{answer:#?}");
+}
+
+#[test]
 fn negative_child_evidence_refutes_an_inherited_method_request() {
     let (interface, signatures) = signatures(
         "trait Parent { fn identity(value: Self) -> Self; } trait Child: Parent {} impl Parent for i64 { fn identity(value: i64) -> i64 { value } } impl !Child for i64 {}",
