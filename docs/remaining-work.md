@@ -65,6 +65,18 @@ retained below but scheduled after the core language and tooling tranche.
   public-`LEAVE` boundaries, now consumes numeric MIR move-path and binding
   identities (with root text retained only for diagnostics) and is
   independently checked by the VM verifier.
+- source-storage lifecycle and cleanup-action conformance: frozen MIR still
+  lacks executable `StorageLive`/`StorageDead`, per-local storage kind and
+  initialization state, compiler-created drop-flag transitions, and ordered
+  `EndBorrow`/`Destroy`/`StorageDead` cleanup actions with protected payloads.
+  The enabled red witness
+  `mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering` proves
+  the first required rejection is currently absent.  Completing this slice
+  must additionally cover rejected store-before-live, read-after-dead,
+  replacement without zero-use destruction, dead-with-live-loan, wrong drop
+  flag transitions, and cleanup plans that omit, reorder, or destroy protected
+  owners; VM lowering must either execute the verified action sequence or
+  prove its compact erasure preserves that sequence exactly.
 
 ### 5.4 Bytecode peepholes and validation
 

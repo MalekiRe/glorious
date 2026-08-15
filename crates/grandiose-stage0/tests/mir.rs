@@ -18,6 +18,40 @@ fn local(ty: Type) -> MirLocalDecl {
     }
 }
 
+/// Sections 2.2, 3.2, 4.3, and 5.3 require a source-storage local to begin
+/// dead, become readable only after `StorageLive` and initialization, and be
+/// rejected before it can reach bytecode lowering.  This remains deliberately
+/// red until the source-storage lifecycle is represented and validated in MIR.
+#[test]
+fn mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering() {
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"forged-mir-uninitialized-source-storage")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![local(Type::Scalar(ScalarType::I64))],
+        result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: vec![],
+            terminator: MirTerminator::Return { value: MirLocal(0) },
+        }],
+    };
+
+    assert!(
+        function.validate().is_err(),
+        "MIR accepted a dead/uninitialized source-storage local; it must be \
+         rejected before VM lowering"
+    );
+    assert!(
+        emit_vm(&function).is_err(),
+        "the VM emitter must not accept a MIR body that reads dead source storage"
+    );
+}
+
 #[test]
 fn mir_rejects_a_forged_nonfinite_replay_budget() {
     let function = MirFunction {
