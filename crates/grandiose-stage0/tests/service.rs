@@ -19551,6 +19551,33 @@ fn equivalent_module_source_enumeration_orders_emit_the_same_verified_program() 
 }
 
 #[test]
+fn equivalent_nominal_layout_source_orders_emit_one_canonical_program() {
+    // `Outer` recursively freezes the layout of `Inner`; these descriptors
+    // are a semantic set in the VM, so module discovery order must not churn
+    // a separately cached program's bytes or fingerprint.
+    let root = "mod data; pub fn main() -> i64 { data::compute() }";
+    let modules = [(
+        "data",
+        "pub struct Inner { value: i64 } pub struct Outer { inner: Inner } pub fn compute() -> i64 { let value = Outer { inner: Inner { value: 41 } }; value.inner.value + 1 }",
+    )];
+    let first = StageZeroCompiler::new()
+        .compile(request_with_modules(root, &modules))
+        .unwrap()
+        .artifact
+        .unwrap();
+    let mut reordered = request_with_modules(root, &modules);
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reordered)
+        .unwrap()
+        .artifact
+        .unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_incoherent_impl_heads_before_body_elaboration() {
     let source = r#"
         trait Marker<T> {}

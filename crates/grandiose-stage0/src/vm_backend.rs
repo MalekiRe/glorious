@@ -1875,15 +1875,19 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Schema 86 makes nominal aggregate construction, projection, and update
 /// prove their field layouts against the frozen declaration-owned descriptor,
 /// preventing an embedded callable from being relabelled with a forged ABI.
+/// Schema 88 canonically orders each function's declaration-owned nominal
+/// layout descriptor set. The descriptors are selected by identity rather
+/// than position, so accepting alternate orders would otherwise give one VM
+/// program multiple byte encodings and cache fingerprints.
+/// Schema 88 also seals each emitted function's declared result and whether
+/// it returns normally. This lets a terminal callee retain its source
+/// callable ABI even when it contains no Return instruction.
 /// Schema 85 binds every sealed callable environment to either its canonical
 /// source lift or an explicit enclosing-instance witness, so a decoded
 /// closure descriptor cannot redirect to an ABI-compatible sibling body.
 /// Schema 83 makes all generic and frozen integer shifts reject a count at or
 /// beyond the operand width instead of silently masking it.
-/// Schema 87 seals each emitted function's declared result and whether it
-/// returns normally. This lets a terminal callee retain its source callable
-/// ABI even when it contains no Return instruction.
-pub const STAGE0_VM_SCHEMA: u32 = 87;
+pub const STAGE0_VM_SCHEMA: u32 = 88;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2669,12 +2673,14 @@ fn emit_with_specialized_lifted_targets(
     if let Some(VmInstruction::DeclareResult { returns: declared, .. }) = instructions.first_mut() {
         *declared = returns;
     }
+    let mut nominal_copy_descriptors = function
+        .nominal_copy_descriptors
+        .iter()
+        .map(vm_nominal_copy_descriptor)
+        .collect::<Result<Vec<_>, _>>()?;
+    nominal_copy_descriptors.sort_by_key(vm_nominal_copy_descriptor_key);
     let function = VmFunction {
-        nominal_copy_descriptors: function
-            .nominal_copy_descriptors
-            .iter()
-            .map(vm_nominal_copy_descriptor)
-            .collect::<Result<Vec<_>, _>>()?,
+        nominal_copy_descriptors,
         definition: function.definition,
         captures: function.captures,
         parameters: function.parameters.len() as u32,
@@ -3589,7 +3595,7 @@ fn encode_optional_digest(value: Option<Digest>, output: &mut Vec<u8>) {
     }
 }
 fn artifact_fingerprint(runtime_manifest: Option<Digest>, function: &VmFunction) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-v22".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-v23".to_vec();
     encode_optional_digest(runtime_manifest, &mut bytes);
     encode_function(function, &mut bytes);
     Digest::of_bytes(&bytes)
@@ -3601,7 +3607,7 @@ fn program_fingerprint(
     functions: &BTreeMap<DefKey, VmFunction>,
     callable_environments: &BTreeMap<DefKey, VmCaptureEnvironment>,
 ) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-program-v23".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-program-v24".to_vec();
     bytes.extend_from_slice(&entry.0.as_bytes());
     encode_optional_digest(runtime_manifest, &mut bytes);
     bytes.extend_from_slice(&(host_capabilities.len() as u64).to_le_bytes());
@@ -3645,6 +3651,15 @@ fn encode_function(function: &VmFunction, output: &mut Vec<u8>) {
     for instruction in &function.instructions {
         encode_instruction(instruction, output);
     }
+}
+
+fn vm_nominal_copy_descriptor_key(descriptor: &VmNominalCopyDescriptor) -> Vec<u8> {
+    let mut output = descriptor.definition.0.as_bytes().to_vec();
+    output.extend_from_slice(&(descriptor.arguments.len() as u64).to_le_bytes());
+    for argument in &descriptor.arguments {
+        encode_type(argument, &mut output);
+    }
+    output
 }
 
 struct Decoder<'a> {
@@ -10110,17 +10125,21 @@ fn register_type(function: &VmFunction, register: u32) -> Result<VmType, VmArtif
 fn validate_vm_nominal_copy_descriptors(
     descriptors: &[VmNominalCopyDescriptor],
 ) -> Result<(), VmArtifactError> {
+    let mut previous_key: Option<Vec<u8>> = None;
     for (index, descriptor) in descriptors.iter().enumerate() {
+        let key = vm_nominal_copy_descriptor_key(descriptor);
         if descriptor.variants.is_empty()
             || descriptors[..index].iter().any(|previous| {
                 previous.definition == descriptor.definition
                     && previous.arguments == descriptor.arguments
             })
+            || previous_key.as_ref().is_some_and(|previous| previous >= &key)
         {
             return Err(VmArtifactError::InvalidCallableEnvironment {
-                message: "invalid nominal copy descriptor",
+                message: "nominal copy descriptors are not canonical",
             });
         }
+        previous_key = Some(key);
         for argument in &descriptor.arguments {
             // These are nominal identity slots, not value registers. A
             // structural const is valid metadata here even though it is

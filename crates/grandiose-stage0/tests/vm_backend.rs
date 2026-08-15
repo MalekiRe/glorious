@@ -2106,6 +2106,57 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
 }
 
 #[test]
+fn verifier_rejects_reordered_nominal_descriptor_sets_before_cache_or_execution() {
+    let entry = DefKey(Digest::of_bytes(b"reordered-nominal-descriptor-entry"));
+    let first = DefKey(Digest::of_bytes(b"reordered-nominal-descriptor-first"));
+    let second = DefKey(Digest::of_bytes(b"reordered-nominal-descriptor-second"));
+    let descriptor = |definition| VmNominalCopyDescriptor {
+        definition,
+        arguments: vec![],
+        variants: vec![vec![]],
+    };
+    let mut descriptors = vec![descriptor(first), descriptor(second)];
+    // Descriptor lookup is by `(definition, arguments)`, never by position.
+    // Reverse this otherwise valid set to forge a second byte spelling of the
+    // exact same executable layout authority.
+    descriptors.sort_by_key(|descriptor| descriptor.definition);
+    descriptors.reverse();
+    let function = VmFunction {
+        nominal_copy_descriptors: descriptors,
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 42 },
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let mut reordered = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: Some(Digest::of_bytes(b"reordered-nominal-descriptor-manifest")),
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(entry, function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"reordered-nominal-descriptor-stale"),
+    };
+    reordered.fingerprint = reordered.computed_fingerprint();
+    let bytes = encode_program(&reordered);
+    for result in [
+        verify_vm_program(reordered),
+        decode_and_verify_program(&bytes),
+    ] {
+        assert!(matches!(
+            result,
+            Err(VmArtifactError::InvalidCallableEnvironment {
+                message: "nominal copy descriptors are not canonical"
+            })
+        ));
+    }
+}
+
+#[test]
 fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
     let effect = DefKey(Digest::of_bytes(b"cross-function-effect-abi"));
     let caller = DefKey(Digest::of_bytes(b"cross-function-effect-caller"));
