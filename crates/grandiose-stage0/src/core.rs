@@ -10735,7 +10735,23 @@ impl Elaborator<'_> {
                 TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
                     effects.effects.extend(row.effects);
                     projections.extend(row.projections);
-                    if row.tail.is_some() {
+                    match (effects.tail, row.tail) {
+                        (None, tail) => effects.tail = tail,
+                        (Some(left), Some(right)) if left == right => {}
+                        (Some(_), None) => {}
+                        (Some(_), Some(_)) => {
+                            self.error(
+                                span,
+                                "G4155",
+                                "normalized effect row has a conflicting outward tail",
+                            );
+                            self.recovered = true;
+                            return;
+                        }
+                    }
+                    if let Some(tail) = effects.tail
+                        && self.declared_effects.tail != Some(tail)
+                    {
                         self.error(span, "G4155", "normalized effect row remains open");
                         self.recovered = true;
                         return;

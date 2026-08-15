@@ -5297,6 +5297,121 @@ fn service_rejects_ambiguous_open_row_hrtb_static_method_values_through_aliases(
 }
 
 #[test]
+fn service_forwards_nested_alias_hrtb_static_methods_with_mixed_row_binders_through_vm() {
+    // `relay` has lifetime, type, and effect-row method binders.  The public
+    // `Callback` spelling crosses two package aliases, while `relay_to_caller`
+    // preserves its still-open row tail before `main` finally closes it.
+    let mut request = request(
+        "use facade::{Callback, Gate, Gateway as Capability, Trace}; pub fn forward<e: EffectRow>() -> Callback<i64, e> { Capability<i64>::relay } pub fn apply<e: EffectRow>(callback: Callback<i64, e>) -> i64 / {Trace<i64>, | e} { let value = 41; let result = callback(&value, value); Trace<i64>::note(result) } pub fn relay_to_caller<e: EffectRow>() -> i64 / {Trace<i64>, | e} { apply(forward<e>()) } pub fn main() -> i64 { handle relay_to_caller<{}>() { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use middle::{First as Gateway, Gate, Trace}; pub type Callback<U, E: EffectRow> = middle::Callback<U, E>;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("middle@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as First, Gate, Trace}; pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> };".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {Trace<U>, | e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = {Trace<U>, | e}; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {Trace<U>, | e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl !Top<i64> for u64 {}".as_slice(),
+    ));
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("nested aliases must preserve the selected mixed-binder static method value");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(request)
+        .expect("source ordering must not perturb nested alias materialization");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_ambiguous_nested_alias_hrtb_static_method_values_with_open_rows() {
+    // The two aliases do not hide that two different concrete subjects prove
+    // Top<i64>. The generic callback row must not cause static extraction to
+    // choose one dictionary merely because both normalize to the same tail.
+    let mut request = request(
+        "use facade::{Callback, Gate, Gateway as Capability}; pub fn forward<e: EffectRow>() -> Callback<i64, e> { Capability<i64>::relay } pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use middle::{First as Gateway, Gate, Trace}; pub type Callback<U, E: EffectRow> = middle::Callback<U, E>;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("middle@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as First, Gate, Trace}; pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> };".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = {| e}; } impl Gate<i64> for u64 { type Effects<'a, U, e: EffectRow> = {| e}; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Base<i64> for u64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <u64 as Gate<i64>>::Effects<'a, U, e> } where u64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Middle<i64> for u64 where u64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl Top<i64> for u64 where u64: Middle<i64> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("ambiguous nested alias static method value unexpectedly entered VM emission");
+    };
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        ["G7007", "G4169", "G4182"],
+        "unexpected nested-alias ambiguity diagnostics: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_negative_nested_alias_hrtb_static_method_values_with_open_rows() {
+    // Negative Top evidence on the only candidate blocks inherited static
+    // extraction even though Base and Gate themselves have positive evidence.
+    let mut request = request(
+        "use facade::{Callback, Gate, Gateway as Capability}; pub fn forward<e: EffectRow>() -> Callback<i64, e> { Capability<i64>::relay } pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use middle::{First as Gateway, Gate, Trace}; pub type Callback<U, E: EffectRow> = middle::Callback<U, E>;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("middle@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as First, Gate, Trace}; pub type Callback<U, E: EffectRow> = for<'a> (&'a i64, U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, E> };".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate<T> { type Effects<'a, U, e: EffectRow>: EffectRow; } pub trait Base<T>: Gate<T> { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <Self as Gate<T>>::Effects<'a, U, e> } where Self: Gate<T, Effects<'a, U, e> = {| e}>; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Gate<i64> for i64 { type Effects<'a, U, e: EffectRow> = {| e}; } impl Base<i64> for i64 { fn relay<'a, U, e: EffectRow>(value: &'a i64, marker: U) -> i64 / { <i64 as Gate<i64>>::Effects<'a, U, e> } where i64: Gate<i64, Effects<'a, U, e> = {| e}> { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl !Top<i64> for i64 {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("negative nested alias static method value unexpectedly entered VM emission");
+    };
+    assert_eq!(
+        diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>(),
+        ["G7007", "G4169", "G4182"],
+        "unexpected negative nested-alias diagnostics: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
