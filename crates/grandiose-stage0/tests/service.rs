@@ -4802,6 +4802,67 @@ fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
 }
 
 #[test]
+fn service_executes_aliased_supertrait_gat_effect_obligations_through_vm() {
+    // `Gateway` is a public alias for a subtrait whose implementation proves
+    // its parent contract through a scoped where-obligation.  Selecting the
+    // inherited method must retain the parent GAT and effect-row identities
+    // through package aliases all the way to VM handler dispatch.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn main() -> i64 { let receiver = 0; let value = 41; handle Capability<i64>::relay(&receiver, &value) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Child as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<'a>; type Effects<'a>: EffectRow; fn relay<'a>(receiver: Self, value: <Self as Parent<T>>::Item<'a>) -> i64 / { <Self as Parent<T>>::Effects<'a> }; } pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 { type Item<'a> = &'a i64; type Effects<'a> = {Trace<i64>}; fn relay<'a>(receiver: &'r i64, value: &'a i64) -> i64 / {Trace<i64>} { Trace<i64>::note(*value) } } impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("aliased scoped supertrait GAT/effect obligations must reach the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_bounds_recursive_aliased_supertrait_gat_obligations_with_negative_evidence() {
+    // A parent implementation asks for its subtrait while that same subtrait
+    // must establish the parent contract.  The re-exported negative alias
+    // makes the recursive fact explicitly impossible.  Interface validation
+    // must terminate with coherence and supertrait diagnostics; it must never
+    // turn the cycle into synthetic associated GAT/effect-row evidence.
+    let mut request = request(
+        "use bridge::{Parent as First, Child as Second, DeniedChild}; pub struct Local {} impl First<i64> for Local where Local: Second<i64> { type Item<'a> = &'a i64; type Effects<'a> = {}; } impl Second<i64> for Local {} impl !DeniedChild<i64> for Local {} pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Parent, Child, Child as DeniedChild};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub trait Parent<T> { type Item<'a>; type Effects<'a>: EffectRow; } pub trait Child<T>: Parent<T> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("recursive aliased supertrait evidence unexpectedly produced a VM artifact");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G3406"),
+        "missing mixed-polarity alias coherence rejection: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4148"),
+        "missing bounded recursive supertrait-obligation rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_executes_alias_equivalent_hrtb_effect_gat_traits_through_vm() {
     let mut request = request(
         "use bridge::First as Primary; use bridge::Second as Secondary; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / { <&'a i64 as Secondary<i64>>::Effects<'a> } { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Primary<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
