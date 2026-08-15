@@ -11065,6 +11065,134 @@ fn service_preserves_generic_associated_items_and_callable_aliases_through_reexp
 }
 
 #[test]
+fn service_seals_generic_facade_interface_fingerprints_independent_of_source_enumeration() {
+    let root = "use top_facade::*; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn call(callback: Callback<i64>) -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: call(Capability<i64>::relay) }; Trace<i64>::note(packet.value) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let mut input = request(root);
+    for (package, source) in [
+        ("semantic-core@0.1.0", provider),
+        (
+            "middle-facade@0.1.0",
+            "pub use semantic_core::{Callback, Child as Capability, Trace};",
+        ),
+        ("top-facade@0.1.0", "pub use middle_facade::*;"),
+    ] {
+        input.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(input.clone(), None).unwrap();
+    let first = compiler
+        .compile_revision(parent)
+        .expect("generic facade interfaces must freeze before VM lowering");
+    let mut reordered = input;
+    reordered.sources.reverse();
+    let child = compiler.import_revision(reordered, Some(parent)).unwrap();
+    assert_eq!(
+        child, parent,
+        "source enumeration must normalize to the exact same immutable request world"
+    );
+    let second = compiler
+        .compile_revision(child)
+        .expect("source enumeration cannot perturb sealed public interfaces");
+
+    let modules = [
+        ("app@0.1.0", "crate"),
+        ("semantic-core@0.1.0", "crate"),
+        ("middle-facade@0.1.0", "crate"),
+        ("top-facade@0.1.0", "crate"),
+    ];
+    for (package, path) in modules {
+        let interface = DependencyNode::Interface(ModuleKey {
+            package: PackageKey(package.into()),
+            path: path.into(),
+        });
+        let first_trace = compiler
+            .dependency_trace(parent, &interface)
+            .expect("first revision must publish every package interface");
+        let second_trace = compiler
+            .dependency_trace(child, &interface)
+            .expect("reordered revision must publish every package interface");
+        assert_eq!(
+            first_trace.fingerprint, second_trace.fingerprint,
+            "{package} public interface fingerprint changed with source enumeration"
+        );
+        assert_eq!(first_trace, second_trace);
+    }
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 43);
+    assert_eq!(second.run_i64().unwrap(), 43);
+}
+
+#[test]
+fn service_rolls_back_malformed_private_generic_facade_reexports_before_interface_publication() {
+    let provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let mut input = request("use top_facade::*; pub fn main() -> i64 { 42 }");
+    for (package, source) in [
+        ("semantic-core@0.1.0", provider),
+        (
+            "middle-facade@0.1.0",
+            "use semantic_core::{Callback, Child as Capability, Trace}; pub use semantic_core::*;",
+        ),
+        (
+            "top-facade@0.1.0",
+            "pub use middle_facade::{Callback, Capability, Trace};",
+        ),
+    ] {
+        input.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let mut reordered = input.clone();
+    reordered.sources.reverse();
+    let mut diagnostics_by_order = Vec::new();
+    for request in [input, reordered] {
+        let compiler = StageZeroCompiler::new();
+        let revision = compiler.import_revision(request, None).unwrap();
+        let session = compiler.open_session(revision).unwrap();
+        let error = compiler
+            .compile_session(&session)
+            .expect_err("a public re-export cannot elevate a private generic facade alias");
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == "G3317"),
+            "missing private facade re-export diagnostic: {:#?}",
+            error.diagnostics()
+        );
+        assert!(
+            error
+                .diagnostics()
+                .iter()
+                .all(|diagnostic| diagnostic.code == "G3317"),
+            "interface authority must fail before body diagnostics: {:#?}",
+            error.diagnostics()
+        );
+        assert_eq!(compiler.interface_cache_stats().hits, 0);
+        assert_eq!(compiler.interface_cache_stats().misses, 0);
+        assert!(
+            compiler.dependency_traces(revision).is_empty(),
+            "a malformed package facade must not publish partial generic interfaces"
+        );
+        diagnostics_by_order.push(error.diagnostics().to_vec());
+    }
+    assert_eq!(
+        diagnostics_by_order[0], diagnostics_by_order[1],
+        "private facade authority diagnostics must be canonical under source reordering"
+    );
+}
+
+#[test]
 fn service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping() {
     let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
     let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";

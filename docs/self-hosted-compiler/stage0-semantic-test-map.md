@@ -195,6 +195,14 @@ coarse. The composite fixtures cover:
   with source-order-stable interface diagnostics
   (`service_preserves_generic_associated_items_and_callable_aliases_through_reexport_chains`,
   `service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping`).
+- sealed public interface fingerprints for generic associated item/effect
+  contracts and callable aliases remain identical when every package source is
+  enumerated in reverse; request normalization collapses both orders to the
+  exact same frozen world. A facade cannot publicly re-export an alias that
+  its direct dependency imported privately: the invalid chain produces only
+  the authority error and rolls back all staged interface/cache/dependency facts
+  (`service_seals_generic_facade_interface_fingerprints_independent_of_source_enumeration`,
+  `service_rolls_back_malformed_private_generic_facade_reexports_before_interface_publication`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and
