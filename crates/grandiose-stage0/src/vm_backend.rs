@@ -18,8 +18,7 @@ use crate::{
     mir::{
         MirCleanupAction, MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern,
         MirPatternField, MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f32_bits,
-        is_canonical_f64_bits,
-        parse_char_literal, parse_f64_literal, parse_text_literal,
+        is_canonical_f64_bits, parse_char_literal, parse_f64_literal, parse_text_literal,
     },
     runtime_manifest::{FloatBinaryOp, FloatCompareOp, FloatPrimitive, FloatWidth, PrimitiveRole},
     source::{TokenKind, exact_scalar_literal_kind},
@@ -2452,7 +2451,16 @@ impl VerifiedVmProgram {
 }
 
 pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactError> {
-    if function.validate().is_err()
+    emit_with_specialized_lifted_targets(function, &BTreeSet::new())
+}
+
+fn emit_with_specialized_lifted_targets(
+    function: &MirFunction,
+    specialized_lifted_targets: &BTreeSet<DefKey>,
+) -> Result<CandidateVmArtifact, VmArtifactError> {
+    if function
+        .validate_with_specialized_lifted_targets(specialized_lifted_targets)
+        .is_err()
         || function.entry.0 != 0
         || !function.blocks[0].parameters.is_empty()
     {
@@ -2686,10 +2694,22 @@ pub fn emit_program(program: &MirProgram) -> Result<CandidateVmProgram, VmArtifa
         .map_err(|_| VmArtifactError::MissingFunction {
             definition: program.entry,
         })?;
+    let specialized_lifted_targets = program
+        .specialized_lifted_target_owners()
+        .map_err(|_| VmArtifactError::MissingFunction {
+            definition: program.entry,
+        })?
+        .into_keys()
+        .collect::<BTreeSet<_>>();
     let functions = program
         .functions
         .iter()
-        .map(|(definition, function)| Ok((*definition, emit(function)?.function)))
+        .map(|(definition, function)| {
+            Ok((
+                *definition,
+                emit_with_specialized_lifted_targets(function, &specialized_lifted_targets)?.function,
+            ))
+        })
         .collect::<Result<BTreeMap<_, _>, VmArtifactError>>()?;
     let host_capabilities = reachable_host_capabilities(program.entry, &functions);
     let mut callable_environments = BTreeMap::new();

@@ -1557,11 +1557,11 @@ pub(crate) fn lifted_callable_definition(brand: EnvironmentBrand) -> DefKey {
     ]))
 }
 
-/// Canonical executable identity for a source-lifted callable instantiated by
-/// one concrete generic owner.  The source lifted identity remains part of
-/// the digest so specialization cannot retarget an environment to a sibling
-/// closure merely because its capture ABI happens to match.
-pub(crate) fn lifted_callable_instance_definition(
+/// Executable identity for a lifted callable cloned into a concrete generic
+/// callable instance. The source lift remains identified by its environment
+/// brand; the enclosing instance keeps two otherwise identical generic
+/// specializations from sharing one body with different concrete layouts.
+pub(crate) fn materialized_lifted_callable_definition(
     instance: &InstanceKey,
     source: DefKey,
 ) -> DefKey {
@@ -5134,15 +5134,15 @@ impl MirFunction {
         &self.blocks[self.entry.0 as usize]
     }
     pub fn validate(&self) -> Result<(), String> {
-        self.validate_with_lifted_callable_targets(&BTreeMap::new())
+        self.validate_with_specialized_lifted_targets(&BTreeSet::new())
     }
 
-    /// Validate with the exact concrete lifted targets published by a frozen
-    /// `MirProgram`. Standalone MIR remains strict: a branded environment must
-    /// point at its canonical source-lifted definition.
-    fn validate_with_lifted_callable_targets(
+    /// Validate a function that belongs to a whole-program product. Only
+    /// `MirProgram` can admit a non-source lifted target, after deriving it
+    /// from a registered concrete instance.
+    pub(crate) fn validate_with_specialized_lifted_targets(
         &self,
-        specialized_lifted_targets: &BTreeMap<DefKey, DefKey>,
+        specialized_lifted_targets: &BTreeSet<DefKey>,
     ) -> Result<(), String> {
         if self.entry.0 as usize >= self.blocks.len() {
             return Err(format!("MIR entry block {} is absent", self.entry.0));
@@ -5917,7 +5917,7 @@ impl MirFunction {
     fn validate_instruction(
         &self,
         instruction: &MirInstruction,
-        specialized_lifted_targets: &BTreeMap<DefKey, DefKey>,
+        specialized_lifted_targets: &BTreeSet<DefKey>,
     ) -> Result<(), String> {
         match instruction {
             MirInstruction::StorageLive { binding, local }
@@ -5994,9 +5994,7 @@ impl MirFunction {
             match environment {
                 Some(environment) => {
                     let source = lifted_callable_definition(environment.brand);
-                    if *callee != source
-                        && specialized_lifted_targets.get(callee) != Some(&source)
-                    {
+                    if *callee != source && !specialized_lifted_targets.contains(callee) {
                         return Err(
                             "MIR callable environment brand does not match its lifted target"
                                 .into(),
@@ -7643,39 +7641,33 @@ impl MirProgram {
                 );
             }
         }
-        // Materialized generic owners may retarget their source-lifted
-        // closures to concrete executable bodies.  Admit only the canonical
-        // target derived from both a registered instance and the original
-        // branded lifted definition; a matching capture layout alone is not
-        // authority to retarget a closure.
-        let mut specialized_lifted_targets = BTreeMap::<DefKey, DefKey>::new();
-        for function in self.functions.values() {
-            for block in &function.blocks {
-                for instruction in &block.instructions {
-                    let MirInstruction::MakeCallable {
-                        environment: Some(environment),
-                        ..
-                    } = instruction
-                    else {
-                        continue;
-                    };
-                    let source = lifted_callable_definition(environment.brand);
-                    for instance in self.instances.values() {
-                        let target = lifted_callable_instance_definition(&instance.key, source);
-                        if let Some(previous) = specialized_lifted_targets.insert(target, source)
-                            && previous != source
-                        {
-                            return Err(
-                                "MIR concrete lifted callable target has conflicting source origins"
-                                    .into(),
-                            );
-                        }
-                    }
-                }
+        let specialized_lifted_owners = self.specialized_lifted_target_owners()?;
+        let mut function_owners = BTreeMap::<DefKey, InstanceKey>::new();
+        for instance in self.instances.values() {
+            if !instance.key.arguments().is_empty()
+                && function_owners
+                    .insert(instance.executable, instance.key.clone())
+                    .is_some()
+            {
+                return Err("MIR concrete instances have duplicate executable owners".into());
             }
         }
-        for function in self.functions.values() {
-            function.validate_with_lifted_callable_targets(&specialized_lifted_targets)?;
+        for (target, owner) in &specialized_lifted_owners {
+            if function_owners.insert(*target, owner.clone()).is_some() {
+                return Err("MIR specialized lifted callable collides with an instance body".into());
+            }
+        }
+        for (definition, function) in &self.functions {
+            let specialized_lifted_targets = function_owners.get(definition).map_or_else(
+                BTreeSet::new,
+                |owner| {
+                    specialized_lifted_owners
+                        .iter()
+                        .filter_map(|(target, candidate)| (candidate == owner).then_some(*target))
+                        .collect()
+                },
+            );
+            function.validate_with_specialized_lifted_targets(&specialized_lifted_targets)?;
             for block in &function.blocks {
                 for instruction in &block.instructions {
                     if let MirInstruction::Call {
@@ -7737,6 +7729,66 @@ impl MirProgram {
             }
         }
         Ok(())
+    }
+
+    /// Derive the only non-source lifted targets admissible in this program.
+    /// A standalone `MirFunction` intentionally has no such authority: its
+    /// callable target must exactly match the environment brand. Here, each
+    /// exception is rooted in an admitted non-empty concrete instance and is
+    /// followed transitively through the specialized lifted bodies it owns.
+    pub(crate) fn specialized_lifted_target_owners(
+        &self,
+    ) -> Result<BTreeMap<DefKey, InstanceKey>, String> {
+        let mut owners = BTreeMap::<DefKey, InstanceKey>::new();
+        let mut pending = VecDeque::new();
+        for instance in self.instances.values() {
+            if !instance.key.arguments().is_empty() {
+                pending.push_back((instance.executable, instance.key.clone()));
+            }
+        }
+
+        while let Some((definition, instance)) = pending.pop_front() {
+            let function = self.functions.get(&definition).ok_or_else(|| {
+                "MIR instance product has no matching executable body".to_owned()
+            })?;
+            if function.definition != definition {
+                return Err("MIR function definition disagrees with its program key".into());
+            }
+            for block in &function.blocks {
+                for instruction in &block.instructions {
+                    let MirInstruction::MakeCallable {
+                        callee,
+                        environment: Some(environment),
+                        ..
+                    } = instruction
+                    else {
+                        continue;
+                    };
+                    let source = lifted_callable_definition(environment.brand);
+                    let target = materialized_lifted_callable_definition(&instance, source);
+                    if *callee != target {
+                        return Err(
+                            "MIR generic instance does not target its canonical specialized lifted callable"
+                                .into(),
+                        );
+                    }
+                    match owners.get(&target) {
+                        Some(owner) if owner != &instance => {
+                            return Err(
+                                "MIR specialized lifted callable has contradictory instance owners"
+                                    .into(),
+                            );
+                        }
+                        Some(_) => {}
+                        None => {
+                            owners.insert(target, instance.clone());
+                            pending.push_back((target, instance.clone()));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(owners)
     }
 }
 

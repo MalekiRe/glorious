@@ -2622,7 +2622,7 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
         entry,
         functions: BTreeMap::from([
             (entry, entry_function(Some(layout.clone()))),
-            (callee, target),
+            (callee, target.clone()),
         ]),
         instances: BTreeMap::new(),
     };
@@ -2634,8 +2634,70 @@ fn mir_rejects_forged_callable_environment_brand_count_and_type() {
     let mut forged_count = layout.clone();
     forged_count.captures.clear();
     assert!(entry_function(Some(forged_count)).validate().is_err());
-    let mut forged_type = layout;
+    let mut forged_type = layout.clone();
     forged_type.captures[0].ty = Type::Scalar(ScalarType::Bool);
     assert!(entry_function(Some(forged_type)).validate().is_err());
     assert!(entry_function(None).validate().is_err());
+
+    let instance_key = InstanceKey::new(
+        DefKey(Digest::of_bytes(b"mir-callable-environment-instance-template")),
+        &[GenericKind::Type],
+        vec![GenericArgument::Type(Type::Scalar(ScalarType::I64))],
+    )
+    .expect("closed generic instance key");
+    let executable = DefKey(instance_key.fingerprint());
+    let specialized_callee = DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable-instance-v1".as_slice(),
+        instance_key.fingerprint().as_bytes().as_slice(),
+        callee.0.as_bytes().as_slice(),
+    ]));
+    let mut specialized_entry = entry_function(Some(layout.clone()));
+    specialized_entry.definition = executable;
+    let MirInstruction::MakeCallable {
+        callee: actual_callee,
+        ..
+    } = &mut specialized_entry.blocks[0].instructions[1]
+    else {
+        panic!("expected callable construction")
+    };
+    *actual_callee = specialized_callee;
+    let mut specialized_target = target;
+    specialized_target.definition = specialized_callee;
+
+    let mut unregistered_entry = entry_function(Some(layout.clone()));
+    let MirInstruction::MakeCallable {
+        callee: actual_callee,
+        ..
+    } = &mut unregistered_entry.blocks[0].instructions[1]
+    else {
+        panic!("expected callable construction")
+    };
+    *actual_callee = specialized_callee;
+    let unregistered = MirProgram {
+        entry,
+        functions: BTreeMap::from([
+            (entry, unregistered_entry),
+            (specialized_callee, specialized_target.clone()),
+        ]),
+        instances: BTreeMap::new(),
+    };
+    assert!(unregistered.validate().is_err_and(|error| {
+        error.contains("environment brand does not match its lifted target")
+    }));
+
+    let registered = MirProgram {
+        entry: executable,
+        functions: BTreeMap::from([
+            (executable, specialized_entry),
+            (specialized_callee, specialized_target),
+        ]),
+        instances: BTreeMap::from([(
+            executable,
+            MirInstance {
+                key: instance_key,
+                executable,
+            },
+        )]),
+    };
+    assert!(registered.validate().is_ok(), "{:#?}", registered.validate());
 }

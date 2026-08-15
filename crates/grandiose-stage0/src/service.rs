@@ -12,9 +12,7 @@ use std::{
 use crate::revision::{
     BodyScratchLease, PackageSessionError, PackageSessionLease, RequestControlError,
 };
-use crate::mir::{
-    lifted_callable_instance_definition, materialized_instance_retains_generic_placeholder,
-};
+use crate::mir::materialized_instance_retains_generic_placeholder;
 use crate::{
     BodySyntax, BootstrapManifest, Budget, BudgetError, CancellationToken, CoherenceSet,
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
@@ -2609,7 +2607,9 @@ fn materialize_lifted_callable_instances(
                     let (target, is_new) = match targets.get(&source).copied() {
                         Some(target) => (target, false),
                         None => {
-                            let target = lifted_callable_instance_definition(instance, source);
+                            let target = crate::mir::materialized_lifted_callable_definition(
+                                instance, source,
+                            );
                             targets.insert(source, target);
                             (target, true)
                         }
