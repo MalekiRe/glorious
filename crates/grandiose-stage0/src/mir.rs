@@ -7018,11 +7018,11 @@ fn validate_lowered_handler_contracts(
     body: &TypedBody,
     function: &MirFunction,
 ) -> Result<(), String> {
-    // Specialised lowerers construct builder-only control sentinels, then the
-    // common publication boundary assigns dense site identities. Validate the
-    // same frozen view here: validating the pre-freeze builder would reject a
-    // correct handler merely because its table has not been published yet.
-    function.clone().with_frozen_control_tables().validate()?;
+    // The caller freezes source-storage alongside the control tables at the
+    // single publication boundary. Do not invoke full MIR validation here:
+    // a builder `Store` has not yet acquired its typed source-storage mapping
+    // or executable `StorageLive` prefix, so validating this intermediate
+    // view would reject ordinary source assignment before freezing it.
 
     let clauses = body
         .expressions
@@ -8823,7 +8823,6 @@ impl Lowerer<'_> {
         // partially materialized value cache (in particular, an argument
         // local allocated by a rejected handler-only probe without its
         // defining instruction).
-        self.reset_speculative_body_state(&parameters);
         let (label, root_prefix) = match self.body.expression(root).kind.clone() {
             CoreKind::Label { .. } => (root, Vec::new()),
             CoreKind::Block(values) => {
@@ -8892,6 +8891,13 @@ impl Lowerer<'_> {
         {
             return None;
         }
+
+        // Do not reset merely because a broad outer shape happened to start
+        // with a label. Most ordinary label programs are intentionally left
+        // for the more general lowerers below. Once this probe has proved it
+        // owns the complete handler/completion shape, however, it must start
+        // from the callable ABI rather than any abandoned probe state.
+        self.reset_speculative_body_state(&parameters);
 
         for expression in root_prefix.iter().chain(label_prefix.iter()) {
             self.statement(*expression)?;
