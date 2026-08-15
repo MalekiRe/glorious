@@ -9,7 +9,10 @@
 use grandiose_stage0::{
     emit_vm, CoreId, DefKey, Digest, EffectRow, LabelBrand, Lifetime, MirBlock, MirBlockId,
     MirCleanupPlan, MirControlTables, MirFunction, MirInstruction, MirLocal, MirLocalDecl,
-    MirScopeId, MirSourceStorageScopeId, MirTerminator, Mutability, Quantity, ScalarType, Type,
+    MirMovePathData, MirMovePathId, MirMovePathTables, MirPlaceBindingData, MirPlaceBindingId,
+    MirScopeId, MirSourceStorageScopeData, MirSourceStorageScopeId, MirSourceStorageTables,
+    MirStorageEvent, MirStorageEventKind, MirTerminator, Mutability, PlaceBindingId,
+    PlaceBindingOrigin, Quantity, ScalarType, SourceStorageScopeId, Type,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -308,5 +311,185 @@ fn mir_requires_drop_flag_for_divergent_source_storage_initialization() {
     assert!(
         emit_vm(&function).is_err(),
         "the VM must not erase an unproven source-storage drop-flag transition"
+    );
+}
+
+fn source_storage_tables() -> (MirMovePathTables, MirSourceStorageTables) {
+    let bindings = vec![
+        MirPlaceBindingData {
+            source: PlaceBindingId(0),
+            origin: PlaceBindingOrigin::Let {
+                expression: CoreId(10),
+            },
+            spelling: "outer_first".into(),
+        },
+        MirPlaceBindingData {
+            source: PlaceBindingId(1),
+            origin: PlaceBindingOrigin::Let {
+                expression: CoreId(11),
+            },
+            spelling: "outer_second".into(),
+        },
+        MirPlaceBindingData {
+            source: PlaceBindingId(2),
+            origin: PlaceBindingOrigin::Let {
+                expression: CoreId(12),
+            },
+            spelling: "inner".into(),
+        },
+        MirPlaceBindingData {
+            source: PlaceBindingId(3),
+            origin: PlaceBindingOrigin::Let {
+                expression: CoreId(13),
+            },
+            spelling: "inner_later".into(),
+        },
+        MirPlaceBindingData {
+            source: PlaceBindingId(4),
+            origin: PlaceBindingOrigin::Let {
+                expression: CoreId(14),
+            },
+            spelling: "sibling".into(),
+        },
+    ];
+    let paths = (0..5)
+        .map(|binding| MirMovePathData {
+            parent: None,
+            binding: MirPlaceBindingId(binding),
+            field: None,
+        })
+        .collect();
+    let events = |bindings: &[MirPlaceBindingId]| {
+        bindings
+            .iter()
+            .copied()
+            .map(|binding| MirStorageEvent {
+                kind: MirStorageEventKind::Live,
+                binding,
+            })
+            .chain(
+                bindings
+                    .iter()
+                    .rev()
+                    .copied()
+                    .map(|binding| MirStorageEvent {
+                        kind: MirStorageEventKind::Dead,
+                        binding,
+                    }),
+            )
+            .collect()
+    };
+    let root_bindings = vec![MirPlaceBindingId(0), MirPlaceBindingId(1)];
+    let inner_bindings = vec![MirPlaceBindingId(2), MirPlaceBindingId(3)];
+    let sibling_bindings = vec![MirPlaceBindingId(4)];
+    (
+        MirMovePathTables { bindings, paths },
+        MirSourceStorageTables {
+            scopes: vec![
+                MirSourceStorageScopeData {
+                    source: SourceStorageScopeId::ROOT,
+                    parent: None,
+                    bindings: root_bindings.clone(),
+                    events: events(&root_bindings),
+                },
+                MirSourceStorageScopeData {
+                    source: SourceStorageScopeId(1),
+                    parent: Some(MirSourceStorageScopeId::ROOT),
+                    bindings: inner_bindings.clone(),
+                    events: events(&inner_bindings),
+                },
+                MirSourceStorageScopeData {
+                    source: SourceStorageScopeId(2),
+                    parent: Some(MirSourceStorageScopeId::ROOT),
+                    bindings: sibling_bindings.clone(),
+                    events: events(&sibling_bindings),
+                },
+            ],
+            binding_scopes: vec![
+                MirSourceStorageScopeId::ROOT,
+                MirSourceStorageScopeId::ROOT,
+                MirSourceStorageScopeId(1),
+                MirSourceStorageScopeId(1),
+                MirSourceStorageScopeId(2),
+            ],
+            binding_locals: vec![
+                Some(MirLocal(0)),
+                Some(MirLocal(1)),
+                Some(MirLocal(2)),
+                Some(MirLocal(3)),
+                Some(MirLocal(4)),
+            ],
+        },
+    )
+}
+
+/// The source-storage arena itself is an artifact trust boundary.  These
+/// hostile records prove that event order, binding provenance, lexical exit
+/// boundaries, reverse destruction, and target-scope protection cannot be
+/// replaced by local spellings or VM register order.
+#[test]
+fn source_storage_arena_rejects_forged_lifecycle_and_cleanup_boundaries() {
+    let (paths, storage) = source_storage_tables();
+    storage.validate(&paths).unwrap();
+    storage.validate_local_mapping(&paths, 5).unwrap();
+    storage
+        .validate_cleanup_exit(
+            &paths,
+            MirSourceStorageScopeId(1),
+            MirSourceStorageScopeId::ROOT,
+            &[MirMovePathId(3), MirMovePathId(2)],
+        )
+        .unwrap();
+
+    let mut wrong_events = storage.clone();
+    wrong_events.scopes[0].events.swap(0, 1);
+    assert!(
+        wrong_events
+            .validate(&paths)
+            .is_err_and(|error| error.contains("StorageLive/StorageDead ordering")),
+        "storage events must retain live-forward/dead-reverse order"
+    );
+
+    let mut stale_local = storage.clone();
+    stale_local.binding_locals[2] = Some(MirLocal(99));
+    assert!(
+        stale_local
+            .validate_local_mapping(&paths, 5)
+            .is_err_and(|error| error.contains("absent local")),
+        "a frozen binding must never be rebound to a stale register"
+    );
+
+    assert!(
+        storage
+            .validate_cleanup_exit(
+                &paths,
+                MirSourceStorageScopeId(1),
+                MirSourceStorageScopeId::ROOT,
+                &[MirMovePathId(0)],
+            )
+            .is_err_and(|error| error.contains("retained by its target scope")),
+        "cleanup cannot destroy source storage protected by the target scope"
+    );
+    assert!(
+        storage
+            .validate_cleanup_exit(
+                &paths,
+                MirSourceStorageScopeId(1),
+                MirSourceStorageScopeId::ROOT,
+                &[MirMovePathId(4)],
+            )
+            .is_err_and(|error| error.contains("outside its declared source-storage exit")),
+        "cleanup cannot reach a sibling storage owner"
+    );
+    assert!(
+        storage
+            .validate_cleanup_exit(
+                &paths,
+                MirSourceStorageScopeId(1),
+                MirSourceStorageScopeId::ROOT,
+                &[MirMovePathId(2), MirMovePathId(3)],
+            )
+            .is_err_and(|error| error.contains("reverse lexical initialization order")),
+        "cleanup must destroy later-initialized storage before earlier storage"
     );
 }

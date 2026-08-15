@@ -132,6 +132,7 @@ The established service suite also keeps these implementation gaps enabled:
 | G1 source boundary rejects deferred non-exact and unbounded resumption quantities such as `[1,2]`, `[0,2]`, and `[1,infinity]` | `service_rejects_deferred_resumption_quantities_at_the_g1_source_boundary` |
 | Source-storage cleanup emits ordered actions, excludes protected payloads, ends loans before storage release, and preserves branch-correlated drop-flag erasure | `source_storage_cleanup.rs::mir_requires_ordered_source_storage_cleanup_on_nested_lexical_leave`, `source_storage_cleanup.rs::mir_requires_end_borrow_before_source_storage_cleanup`, `source_storage_cleanup.rs::mir_requires_drop_flag_for_divergent_source_storage_initialization` |
 | **Red: source-produced MIR has no executable storage lifecycle witness yet.** The source-path anchors can prove lowering and runtime behavior, but cannot prove `StorageLive`/`StorageDead`, drop-flag transitions, or ordered actions until those are represented in frozen MIR and serialized into the artifact. | `mir.rs::mir_rejects_read_of_uninitialized_source_storage_before_vm_lowering`, `mir.rs::mir_rejects_path_dependent_source_storage_initialization_at_a_join`, `source_storage_cleanup.rs`, and `vm_storage_erasure.rs` |
+| Source-storage cleanup arena rejects forged lifecycle, local provenance, scope-boundary, and reverse-order records | `source_storage_cleanup.rs::source_storage_arena_rejects_forged_lifecycle_and_cleanup_boundaries` |
 
 ## Acceptance condition
 
