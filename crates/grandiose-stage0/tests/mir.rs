@@ -2760,6 +2760,60 @@ fn checked_mir_editor_rewrites_operation_inputs_transactionally() {
 }
 
 #[test]
+fn vm_backend_emits_acyclic_edge_transfers_without_temporary_registers() {
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"mir-acyclic-edge-register-allocation")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+        ],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(0),
+                        value: 41,
+                    },
+                    MirInstruction::ConstI64 {
+                        dst: MirLocal(1),
+                        value: 7,
+                    },
+                ],
+                terminator: MirTerminator::Goto {
+                    target: MirBlockId(1),
+                    arguments: vec![MirLocal(0), MirLocal(1)],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![MirLocal(2), MirLocal(3)],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(2) },
+            },
+        ],
+    };
+
+    let artifact = emit_vm(&function).expect("valid typed edge emits");
+    assert_eq!(
+        artifact.function.registers.len(),
+        function.locals.len(),
+        "acyclic edge copies need no temporary physical registers"
+    );
+    assert_eq!(verify_vm(artifact).unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
 fn optimizer_folds_checked_scalar_constants_and_eliminates_known_branches() {
     let mut function = graph();
     function.blocks[0].instructions = vec![MirInstruction::ConstBool {
