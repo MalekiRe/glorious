@@ -9437,6 +9437,73 @@ fn service_partial_handler_forwarding_may_reach_an_outer_label_transfer() {
 }
 
 #[test]
+fn service_forwards_a_refutable_record_payload_to_a_label_exiting_outer_handler() {
+    // The inner matrix refutes the live record payload and must `Forward`.
+    // The outer record pattern receives the original payload, structurally
+    // refines/destructures it, and leaves the enclosing lexical label while
+    // both dynamic handler frames are still represented.
+    let source = r#"
+        struct Ticket { serial: i64, approved: Bool }
+        effect Inspect { [0, 1] inspect(ticket: Ticket) -> i64; }
+        pub fn leaf(ticket: Ticket) -> i64 / Inspect { Inspect::inspect(ticket) }
+        pub fn main() -> i64 {
+            label done {
+                handle {
+                    handle leaf(Ticket { serial: 41, approved: true }) {
+                        Inspect::inspect(Ticket { serial: 0, approved: _ }, _) => 0,
+                    }
+                } {
+                    Inspect::inspect(Ticket { serial: serial, approved: _ }, _) =>
+                        transfer done serial + 1,
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("refutable record forwarding and label exit must lower");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(program.functions.values().any(|function| {
+        function.instructions.iter().any(|instruction| matches!(
+            instruction,
+            VmInstruction::PatternTest { .. }
+        )) && function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Forward))
+    }));
+    assert!(program.functions.values().any(|function| function
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, VmInstruction::Leave { .. }))));
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+
+    // A duplicate structural row would make the later arm unreachable. It
+    // must be rejected before lowering, rather than becoming a stale handler
+    // target that could incorrectly retain or forward an old frame.
+    let illegal = r#"
+        struct Ticket { serial: i64, approved: Bool }
+        effect Inspect { [0, 1] inspect(ticket: Ticket) -> i64; }
+        pub fn main() -> i64 {
+            handle Inspect::inspect(Ticket { serial: 41, approved: true }) {
+                Inspect::inspect(Ticket { serial: 0, approved: _ }, _) => 0,
+                Inspect::inspect(Ticket { serial: 0, approved: _ }, _) => 1,
+                Inspect::inspect(_, _) => 2,
+            }
+        }
+    "#;
+    let error = StageZeroCompiler::new()
+        .compile(request(illegal))
+        .expect_err("duplicate refutable record row must not lower a stale frame");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4175"));
+}
+
+#[test]
 fn service_replayed_resumption_result_may_transfer_to_an_enclosing_label() {
     let source = r#"
         effect Ask { [2, 2] ask() -> i64; }
