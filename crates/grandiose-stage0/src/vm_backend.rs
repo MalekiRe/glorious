@@ -1396,6 +1396,7 @@ impl VmStorageErasureWitness {
             || storages.iter().any(|storage| {
                 storage.storage == u32::MAX
                     || storage.binding == u32::MAX
+                    || storage.storage != storage.binding
                     || storage.value_register as usize >= register_count
                     || storage.drop_flag == Some(u32::MAX)
             })
@@ -6953,6 +6954,7 @@ struct VerifierContinuation {
     /// this fact: `Some(false)` means either a moved SSA value or a live,
     /// uninitialized addressable slot.
     storage_live: Vec<bool>,
+    reference_origins: Vec<Option<u32>>,
     snapshots: Vec<Option<u32>>,
     labels: Vec<bool>,
     /// Whether a value contains a frame-branded resumption token.  This is
@@ -6983,6 +6985,16 @@ struct VerifierState {
     /// first definition, whereas an emptied SSA register remains unavailable
     /// until a CFG edge supplies a new definition.
     storage_live: Vec<bool>,
+    /// Whether a register has ever been declared as addressable source
+    /// storage in this function.  Unlike `storage_live`, this fact remains
+    /// true after `StorageDead` so an attacker cannot revive a dead slot by
+    /// exploiting the otherwise identical empty SSA register state.
+    source_storage: Vec<bool>,
+    /// Root source register for direct reference values. This is deliberately
+    /// separate from their type: a reference remains a live loan after its
+    /// owner has been moved, so StorageDead must inspect the root rather than
+    /// only the owner's resident-value state.
+    reference_origins: Vec<Option<u32>>,
     /// Provenance for first-class continuation values. `Some(frame)` means
     /// this register was produced by `CaptureResumption` for that exact live
     /// frame. The type system still sees a callable; this parallel proof fact
@@ -7165,11 +7177,31 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     {
         *state = true;
     }
+    let mut source_storage = vec![false; function.registers.len()];
+    for state in source_storage
+        .iter_mut()
+        .take(function.parameters as usize)
+    {
+        *state = true;
+    }
+    for instruction in &function.instructions {
+        let (VmInstruction::StorageLive { local, .. }
+        | VmInstruction::StorageDead { local, .. }) = instruction
+        else {
+            continue;
+        };
+        let Some(state) = source_storage.get_mut(*local as usize) else {
+            return Err(VmArtifactError::InvalidRegister { register: *local });
+        };
+        *state = true;
+    }
     let mut incoming = vec![None; function.instructions.len()];
     if let Some(entry) = incoming.first_mut() {
         *entry = Some(VerifierState {
             registers: initial,
             storage_live: initial_storage_live,
+            source_storage,
+            reference_origins: vec![None; function.registers.len()],
             snapshots: vec![None; function.registers.len()],
             labels: vec![false; function.registers.len()],
             resumptions: vec![false; function.registers.len()],
@@ -8137,6 +8169,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         dst: *dst,
                         registers: saved,
                         storage_live: states.storage_live.clone(),
+                        reference_origins: states.reference_origins.clone(),
                         snapshots: states.snapshots.clone(),
                         labels: states.labels.clone(),
                         resumptions: states.resumptions.clone(),
@@ -8262,6 +8295,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     let mut resumed = VerifierState {
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
+                        source_storage: states.source_storage.clone(),
+                        reference_origins: continuation.reference_origins,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
@@ -8324,6 +8359,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let mut resumed = VerifierState {
                     registers: continuation.registers,
                     storage_live: continuation.storage_live,
+                    source_storage: states.source_storage.clone(),
+                    reference_origins: continuation.reference_origins,
                     snapshots: continuation.snapshots,
                     labels: continuation.labels,
                     resumptions: continuation.resumptions,
@@ -8435,6 +8472,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     let mut resumed = VerifierState {
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
+                        source_storage: states.source_storage.clone(),
+                        reference_origins: continuation.reference_origins,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
@@ -8480,6 +8519,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     }
                     forwarded.registers = continuation.registers.clone();
                     forwarded.storage_live = continuation.storage_live.clone();
+                    forwarded.reference_origins = continuation.reference_origins.clone();
                     forwarded.snapshots = continuation.snapshots.clone();
                     forwarded.labels = continuation.labels.clone();
                     forwarded.resumptions = continuation.resumptions.clone();
@@ -8499,6 +8539,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         dst: continuation.dst,
                         registers: continuation.registers,
                         storage_live: continuation.storage_live,
+                        reference_origins: continuation.reference_origins,
                         snapshots: continuation.snapshots,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
@@ -8534,6 +8575,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize];
+                if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
+                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize];
+                }
             }
             VmInstruction::StorageLive { local, .. } => {
                 let index = *local as usize;
@@ -8549,6 +8593,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
                 states.resumptions[*local as usize] = false;
+                states.reference_origins[*local as usize] = None;
             }
             VmInstruction::StorageDead { local, .. } => {
                 let index = *local as usize;
@@ -8556,7 +8601,14 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     .registers
                     .get_mut(index)
                     .ok_or(VmArtifactError::InvalidRegister { register: *local })?;
-                if !states.storage_live[index] || *slot != Some(false) {
+                if !states.storage_live[index]
+                    || *slot != Some(false)
+                    || states
+                        .reference_origins
+                        .iter()
+                        .flatten()
+                        .any(|origin| *origin as usize == index)
+                {
                     return Err(VmArtifactError::ReadBeforeWrite { register: *local });
                 }
                 *slot = None;
@@ -8564,6 +8616,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
                 states.resumptions[*local as usize] = false;
+                states.reference_origins[*local as usize] = None;
             }
             VmInstruction::SetDropFlag { flag, .. } => {
                 expect_type(function, *flag, VmType::Bool)?;
@@ -8599,6 +8652,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 read(&states, *src)?;
                 same_type(function, *dst, *src)?;
                 let index = *dst as usize;
+                if states.source_storage[index] && !states.storage_live[index] {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: *dst });
+                }
                 let state = states
                     .registers
                     .get_mut(index)
@@ -8607,6 +8663,11 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize];
+                if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
+                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize];
+                } else {
+                    states.reference_origins[*dst as usize] = None;
+                }
             }
             VmInstruction::Move { dst, src } => {
                 read(&states, *src)?;
@@ -8618,7 +8679,11 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.labels[*src as usize] = false;
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize];
                 states.resumptions[*src as usize] = false;
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
+                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize];
+                }
+                states.reference_origins[*src as usize] = None;
             }
             VmInstruction::Borrow {
                 dst,
@@ -8712,6 +8777,11 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize];
+                states.reference_origins[*dst as usize] = if *reborrow {
+                    states.reference_origins[*src as usize]
+                } else {
+                    Some(*src)
+                };
             }
             VmInstruction::DerefCopy { dst, reference } => {
                 read(&states, *reference)?;
@@ -8730,6 +8800,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*reference as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*reference as usize];
+                if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
+                    states.reference_origins[*dst as usize] = states.reference_origins[*reference as usize];
+                }
             }
             VmInstruction::DerefStore { reference, src } => {
                 read(&states, *reference)?;
@@ -8757,6 +8830,18 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     });
                 };
                 expect_type(function, *src, *referent)?;
+                // A reference is the verifier's handle for the addressed
+                // content. Keep its lexical-label taint synchronized with a
+                // store so a subsequent DerefCopy cannot repackage a label
+                // as an ordinary capturable callable. This remains local to
+                // the active frame; labels still pass through ordinary calls.
+                states.labels[*reference as usize] = states.labels[*src as usize];
+                if let Some(origin) = states.reference_origins[*reference as usize]
+                    && states.source_storage[origin as usize]
+                    && !states.storage_live[origin as usize]
+                {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: origin });
+                }
             }
             VmInstruction::NotBool { dst, value } => {
                 read(&states, *value)?;
@@ -9680,15 +9765,21 @@ fn write(states: &mut VerifierState, register: u32) -> Result<(), VmArtifactErro
         .storage_live
         .get(index)
         .ok_or(VmArtifactError::InvalidRegister { register })?;
+    let source_storage = *states
+        .source_storage
+        .get(index)
+        .ok_or(VmArtifactError::InvalidRegister { register })?;
     let state = states
         .registers
         .get_mut(index)
         .ok_or(VmArtifactError::InvalidRegister { register })?;
+    states.reference_origins[index] = None;
     match *state {
-        None => {
+        None if !source_storage || storage_live => {
             *state = Some(true);
             Ok(())
         }
+        None => Err(VmArtifactError::ReadBeforeWrite { register }),
         Some(false) if storage_live => {
             *state = Some(true);
             Ok(())

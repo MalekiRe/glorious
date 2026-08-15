@@ -8,6 +8,7 @@ use grandiose_stage0::{
     VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmContinuationPolicy,
     VmEffectRow, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction,
     VmNominalCopyDescriptor, VmPattern, VmPatternField, VmStorageErasureWitness, VmType,
+    VmStorageErasureAction, VmStorageErasureStorage,
     decode_and_verify_artifact,
     decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
     encode_artifact, encode_program, verify_vm, verify_vm_program,
@@ -2893,6 +2894,261 @@ fn schema_26_leave_payload_mutations_reject_before_vm_execution() {
     assert!(matches!(
         decode_and_verify_artifact(&unknown_brand_owner),
         Err(VmArtifactError::FingerprintMismatch)
+    ));
+}
+
+#[test]
+fn verifier_rejects_leave_storage_witnesses_with_divergent_storage_and_binding_ids() {
+    let definition = DefKey(Digest::of_bytes(b"detached-leave-storage-witness"));
+    // The cleanup sequence is otherwise canonical, but its storage handle
+    // diverges from the frozen binding identity. Those names are one dense
+    // source-owner identity at the VM boundary, not two forgeable aliases.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition,
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::Leave {
+                    brand_owner: definition,
+                    brand_label: 0,
+                    handler_depth: 0,
+                    target: 2,
+                    arguments: vec![0],
+                    destinations: vec![1],
+                    cleanup: VmCleanupProof {
+                        moved_places: vec![],
+                        active_loans: vec![],
+                        storage_erasure: VmStorageErasureWitness::Verified {
+                            storages: vec![VmStorageErasureStorage {
+                                storage: 1,
+                                binding: 0,
+                                value_register: 0,
+                                initialized: true,
+                                drop_flag: Some(1),
+                            }],
+                            actions: vec![
+                                VmStorageErasureAction::Destroy { storage: 1 },
+                                VmStorageErasureAction::SetDropFlag {
+                                    drop_flag: 1,
+                                    initialized: false,
+                                },
+                                VmStorageErasureAction::StorageDead { storage: 1 },
+                            ],
+                            protected_registers: vec![],
+                        },
+                    },
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"detached-leave-storage-witness-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "leave source-storage erasure witness is not canonical"
+        })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::MalformedEncoding {
+            message: "leave source-storage erasure witness is not canonical"
+        })
+    ));
+}
+
+#[test]
+fn verifier_rejects_writes_that_resurrect_dead_source_storage() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"resurrected-source-storage")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64],
+            instructions: vec![
+                VmInstruction::StorageLive {
+                    binding: 0,
+                    local: 0,
+                },
+                VmInstruction::StorageDead {
+                    binding: 0,
+                    local: 0,
+                },
+                // This used to be accepted because a dead source slot had
+                // the same `None` register state as an ordinary SSA value.
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"resurrected-source-storage-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::ReadBeforeWrite { register: 0 })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::ReadBeforeWrite { register: 0 })
+    ));
+}
+
+#[test]
+fn verifier_rejects_labels_laundered_through_mutable_storage() {
+    let owner = DefKey(Digest::of_bytes(b"label-mutable-storage-owner"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let closure = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // Labels remain legal ordinary call arguments, but they must not become
+    // capturable merely by passing through a mutable addressable slot.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                label.clone(),
+                VmType::Reference {
+                    unique: true,
+                    referent: Box::new(label.clone()),
+                },
+                label.clone(),
+                label,
+                closure,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeCallable {
+                    dst: 1,
+                    callee: DefKey(Digest::of_bytes(b"label-mutable-storage-initial")),
+                    captures: vec![],
+                    environment: None,
+                },
+                VmInstruction::Borrow {
+                    dst: 2,
+                    src: 1,
+                    fields: vec![],
+                    unique: true,
+                    reborrow: false,
+                },
+                VmInstruction::MakeLabel {
+                    dst: 3,
+                    brand_owner: owner,
+                    brand_label: 1,
+                    target: 7,
+                    destination: 0,
+                },
+                VmInstruction::DerefStore {
+                    reference: 2,
+                    src: 3,
+                },
+                VmInstruction::DerefCopy {
+                    dst: 4,
+                    reference: 2,
+                },
+                VmInstruction::MakeCallable {
+                    dst: 5,
+                    callee: DefKey(Digest::of_bytes(b"label-mutable-storage-closure")),
+                    captures: vec![4],
+                    environment: None,
+                },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"label-mutable-storage-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+}
+
+#[test]
+fn verifier_rejects_storage_death_while_a_borrow_remains_live() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"live-borrow-after-storage-dead")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                VmType::Reference {
+                    unique: false,
+                    referent: Box::new(VmType::I64),
+                },
+                VmType::I64,
+                VmType::I64,
+            ],
+            instructions: vec![
+                VmInstruction::StorageLive {
+                    binding: 0,
+                    local: 0,
+                },
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::Borrow {
+                    dst: 1,
+                    src: 0,
+                    fields: vec![],
+                    unique: false,
+                    reborrow: false,
+                },
+                VmInstruction::Move { dst: 2, src: 0 },
+                // Moving the resident value must not make its live borrow
+                // harmless: this ends the addressable source slot too early.
+                VmInstruction::StorageDead {
+                    binding: 0,
+                    local: 0,
+                },
+                VmInstruction::DerefCopy {
+                    dst: 3,
+                    reference: 1,
+                },
+                VmInstruction::Return { value: 3 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"live-borrow-after-storage-dead-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::ReadBeforeWrite { register: 0 })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::ReadBeforeWrite { register: 0 })
     ));
 }
 
