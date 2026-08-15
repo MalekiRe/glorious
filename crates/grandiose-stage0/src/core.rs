@@ -5226,7 +5226,14 @@ impl Elaborator<'_> {
                         result.tail = row.tail;
                     }
                 }
-                _ => unresolved.push(projection),
+                answer => {
+                    // Concrete selected rows are no longer lexical
+                    // forwarding. Preserve why normalization failed so an
+                    // inherited ambiguity cannot be reported as the same
+                    // generic missing-row error as an unresolved facade.
+                    self.effect_projection_normalization_error(&answer);
+                    unresolved.push(projection);
+                }
             }
         }
         result.projections = unresolved;
@@ -5289,6 +5296,41 @@ impl Elaborator<'_> {
                 unreachable!("normalized projections are returned through Ok")
             }
         }
+    }
+
+    fn effect_projection_normalization_error(&mut self, answer: &TraitEffectRowProjectionAnswer) {
+        let (code, message) = match answer {
+            TraitEffectRowProjectionAnswer::Refuted { .. } => (
+                "G4151",
+                "associated effect-row projection is refuted by a negative implementation",
+            ),
+            TraitEffectRowProjectionAnswer::NoSolution => (
+                "G4152",
+                "no implementation can normalize this associated effect-row projection",
+            ),
+            TraitEffectRowProjectionAnswer::Ambiguous => {
+                ("G4153", "associated effect-row projection is ambiguous")
+            }
+            TraitEffectRowProjectionAnswer::Overflow => (
+                "G4154",
+                "associated effect-row projection exceeded the trait solver limit",
+            ),
+            TraitEffectRowProjectionAnswer::MissingAssociatedEffectRow { .. }
+            | TraitEffectRowProjectionAnswer::AssociatedEffectRowArity { .. } => (
+                "G4155",
+                "selected implementation does not define this associated effect row",
+            ),
+            TraitEffectRowProjectionAnswer::NestedTypeProjection { .. }
+            | TraitEffectRowProjectionAnswer::RecursiveProjection
+            | TraitEffectRowProjectionAnswer::ConflictingRowTails => (
+                "G4157",
+                "associated effect-row projection has no finite normal form",
+            ),
+            TraitEffectRowProjectionAnswer::Normalized { .. } => {
+                unreachable!("normalized effect projections are returned through the success arm")
+            }
+        };
+        self.projection_error(code, message);
     }
     fn header_projection(
         &mut self,

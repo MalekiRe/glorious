@@ -5697,6 +5697,76 @@ fn service_preserves_caller_reference_closure_results_and_rejects_invocation_loc
 }
 
 #[test]
+fn service_keeps_selected_hrtb_projection_failures_distinct_through_facades() {
+    let root = "use facade::{Callback, Packet, relay, Trace, Gate}; pub fn tag(packet: Packet<<i64 as Gate>::Width>) -> i64 { packet.value } pub fn apply(callback: Callback) -> i64 / Trace<7, i64> { let value = 41; let packet = callback(&value); Trace<7, i64>::note(packet.value) } pub fn main() -> i64 { handle apply(relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }";
+    let legal = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub struct Packet<n: u32> { value: i64 } pub trait Gate { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } impl Gate for i64 { const Width = 7; type Item<'a> = Packet<<i64 as Gate>::Width>; type Effects<'a> = {Trace<<i64 as Gate>::Width, i64>}; } pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> }; pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> } { Packet<<i64 as Gate>::Width> { value: *value } }";
+    let unresolved = legal.replace("impl Gate for i64 { const Width = 7; type Item<'a> = Packet<<i64 as Gate>::Width>; type Effects<'a> = {Trace<<i64 as Gate>::Width, i64>}; } ", "");
+    let ambiguous = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub struct Packet<n: u32> { value: i64 } pub trait Left { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } pub trait Right { const Width: u32; type Item<'a>; type Effects<'a>: EffectRow; } pub trait Gate: Left + Right {} impl Left for i64 { const Width = 7; type Item<'a> = Packet<7>; type Effects<'a> = {Trace<7, i64>}; } impl Right for i64 { const Width = 9; type Item<'a> = Packet<9>; type Effects<'a> = {Trace<9, i64>}; } impl Gate for i64 {} pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> }; pub fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a> / { <i64 as Gate>::Effects<'a> } { Packet<7> { value: *value } }";
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Gate, Packet, relay, Trace};".as_slice()));
+        input.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+        input
+    };
+    let mut reordered = world(legal);
+    let artifact = StageZeroCompiler::new()
+        .compile(reordered.clone())
+        .expect("selected type, effect, and const projections must materialize through an HRTB facade")
+        .artifact
+        .unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("source ordering must preserve selected HRTB projection materialization")
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(legal), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey { package: PackageKey("facade@0.1.0".into()), path: "crate".into() });
+    let trace = compiler.dependency_trace(parent, &facade).expect("legal projection facade must be frozen");
+    for (label, provider, expected) in [("unresolved", unresolved.as_str(), "G4190"), ("ambiguous", ambiguous, "G4153")] {
+        let rejected_world = world(provider);
+        let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+        let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("invalid selected projection facade must not publish");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == expected), "{label} projection revision missing {expected}: {:#?}", error.diagnostics());
+        if label == "unresolved" {
+            for kind in ["associated type projection", "associated effect-row projection", "associated const projection"] {
+                assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4190" && diagnostic.message.contains(kind)), "{label} revision lost {kind} evidence: {:#?}", error.diagnostics());
+            }
+        }
+        assert_eq!(compiler.interface_cache_stats(), cached, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()), "{label} revision disturbed legal traces");
+        let mut reordered = rejected_world;
+        reordered.sources.reverse();
+        assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source ordering cannot change projection diagnostics").diagnostics(), "{label} diagnostics must be canonical");
+    }
+    assert_eq!(parent_artifact.canonical_bytes(), artifact.canonical_bytes());
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), artifact.canonical_bytes());
+
+    let effect_root = "use facade::{Callback, relay, Trace}; pub fn apply(callback: Callback) -> i64 / Trace<7, i64> { let value = 41; Trace<7, i64>::note(callback(&value)) } pub fn main() -> i64 { handle apply(relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }";
+    let effect_provider = "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Left { type Effects<'a>: EffectRow; } pub trait Right { type Effects<'a>: EffectRow; } pub trait Gate: Left + Right {} impl Left for i64 { type Effects<'a> = {Trace<7, i64>}; } impl Right for i64 { type Effects<'a> = {Trace<9, i64>}; } impl Gate for i64 {} pub type Callback = for<'a> (&'a i64) -> i64 / { <i64 as Gate>::Effects<'a> }; pub fn relay<'a>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a> } { Trace<7, i64>::note(*value) }";
+    let mut effect_world = request(effect_root);
+    effect_world.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, relay, Trace};".as_slice()));
+    effect_world.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), effect_provider.as_bytes()));
+    let effect_error = StageZeroCompiler::new().compile(effect_world).expect_err("ambiguous effect GAT facade must reject");
+    assert!(effect_error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4153" && diagnostic.message == "associated effect-row projection is ambiguous"), "ambiguous effect GAT was not diagnosed distinctly: {:#?}", effect_error.diagnostics());
+
+    let const_root = "use facade::{Gate, Packet}; pub fn tag(packet: Packet<<i64 as Gate>::Width>) -> i64 { packet.value } pub fn main() -> i64 { 0 }";
+    let const_provider = "pub struct Packet<n: u32> { value: i64 } pub trait Left { const Width: u32; } pub trait Right { const Width: u32; } pub trait Gate: Left + Right {} impl Left for i64 { const Width = 7; } impl Right for i64 { const Width = 9; } impl Gate for i64 {}";
+    let mut const_world = request(const_root);
+    const_world.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Gate, Packet};".as_slice()));
+    const_world.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), const_provider.as_bytes()));
+    let const_error = StageZeroCompiler::new().compile(const_world).expect_err("ambiguous const facade must reject");
+    assert!(const_error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4153"), "ambiguous associated const must not be reported as unresolved: {:#?}", const_error.diagnostics());
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,
