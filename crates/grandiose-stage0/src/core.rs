@@ -3943,6 +3943,16 @@ impl Elaborator<'_> {
             }
             ExprKind::Move(value) => {
                 let value = self.expression(value);
+                if let CoreKind::Field { base, .. } = self.expressions[value.0 as usize].kind
+                    && self.type_has_custom_drop(&self.expressions[base.0 as usize].ty)
+                {
+                    self.error(
+                        expression.span,
+                        "G4188",
+                        "a custom-Drop aggregate cannot be partially moved; transfer the whole value or destroy it through its destructor",
+                    );
+                    self.recovered = true;
+                }
                 let ty = self.expressions[value.0 as usize].ty.clone();
                 self.alloc(CoreKind::Move(value), ty, expression.span)
             }
@@ -7260,6 +7270,29 @@ impl Elaborator<'_> {
             span,
         )
     }
+
+    /// `Drop` observes the complete initialized aggregate.  The hook cannot
+    /// run after a field has been moved out, so safe source may only transfer
+    /// such a value as a whole (or use a legal zero-use destruction path).
+    fn type_has_custom_drop(&self, ty: &Type) -> bool {
+        let Type::Nominal { definition, .. } = ty else {
+            return false;
+        };
+        self.signatures.definitions.values().any(|header| {
+            let crate::ElaboratedHeader::Implementation(implementation) = header else {
+                return false;
+            };
+            implementation.relation.definition
+                == crate::resolution::language_drop_trait_definition()
+                && matches!(
+                    implementation.self_ty,
+                    Type::Nominal {
+                        definition: implemented,
+                        ..
+                    } if implemented == *definition
+                )
+        })
+    }
     /// Return the payload layout of a selected enum variant only while the
     /// enclosing positive refinement proves that this exact Core place has
     /// that variant.  Generic enum alternatives can have incompatible field
@@ -8788,6 +8821,19 @@ impl Elaborator<'_> {
                 clause.span,
                 Some(&names),
             );
+            if self.type_has_custom_drop(&subject_ty)
+                && matches!(
+                    core_pattern,
+                    CorePattern::Record { .. } | CorePattern::Enum { .. }
+                )
+            {
+                self.error(
+                    clause.span,
+                    "G4188",
+                    "a custom-Drop aggregate cannot be ownership-deconstructed by a pattern",
+                );
+                self.recovered = true;
+            }
             let refinement = refinement
                 .as_ref()
                 .and_then(|(subject, pattern, environment)| {

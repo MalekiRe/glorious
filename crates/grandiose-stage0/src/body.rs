@@ -1874,13 +1874,29 @@ impl Parser<'_> {
                     self.position += 1;
                     let mut fields = vec![];
                     while !self.at_punctuation('}') && self.current().is_some() {
+                        let field_span = self.lexed.tokens[self.current()?].span;
                         let name = self.expect_identifier()?;
-                        if !self.at_punctuation(':') {
-                            self.error_current("G4016", "expected `:` in record pattern field");
-                            return None;
+                        if self.at_punctuation(':') {
+                            self.position += 1;
+                            fields.push((name, self.parse_pattern(binders)?));
+                        } else {
+                            // Record patterns use the same field shorthand as
+                            // record values: `Pair { left }` binds the field
+                            // named `left`. The semantic pattern plan still
+                            // carries the explicit field identity, so this is
+                            // pure surface sugar rather than a name-based
+                            // projection later in Core.
+                            if !binders.insert(name.clone()) {
+                                self.error_at(
+                                    field_span,
+                                    "G4017",
+                                    "duplicate binder in one pattern",
+                                );
+                            }
+                            let binding =
+                                self.alloc_pattern(PatternKind::Binding(name.clone()), field_span);
+                            fields.push((name, binding));
                         }
-                        self.position += 1;
-                        fields.push((name, self.parse_pattern(binders)?));
                         if !self.at_punctuation(',') {
                             break;
                         }

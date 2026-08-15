@@ -26,7 +26,7 @@ pub(crate) fn language_use_trait_definition() -> DefKey {
     ))
 }
 
-fn language_drop_trait() -> DefKey {
+pub(crate) fn language_drop_trait_definition() -> DefKey {
     DefKey(crate::Digest::of_bytes(
         b"grandiose-stage0-language-prelude-drop-v1",
     ))
@@ -35,7 +35,7 @@ fn language_drop_trait() -> DefKey {
 fn language_prelude_trait(path: &[String]) -> Option<DefKey> {
     match path {
         [name] if name == "Use" => Some(language_use_trait_definition()),
-        [name] if name == "Drop" => Some(language_drop_trait()),
+        [name] if name == "Drop" => Some(language_drop_trait_definition()),
         _ => None,
     }
 }
@@ -45,7 +45,7 @@ fn language_prelude_trait_kinds(definition: DefKey) -> Option<&'static [GenericK
         value if value == language_use_trait_definition() => {
             Some(&[GenericKind::Const(crate::types::ConstKind::Quantity)])
         }
-        value if value == language_drop_trait() => Some(&[]),
+        value if value == language_drop_trait_definition() => Some(&[]),
         _ => None,
     }
 }
