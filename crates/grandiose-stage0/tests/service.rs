@@ -10968,6 +10968,83 @@ fn service_executes_multilevel_callable_alias_effect_row_and_fixity_facades() {
 }
 
 #[test]
+fn service_preserves_generic_associated_items_and_callable_aliases_through_reexport_chains() {
+    let root = "use top_facade::*; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn call(callback: Callback<i64>) -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: call(Capability<i64>::relay) }; Trace<i64>::note(packet.value) } pub fn effect_value() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let mut request = request(root);
+    for (package, source) in [
+        ("semantic-core@0.1.0", provider),
+        (
+            "middle-facade@0.1.0",
+            "pub use semantic_core::{Callback, Child as Capability, Trace}; pub use semantic_core::*;",
+        ),
+        ("top-facade@0.1.0", "pub use middle_facade::*;"),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("re-export chains must retain generic associated item and callable alias authority");
+    let mut reordered = request;
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("associated-item facade artifacts must be source-order invariant");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 52);
+    assert_eq!(second.run_i64().unwrap(), 52);
+}
+
+#[test]
+fn service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping() {
+    let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
+    let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    for (package, source) in [
+        ("semantic-core@0.1.0", provider),
+        (
+            "middle-facade@0.1.0",
+            "pub use semantic_core::{Callback, Child as Capability, Trace}; pub use semantic_core::*;",
+        ),
+        ("top-facade@0.1.0", "pub use middle_facade::*;"),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let mut reordered = request.clone();
+    reordered.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request)
+    else {
+        panic!("private associated items or callable aliases unexpectedly crossed facades");
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(second)) =
+        StageZeroCompiler::new().compile(reordered)
+    else {
+        panic!("source ordering changed private facade authority into success");
+    };
+    assert!(
+        first.iter().any(|diagnostic| diagnostic.code == "G3317"),
+        "missing private associated-item/callable-alias authority diagnostic: {first:#?}"
+    );
+    assert!(
+        first.iter().all(|diagnostic| diagnostic.code == "G3317"),
+        "private facade authority must fail before operator grouping: {first:#?}"
+    );
+    assert_eq!(first, second, "private associated-item diagnostics must be canonical");
+}
+
+#[test]
 fn service_rejects_partial_multilevel_operator_reexports_before_grouping() {
     let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
     let provider = "pub infixr 30 **; trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub type Callback<U> = (i64, U) -> i64 / {Trace<U>};";

@@ -188,6 +188,13 @@ coarse. The composite fixtures cover:
   fixity stays public, exported-interface authority fails before body grouping
   (`service_executes_multilevel_callable_alias_effect_row_and_fixity_facades`,
   `service_rejects_partial_multilevel_operator_reexports_before_grouping`).
+- generic associated type/effect items and a callable alias may cross the same
+  re-export chain, preserving selected trait-method identity, an imported
+  generic operator trait, canonical VM bytes, and execution. Private versions
+  of the associated contract, alias, and effect are rejected before grouping
+  with source-order-stable interface diagnostics
+  (`service_preserves_generic_associated_items_and_callable_aliases_through_reexport_chains`,
+  `service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and
