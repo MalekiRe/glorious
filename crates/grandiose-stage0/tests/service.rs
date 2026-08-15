@@ -8217,6 +8217,47 @@ fn service_dynamic_label_rejoins_through_outer_completion_after_three_handler_fr
 }
 
 #[test]
+fn service_dynamic_label_completion_effect_rejoins_through_enclosing_facade() {
+    // The dynamic label abandons the partial/exact Ask frames and rejoins the
+    // completion boundary. That completion performs Audit, which must still
+    // see the facade installed around the whole computation.
+    let source = r#"
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        effect Audit { [1, 1] audit(value: i64) -> i64; }
+        pub fn main() -> i64 {
+            handle {
+                handle {
+                    @done: i64 {
+                        let exit = @done;
+                        handle {
+                            handle {
+                                let answer = Ask::ask(1);
+                                exit(answer + 1)
+                            } {
+                                Ask::ask(0) with k => k(0),
+                            }
+                        } {
+                            Ask::ask(value) with k => k(41),
+                        }
+                    }
+                } {
+                    value => Audit::audit(value),
+                }
+            } {
+                Audit::audit(value) with k => k(value + 100),
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 142);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 142);
+}
+
+#[test]
 fn service_allows_an_immediately_invoked_closure_to_capture_a_resumption() {
     let source = r#"
         effect Ask { [1, 1] ask() -> i64; }

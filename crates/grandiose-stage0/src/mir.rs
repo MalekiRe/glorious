@@ -6571,7 +6571,13 @@ fn lexical_scope_contexts(
         let mut context = contexts.get(&block_id).cloned().unwrap_or_default();
         for instruction in &block.instructions {
             match instruction {
-                MirInstruction::MakeLabel { label, .. } => {
+                MirInstruction::MakeLabel { label, target, .. } => {
+                    // A first-class invocation re-enters at `target` after
+                    // leaving the label's own lexical scope. Preserve the
+                    // handler prefix that existed *before* this capability
+                    // was minted, so a target nested in an enclosing facade
+                    // can later uninstall that facade normally.
+                    merge_lexical_context(&mut contexts, &mut pending, *target, &context);
                     context.push(MirScopeEntry::Label(*label));
                 }
                 MirInstruction::InstallHandler { site, target, .. } => {
@@ -11400,6 +11406,21 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
+        let root_tail = match self.body.expression(root).kind.clone() {
+            CoreKind::Block(values) => values.last().copied()?,
+            _ => root,
+        };
+        // An enclosing facade remains below the label capability. The label
+        // jump must abandon the two Ask frames but retain this handler so a
+        // normal completion may perform its residual effect through it.
+        let (completion_root, facade_clauses) = match self.body.expression(root_tail).kind.clone()
+        {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, Some(clauses)),
+            _ => (root, None),
+        };
         let completion_label = |computation| match self.body.expression(computation).kind {
             CoreKind::Label { .. } => Some(computation),
             CoreKind::Block(ref values) => values.last().copied().filter(|value| {
@@ -11407,8 +11428,8 @@ impl Lowerer<'_> {
             }),
             _ => None,
         };
-        let (label, completion) = match self.body.expression(root).kind.clone() {
-            CoreKind::Label { .. } => (root, None),
+        let (label, completion) = match self.body.expression(completion_root).kind.clone() {
+            CoreKind::Label { .. } => (completion_root, None),
             CoreKind::Completion {
                 computation,
                 clauses,
@@ -11544,8 +11565,70 @@ impl Lowerer<'_> {
             return None;
         }
 
+        let facade = if let Some(facade_clauses) = facade_clauses.as_ref() {
+            let [completion_clause] = completion.as_ref()?.as_slice() else {
+                return None;
+            };
+            let CoreKind::Perform {
+                effect: completion_effect,
+                operation: completion_operation,
+                arguments: completion_arguments,
+                terminal: false,
+                ..
+            } = self.body.expression(completion_clause.body).kind.clone()
+            else {
+                return None;
+            };
+            let matching = facade_clauses
+                .iter()
+                .filter(|clause| {
+                    !clause.terminal
+                        && clause.effect == completion_effect
+                        && clause.operation == completion_operation
+                })
+                .collect::<Vec<_>>();
+            let [facade] = matching.as_slice() else {
+                return None;
+            };
+            let CoreHandlerResumption::Explicit { quantity, .. } = facade.resumption else {
+                return None;
+            };
+            if quantity != crate::quantity::Quantity::ONCE
+                || facade.patterns.len() != completion_arguments.len()
+                || !facade.patterns.iter().all(pattern_is_irrefutable)
+                || facade.continuation.is_none()
+                || self.handler_body_uses_snapshot_alias(facade.body)
+            {
+                return None;
+            }
+            Some(*facade)
+        } else {
+            None
+        };
+
         let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
         self.label_values.insert(brand, (MirBlockId(1), join));
+        let facade_payloads = facade
+            .map(|facade| {
+                facade
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), facade.body))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if let Some(facade) = facade {
+            self.instructions.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: facade.effect.definition,
+                effect_arguments: facade.effect.arguments.clone(),
+                operation: facade.operation,
+                payload_destinations: facade_payloads.clone(),
+                resume_type: facade.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target: MirBlockId(6),
+            });
+        }
         for expression in label_prefix {
             self.statement(*expression)?;
         }
@@ -11601,6 +11684,9 @@ impl Lowerer<'_> {
         // state: a real `Label<T>` invocation jumps to the rejoin block.
         self.instructions.push(MirInstruction::UninstallHandler);
         self.instructions.push(MirInstruction::UninstallHandler);
+        if facade.is_some() {
+            self.instructions.push(MirInstruction::UninstallHandler);
+        }
         let entry_instructions = std::mem::take(&mut self.instructions);
 
         self.instructions = Vec::new();
@@ -11615,8 +11701,8 @@ impl Lowerer<'_> {
         let outer_instructions = std::mem::take(&mut self.instructions);
 
         self.instructions = Vec::new();
-        self.named = boundary_named;
-        self.values = boundary_values;
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
         self.bind_handler_patterns(&inner.patterns, &inner_payloads)?;
         let inner_resumed = self.direct_handler_clause_value(inner)?;
         self.instructions.push(MirInstruction::Resume {
@@ -11626,7 +11712,21 @@ impl Lowerer<'_> {
         let inner_instructions = std::mem::take(&mut self.instructions);
         let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), performed);
         let pattern = lower_pattern(inner.patterns[0].clone())?;
-        let (join_instructions, join_result) = if let Some(clauses) = completion {
+        let facade_instructions = if let Some(facade) = facade {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(&facade.patterns, &facade_payloads)?;
+            let facade_resumed = self.direct_handler_clause_value(facade)?;
+            self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
+                value: facade_resumed,
+            });
+            std::mem::take(&mut self.instructions)
+        } else {
+            Vec::new()
+        };
+        let (mut join_instructions, join_result) = if let Some(clauses) = completion {
             let [clause] = clauses.as_slice() else {
                 return None;
             };
@@ -11634,12 +11734,17 @@ impl Lowerer<'_> {
                 return None;
             }
             self.instructions = Vec::new();
+            self.named = boundary_named;
+            self.values = boundary_values;
             self.bind_completion_clause(clause, join)?;
             let completed = self.value(clause.body)?;
             (std::mem::take(&mut self.instructions), completed)
         } else {
             (Vec::new(), join)
         };
+        if facade.is_some() {
+            join_instructions.push(MirInstruction::UninstallHandler);
+        }
         self.label_values.remove(&brand);
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
@@ -11697,6 +11802,12 @@ impl Lowerer<'_> {
                     instructions: vec![MirInstruction::Forward {
                         site: MirResumptionSiteId::UNASSIGNED,
                     }],
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: facade_instructions,
                     terminator: MirTerminator::Unreachable,
                 },
             ],
