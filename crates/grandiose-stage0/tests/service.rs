@@ -5121,6 +5121,33 @@ fn service_rejects_ambiguous_aliased_inherited_hrtb_static_method_values() {
 }
 
 #[test]
+fn service_materializes_unique_hrtb_static_method_values_with_defaulted_gats_and_negative_peers() {
+    // `Top<i64>` has one positive subject and a distinct negative peer. The
+    // inherited static method's HRTB effect projects a default using all
+    // three item domains: lifetime, effect row, and structural const. The
+    // public alias must retain that identity, while the negative peer must
+    // neither become a candidate nor poison the selected positive evidence.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn apply(callback: for<'a> (&'a i64) -> i64 / Trace<7, i64>) -> i64 / Trace<7, i64> { let value = 41; let result = callback(&value); Trace<7, i64>::note(result) } pub fn main() -> i64 { handle apply(Capability<i64>::relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Base<T> { type Item<'a, row: EffectRow, n: u32> = i64; type Effects<'a, row: EffectRow, n: u32>: EffectRow = {Trace<n, <Self as Base<T>>::Item<'a, row, n>>, | row}; fn relay<'a>(value: &'a i64) -> i64 / { <Self as Base<T>>::Effects<'a, {}, 7> }; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl Base<i64> for i64 { fn relay<'a>(value: &'a i64) -> i64 / { <i64 as Base<i64>>::Effects<'a, {}, 7> } { *value } } impl Middle<i64> for i64 where i64: Base<i64> {} impl Top<i64> for i64 where i64: Middle<i64> {} impl !Top<i64> for u64 {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("unique defaulted-GAT static HRTB method value must reach the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
