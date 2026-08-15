@@ -643,6 +643,21 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
             .is_err_and(|error| error.contains("i64 operation")),
         "a Bool register must not be accepted as an i64 arithmetic operand"
     );
+
+    let mut unsigned = graph();
+    unsigned.blocks[0]
+        .instructions
+        .push(MirInstruction::U32CheckedAdd {
+            dst: MirLocal(1),
+            left: MirLocal(1),
+            right: MirLocal(2),
+        });
+    assert!(
+        unsigned
+            .validate()
+            .is_err_and(|error| error.contains("u32 operation")),
+        "an i64 register must not be accepted as a u32 arithmetic operand"
+    );
 }
 
 #[test]

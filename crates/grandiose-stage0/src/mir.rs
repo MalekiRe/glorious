@@ -6917,6 +6917,97 @@ impl MirFunction {
                 self.require_scalar_locals(&[*dst], ScalarType::Bool, "f64 comparison result")?;
                 self.require_scalar_locals(&[*left, *right], ScalarType::F64, "f64 comparison")?;
             }
+            MirInstruction::ConstU32 { dst, .. } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U32, "u32 constant")?;
+            }
+            MirInstruction::ConstUsize { dst, .. } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Usize, "usize constant")?;
+            }
+            MirInstruction::U32CheckedAdd { dst, left, right }
+            | MirInstruction::U32CheckedSub { dst, left, right }
+            | MirInstruction::U32CheckedMul { dst, left, right }
+            | MirInstruction::U32CheckedDiv { dst, left, right }
+            | MirInstruction::U32CheckedRem { dst, left, right }
+            | MirInstruction::U32WrappingAdd { dst, left, right }
+            | MirInstruction::U32WrappingSub { dst, left, right }
+            | MirInstruction::U32WrappingMul { dst, left, right }
+            | MirInstruction::U32WrappingShl { dst, left, right }
+            | MirInstruction::U32WrappingShr { dst, left, right }
+            | MirInstruction::U32CheckedShl { dst, left, right }
+            | MirInstruction::U32CheckedShr { dst, left, right }
+            | MirInstruction::BitAndU32 { dst, left, right } => {
+                self.require_scalar_locals(&[*dst, *left, *right], ScalarType::U32, "u32 operation")?;
+            }
+            MirInstruction::U32Eq { dst, left, right }
+            | MirInstruction::U32Lt { dst, left, right }
+            | MirInstruction::U32Le { dst, left, right }
+            | MirInstruction::NeU32 { dst, left, right } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Bool, "u32 comparison result")?;
+                self.require_scalar_locals(&[*left, *right], ScalarType::U32, "u32 comparison")?;
+            }
+            MirInstruction::U32ToUsize { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Usize, "u32-to-usize result")?;
+                self.require_scalar_locals(&[*value], ScalarType::U32, "u32-to-usize input")?;
+            }
+            MirInstruction::UsizeToU32Checked { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U32, "usize-to-u32 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::Usize, "usize-to-u32 input")?;
+            }
+            MirInstruction::I64ToU32Checked { dst, value }
+            | MirInstruction::I64ToU32Wrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U32, "i64-to-u32 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-u32 input")?;
+            }
+            MirInstruction::I64ToUsizeChecked { dst, value }
+            | MirInstruction::I64ToUsizeWrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Usize, "i64-to-usize result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-usize input")?;
+            }
+            MirInstruction::I64ToU8Checked { dst, value }
+            | MirInstruction::I64ToU8Wrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U8, "i64-to-u8 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-u8 input")?;
+            }
+            MirInstruction::I64ToU16Checked { dst, value }
+            | MirInstruction::I64ToU16Wrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U16, "i64-to-u16 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-u16 input")?;
+            }
+            MirInstruction::I64ToI16Checked { dst, value }
+            | MirInstruction::I64ToI16Wrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::I16, "i64-to-i16 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-i16 input")?;
+            }
+            MirInstruction::I64ToI32Checked { dst, value }
+            | MirInstruction::I64ToI32Wrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::I32, "i64-to-i32 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-i32 input")?;
+            }
+            MirInstruction::I64ToI8Checked { dst, value }
+            | MirInstruction::I64ToI8Wrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::I8, "i64-to-i8 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-i8 input")?;
+            }
+            MirInstruction::I64ToU64Checked { dst, value }
+            | MirInstruction::I64ToU64Wrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U64, "i64-to-u64 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-u64 input")?;
+            }
+            MirInstruction::I64ToIsizeChecked { dst, value }
+            | MirInstruction::I64ToIsizeWrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Isize, "i64-to-isize result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-isize input")?;
+            }
+            MirInstruction::I64ToU128Checked { dst, value }
+            | MirInstruction::I64ToU128Wrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::U128, "i64-to-u128 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-u128 input")?;
+            }
+            MirInstruction::I64ToI128Checked { dst, value }
+            | MirInstruction::I64ToI128Wrapping { dst, value } => {
+                self.require_scalar_locals(&[*dst], ScalarType::I128, "i64-to-i128 result")?;
+                self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-i128 input")?;
+            }
             _ => return Ok(false),
         }
         Ok(true)
