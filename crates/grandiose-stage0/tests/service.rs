@@ -2169,6 +2169,105 @@ fn service_generic_label_forward_cancellation_cleans_protected_multi_payload_sco
 }
 
 #[test]
+fn service_replays_forwarded_multi_payload_operation_then_rejoins_generic_label_completion() {
+    // `ask(true, 1)` passes the first inner test and refutes the second, so
+    // the suspended exact-two continuation forwards to the outer replayer.
+    // Both resumes must retain the partial inner frame; only after their
+    // results return may the generic label call abandon that frame, drop the
+    // protected Probe once, and enter the outer completion.
+    let root = r#"
+        use facade::escape;
+        effect Ask { [2, 2] ask(flag: Bool, value: i64) -> i64; }
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0, 1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> {
+            drop(&mut self) -> { *self.target = *self.target + 1; }
+        }
+        pub fn main() -> i64 {
+            let count = 40;
+            handle {
+                @outer: i64 {
+                    @inner: i64 {
+                        let probe = Probe { target: &mut count };
+                        handle {
+                            handle Ask::ask(true, 1) {
+                                Ask::ask(true, 0) with k => {
+                                    let first = k(0);
+                                    let second = k(0);
+                                    escape(@inner, first + second)
+                                },
+                            }
+                        } {
+                            Ask::ask(flag, value) with k => {
+                                let first = k(10);
+                                let second = k(20);
+                                escape(@inner, value + first + second + 41)
+                            },
+                        }
+                    }
+                }
+            } {
+                value => count + value + 100,
+            }
+        }
+    "#;
+    let mut input = request(root);
+    input.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::escape;".as_slice(),
+    ));
+    input.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn escape<L>(destination: L, value: i64) -> ! where L: Label<i64> { destination(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(input)
+        .expect("replayed forwarding must rejoin through the generic label facade");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let instructions = program
+        .functions
+        .values()
+        .flat_map(|function| function.instructions.iter())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        instructions
+            .iter()
+            .filter(|instruction| matches!(
+                instruction,
+                VmInstruction::InstallHandler {
+                    continuation: VmContinuationPolicy::Replay { uses: 2 },
+                    ..
+                }
+            ))
+            .count(),
+        2,
+        "both nested handler frames must preserve their exact replay budgets"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Forward)),
+        "the late refutable payload mismatch must remain a VM Forward edge"
+    );
+    assert!(
+        instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::ResumeReturn { .. }))
+            .count()
+            >= 2,
+        "the outer exact-two handler must return from both replayed residuals"
+    );
+    assert_eq!(artifact.run_i64().unwrap(), 213);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 213);
+}
+
+#[test]
 fn service_accepts_symbolic_structural_const_layout_contracts() {
     let source = "pub struct Tag<n: u32> {} pub fn identity<n: u32>(value: Tag<n + 1>) -> Tag<1 + n> { value } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new()

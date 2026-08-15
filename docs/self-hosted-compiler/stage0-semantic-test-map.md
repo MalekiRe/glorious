@@ -70,6 +70,9 @@ coarse. The composite fixtures cover:
   prefix test before a later mismatch reaches the generic-label rejoin;
 - a forwarded cancellation through that generic-label rejoin drops its
   protected lexical payload once before the completion observes outer state;
+- exact `[2,2]` replay can cross a late multi-payload refutable `Forward`,
+  return both residual results to its outer clause, and then rejoin through a
+  generic label facade without duplicating protected cleanup;
 - source-defined control names and contextual delayed blocks selected by `Fn`
   constraints rather than compiler-known names;
 - fresh callable/environment brands, sealed `RunsIn` evidence, the canonical
@@ -511,6 +514,7 @@ bridges executable:
 | Multi-operation resume then cancellation to a label | `service_multi_operation_handler_may_cancel_to_an_enclosing_label_after_a_resume` |
 | Partial-handler forwarding to an outer label transfer | `service_partial_handler_forwarding_may_reach_an_outer_label_transfer` |
 | Finite replay followed by label transfer | `service_replayed_resumption_result_may_transfer_to_an_enclosing_label` |
+| Exact replay through a late refutable forward then generic-label completion, with one protected cleanup | `nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup`, `service_replays_forwarded_multi_payload_operation_then_rejoins_generic_label_completion` |
 | Cancellation through a public effect facade must retain a move-captured callback's lower-use obligation | `service_rejects_move_capture_cancellation_through_public_facades` |
 | A shared-only closure payload is duplicable across an exact `[2,2]` replay handler through public facades | `service_replays_shared_closure_payloads_across_public_facades` |
 | A custom-`Drop` aggregate survives partial-handler forwarding and is destroyed exactly once when the enclosing `[0,1]` handler cancels the suspended continuation | `service_drops_a_custom_aggregate_once_across_forward_and_cancellation` |

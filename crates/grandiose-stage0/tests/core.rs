@@ -7948,6 +7948,121 @@ fn nested_generic_label_forward_cancellation_cleans_before_completion_rejoin() {
 }
 
 #[test]
+fn nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup() {
+    let source = r#"
+        escape<L>(destination: L, value: i64) -> !
+        where L: Label<i64>
+        {
+            destination(value)
+        }
+        effect Ask { [2, 2] ask(flag: Bool, value: i64) -> i64; }
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0, 1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> {
+            drop(&mut self) -> { *self.target = *self.target + 1; }
+        }
+        pub main() -> i64 {
+            let count = 40;
+            handle {
+                @outer: i64 {
+                    @inner: i64 {
+                        let probe = Probe { target: &mut count };
+                        handle {
+                            handle Ask::ask(true, 1) {
+                                Ask::ask(true, 0) with k => {
+                                    let first = k(0);
+                                    let second = k(0);
+                                    escape(@inner, first + second)
+                                },
+                            }
+                        } {
+                            Ask::ask(flag, value) with k => {
+                                let first = k(10);
+                                let second = k(20);
+                                escape(@inner, value + first + second + 41)
+                            },
+                        }
+                    }
+                }
+            } {
+                value => count + value + 100,
+            }
+        }
+    "#;
+    let package = PackageKey("core-replay-forward-label-cleanup@0.1.0".into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        definition.key,
+        &core,
+        &flow,
+        &std::collections::BTreeMap::new(),
+        Some(&signatures),
+    );
+    let mir = lowered.function.unwrap();
+    mir.validate()
+        .unwrap_or_else(|error| panic!("replayed forwarding MIR validates: {error}\n{mir:#?}"));
+    assert_eq!(
+        mir.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| matches!(instruction, MirInstruction::InstallHandler {
+                continuation: grandiose_stage0::MirContinuationPolicy::Replay { uses: 2 },
+                ..
+            }))
+            .count(),
+        2,
+        "both forwarded handler frames retain the exact replay budget: {mir:#?}"
+    );
+    assert_eq!(
+        mir.blocks
+            .iter()
+            .filter(|block| block.instructions.iter().any(|instruction| matches!(instruction, MirInstruction::PatternTest { .. })))
+            .count(),
+        2,
+        "a late multi-payload refutation must retain both ordered tests: {mir:#?}"
+    );
+    assert!(mir.blocks.iter().any(|block| block
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, MirInstruction::Forward { .. }))));
+    assert_eq!(
+        mir.blocks[1]
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, MirInstruction::Call { .. }))
+            .count(),
+        1,
+        "the generic-label rejoin drops Probe exactly once before completion: {mir:#?}"
+    );
+    let artifact = grandiose_stage0::emit_vm(&mir).unwrap();
+    grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
+        .expect("replayed forwarding cleanup bytecode verifies");
+}
+
+#[test]
 fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
     let core = core_for(
         "core-completion-label-transfer@0.1.0",

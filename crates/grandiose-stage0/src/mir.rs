@@ -12227,14 +12227,42 @@ impl Lowerer<'_> {
         {
             return None;
         }
+        let outer_resumption = match &outer.resumption {
+            CoreHandlerResumption::Explicit { name, quantity } => {
+                let replay = if *quantity == crate::quantity::Quantity::ONCE {
+                    None
+                } else {
+                    Some(exact_replay_uses(&outer.resumption)?)
+                };
+                Some((name.clone(), *quantity, replay))
+            }
+            // A forwarded cancellation still needs the dynamic label path,
+            // but it has no clause-local continuation to materialize.
+            CoreHandlerResumption::Discard { quantity } if !quantity.requires_positive_use() => {
+                None
+            }
+            // A tail arm that only takes the generic label has no named
+            // continuation to materialize; its implicit one-shot result is
+            // abandoned by the nonlocal call just like an explicit discard.
+            CoreHandlerResumption::Tail { quantity }
+                if quantity.contains(crate::quantity::Quantity::ONCE) =>
+            {
+                None
+            }
+            CoreHandlerResumption::Tail { .. }
+            | CoreHandlerResumption::Discard { .. }
+            | CoreHandlerResumption::Terminal => return None,
+        };
         let CoreHandlerResumption::Explicit { quantity, .. } = inner.resumption else {
             return None;
         };
-        // The forwarded inner arm invokes its continuation exactly once.
-        // `[0, 1]` is therefore as sound here as `[1, 1]`: the outer arm may
-        // cancel its own continuation after the `Forward`, while the inner
-        // frame still consumes the one continuation use it actually makes.
-        if !quantity.contains(crate::quantity::Quantity::ONCE) {
+        let inner_replay_uses = exact_replay_uses(&inner.resumption);
+        // The forwarded inner arm either consumes its continuation once or
+        // has a concrete finite replay contract. `[0, 1]` is valid for the
+        // former because the outer arm may discard its own continuation after
+        // `Forward`; `[n, n]` needs a replayable VM frame even though this
+        // particular refutable path forwards before entering the inner body.
+        if !quantity.contains(crate::quantity::Quantity::ONCE) && inner_replay_uses.is_none() {
             return None;
         }
         let mut selected = None;
@@ -12242,6 +12270,7 @@ impl Lowerer<'_> {
         for brand in labels {
             let mut ids = Vec::new();
             self.label_value_ids(outer.body, brand, &mut ids);
+            self.label_value_ids(inner.body, brand, &mut ids);
             if !ids.is_empty() {
                 if selected.replace(brand).is_some() {
                     return None;
@@ -12305,7 +12334,12 @@ impl Lowerer<'_> {
             operation: outer.operation,
             payload_destinations: outer_payloads.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
-            continuation: MirContinuationPolicy::Consume,
+            continuation: outer_resumption
+                .as_ref()
+                .and_then(|(_, _, uses)| *uses)
+                .map_or(MirContinuationPolicy::Consume, |uses| {
+                    MirContinuationPolicy::Replay { uses }
+                }),
             target: MirBlockId(2),
         });
         self.instructions.push(MirInstruction::InstallHandler {
@@ -12315,7 +12349,9 @@ impl Lowerer<'_> {
             operation: inner.operation,
             payload_destinations: inner_payloads.clone(),
             resume_type: self.body.expression(inner_computation).ty.clone(),
-            continuation: MirContinuationPolicy::Consume,
+            continuation: inner_replay_uses.map_or(MirContinuationPolicy::Consume, |uses| {
+                MirContinuationPolicy::Replay { uses }
+            }),
             target: MirBlockId(3),
         });
         self.instructions.push(MirInstruction::Perform {
@@ -12344,7 +12380,34 @@ impl Lowerer<'_> {
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
         self.bind_handler_patterns(&outer.patterns, &outer_payloads)?;
-        self.value(outer.body)?;
+        if let Some((outer_name, outer_quantity, outer_replay_uses)) = outer_resumption {
+            let previous = self.direct_resumption.replace(DirectResumptionState {
+                name: outer_name,
+                quantity: outer_quantity,
+                calls: 0,
+                plan: if outer_replay_uses.is_some() {
+                    DirectResumptionPlan::RuntimeReplay
+                } else {
+                    DirectResumptionPlan::Identity
+                },
+            });
+            self.value(outer.body)?;
+            let state = self
+                .direct_resumption
+                .take()
+                .expect("outer replay state must outlive its generic label body");
+            self.direct_resumption = previous;
+            let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls)).ok()?;
+            if !state.quantity.contains(actual) {
+                self.error(
+                    "G6005",
+                    "forwarded outer resumption calls do not satisfy its declared quantity",
+                );
+                return None;
+            }
+        } else {
+            self.value(outer.body)?;
+        }
         let outer_instructions = std::mem::take(&mut self.instructions);
 
         self.instructions = Vec::new();
@@ -12352,10 +12415,15 @@ impl Lowerer<'_> {
         self.values = boundary_values.clone();
         self.bind_handler_patterns(&inner.patterns, &inner_payloads)?;
         let resumed = self.direct_handler_clause_value(inner)?;
-        self.instructions.push(MirInstruction::Resume {
-            site: MirResumptionSiteId::UNASSIGNED,
-            value: resumed,
-        });
+        // A matched finite-replay arm can itself invoke the lexical label.
+        // That `Never` path has already consumed its exact resumes and exits
+        // both frames, so appending a tail `Resume` would be a third use.
+        if self.body.expression(inner.body).ty != Type::Never {
+            self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
+                value: resumed,
+            });
+        }
         let inner_instructions = std::mem::take(&mut self.instructions);
         let tests = inner
             .patterns
@@ -12382,7 +12450,14 @@ impl Lowerer<'_> {
                 scope: MirScopeId::ROOT,
                 parameters: vec![],
                 instructions: entry,
-                terminator: MirTerminator::Unreachable,
+                // A replayed outer arm resumes this protected operation with
+                // `ResumeReturn`. Once the restored inner frame is removed,
+                // the performed value is the exact residual result that must
+                // return to the clause before its next replay or generic
+                // label transfer. Leaving this as `Unreachable` traps every
+                // replayed path and prevents the VM from restoring the
+                // replay budget.
+                terminator: MirTerminator::Return { value: performed },
             },
             MirBlock {
                 scope: MirScopeId::ROOT,
