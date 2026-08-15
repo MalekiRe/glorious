@@ -5767,6 +5767,54 @@ fn service_keeps_selected_hrtb_projection_failures_distinct_through_facades() {
 }
 
 #[test]
+fn service_zonks_open_row_projection_facades_before_revision_publication() {
+    let root = "use facade::{Callback, Gate, Trace}; pub fn forward<e: EffectRow>() -> Callback<e> { Gate::relay } pub fn apply(callback: Callback<{}>) -> i64 / Trace<i64> { let value = 41; Trace<i64>::note(callback(&value)) } pub fn main() -> i64 { handle apply(forward<{}>()) { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let provider_prefix = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Gate { type Effects<'a, e: EffectRow>: EffectRow; fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } where Self: Gate<Effects<'a, e> = {Trace<i64>, | e}>; } ";
+    let provider_i64 = "impl Gate for i64 { type Effects<'a, e: EffectRow> = {Trace<i64>, | e}; fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } where i64: Gate<Effects<'a, e> = {Trace<i64>, | e}> { *value } } ";
+    let provider_u64 = "impl Gate for u64 { type Effects<'a, e: EffectRow> = {Trace<i64>, | e}; fn relay<'a, e: EffectRow>(value: &'a i64) -> i64 / { <i64 as Gate>::Effects<'a, e> } where u64: Gate<Effects<'a, e> = {Trace<i64>, | e}> { *value } } ";
+    let callback = "pub type Callback<E: EffectRow> = for<'a> (&'a i64) -> i64 / { <i64 as Gate>::Effects<'a, E> };";
+    let provider = format!("{provider_prefix}{provider_i64}{callback}");
+    let unresolved = format!("{provider_prefix}{callback}");
+    let ambiguous = format!("{provider_prefix}{provider_i64}{provider_u64}{callback}");
+    let world = |provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Gate, Trace};".as_slice()));
+        input.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+        input
+    };
+    let mut reordered = world(&provider);
+    let artifact = StageZeroCompiler::new().compile(reordered.clone()).expect("open-row GAT alias must zonk at the concrete VM call").artifact.unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new().compile(reordered).expect("open-row GAT alias must be source-order independent").artifact.unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(&provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey { package: PackageKey("facade@0.1.0".into()), path: "crate".into() });
+    let trace = compiler.dependency_trace(parent, &facade).expect("legal open-row facade must be frozen");
+    for (label, provider, code) in [("no-solution", unresolved.as_str(), "G4190"), ("ambiguous", ambiguous.as_str(), "G4169")] {
+        let rejected_world = world(provider);
+        let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+        let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("invalid open-row revision must not publish");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{label} open-row revision missing {code}: {:#?}", error.diagnostics());
+        assert_eq!(compiler.interface_cache_stats(), cached, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()), "{label} revision disturbed legal trace");
+        let mut reordered = rejected_world;
+        reordered.sources.reverse();
+        assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source ordering cannot change open-row diagnostics").diagnostics(), "{label} diagnostics must be canonical");
+    }
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
+
+    let occurs = "pub fn main() -> i64 { let recursive = { value => value(value) }; 0 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new().compile(request(occurs)) else { panic!("occurs-check control unexpectedly compiled") };
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4105"), "recursive callable inference escaped its occurs check: {diagnostics:#?}");
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,
