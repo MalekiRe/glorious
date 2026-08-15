@@ -4923,6 +4923,66 @@ fn service_rejects_alias_equivalent_polarity_for_defaulted_hrtb_gats() {
 }
 
 #[test]
+fn service_executes_three_level_defaulted_hrtb_gats_with_const_and_row_arguments() {
+    // The public facade is the third trait in the chain; both GAT defaults
+    // belong to Base. Their explicit lifetime, effect-row, and const inputs
+    // must survive inherited lookup, scoped impl obligations, an HRTB
+    // callback, and VM handler identity materialization.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<7, i64> { value } pub fn apply(callback: for<'a> (&'a i64) -> &'a i64 / { <&'a i64 as Capability<i64>>::Effects<'a, {}, 7> }) -> i64 / Trace<7, i64> { let value = 41; let result = callback(&value); Trace<7, i64>::note(*result) } pub fn main() -> i64 { handle apply(identity) { Trace<7, i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Top as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Base<T> { type Item<'a, row: EffectRow, n: u32> = i64; type Effects<'a, row: EffectRow, n: u32>: EffectRow = {Trace<n, <Self as Base<T>>::Item<'a, row, n>>, | row}; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {} impl<'r> Base<i64> for &'r i64 {} impl<'r> Middle<i64> for &'r i64 where &'r i64: Base<i64> {} impl<'r> Top<i64> for &'r i64 where &'r i64: Middle<i64> {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("three-level inherited defaulted HRTB GATs must reach the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_three_level_defaulted_hrtb_gat_alias_mixed_polarity() {
+    // These aliases name the same third-level trait. The positive impl would
+    // otherwise inherit Base's defaulted HRTB GATs, while the negative alias
+    // denies that same selected fact. Explicit row/const application must
+    // preserve the refutation rather than choosing an alias-specific default.
+    let mut request = request(
+        "use bridge::{Base, Middle, First as Positive, Second as Negative, Trace}; pub struct Local {} impl Base<i64> for Local {} impl Middle<i64> for Local where Local: Base<i64> {} impl Positive<i64> for Local where Local: Middle<i64> {} impl !Negative<i64> for Local {} pub fn probe<'a>(value: &'a i64) -> i64 / { <Local as Positive<i64>>::Effects<'a, {}, 7> } { Trace<7, i64>::note(41) } pub fn main() -> i64 { 42 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Base, Middle, Top as First, Top as Second, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub trait Base<T> { type Item<'a, row: EffectRow, n: u32> = i64; type Effects<'a, row: EffectRow, n: u32>: EffectRow = {Trace<n, <Self as Base<T>>::Item<'a, row, n>>, | row}; } pub trait Middle<T>: Base<T> {} pub trait Top<T>: Middle<T> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("mixed-polarity three-level defaulted GAT aliases entered VM emission");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G3406"),
+        "missing mixed-polarity three-level alias coherence rejection: {diagnostics:#?}"
+    );
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4192"),
+        "missing bounded ambiguous defaulted effect-GAT projection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
