@@ -1206,10 +1206,12 @@ boundary:
   to derive all edge-transfer-temporary lists directly and thereby remove the
   seeded-bytecode-anchor completion step.
 - **Not yet realized.** `Store`/`StorageLive`/`StorageDead` statements,
-  persistent typed arenas for places, locals, operations, move paths, scopes,
-  and control sites, multi-scope lexical export (one function scope is
-  exported), and frontend-emitted drop flags (branch post-states must agree at
-  source level). A typed `BlockId`/`BlockKind` checked editor now performs
+  persistent typed arenas for operations and move paths, full multi-scope
+  lexical scope export (the explicit root scope is published today), and
+  frontend-emitted drop flags (branch post-states must agree at source level).
+  Places and locals already have typed arenas; frozen typed control tables now
+  publish label, handler, performance, and resumption identities. A typed
+  `BlockId`/`BlockKind` checked editor now performs
   transactional tombstoned NormalizeCfg deletion and precisely invalidated
   same-block statement removal, and canonical resource limits fail
   structurally before optimization. Reusable, deterministic checked analyses

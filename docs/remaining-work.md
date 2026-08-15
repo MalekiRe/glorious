@@ -24,9 +24,11 @@ retained below but scheduled after the core language and tooling tranche.
 ### 5.1 MIR infrastructure
 
 - extend the implemented typed `BlockId`/block-kind checked editor,
-  transactional block tombstones, and persistent local/place arenas to
-  persistent typed arenas for operations, move paths, scopes, and control
-  sites;
+  transactional block tombstones, persistent local/place arenas, and frozen
+  typed control-site tables (labels, handlers, performances, and resumptions)
+  to persistent typed arenas for operations and move paths, plus full
+  multi-scope lexical scope elaboration (the explicit root scope is already
+  published with each frozen body);
 - migrate the remaining edge redirection, block splitting/merging, operand,
   and terminator replacement paths through the checked editor (NormalizeCfg
   unreachable deletion and same-block scalar-`Move` removal are checked and
