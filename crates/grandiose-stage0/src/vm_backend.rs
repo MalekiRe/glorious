@@ -8734,6 +8734,14 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::DerefStore { reference, src } => {
                 read(&states, *reference)?;
                 read(&states, *src)?;
+                // `ResumeSnapshot` authenticates an exact live handler
+                // frame, but an indirect store has no frozen provenance slot
+                // through which that authority can be recovered.  Reject the
+                // write instead of allowing a later DerefCopy to erase the
+                // marker and present the resumption as an ordinary callable.
+                if states.resumptions[*src as usize] {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
                 let VmType::Reference {
                     unique: true,
                     referent,
@@ -9117,6 +9125,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             }
             VmInstruction::Return { value } => {
                 read(&states, *value)?;
+                // Return leaves this activation (or exposes the value to the
+                // embedding host). A captured resumption is instead valid
+                // only while its branded handler frame remains live.
+                if states.resumptions[*value as usize] {
+                    return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
                 if states.resumption_return_depth != 0 {
                     if states
                         .handlers

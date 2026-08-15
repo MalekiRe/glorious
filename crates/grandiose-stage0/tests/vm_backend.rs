@@ -5142,6 +5142,178 @@ fn verifier_rejects_resumption_tokens_masquerading_as_indirect_callees() {
 }
 
 #[test]
+fn verifier_rejects_resumption_tokens_hidden_through_mutable_storage() {
+    let entry = DefKey(Digest::of_bytes(b"snapshot-mutable-storage-entry"));
+    let sink = DefKey(Digest::of_bytes(b"snapshot-mutable-storage-sink"));
+    let effect = DefKey(Digest::of_bytes(b"snapshot-mutable-storage-effect"));
+    let snapshot = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // `DerefStore` used to erase the verifier-side resumption marker. A
+    // hostile artifact could then re-read the same VM resumption through the
+    // reference and present it to `CallIndirect` as an ordinary callable.
+    let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            snapshot.clone(),
+            VmType::Reference {
+                unique: true,
+                referent: Box::new(snapshot.clone()),
+            },
+            VmType::I64,
+            snapshot.clone(),
+            snapshot.clone(),
+            VmType::I64,
+            VmType::I64,
+        ],
+        instructions: vec![
+            VmInstruction::MakeCallable {
+                dst: 0,
+                callee: sink,
+                captures: vec![],
+                environment: None,
+            },
+            VmInstruction::Borrow {
+                dst: 1,
+                src: 0,
+                fields: vec![],
+                unique: true,
+                reborrow: false,
+            },
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                payload_destinations: vec![],
+                resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume,
+                target: 7,
+            },
+            VmInstruction::Perform {
+                dst: 2,
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                arguments: vec![],
+            },
+            VmInstruction::UninstallHandler,
+            VmInstruction::Trap,
+            VmInstruction::Trap,
+            VmInstruction::CaptureResumption { dst: 3 },
+            VmInstruction::DerefStore {
+                reference: 1,
+                src: 3,
+            },
+            VmInstruction::DerefCopy {
+                dst: 4,
+                reference: 1,
+            },
+            VmInstruction::ConstI64 { dst: 6, value: 42 },
+            VmInstruction::CallIndirect {
+                dst: 5,
+                callee: 4,
+                arguments: vec![6],
+            },
+            VmInstruction::Cancel,
+            VmInstruction::Return { value: 5 },
+        ],
+    };
+    let sink_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: sink,
+        captures: 0,
+        parameters: 1,
+        registers: vec![VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 1, value: 0 },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(entry, entry_function), (sink, sink_function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"snapshot-mutable-storage-program-fingerprint"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    assert!(matches!(
+        verify_vm_program(program),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+    assert!(matches!(
+        decode_and_verify_program(&bytes),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
+fn verifier_rejects_resumption_tokens_returned_after_handler_exit() {
+    let effect = DefKey(Digest::of_bytes(b"snapshot-return-after-cancel-effect"));
+    let snapshot = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // Cancellation invalidates the owning handler frame. Returning its
+    // callable-shaped snapshot would export stale control authority to an
+    // embedding host, where it could only fail after verification.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"snapshot-return-after-cancel")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![snapshot, VmType::I64],
+            instructions: vec![
+                VmInstruction::InstallHandler {
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    payload_destinations: vec![],
+                    resume_type: VmType::I64,
+                    continuation: VmContinuationPolicy::Consume,
+                    target: 4,
+                },
+                VmInstruction::Perform {
+                    dst: 1,
+                    effect,
+                    effect_arguments: vec![],
+                    operation: 0,
+                    arguments: vec![],
+                },
+                VmInstruction::UninstallHandler,
+                VmInstruction::Trap,
+                VmInstruction::CaptureResumption { dst: 0 },
+                VmInstruction::Cancel,
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"snapshot-return-after-cancel-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::HandlerResumeUnavailable)
+    ));
+}
+
+#[test]
 fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
     let effect = DefKey(Digest::of_bytes(b"forged-snapshot-effect"));
     let continuation = VmType::Callable {
