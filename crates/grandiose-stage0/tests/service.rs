@@ -4782,6 +4782,63 @@ fn service_executes_reexported_hrtb_inherited_effect_gats_through_vm_handlers() 
 }
 
 #[test]
+fn service_executes_recursive_defaulted_hrtb_supertrait_gats_through_vm() {
+    // Both public GAT defaults recursively project through a second default
+    // on the selected parent implementation. `Gateway` exposes only the
+    // child facade, whose where clause establishes that parent contract.
+    // The HRTB callback forces both the type and row defaults through alias
+    // resolution, method selection, handler checking, and VM materialization.
+    let mut request = request(
+        "use bridge::Gateway as Capability; use bridge::Trace; pub fn bounce<'a>(value: &'a i64) -> &'a i64 / { <&'a i64 as Capability<i64>>::Effects<'a> } { Capability<i64>::relay(value) } pub fn apply(callback: for<'a> (&'a i64) -> &'a i64 / { <&'a i64 as Capability<i64>>::Effects<'a> }) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); Trace<i64>::note(*result) } pub fn main() -> i64 { handle apply(bounce) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Child as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Base<'a> = &'a T; type Item<'a> = <Self as Parent<T>>::Base<'a>; type BaseEffects<'a>: EffectRow = {Trace<i64>}; type Effects<'a>: EffectRow = { <Self as Parent<T>>::BaseEffects<'a> }; fn relay<'a>(value: <Self as Parent<T>>::Item<'a>) -> <Self as Parent<T>>::Item<'a> / { <Self as Parent<T>>::Effects<'a> }; } pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 { fn relay<'a>(value: &'a i64) -> &'a i64 / {Trace<i64>} { Trace<i64>::note(*value); value } } impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("selected recursive defaulted supertrait GATs must materialize into the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_unselected_recursive_defaulted_hrtb_supertrait_gats() {
+    // Keep the same nested defaults and HRTB projection, but leave the parent
+    // unimplemented.  The child's scoped `where` declaration is a contract,
+    // not global evidence: validation and projection normalization must reach
+    // a finite rejected state rather than treating defaults as an impl.
+    let mut request = request(
+        "use bridge::Gateway as Capability; pub fn bounce<'a>(value: &'a i64) -> &'a i64 / { <&'a i64 as Capability<i64>>::Effects<'a> } { value } pub fn main() -> i64 { let value = 41; *bounce(&value) }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::Child as Gateway;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Base<'a> = &'a T; type Item<'a> = <Self as Parent<T>>::Base<'a>; type BaseEffects<'a>: EffectRow = {Trace<i64>}; type Effects<'a>: EffectRow = { <Self as Parent<T>>::BaseEffects<'a> }; } pub trait Child<T>: Parent<T> {} impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("unselected recursive defaulted HRTB GATs unexpectedly reached VM emission");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4190"),
+        "missing unselected recursive default projection rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
     let mut request = request(
         "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
