@@ -2707,6 +2707,69 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
     }
 }
 
+/// Effect-row selection may reveal an associated type whose own GAT argument
+/// is the row currently being selected.  Descending through that argument
+/// would turn a finite cyclic-row diagnostic into elaborator recursion.  We
+/// may still normalize ordinary associated type arguments embedded in a
+/// selected row, provided their type tree has no row argument to re-enter.
+fn generic_argument_contains_effect_row(argument: &GenericArgument) -> bool {
+    match argument {
+        GenericArgument::Type(value) => type_contains_effect_row_argument(value),
+        GenericArgument::EffectRow(_) => true,
+        GenericArgument::ConstProjection {
+            subject,
+            trait_arguments,
+            ..
+        } => {
+            type_contains_effect_row_argument(subject)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_contains_effect_row)
+        }
+        GenericArgument::Lifetime(_)
+        | GenericArgument::ConstU32(_)
+        | GenericArgument::ConstU32Expr(_)
+        | GenericArgument::ConstQuantity(_)
+        | GenericArgument::ConstGeneric { .. }
+        | GenericArgument::ConstInfer { .. } => false,
+    }
+}
+
+fn type_contains_effect_row_argument(value: &Type) -> bool {
+    match value {
+        Type::Nominal { arguments, .. } => arguments.iter().any(generic_argument_contains_effect_row),
+        Type::Projection {
+            subject,
+            trait_arguments,
+            item_arguments,
+            ..
+        } => {
+            type_contains_effect_row_argument(subject)
+                || trait_arguments
+                    .iter()
+                    .any(generic_argument_contains_effect_row)
+                || item_arguments
+                    .iter()
+                    .any(generic_argument_contains_effect_row)
+        }
+        Type::Tuple(values) => values.iter().any(type_contains_effect_row_argument),
+        Type::Array(value)
+        | Type::Reference {
+            referent: value, ..
+        } => type_contains_effect_row_argument(value),
+        Type::Callable { .. } => true,
+        Type::Unit
+        | Type::Never
+        | Type::Scalar(_)
+        | Type::ConstU32(_)
+        | Type::ConstQuantity(_)
+        | Type::ConstGeneric { .. }
+        | Type::Generic(_)
+        | Type::Infer(_)
+        | Type::Error => false,
+    }
+}
+
 fn effect_row_contains_inference(row: &EffectRow) -> bool {
     row.effects.iter().any(|effect| {
         effect
@@ -5237,6 +5300,34 @@ impl Elaborator<'_> {
             }
         }
         result.projections = unresolved;
+        // A selected associated row can itself contain selected associated
+        // types.  Normalize those arguments before the row is retained as an
+        // executable callable contract; `Perform` normalizes its instance at
+        // the same boundary, so both sides retain the same closed protocol
+        // identity through MIR and VM lowering.
+        result.effects = result
+            .effects
+            .into_iter()
+            .map(|effect| {
+                EffectInstance {
+                    definition: effect.definition,
+                    arguments: effect
+                        .arguments
+                        .into_iter()
+                        .map(|argument| match argument {
+                            GenericArgument::Type(value)
+                                if !type_contains_effect_row_argument(&value) =>
+                            {
+                                GenericArgument::Type(
+                                    self.normalize_selectable_type_projections(value),
+                                )
+                            }
+                            argument => argument,
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
         result
     }
 
@@ -9494,6 +9585,22 @@ impl Elaborator<'_> {
                 argument
             })
             .collect::<Vec<_>>();
+        // The selected operation payload/result contracts above are already
+        // normalized before unification. Its protocol identity must cross the
+        // same boundary: retaining a selectable associated type only in the
+        // effect argument would leave Core apparently clean while making the
+        // corresponding MIR `Perform` impossible for the VM to encode.
+        let mut effect_projection_stack = std::collections::BTreeSet::new();
+        let effect_arguments = effect_arguments
+            .into_iter()
+            .map(|argument| {
+                self.normalize_selectable_type_argument(
+                    argument,
+                    &mut effect_projection_stack,
+                    &[],
+                )
+            })
+            .collect();
         let instance = EffectInstance {
             definition: effect_definition,
             arguments: effect_arguments,

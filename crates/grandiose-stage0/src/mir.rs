@@ -4539,6 +4539,35 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        if let Some(function) = lowerer
+            .lower_root_statement_runtime_indirect_one_shot_handler(
+                body.root,
+                parameters.clone(),
+            )
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_statement_one_shot_handler(body.root, parameters.clone())
         {
@@ -16552,6 +16581,183 @@ impl Lowerer<'_> {
             blocks,
         })
     }
+    /// Lower a one-shot handler around an indirect callable used as a
+    /// statement in an enclosing block.
+    ///
+    /// A callable value carries a frozen effect row but not a source-visible
+    /// body to inline.  Installing the selected handler frame around the
+    /// ordinary indirect call lets the VM dispatch its later `Perform` through
+    /// the real call stack.  This is the dynamic counterpart to the direct
+    /// statement specializer below: it deliberately claims only one total,
+    /// irrefutable, exact-one-shot clause, whose frozen payload and result
+    /// contracts are sufficient to materialize a verified frame.
+    fn lower_root_statement_runtime_indirect_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let CoreKind::Block(values) = self.body.expression(root).kind.clone() else {
+            return None;
+        };
+        let (handler_index, handler, result_binding) = values
+            .iter()
+            .enumerate()
+            .find_map(|(index, id)| match self.body.expression(*id).kind.clone() {
+                CoreKind::Handle { .. } => Some((index, *id, None)),
+                CoreKind::Let { name, value }
+                    if matches!(self.body.expression(value).kind, CoreKind::Handle { .. }) =>
+                {
+                    Some((index, value, Some((name, *id))))
+                }
+                _ => None,
+            })?;
+        if handler_index + 1 >= values.len()
+            || values[handler_index + 1..]
+                .iter()
+                .any(|candidate| {
+                    match self.body.expression(*candidate).kind {
+                        CoreKind::Handle { .. } => true,
+                        CoreKind::Let { value, .. } => {
+                            matches!(self.body.expression(value).kind, CoreKind::Handle { .. })
+                        }
+                        _ => false,
+                    }
+                })
+        {
+            return None;
+        }
+        let CoreKind::Handle {
+            computation,
+            clauses,
+        } = self.body.expression(handler).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Call { callee, .. } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        // Direct named calls retain their more precise static/interprocedural
+        // specializers. This path owns only a runtime callable value, whose
+        // sealed effect row has already been normalized by Core.
+        if matches!(
+            self.body.expression(callee).kind,
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. }
+        ) {
+            return None;
+        }
+        let Type::Callable {
+            effects,
+            lifetime_binders,
+            ..
+        } = self.body.expression(callee).ty.clone()
+        else {
+            return None;
+        };
+        let effects = if lifetime_binders > 0 {
+            crate::core::open_hrtb_callable_body_effect_row(effects, 0)
+        } else {
+            effects
+        };
+        let operational = clauses
+            .iter()
+            .filter(|clause| !clause.terminal)
+            .collect::<Vec<_>>();
+        let [clause] = operational.as_slice() else {
+            return None;
+        };
+        let quantity = match clause.resumption {
+            CoreHandlerResumption::Explicit { quantity, .. }
+            | CoreHandlerResumption::Tail { quantity } => quantity,
+            CoreHandlerResumption::Discard { .. } | CoreHandlerResumption::Terminal => {
+                return None;
+            }
+        };
+        if quantity != crate::quantity::Quantity::ONCE
+            || clause.patterns.len() != clause.payload_types.len()
+            || !clause.patterns.iter().all(pattern_is_irrefutable)
+            || !effects.effects.contains(&clause.effect)
+        {
+            return None;
+        }
+
+        for expression in &values[..handler_index] {
+            self.statement(*expression)?;
+        }
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let payload_destinations = clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
+            effect: clause.effect.definition,
+            effect_arguments: clause.effect.arguments.clone(),
+            operation: clause.operation,
+            payload_destinations: payload_destinations.clone(),
+            resume_type: clause.continuation.as_ref()?.parameter.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(1),
+        });
+        let call_result = self.value(computation)?;
+        entry.extend(std::mem::take(&mut self.instructions));
+        entry.push(MirInstruction::UninstallHandler);
+        if let Some((name, binding)) = &result_binding {
+            let result = self.alloc(self.body.expression(handler).ty.clone(), *binding);
+            entry.push(MirInstruction::Store {
+                dst: result,
+                src: call_result,
+            });
+            self.named.insert(name.clone(), result);
+        }
+
+        let (last, suffix) = values[handler_index + 1..].split_last()?;
+        for expression in suffix {
+            self.statement(*expression)?;
+        }
+        let result = self.value(*last)?;
+        entry.extend(std::mem::take(&mut self.instructions));
+
+        self.instructions = Vec::new();
+        self.named = boundary_named;
+        self.values = boundary_values;
+        self.bind_handler_patterns(&clause.patterns, &payload_destinations)?;
+        let resumed = self.direct_handler_clause_value(clause)?;
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: resumed,
+        });
+        let handler_instructions = std::mem::take(&mut self.instructions);
+
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
+        })
+    }
+
     /// Lower a resumptive handler used as a statement in an enclosing block.
     ///
     /// The earlier root-only paths deliberately assumed that a handler was the
