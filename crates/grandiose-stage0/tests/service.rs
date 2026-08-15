@@ -10451,6 +10451,54 @@ fn service_enforces_cross_package_orphan_coherence_through_public_reexports() {
 }
 
 #[test]
+fn service_preserves_associated_item_authority_through_dependency_trait_facades() {
+    let exported = {
+        let mut request = request(
+            "use bridge::Capability; pub fn relay(value: <i64 as Capability>::Item) -> <i64 as Capability>::Item { Capability::value(value) } pub fn main() -> i64 { relay(42) }",
+        );
+        request.sources.push(SourceInput::new(
+            PackageKey("bridge@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::Capability;".as_slice(),
+        ));
+        request.sources.push(SourceInput::new(
+            PackageKey("provider@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub trait Capability { type Item; fn value(receiver: Self) -> i64; } impl Capability for i64 { type Item = i64; fn value(receiver: i64) -> i64 { receiver } }".as_slice(),
+        ));
+        StageZeroCompiler::new().compile(request)
+    };
+    let exported = exported
+        .expect("a public trait facade must preserve its associated-item contracts into Core");
+    assert!(exported.diagnostics.is_empty(), "{:#?}", exported.diagnostics);
+    assert_eq!(exported.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let private = {
+        let mut request = request("pub fn main() -> i64 { 42 }");
+        request.sources.push(SourceInput::new(
+            PackageKey("bridge@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::Capability;".as_slice(),
+        ));
+        request.sources.push(SourceInput::new(
+            PackageKey("provider@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"trait Capability { type Item; fn value(receiver: Self) -> i64; } impl Capability for i64 { type Item = i64; fn value(receiver: i64) -> i64 { receiver } }".as_slice(),
+        ));
+        StageZeroCompiler::new().compile(request)
+    };
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = private else {
+        panic!("a private dependency trait unexpectedly leaked its associated-item API")
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "missing private associated-item facade diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_materializes_dependency_generic_function_values_for_indirect_calls() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(

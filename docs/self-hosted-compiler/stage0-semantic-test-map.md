@@ -95,6 +95,10 @@ coarse. The composite fixtures cover:
   self type remains a valid anchor for an imported trait and reaches VM
   execution, while an imported trait plus imported self type is rejected
   before body lowering (`service_enforces_cross_package_orphan_coherence_through_public_reexports`).
+- dependency trait facades preserve public associated-type contracts through
+  projection, method selection, Core, and VM execution, but cannot expose a
+  private provider trait (and therefore cannot leak its associated-item API)
+  (`service_preserves_associated_item_authority_through_dependency_trait_facades`).
 - effect declaration visibility across dependency-package boundaries, including
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate
