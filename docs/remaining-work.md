@@ -23,11 +23,11 @@ retained below but scheduled after the core language and tooling tranche.
 
 ### 5.1 MIR infrastructure
 
-- extend the implemented typed `BlockId`/block-kind checked editor,
-  transactional block tombstones, persistent local/place arenas, and frozen
-  typed control-site tables (labels, handlers, performances, and resumptions)
-  to persistent typed arenas for operations and move paths, plus full
-  multi-scope lexical scope elaboration (the explicit root scope is already
+- extend the implemented typed `BlockId`/block-kind and `MirOperationId`
+  checked editors, transactional block/operation tombstones, persistent
+  local/place arenas, and frozen typed control-site tables (labels, handlers,
+  performances, and resumptions) to persistent typed arenas for move paths
+  and full multi-scope lexical scope elaboration (the explicit root scope is
   published with each frozen body);
 - migrate the remaining edge redirection, block splitting/merging, operand,
   and terminator replacement paths through the checked editor (NormalizeCfg

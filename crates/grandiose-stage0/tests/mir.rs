@@ -3,12 +3,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use grandiose_stage0::{
     CallableId, CaptureMode, ConstInferVar, ConstKind, CoreId, DefKey, Digest, EffectInstance,
     EffectRow, EffectRowProjection, EnvironmentBrand, GenericArgument, GenericKind, InferVar,
-    InstanceKey, Lifetime, LoanFact, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment,
-    MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirEditor, MirFunction,
-    MirHandlerSiteId, MirInstance, MirInstruction, MirLabelId, MirLocal, MirLocalDecl, MirPattern,
-    MirPatternField, MirPerformSiteId, MirProgram, MirResumptionSiteId, MirScopeId, MirTerminator,
-    MirTraitMethodInstance, MoveFact, Mutability, Quantity, ScalarType, Type, VmArtifactError,
-    emit_vm, emit_vm_program, optimize_mir, verify_vm,
+    InstanceKey, Lifetime, LoanFact, MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture,
+    MirCaptureEnvironment, MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirEditor,
+    MirFunction, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelId, MirLocal, MirLocalDecl,
+    MirOperationId, MirPattern, MirPatternField, MirPerformSiteId, MirProgram, MirResumptionSiteId,
+    MirScopeId, MirTerminator, MirTraitMethodInstance, MoveFact, Mutability, Quantity, ScalarType,
+    Type, VmArtifactError, emit_vm, emit_vm_program, optimize_mir, verify_vm,
 };
 
 fn local(ty: Type) -> MirLocalDecl {
@@ -1217,6 +1217,133 @@ fn checked_mir_editor_rolls_back_an_invalid_cfg_edit() {
             .is_err()
     );
     assert_eq!(editor.finish(), function);
+}
+
+#[test]
+fn checked_mir_editor_preserves_operation_ids_and_tombstones() {
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"mir-operation-identity")),
+        captures: 0,
+        parameters: vec![],
+        locals: vec![
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+        ],
+        result: i64_ty,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 1,
+                },
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(1),
+                    value: 2,
+                },
+                MirInstruction::AddI64 {
+                    dst: MirLocal(2),
+                    left: MirLocal(0),
+                    right: MirLocal(1),
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(2) },
+        }],
+    };
+    let mut editor = MirEditor::open(function).unwrap();
+    assert_eq!(
+        editor
+            .operation_data(MirOperationId(1))
+            .unwrap()
+            .instruction_index,
+        1
+    );
+
+    let replacement = editor
+        .replace_operation(
+            MirOperationId(0),
+            MirInstruction::ConstI64 {
+                dst: MirLocal(0),
+                value: 3,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        replacement,
+        MirAnalysisInvalidation::VALUES | MirAnalysisInvalidation::COST
+    );
+    assert!(!replacement.contains(MirAnalysisInvalidation::USES));
+
+    let inserted = editor
+        .insert_after(
+            MirOperationId(0),
+            MirInstruction::ConstI64 {
+                dst: MirLocal(3),
+                value: 4,
+            },
+        )
+        .unwrap();
+    assert_eq!(inserted, MirOperationId(3));
+    assert_eq!(
+        editor
+            .operation_data(MirOperationId(1))
+            .unwrap()
+            .instruction_index,
+        2
+    );
+    assert_eq!(
+        editor.invalidation(),
+        MirAnalysisInvalidation::USES
+            | MirAnalysisInvalidation::FLOW
+            | MirAnalysisInvalidation::VALUES
+            | MirAnalysisInvalidation::COST
+    );
+
+    let removed = editor.remove_operation(inserted).unwrap();
+    assert_eq!(
+        removed,
+        MirAnalysisInvalidation::USES
+            | MirAnalysisInvalidation::FLOW
+            | MirAnalysisInvalidation::VALUES
+            | MirAnalysisInvalidation::COST
+    );
+    assert!(editor.is_operation_tombstone(inserted));
+    assert!(editor.operation(inserted).is_none());
+    assert_eq!(
+        editor
+            .operation_data(MirOperationId(1))
+            .unwrap()
+            .instruction_index,
+        1
+    );
+
+    editor
+        .replace_instructions(
+            MirBlockId(0),
+            vec![MirInstruction::ConstI64 {
+                dst: MirLocal(2),
+                value: 42,
+            }],
+        )
+        .unwrap();
+    assert!(editor.is_operation_tombstone(MirOperationId(0)));
+    assert!(editor.is_operation_tombstone(MirOperationId(1)));
+    assert!(editor.is_operation_tombstone(MirOperationId(2)));
+    assert_eq!(
+        editor
+            .operation_data(MirOperationId(4))
+            .unwrap()
+            .instruction_index,
+        0
+    );
+    assert!(editor.finish().validate().is_ok());
 }
 
 #[test]

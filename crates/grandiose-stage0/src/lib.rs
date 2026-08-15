@@ -80,10 +80,11 @@ pub use interface::{
     InterfaceSet, PackageInterface,
 };
 pub use mir::{
-    MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment, MirCleanupPlan, MirContinuationPolicy,
-    MirControlTables, MirDiagnostic, MirEditor, MirFunction, MirHandlerSiteData, MirHandlerSiteId,
-    MirInstance, MirInstruction, MirLabelData, MirLabelId, MirLocal, MirLocalDecl, MirLowering,
-    MirNominalCopyDescriptor, MirOptimizationReport, MirPattern, MirPatternField,
+    MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment,
+    MirCleanupPlan, MirContinuationPolicy, MirControlTables, MirDiagnostic, MirEditor, MirFunction,
+    MirHandlerSiteData, MirHandlerSiteId, MirInstance, MirInstruction, MirLabelData, MirLabelId,
+    MirLocal, MirLocalDecl, MirLowering, MirNominalCopyDescriptor, MirOperationArena,
+    MirOperationData, MirOperationId, MirOptimizationReport, MirPattern, MirPatternField,
     MirPerformSiteData, MirPerformSiteId, MirProgram, MirResumptionSiteData, MirResumptionSiteId,
     MirResumptionSiteKind, MirScopeData, MirScopeId, MirTerminator, MirTraitMethodInstance,
     optimize as optimize_mir,

@@ -144,6 +144,10 @@ pub struct MirControlTables {
     pub handlers: Vec<MirHandlerSiteData>,
     pub performs: Vec<MirPerformSiteData>,
     pub resumptions: Vec<MirResumptionSiteData>,
+    /// Body-wide operation identities share the frozen table boundary with
+    /// control identities.  This keeps existing raw `MirFunction` literals
+    /// source-compatible while still serializing one stable, body-local arena.
+    pub operations: MirOperationArena,
 }
 
 impl Default for MirControlTables {
@@ -158,6 +162,7 @@ impl Default for MirControlTables {
             handlers: vec![],
             performs: vec![],
             resumptions: vec![],
+            operations: MirOperationArena::default(),
         }
     }
 }
@@ -294,6 +299,133 @@ impl MirPlaceArena {
 /// Body-local basic-block identity. It never crosses a MIR body boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MirBlockId(pub u32);
+
+/// Stable body-local identity for one executable MIR instruction.  Like block
+/// identities, operation IDs are never recycled: deleting an instruction
+/// leaves a tombstone so diagnostics, analysis worklists, and a later edit
+/// cannot accidentally refer to a different operation that happened to take
+/// its vector slot.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct MirOperationId(pub u32);
+
+/// The live location of one operation in the executable block stream.
+///
+/// Stage 0 deliberately keeps instructions in their established contiguous
+/// block vectors for bytecode emission.  This side arena gives those compact
+/// instructions persistent identities without duplicating their payloads.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MirOperationData {
+    pub block: MirBlockId,
+    pub instruction_index: u32,
+}
+
+/// Append-only operation identity storage.  An absent entry is an intentional
+/// tombstone, not a reusable hole.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MirOperationArena {
+    entries: Vec<Option<MirOperationData>>,
+}
+
+impl MirOperationArena {
+    fn frozen(blocks: &[MirBlock]) -> Self {
+        let mut entries = Vec::new();
+        for (block_index, block) in blocks.iter().enumerate() {
+            for instruction_index in 0..block.instructions.len() {
+                entries.push(Some(MirOperationData {
+                    block: MirBlockId(block_index as u32),
+                    instruction_index: instruction_index as u32,
+                }));
+            }
+        }
+        Self { entries }
+    }
+
+    pub fn get(&self, id: MirOperationId) -> Option<&MirOperationData> {
+        self.entries.get(id.0 as usize)?.as_ref()
+    }
+
+    pub fn is_tombstone(&self, id: MirOperationId) -> bool {
+        self.entries.get(id.0 as usize).is_some_and(Option::is_none)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn live_len(&self) -> usize {
+        self.entries.iter().flatten().count()
+    }
+
+    fn allocate(&mut self, data: MirOperationData) -> MirOperationId {
+        let id = MirOperationId(
+            u32::try_from(self.entries.len())
+                .expect("MIR operation arena exceeded the representable operation identity space"),
+        );
+        self.entries.push(Some(data));
+        id
+    }
+
+    fn tombstone(&mut self, id: MirOperationId) -> Option<MirOperationData> {
+        self.entries.get_mut(id.0 as usize)?.take()
+    }
+
+    fn relocate_block_from(&mut self, block: MirBlockId, from: u32, delta: i32) {
+        for data in self.entries.iter_mut().flatten() {
+            if data.block == block && data.instruction_index >= from {
+                data.instruction_index = if delta.is_negative() {
+                    data.instruction_index
+                        .checked_sub(delta.unsigned_abs())
+                        .expect("MIR operation relocation underflow")
+                } else {
+                    data.instruction_index
+                        .checked_add(delta as u32)
+                        .expect("MIR operation relocation overflow")
+                };
+            }
+        }
+    }
+}
+
+/// Analysis bundles invalidated by a checked MIR edit.  The editor keeps the
+/// accumulated mask on the body-edit session; consumers can lazily recompute
+/// only the affected facts after `finish`.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct MirAnalysisInvalidation(u8);
+
+impl MirAnalysisInvalidation {
+    pub const NONE: Self = Self(0);
+    pub const CFG: Self = Self(1);
+    pub const USES: Self = Self(2);
+    pub const FLOW: Self = Self(4);
+    pub const EFFECTS: Self = Self(8);
+    pub const VALUES: Self = Self(16);
+    pub const COST: Self = Self(32);
+    pub const ALL: Self = Self(
+        Self::CFG.0 | Self::USES.0 | Self::FLOW.0 | Self::EFFECTS.0 | Self::VALUES.0 | Self::COST.0,
+    );
+
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+}
+
+impl std::ops::BitOr for MirAnalysisInvalidation {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self::from_bits(self.0 | rhs.0)
+    }
+}
+
+impl std::ops::BitOrAssign for MirAnalysisInvalidation {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = *self | rhs;
+    }
+}
 /// Pattern decisions in MIR remain source-free and carry exact field types so
 /// the verifier need not consult compiler interface tables to validate them.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1435,16 +1567,28 @@ pub struct MirBlock {
 #[derive(Clone, Debug)]
 pub struct MirEditor {
     function: MirFunction,
+    invalidation: MirAnalysisInvalidation,
 }
 impl MirEditor {
     pub fn open(function: MirFunction) -> Result<Self, String> {
+        let function = function.with_frozen_operation_arena();
         function.validate()?;
-        Ok(Self { function })
+        Ok(Self {
+            function,
+            invalidation: MirAnalysisInvalidation::NONE,
+        })
     }
     pub fn append_block(&mut self, block: MirBlock) -> Result<MirBlockId, String> {
-        self.transaction(|function| {
+        self.transaction(MirAnalysisInvalidation::CFG, |function| {
             let id = MirBlockId(function.blocks.len() as u32);
+            let instruction_count = block.instructions.len();
             function.blocks.push(block);
+            for instruction_index in 0..instruction_count {
+                function.control.operations.allocate(MirOperationData {
+                    block: id,
+                    instruction_index: instruction_index as u32,
+                });
+            }
             Ok(id)
         })
     }
@@ -1453,7 +1597,7 @@ impl MirEditor {
         block: MirBlockId,
         terminator: MirTerminator,
     ) -> Result<(), String> {
-        self.transaction(|function| {
+        self.transaction(MirAnalysisInvalidation::ALL, |function| {
             let block = function
                 .blocks
                 .get_mut(block.0 as usize)
@@ -1467,20 +1611,196 @@ impl MirEditor {
         block: MirBlockId,
         instructions: Vec<MirInstruction>,
     ) -> Result<(), String> {
-        self.transaction(|function| {
+        self.transaction(
+            MirAnalysisInvalidation::USES
+                | MirAnalysisInvalidation::FLOW
+                | MirAnalysisInvalidation::EFFECTS
+                | MirAnalysisInvalidation::VALUES
+                | MirAnalysisInvalidation::COST,
+            |function| {
+                let old_operations = function
+                    .control
+                    .operations
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, entry)| {
+                        entry
+                            .as_ref()
+                            .is_some_and(|data| data.block == block)
+                            .then_some(MirOperationId(index as u32))
+                    })
+                    .collect::<Vec<_>>();
+                let instruction_count = {
+                    let block_data = function
+                        .blocks
+                        .get_mut(block.0 as usize)
+                        .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?;
+                    block_data.instructions = instructions;
+                    block_data.instructions.len()
+                };
+                for operation in old_operations {
+                    function.control.operations.tombstone(operation);
+                }
+                for instruction_index in 0..instruction_count {
+                    function.control.operations.allocate(MirOperationData {
+                        block,
+                        instruction_index: instruction_index as u32,
+                    });
+                }
+                Ok(())
+            },
+        )
+    }
+    /// Return the current operation location. Tombstoned and absent IDs are
+    /// deliberately indistinguishable to callers that merely need a live
+    /// executable instruction; `is_operation_tombstone` preserves that
+    /// distinction for diagnostics and editor clients.
+    pub fn operation(&self, id: MirOperationId) -> Option<&MirInstruction> {
+        let data = self.function.control.operations.get(id)?;
+        self.function
+            .blocks
+            .get(data.block.0 as usize)?
+            .instructions
+            .get(data.instruction_index as usize)
+    }
+    pub fn operation_data(&self, id: MirOperationId) -> Option<&MirOperationData> {
+        self.function.control.operations.get(id)
+    }
+    pub fn is_operation_tombstone(&self, id: MirOperationId) -> bool {
+        self.function.control.operations.is_tombstone(id)
+    }
+    pub fn invalidation(&self) -> MirAnalysisInvalidation {
+        self.invalidation
+    }
+    /// Replace one operation without changing its identity.  The returned
+    /// mask names exactly the analysis bundles that became stale; a rejected
+    /// replacement leaves both the body and accumulated invalidation intact.
+    pub fn replace_operation(
+        &mut self,
+        id: MirOperationId,
+        instruction: MirInstruction,
+    ) -> Result<MirAnalysisInvalidation, String> {
+        let original = self
+            .operation(id)
+            .cloned()
+            .ok_or_else(|| format!("MIR edit targets absent or deleted operation {}", id.0))?;
+        let invalidation = operation_replacement_invalidation(&original, &instruction);
+        self.transaction(invalidation, |function| {
+            let data = function
+                .control
+                .operations
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("MIR edit targets absent or deleted operation {}", id.0))?;
+            let operation = function
+                .blocks
+                .get_mut(data.block.0 as usize)
+                .and_then(|block| block.instructions.get_mut(data.instruction_index as usize))
+                .ok_or_else(|| format!("MIR operation {} has no live instruction", id.0))?;
+            *operation = instruction;
+            Ok(())
+        })?;
+        Ok(invalidation)
+    }
+    /// Insert an instruction before a live operation.  The new instruction
+    /// receives a fresh ID; existing operation IDs remain stable and their
+    /// recorded positions are shifted atomically.
+    pub fn insert_before(
+        &mut self,
+        before: MirOperationId,
+        instruction: MirInstruction,
+    ) -> Result<MirOperationId, String> {
+        self.insert_relative(before, instruction, false)
+    }
+    /// Insert an instruction after a live operation.  See [`insert_before`]
+    /// for identity and invalidation guarantees.
+    pub fn insert_after(
+        &mut self,
+        after: MirOperationId,
+        instruction: MirInstruction,
+    ) -> Result<MirOperationId, String> {
+        self.insert_relative(after, instruction, true)
+    }
+    fn insert_relative(
+        &mut self,
+        anchor: MirOperationId,
+        instruction: MirInstruction,
+        after: bool,
+    ) -> Result<MirOperationId, String> {
+        let data = self
+            .operation_data(anchor)
+            .cloned()
+            .ok_or_else(|| format!("MIR edit targets absent or deleted operation {}", anchor.0))?;
+        let index = data
+            .instruction_index
+            .checked_add(u32::from(after))
+            .ok_or_else(|| "MIR operation insertion index overflow".to_owned())?;
+        let invalidation = operation_add_remove_invalidation(&instruction);
+        self.transaction(invalidation, |function| {
             let block = function
                 .blocks
-                .get_mut(block.0 as usize)
-                .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?;
-            block.instructions = instructions;
-            Ok(())
+                .get_mut(data.block.0 as usize)
+                .ok_or_else(|| format!("MIR operation {} names absent block", anchor.0))?;
+            if index as usize > block.instructions.len() {
+                return Err(format!("MIR operation {} has no insertion point", anchor.0));
+            }
+            block.instructions.insert(index as usize, instruction);
+            function
+                .control
+                .operations
+                .relocate_block_from(data.block, index, 1);
+            Ok(function.control.operations.allocate(MirOperationData {
+                block: data.block,
+                instruction_index: index,
+            }))
         })
+    }
+    /// Delete an operation and retain its ID as a tombstone.  Validation is
+    /// transactional, so removing a definition that leaves the body invalid
+    /// restores both the instruction and its live identity.
+    pub fn remove_operation(
+        &mut self,
+        id: MirOperationId,
+    ) -> Result<MirAnalysisInvalidation, String> {
+        let data = self
+            .operation_data(id)
+            .cloned()
+            .ok_or_else(|| format!("MIR edit targets absent or deleted operation {}", id.0))?;
+        let instruction = self
+            .operation(id)
+            .cloned()
+            .ok_or_else(|| format!("MIR operation {} has no live instruction", id.0))?;
+        let invalidation = operation_add_remove_invalidation(&instruction);
+        self.transaction(invalidation, |function| {
+            let block = function
+                .blocks
+                .get_mut(data.block.0 as usize)
+                .ok_or_else(|| format!("MIR operation {} names absent block", id.0))?;
+            if data.instruction_index as usize >= block.instructions.len() {
+                return Err(format!("MIR operation {} has no live instruction", id.0));
+            }
+            block.instructions.remove(data.instruction_index as usize);
+            function
+                .control
+                .operations
+                .tombstone(id)
+                .ok_or_else(|| format!("MIR edit targets absent or deleted operation {}", id.0))?;
+            function.control.operations.relocate_block_from(
+                data.block,
+                data.instruction_index.saturating_add(1),
+                -1,
+            );
+            Ok(())
+        })?;
+        Ok(invalidation)
     }
     pub fn finish(self) -> MirFunction {
         self.function
     }
     fn transaction<T>(
         &mut self,
+        invalidation: MirAnalysisInvalidation,
         edit: impl FnOnce(&mut MirFunction) -> Result<T, String>,
     ) -> Result<T, String> {
         let original = self.function.clone();
@@ -1495,8 +1815,70 @@ impl MirEditor {
             self.function = original;
             return Err(error);
         }
+        self.invalidation |= invalidation;
         Ok(value)
     }
+}
+
+fn operation_replacement_invalidation(
+    before: &MirInstruction,
+    after: &MirInstruction,
+) -> MirAnalysisInvalidation {
+    if before == after {
+        return MirAnalysisInvalidation::NONE;
+    }
+    let mut invalidation = MirAnalysisInvalidation::VALUES | MirAnalysisInvalidation::COST;
+    if destination(before) != destination(after) || references(before) != references(after) {
+        invalidation |= MirAnalysisInvalidation::USES | MirAnalysisInvalidation::FLOW;
+    }
+    if operation_is_effectful(before) || operation_is_effectful(after) {
+        invalidation |= MirAnalysisInvalidation::EFFECTS;
+    }
+    invalidation
+}
+
+fn operation_add_remove_invalidation(instruction: &MirInstruction) -> MirAnalysisInvalidation {
+    let mut invalidation = MirAnalysisInvalidation::COST;
+    if destination(instruction).is_some() || !references(instruction).is_empty() {
+        invalidation |= MirAnalysisInvalidation::USES
+            | MirAnalysisInvalidation::FLOW
+            | MirAnalysisInvalidation::VALUES;
+    }
+    if operation_is_effectful(instruction) {
+        invalidation |= MirAnalysisInvalidation::EFFECTS;
+    }
+    invalidation
+}
+
+/// The Effects bundle tracks operations whose ordering, control transfer, or
+/// external interaction is semantically observable.  Pure arithmetic and
+/// aggregate construction deliberately stay out of this set, letting an
+/// editor replacement invalidate only value facts when its operands/outputs
+/// have not changed.
+fn operation_is_effectful(instruction: &MirInstruction) -> bool {
+    matches!(
+        instruction,
+        MirInstruction::Abort
+            | MirInstruction::Store { .. }
+            | MirInstruction::DerefStore { .. }
+            | MirInstruction::ArraySetMove { .. }
+            | MirInstruction::ArrayPushMove { .. }
+            | MirInstruction::ArrayPopMove { .. }
+            | MirInstruction::ArrayReserve { .. }
+            | MirInstruction::ArrayFinishDrained { .. }
+            | MirInstruction::Call { .. }
+            | MirInstruction::CallIndirect { .. }
+            | MirInstruction::HostCall { .. }
+            | MirInstruction::Perform { .. }
+            | MirInstruction::InstallHandler { .. }
+            | MirInstruction::UninstallHandler
+            | MirInstruction::CaptureResumption { .. }
+            | MirInstruction::Resume { .. }
+            | MirInstruction::ResumeReturn { .. }
+            | MirInstruction::ResumeSnapshot { .. }
+            | MirInstruction::Forward { .. }
+            | MirInstruction::Cancel { .. }
+    )
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MirOptimizationReport {
@@ -3500,6 +3882,22 @@ impl MirFunction {
             }
         }
         self.control = control;
+        self.with_frozen_operation_arena()
+    }
+
+    /// Materialize the parallel operation identity arena once a raw block
+    /// stream becomes a frozen MIR body.  Re-freezing an already frozen body
+    /// is intentionally a no-op: IDs are semantic editor handles and must not
+    /// change merely because a caller crosses another validation boundary.
+    pub fn with_frozen_operation_arena(mut self) -> Self {
+        if self.control.operations.entries.is_empty()
+            && self
+                .blocks
+                .iter()
+                .any(|block| !block.instructions.is_empty())
+        {
+            self.control.operations = MirOperationArena::frozen(&self.blocks);
+        }
         self
     }
 
@@ -3529,8 +3927,65 @@ impl MirFunction {
             }
             self.validate_terminator(index, &block.terminator)?;
         }
+        self.validate_operation_arena()?;
         self.validate_label_contracts()?;
         self.validate_control_tables()?;
+        Ok(())
+    }
+    fn validate_operation_arena(&self) -> Result<(), String> {
+        // Unfrozen constructor literals remain supported for hostile-MIR unit
+        // tests and the raw lowering boundary.  Any nonempty arena, however,
+        // is complete and bidirectionally checked.
+        if self.control.operations.entries.is_empty() {
+            return Ok(());
+        }
+        let mut seen = vec![false; self.control.operations.entries.len()];
+        for (block_index, block) in self.blocks.iter().enumerate() {
+            let block_id = MirBlockId(block_index as u32);
+            for instruction_index in 0..block.instructions.len() {
+                let Some((operation_index, _)) = self
+                    .control
+                    .operations
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .find(|(_, entry)| {
+                        entry.as_ref().is_some_and(|data| {
+                            data.block == block_id
+                                && data.instruction_index == instruction_index as u32
+                        })
+                    })
+                else {
+                    return Err(format!(
+                        "MIR instruction at block {} index {} has no operation identity",
+                        block_index, instruction_index
+                    ));
+                };
+                if std::mem::replace(&mut seen[operation_index], true) {
+                    return Err("MIR operation identity aliases multiple instructions".into());
+                }
+            }
+        }
+        for (index, entry) in self.control.operations.entries.iter().enumerate() {
+            let Some(data) = entry else {
+                continue;
+            };
+            if !seen[index] {
+                return Err(format!("MIR live operation {index} has no instruction"));
+            }
+            let Some(block) = self.blocks.get(data.block.0 as usize) else {
+                return Err(format!(
+                    "MIR operation {index} names absent block {}",
+                    data.block.0
+                ));
+            };
+            if data.instruction_index as usize >= block.instructions.len() {
+                return Err(format!(
+                    "MIR operation {index} names absent instruction {} in block {}",
+                    data.instruction_index, data.block.0
+                ));
+            }
+        }
         Ok(())
     }
     fn validate_scope(&self, scope: MirScopeId) -> Result<(), String> {
