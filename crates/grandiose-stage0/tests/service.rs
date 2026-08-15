@@ -5242,6 +5242,19 @@ fn service_materializes_hrtb_static_values_with_selected_const_gat_arguments() {
 }
 
 #[test]
+fn service_equates_self_and_concrete_selected_const_method_contracts() {
+    let mut request = request("use facade::{Callback, Gateway as Capability}; pub fn apply(callback: Callback) -> i64 { let value = 41; callback(&value) } pub fn main() -> i64 { apply(Capability::relay) }");
+    request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::Top as Gateway; pub type Callback = provider::Callback;".as_slice()));
+    request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub trait Gate { const Width: u32; type Item<'a, n: u32>; } pub trait Base: Gate { fn relay<'a>(value: &'a i64) -> <Self as Gate>::Item<'a, <Self as Gate>::Width>; } pub trait Top: Base {} pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a, <i64 as Gate>::Width>; impl Gate for i64 { const Width = 7; type Item<'a, n: u32> = i64; } impl Base for i64 { fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a, <i64 as Gate>::Width> { *value } } impl Top for i64 where i64: Base {}".as_slice()));
+    let first = StageZeroCompiler::new().compile(request.clone()).expect("concrete selected const must match Self contract");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new().compile(request).expect("source order must preserve selected const contract equality");
+    let first = first.artifact.unwrap(); let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint()); assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 41); assert_eq!(second.run_i64().unwrap(), 41);
+}
+
+#[test]
 fn service_normalizes_generic_associated_consts_in_hrtb_gat_body_results() {
     let mut request = request(
         "use facade::layout; pub fn main() -> i64 { layout() }",

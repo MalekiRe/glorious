@@ -3354,6 +3354,12 @@ fn normalize_selected_contract_generic_argument(
     solver: &mut crate::TraitSolver,
     fuel: u32,
 ) -> GenericArgument {
+    // Contract equality runs after the implementation head has selected its
+    // trait evidence.  Normalize a concrete associated-const argument before
+    // recursing, just as the type/effect paths above do; failed or ambiguous
+    // selection deliberately retains the original identity for rejection by
+    // the ordinary signature comparison.
+    let value = solver.normalize_generic_argument(value.clone()).unwrap_or(value);
     match value {
         GenericArgument::Type(value) => {
             GenericArgument::Type(normalize_selected_contract_type(value, solver, fuel))
