@@ -4121,6 +4121,21 @@ fn source_infix_callable_contextualizes_a_higher_order_fallback_closure() {
 }
 
 #[test]
+fn canonical_option_some_alias_lowers_to_its_enum_constructor() {
+    let core = core_for(
+        "core-option-some-alias@0.1.0",
+        "enum Result<T, E> { Ok(T), Err(E) } type Option<T> = Result<T, ()>; let Option::Some = Result::Ok; pub fn main() -> Option<u8> { Option::Some(7) }",
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| {
+        matches!(
+            expression.kind,
+            CoreKind::Enum { fields: ref values, .. } if values.len() == 1
+        )
+    }));
+}
+
+#[test]
 fn handler_pattern_matrix_rejects_duplicate_unbounded_literal_rows() {
     let core = core_for(
         "core-handler-pattern-unbounded-literal@0.1.0",

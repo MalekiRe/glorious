@@ -3686,7 +3686,7 @@ impl Elaborator<'_> {
                 expression.span,
             ),
             ExprKind::Path(path) => self
-                .enum_constructor(path.clone(), vec![], vec![], expression.span)
+                .enum_constructor(path.clone(), vec![], vec![], None, expression.span)
                 .unwrap_or_else(|| self.path(path, expression.span)),
             ExprKind::GenericPath {
                 path,
@@ -3697,6 +3697,7 @@ impl Elaborator<'_> {
                     path.clone(),
                     effect_arguments.clone(),
                     vec![],
+                    None,
                     expression.span,
                 ) {
                     return value;
@@ -3979,6 +3980,7 @@ impl Elaborator<'_> {
                         path.clone(),
                         vec![],
                         arguments.clone(),
+                        None,
                         expression.span,
                     )
                 {
@@ -3994,6 +3996,7 @@ impl Elaborator<'_> {
                         path.clone(),
                         effect_arguments.clone(),
                         arguments.clone(),
+                        None,
                         expression.span,
                     )
                 {
@@ -4222,6 +4225,15 @@ impl Elaborator<'_> {
                 let ExprKind::Path(path) = &self.body.expression(callee).kind else {
                     return self.expression(id);
                 };
+                if let Some(value) = self.enum_constructor(
+                    path.clone(),
+                    vec![],
+                    arguments.clone(),
+                    expected.clone(),
+                    expression.span,
+                ) {
+                    return value;
+                }
                 let ResolutionState::Resolved(definition) =
                     self.index
                         .resolve_path(DefinitionNamespace::Value, self.module, path)
@@ -8519,8 +8531,24 @@ impl Elaborator<'_> {
         path: Vec<String>,
         source_arguments: Vec<crate::header::HeaderGenericArgument>,
         supplied: Vec<ExprId>,
+        expected: Option<Type>,
         span: Span,
     ) -> Option<CoreId> {
+        if let ResolutionState::Resolved(alias) = self
+            .index
+            .resolve_path(DefinitionNamespace::Value, self.module, &path)
+            && let Some((definition, variant_name)) =
+                self.signatures.value_alias_enum_constructor(alias)
+        {
+            return self.enum_constructor_variant(
+                definition,
+                variant_name.to_owned(),
+                source_arguments,
+                supplied,
+                expected,
+                span,
+            );
+        }
         let (variant_name, enum_path) = path.split_last()?;
         if enum_path.is_empty() {
             return None;
@@ -8533,10 +8561,55 @@ impl Elaborator<'_> {
                 ResolutionState::Resolved(definition) => definition,
                 _ => return None,
             };
+        self.enum_constructor_variant(
+            definition,
+            variant_name.clone(),
+            source_arguments,
+            supplied,
+            expected,
+            span,
+        )
+    }
+
+    fn enum_constructor_variant(
+        &mut self,
+        definition: DefKey,
+        variant_name: String,
+        source_arguments: Vec<crate::header::HeaderGenericArgument>,
+        supplied: Vec<ExprId>,
+        expected: Option<Type>,
+        span: Span,
+    ) -> Option<CoreId> {
         let arguments = self.nominal_arguments(definition, &source_arguments, span)?;
+        let nominal = Type::Nominal {
+            definition,
+            arguments: arguments.clone(),
+        };
+        if let Some(expected) = expected
+            && self.inference.unify(nominal.clone(), expected).is_err()
+        {
+            return Some(self.fail(
+                span,
+                "G4131",
+                "enum constructor result does not match its contextual expected type",
+            ));
+        }
+        // Contextual result evidence may have solved an omitted nominal type
+        // argument (for example `Option::Some(7)` under `Option<u8>`).
+        // Reify that substitution before elaborating payloads, otherwise the
+        // literal only sees the stale inference variable and falls back to
+        // the default integer type.
+        let nominal = self.inference.zonk(nominal.clone()).unwrap_or(nominal);
+        let Type::Nominal { arguments, .. } = &nominal else {
+            return Some(self.fail(
+                span,
+                "G4131",
+                "enum constructor lost its nominal result type",
+            ));
+        };
         let (variant, fields) = self
             .signatures
-            .instantiate_enum_variant_generic(definition, &arguments, variant_name)
+            .instantiate_enum_variant_generic(definition, arguments, &variant_name)
             .ok()?;
         if fields.len() != supplied.len() {
             return Some(self.fail(
@@ -8562,13 +8635,7 @@ impl Elaborator<'_> {
                 value
             })
             .collect::<Vec<_>>();
-        let ty = self.strict_result(
-            &values,
-            Type::Nominal {
-                definition,
-                arguments,
-            },
-        );
+        let ty = self.strict_result(&values, nominal);
         Some(self.alloc(
             CoreKind::Enum {
                 definition,

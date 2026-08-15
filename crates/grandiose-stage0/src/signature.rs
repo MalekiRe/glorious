@@ -298,6 +298,12 @@ pub enum ElaboratedHeader {
     ValueAlias {
         target: DefKey,
         signature: CallableSignature,
+        /// A forwarding alias may name an enum constructor rather than an
+        /// ordinary source callable.  Keep the variant identity alongside
+        /// the enum declaration so Core can lower an application directly
+        /// to `CoreKind::Enum` instead of treating the enum declaration as a
+        /// function body.
+        enum_constructor: Option<String>,
     },
     /// A top-level evaluated `let`. The `Option` is `None` only during the
     /// private elaboration prepass; all consumers require the resulting type
@@ -411,9 +417,9 @@ fn resolve_value_alias(
     aliases: &BTreeMap<DefKey, (ModuleKey, Vec<String>)>,
     index: &DefinitionIndex,
     definitions: &BTreeMap<DefKey, ElaboratedHeader>,
-    resolved: &mut BTreeMap<DefKey, (DefKey, CallableSignature)>,
+    resolved: &mut BTreeMap<DefKey, (DefKey, CallableSignature, Option<String>)>,
     active: &mut Vec<DefKey>,
-) -> Result<(DefKey, CallableSignature), String> {
+) -> Result<(DefKey, CallableSignature, Option<String>), String> {
     if let Some(value) = resolved.get(&key) {
         return Ok(value.clone());
     }
@@ -436,8 +442,9 @@ fn resolve_value_alias(
         }
         ResolutionState::Unresolved | ResolutionState::Recovered => {
             match enum_constructor_alias(module, path, index, definitions) {
-                Some(value) => {
+                Some((target, signature, variant)) => {
                     active.pop();
+                    let value = (target, signature, Some(variant));
                     resolved.insert(key, value.clone());
                     return Ok(value);
                 }
@@ -455,7 +462,7 @@ fn resolve_value_alias(
             .get(&target)
             .and_then(callable_signature)
             .cloned()
-            .map(|signature| (target, signature))
+            .map(|signature| (target, signature, None))
             .ok_or_else(|| "value alias target is not a callable value".into())
     };
     active.pop();
@@ -475,7 +482,7 @@ fn enum_constructor_alias(
     path: &[String],
     index: &DefinitionIndex,
     definitions: &BTreeMap<DefKey, ElaboratedHeader>,
-) -> Option<(DefKey, CallableSignature)> {
+) -> Option<(DefKey, CallableSignature, String)> {
     let (variant_name, enum_path) = path.split_last()?;
     let definition = match index.resolve_path(DefinitionNamespace::Type, module, enum_path) {
         ResolutionState::Resolved(definition) => definition,
@@ -515,6 +522,7 @@ fn enum_constructor_alias(
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        variant.name.clone(),
     ))
 }
 
@@ -923,6 +931,21 @@ impl ElaboratedInterface {
         }
     }
 
+    /// Return the enum constructor selected by a source-level value alias.
+    /// This is intentionally separate from `value_alias_target`: ordinary
+    /// aliases lower to their callable target, while a constructor alias
+    /// must retain its variant tag for VM data construction.
+    pub fn value_alias_enum_constructor(&self, definition: DefKey) -> Option<(DefKey, &str)> {
+        match self.definitions.get(&definition) {
+            Some(ElaboratedHeader::ValueAlias {
+                target,
+                enum_constructor: Some(variant),
+                ..
+            }) => Some((*target, variant)),
+            _ => None,
+        }
+    }
+
     pub fn freeze_value_initializer(
         &mut self,
         definition: DefKey,
@@ -1215,9 +1238,13 @@ impl ElaboratedInterface {
                 &mut resolved,
                 &mut active,
             ) {
-                Ok((target, signature)) => {
+                Ok((target, signature, enum_constructor)) => {
                     self.definitions
-                        .insert(key, ElaboratedHeader::ValueAlias { target, signature });
+                        .insert(key, ElaboratedHeader::ValueAlias {
+                            target,
+                            signature,
+                            enum_constructor,
+                        });
                 }
                 Err(message) => self.diagnostics.push(SignatureDiagnostic {
                     code: "G3340",
