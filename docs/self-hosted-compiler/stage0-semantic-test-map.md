@@ -277,6 +277,13 @@ coarse. The composite fixtures cover:
   products, and a repaired v0.3 provider yields new provider traces and
   canonical VM bytes with no stale diagnostics
   (`service_recovers_three_version_cyclic_alias_slice_without_stale_publication`).
+- two unrelated dependency diamonds may publish the same local generic aliases
+  while retaining separate provider identities. A private callable/effect/GAT
+  revision in one diamond is transactional: it emits canonical private
+  callable/trait/effect diagnostics, publishes no child products, and leaves the other
+  diamond's interfaces, cache state, and independently compiled VM bytes
+  unchanged. Repairing the failed side refreshes only that provider/facade
+  identity (`service_isolates_unrelated_generic_diamonds_from_private_callable_revisions`).
 - two package facades may each contain a public module re-export cycle. When
   both ultimately expose one provider, aliases deduplicate to that identity;
   when they expose same-spelled distinct providers, both generic callback/GAT

@@ -12720,6 +12720,199 @@ fn service_recovers_three_version_cyclic_alias_slice_without_stale_publication()
 }
 
 #[test]
+fn service_isolates_unrelated_generic_diamonds_from_private_callable_revisions() {
+    let root = "use left_diamond::*; use right_diamond::{Callback as RightRelay, Child as RightCapability, Trace as RightTrace}; pub struct LeftPacket { value: <i64 as Child<i64>>::Item<i64> } pub struct RightPacket { value: <i64 as RightCapability<i64>>::Item<i64> } pub fn left_call(callback: Callback<i64>) -> i64 / { <i64 as Child<i64>>::Effects<i64> } { callback(0, 41) } pub fn left_worker() -> i64 / Trace<i64> { let packet = LeftPacket { value: left_call(Child<i64>::relay) }; Trace<i64>::note(packet.value) } pub fn right_call(callback: RightRelay<i64>) -> i64 / { <i64 as RightCapability<i64>>::Effects<i64> } { callback(0, 41) } pub fn right_worker() -> i64 / RightTrace<i64> { let packet = RightPacket { value: right_call(RightCapability<i64>::relay) }; RightTrace<i64>::note(packet.value) } pub fn left_value() -> i64 { handle left_worker() { Trace<i64>::note(value) with k => k(value + 1) } } pub fn right_value() -> i64 { handle right_worker() { RightTrace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + left_value() + right_value() }";
+    let right_root = "use right_diamond::*; pub struct Packet { value: <i64 as Child<i64>>::Item<i64> } pub fn call(callback: Callback<i64>) -> i64 / { <i64 as Child<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: call(Child<i64>::relay) }; Trace<i64>::note(packet.value) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let public_provider = |fixity: &str| {
+        format!(
+            "pub {fixity} 30 **; pub trait Combine<T> {{ **(left: T, right: T) -> T; }} impl Combine<i64> for i64 {{ **(left: i64, right: i64) -> i64 {{ left - right }} }} pub effect Trace<T> {{ [1,1] note(value: T) -> i64; }} pub trait Parent<T> {{ type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / {{ <Self as Parent<T>>::Effects<U> }}; }} pub trait Child<T>: Parent<T> {{}} impl Parent<i64> for i64 {{ type Item<U> = i64; type Effects<U> = {{Trace<U>}}; fn relay<U>(receiver: i64, value: U) -> i64 / {{Trace<U>}} {{ Trace<U>::note(value) }} }} impl Child<i64> for i64 {{}} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / {{ <i64 as Child<i64>>::Effects<U> }};"
+        )
+    };
+    let private_provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = Bool; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> Bool / {Trace<U>} { true } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let diamond_sources = |prefix: &str, provider_alias: &str| {
+        let a_package = format!("{prefix}-a@0.1.0");
+        let b_package = format!("{prefix}-b@0.1.0");
+        let top_package = format!("{prefix}-diamond@0.1.0");
+        vec![
+            (a_package, format!("pub use {provider_alias}::*;")),
+            (b_package, format!("pub use {provider_alias}::*;")),
+            (
+                top_package,
+                format!("pub use {}::*; pub use {}::*;", prefix.replace('-', "_") + "_a", prefix.replace('-', "_") + "_b"),
+            ),
+        ]
+    };
+    let world = |root: &str, left_provider: (&str, String), include_left: bool| {
+        let mut input = request(root);
+        if include_left {
+            input.sources.push(SourceInput::new(
+                PackageKey(left_provider.0.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                left_provider.1.into_bytes(),
+            ));
+            for (package, source) in diamond_sources("left", "left_core") {
+                input.sources.push(SourceInput::new(
+                    PackageKey(package),
+                    LogicalPath::parse("src/lib.glorious").unwrap(),
+                    source.into_bytes(),
+                ));
+            }
+        }
+        input.sources.push(SourceInput::new(
+            PackageKey("right-core@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            public_provider("infixr").into_bytes(),
+        ));
+        for (package, source) in diamond_sources("right", "right_core") {
+            input.sources.push(SourceInput::new(
+                PackageKey(package),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                source.into_bytes(),
+            ));
+        }
+        input
+    };
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(
+            world(root, ("left-core@0.1.0", public_provider("infixl")), true),
+            None,
+        )
+        .unwrap();
+    let first = compiler
+        .compile_revision(parent)
+        .expect("both public generic diamonds must compile together")
+        .artifact
+        .unwrap();
+    assert_eq!(first.run_i64().unwrap(), 91);
+
+    let observer = compiler
+        .import_revision(
+            world(right_root, ("left-core@unused", String::new()), false),
+            Some(parent),
+        )
+        .unwrap();
+    let observer_artifact = compiler
+        .compile_revision(observer)
+        .expect("the unrelated right diamond must compile independently")
+        .artifact
+        .unwrap();
+    assert_eq!(observer_artifact.run_i64().unwrap(), 43);
+    let observer_bytes = observer_artifact.canonical_bytes().to_vec();
+    let cached_parent = compiler.interface_cache_stats();
+    let right_provider = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("right-core@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let mut right_traces = Vec::new();
+    for package in ["right-a@0.1.0", "right-b@0.1.0", "right-diamond@0.1.0"] {
+        let node = DependencyNode::Interface(ModuleKey {
+            package: PackageKey(package.into()),
+            path: "crate".into(),
+        });
+        let trace = compiler
+            .dependency_trace(parent, &node)
+            .expect("the full parent must freeze every right-diamond interface");
+        assert!(trace.dependencies.contains(&right_provider));
+        right_traces.push((node, trace));
+    }
+    let left_top = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("left-diamond@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let left_parent = compiler
+        .dependency_trace(parent, &left_top)
+        .expect("the full parent must freeze the left diamond interface");
+
+    let rejected_world = world(root, ("left-core@0.2.0", private_provider.into()), true);
+    let rejected = compiler
+        .import_revision(rejected_world.clone(), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(rejected).unwrap())
+        .expect_err("a private callable/effect/GAT revision must reject its left diamond");
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3304"),
+        "the changed private callable alias must be diagnosed: {:#?}",
+        error.diagnostics()
+    );
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3310"),
+        "the changed private generic trait/GAT must be diagnosed: {:#?}",
+        error.diagnostics()
+    );
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3315"),
+        "the changed private generic effect must be diagnosed: {:#?}",
+        error.diagnostics()
+    );
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G4111"),
+        "private left fallout must not alter the independent right fixity world: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached_parent);
+    assert!(compiler.dependency_traces(rejected).is_empty());
+    for (node, trace) in &right_traces {
+        assert_eq!(compiler.dependency_trace(parent, node), Some(trace.clone()));
+    }
+    let mut reordered_rejected = rejected_world;
+    reordered_rejected.sources.reverse();
+    assert_eq!(
+        error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(reordered_rejected)
+            .expect_err("source order cannot publish private left aliases")
+            .diagnostics(),
+        "private left-diamond diagnostics must be canonical"
+    );
+    let observer_replay = compiler.compile_revision(observer).unwrap().artifact.unwrap();
+    assert_eq!(observer_replay.canonical_bytes(), observer_bytes.as_slice());
+
+    let repaired = compiler
+        .import_revision(
+            world(root, ("left-core@0.2.0", public_provider("infixr")), true),
+            Some(parent),
+        )
+        .unwrap();
+    let repaired_artifact = compiler
+        .compile_revision(repaired)
+        .expect("a repaired left provider must not retain private diagnostics")
+        .artifact
+        .unwrap();
+    assert_eq!(repaired_artifact.run_i64().unwrap(), 95);
+    assert_ne!(first.fingerprint(), repaired_artifact.fingerprint());
+    for (node, trace) in right_traces {
+        let repaired_trace = compiler
+            .dependency_trace(repaired, &node)
+            .expect("the repaired world must retain every right-diamond interface");
+        assert_eq!(
+            repaired_trace.fingerprint, trace.fingerprint,
+            "repairing the left diamond must not change a right-diamond interface identity"
+        );
+        assert_eq!(repaired_trace.dependencies, trace.dependencies);
+    }
+    let repaired_left = compiler
+        .dependency_trace(repaired, &left_top)
+        .expect("the repaired left facade must publish");
+    assert_ne!(left_parent.fingerprint, repaired_left.fingerprint);
+    assert!(compiler.interface_cache_stats().misses > cached_parent.misses);
+}
+
+#[test]
 fn service_distinguishes_provider_identities_through_parallel_package_module_cycles() {
     let root = "use left_facade::{Capability as LeftCapability, Trace as LeftTrace}; use right_facade::{Capability as RightCapability, Trace as RightTrace}; pub struct LeftPacket { value: <i64 as LeftCapability<i64>>::Item<i64> } pub struct RightPacket { value: <i64 as RightCapability<i64>>::Item<i64> } pub fn left_worker() -> i64 / LeftTrace<i64> { let packet = LeftPacket { value: LeftCapability<i64>::relay(0, 41) }; LeftTrace<i64>::note(packet.value) } pub fn right_worker() -> i64 / RightTrace<i64> { let packet = RightPacket { value: RightCapability<i64>::relay(0, 41) }; RightTrace<i64>::note(packet.value) } pub fn left_value() -> i64 { handle left_worker() { LeftTrace<i64>::note(value) with k => k(value + 1) } } pub fn right_value() -> i64 { handle right_worker() { RightTrace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { left_value() + right_value() }";
     let public_provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
