@@ -7572,6 +7572,19 @@ fn service_multiplies_move_captured_callable_use_through_handler_replay() {
 }
 
 #[test]
+fn service_rejects_multishot_move_capture_through_public_callback_facades() {
+    let provider = "pub fn invoke(callback: (i64) -> i64, value: i64) -> i64 { callback(value) }";
+    let world = |source: &str| { let mut input = request(source); for (p,s) in [("capture-core@0.1.0", provider), ("callback-facade@0.1.0", "pub use capture_core::invoke;"), ("top-facade@0.1.0", "pub use callback_facade::*;")] { input.sources.push(SourceInput::new(PackageKey(p.into()), LogicalPath::parse("src/lib.glorious").unwrap(), s.as_bytes())); } input };
+    let shared = "use top_facade::invoke; effect Ask { [2,2] ask() -> i64; } pub fn replay() -> i64 { handle { let value = Ask::ask(); let call = (input: i64) -> i64 { input + 1 }; invoke(call, value) } { Ask::ask() with k => k(20) + k(21) } } pub fn main() -> i64 { replay() }";
+    assert_eq!(StageZeroCompiler::new().compile(world(shared)).unwrap().artifact.unwrap().run_i64().unwrap(), 43);
+    let moved = "use top_facade::invoke; effect Ask { [2,2] ask() -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replay(function: (i64) -> i64) -> i64 { handle { let value = Ask::ask(); let call = (input: i64) -> i64 { move function(input) }; invoke(call, value) } { Ask::ask() with k => k(20) + k(21) } } pub fn main() -> i64 { replay(add_one) }";
+    let error = StageZeroCompiler::new().compile(world(moved)).expect_err("facade cannot hide multishot move capture");
+    assert!(error.diagnostics().iter().any(|d| d.code == "G5011"));
+    let mut reordered = world(moved); reordered.sources.reverse();
+    assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("canonical multishot rejection").diagnostics());
+}
+
+#[test]
 fn service_move_captures_aggregate_roots_for_partial_closure_moves() {
     let source = "pub struct Pair { function: (i64) -> i64, value: i64 } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn through(pair: Pair) -> i64 { let call = () -> i64 { let taken = move pair.function; taken(41) }; call() } pub fn main() -> i64 { through(Pair { function: add_one, value: 0 }) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
