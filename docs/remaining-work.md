@@ -204,5 +204,4 @@ These are not part of the completion backlog:
   a handler, and outward-row mismatches;
 - optimizer transformations that weaken traps, `Use`, cleanup, or custom-`Drop`;
 - O3 legality rules different from O2;
-- associated type defaults and open effect-row aliases unless explicitly added
-  to product scope.
+- open effect-row aliases unless explicitly added to product scope.
