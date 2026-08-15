@@ -630,6 +630,22 @@ fn cfg_validation_checks_typed_block_edges_and_returns() {
 }
 
 #[test]
+fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
+    let mut function = graph();
+    function.blocks[0].instructions.push(MirInstruction::AddI64 {
+        dst: MirLocal(1),
+        left: MirLocal(0),
+        right: MirLocal(2),
+    });
+    assert!(
+        function
+            .validate()
+            .is_err_and(|error| error.contains("i64 operation")),
+        "a Bool register must not be accepted as an i64 arithmetic operand"
+    );
+}
+
+#[test]
 fn mir_templates_may_defer_associated_const_projection_but_vm_emission_rejects_it() {
     let nominal = Type::Nominal {
         definition: DefKey(Digest::of_bytes(b"mir-associated-const-carrier")),

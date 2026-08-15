@@ -6849,6 +6849,78 @@ impl MirFunction {
             .map(|local| &local.ty)
             .ok_or_else(|| format!("MIR references invalid local {}", local.0))
     }
+    fn require_scalar_locals(
+        &self,
+        locals: &[MirLocal],
+        scalar: crate::types::ScalarType,
+        instruction: &str,
+    ) -> Result<(), String> {
+        let expected = Type::Scalar(scalar);
+        for local in locals {
+            if self.local_type(*local)? != &expected {
+                return Err(format!("MIR {instruction} has an inconsistent scalar operand type"));
+            }
+        }
+        Ok(())
+    }
+    fn validate_fixed_scalar_instruction(&self, instruction: &MirInstruction) -> Result<bool, String> {
+        use crate::types::ScalarType;
+        match instruction {
+            MirInstruction::ConstI64 { dst, .. } => {
+                self.require_scalar_locals(&[*dst], ScalarType::I64, "i64 constant")?;
+            }
+            MirInstruction::ConstBool { dst, .. } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Bool, "Bool constant")?;
+            }
+            MirInstruction::AddI64 { dst, left, right }
+            | MirInstruction::WrappingAddI64 { dst, left, right }
+            | MirInstruction::WrappingSubI64 { dst, left, right }
+            | MirInstruction::WrappingMulI64 { dst, left, right }
+            | MirInstruction::BitAndI64 { dst, left, right }
+            | MirInstruction::BitXorI64 { dst, left, right }
+            | MirInstruction::BitOrI64 { dst, left, right }
+            | MirInstruction::SubI64 { dst, left, right }
+            | MirInstruction::MulI64 { dst, left, right }
+            | MirInstruction::DivI64 { dst, left, right }
+            | MirInstruction::RemI64 { dst, left, right } => {
+                self.require_scalar_locals(&[*dst, *left, *right], ScalarType::I64, "i64 operation")?;
+            }
+            MirInstruction::NotBool { dst, value } => {
+                self.require_scalar_locals(&[*dst, *value], ScalarType::Bool, "Bool operation")?;
+            }
+            MirInstruction::EqBool { dst, left, right }
+            | MirInstruction::NeBool { dst, left, right } => {
+                self.require_scalar_locals(&[*dst, *left, *right], ScalarType::Bool, "Bool comparison")?;
+            }
+            MirInstruction::AddF64 { dst, left, right }
+            | MirInstruction::SubF64 { dst, left, right }
+            | MirInstruction::MulF64 { dst, left, right }
+            | MirInstruction::DivF64 { dst, left, right }
+            | MirInstruction::RemF64 { dst, left, right } => {
+                self.require_scalar_locals(&[*dst, *left, *right], ScalarType::F64, "f64 operation")?;
+            }
+            MirInstruction::EqI64 { dst, left, right }
+            | MirInstruction::NeI64 { dst, left, right }
+            | MirInstruction::LtI64 { dst, left, right }
+            | MirInstruction::LeI64 { dst, left, right }
+            | MirInstruction::GtI64 { dst, left, right }
+            | MirInstruction::GeI64 { dst, left, right } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Bool, "i64 comparison result")?;
+                self.require_scalar_locals(&[*left, *right], ScalarType::I64, "i64 comparison")?;
+            }
+            MirInstruction::EqF64 { dst, left, right }
+            | MirInstruction::NeF64 { dst, left, right }
+            | MirInstruction::LtF64 { dst, left, right }
+            | MirInstruction::LeF64 { dst, left, right }
+            | MirInstruction::GtF64 { dst, left, right }
+            | MirInstruction::GeF64 { dst, left, right } => {
+                self.require_scalar_locals(&[*dst], ScalarType::Bool, "f64 comparison result")?;
+                self.require_scalar_locals(&[*left, *right], ScalarType::F64, "f64 comparison")?;
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
     fn validate_instruction(
         &self,
         instruction: &MirInstruction,
@@ -6917,6 +6989,9 @@ impl MirFunction {
             if !is_canonical_f32_bits(*bits) {
                 return Err("MIR f32 constant has a non-canonical NaN payload".into());
             }
+            return Ok(());
+        }
+        if self.validate_fixed_scalar_instruction(instruction)? {
             return Ok(());
         }
         if let MirInstruction::MakeCallable {
