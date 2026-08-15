@@ -21987,22 +21987,36 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let (computation, clauses, root_prefix, suffix) = match self.body.expression(root).kind.clone() {
+        let (computation, clauses, root_prefix, result_binding, suffix) = match self.body.expression(root).kind.clone() {
             CoreKind::Handle {
                 computation,
                 clauses,
-            } => (computation, clauses, Vec::new(), Vec::new()),
+            } => (computation, clauses, Vec::new(), None, Vec::new()),
             CoreKind::Block(values) => {
-                let handler_index = values
+                let (handler_index, handler, result_binding) = values
                     .iter()
-                    .position(|id| matches!(self.body.expression(*id).kind, CoreKind::Handle { .. }))?;
+                    .enumerate()
+                    .find_map(|(index, id)| match self.body.expression(*id).kind.clone() {
+                        CoreKind::Handle { .. } => Some((index, *id, None)),
+                        CoreKind::Let { name, value }
+                            if matches!(self.body.expression(value).kind, CoreKind::Handle { .. }) =>
+                        {
+                            Some((index, value, Some((name, *id))))
+                        }
+                        _ => None,
+                    })?;
                 if values[handler_index + 1..]
                     .iter()
-                    .any(|id| matches!(self.body.expression(*id).kind, CoreKind::Handle { .. }))
+                    .any(|id| match self.body.expression(*id).kind {
+                        CoreKind::Handle { .. } => true,
+                        CoreKind::Let { value, .. } => {
+                            matches!(self.body.expression(value).kind, CoreKind::Handle { .. })
+                        }
+                        _ => false,
+                    })
                 {
                     return None;
                 }
-                let handler = values[handler_index];
                 let CoreKind::Handle {
                     computation,
                     clauses,
@@ -22014,6 +22028,7 @@ impl Lowerer<'_> {
                     computation,
                     clauses,
                     values[..handler_index].to_vec(),
+                    result_binding,
                     values[handler_index + 1..].to_vec(),
                 )
             }
@@ -22166,6 +22181,17 @@ impl Lowerer<'_> {
         // at the end of the enclosing block.  Snapshot it before lowering a
         // later suffix so same-spelled locals cannot be captured by an arm.
         let previous_named = self.named.clone();
+        let previous_values = self.values.clone();
+        let handler_value = result_binding.as_ref().map(|(_, binding)| {
+            self.alloc(self.body.expression(computation).ty.clone(), *binding)
+        });
+        if let (Some((name, _)), Some(handler_value)) = (&result_binding, handler_value) {
+            entry.push(MirInstruction::Store {
+                dst: handler_value,
+                src: call_result,
+            });
+            self.named.insert(name.clone(), handler_value);
+        }
         let result = if suffix.is_empty() {
             call_result
         } else {
@@ -22196,12 +22222,29 @@ impl Lowerer<'_> {
         for (clause, payloads) in frames.iter().zip(payloads) {
             self.instructions = Vec::new();
             self.named = previous_named.clone();
+            self.values = previous_values.clone();
             self.bind_handler_patterns(&clause.patterns, &payloads)?;
             if clause.terminal {
-                let result = self.value(clause.body)?;
+                let handler_result = self.value(clause.body)?;
                 self.instructions.push(MirInstruction::Cancel {
                     site: MirResumptionSiteId::UNASSIGNED,
                 });
+                if let (Some((name, _)), Some(handler_value)) = (&result_binding, handler_value) {
+                    self.instructions.push(MirInstruction::Store {
+                        dst: handler_value,
+                        src: handler_result,
+                    });
+                    self.named.insert(name.clone(), handler_value);
+                }
+                let result = if suffix.is_empty() {
+                    handler_result
+                } else {
+                    let (last, statements) = suffix.split_last()?;
+                    for statement in statements {
+                        self.statement(*statement)?;
+                    }
+                    self.value(*last)?
+                };
                 blocks.push(MirBlock {
                     scope: MirScopeId::ROOT,
                     parameters: vec![],
@@ -22238,6 +22281,7 @@ impl Lowerer<'_> {
             });
         }
         self.named = previous_named;
+        self.values = previous_values;
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
