@@ -3763,6 +3763,48 @@ fn service_rejects_partial_move_when_a_conditional_drop_impl_is_selected() {
     );
 }
 
+#[test]
+fn service_selects_conditional_drop_through_generic_nominal_facades() {
+    let moving_root = "use facade::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
+    let cleanup_root = "use facade::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet; 42 }";
+    let provider = "pub trait Mark: Use<[0, 0]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T>; } impl Family for i64 { type Item<T> = Packet<T>; } pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } }";
+    let selected = format!("{provider} impl Use<[0, 0]> for Token {{}} impl Mark for Token {{}}");
+    let world = |root: &str, provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{make, Token};".as_slice()));
+        input.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+        input
+    };
+
+    let mut reordered = world(moving_root, provider);
+    let artifact = StageZeroCompiler::new().compile(reordered.clone()).expect("unselected conditional Drop must leave a selected generic nominal movable").artifact.unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new().compile(reordered).expect("unselected Drop movement must be source-order independent").artifact.unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+
+    let cleanup = StageZeroCompiler::new().compile(world(cleanup_root, &selected)).expect("selected conditional Drop permits whole-value transfer and must lower its cleanup into the VM").artifact.unwrap();
+    assert_eq!(cleanup.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(moving_root, provider), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey { package: PackageKey("facade@0.1.0".into()), path: "crate".into() });
+    let trace = compiler.dependency_trace(parent, &facade).expect("unselected Drop facade must be frozen");
+    let rejected_world = world(moving_root, &selected);
+    let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+    let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("selected conditional Drop must make partial movement opaque");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4188"), "selected generic associated nominal Drop missing G4188: {:#?}", error.diagnostics());
+    assert_eq!(compiler.interface_cache_stats(), cached, "rejected Drop selection revision published cache state");
+    assert!(compiler.dependency_traces(rejected).is_empty(), "rejected Drop selection revision published traces");
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace), "rejected Drop selection revision disturbed legal trace");
+    let mut reordered = rejected_world;
+    reordered.sources.reverse();
+    assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source ordering cannot change Drop selection diagnostics").diagnostics());
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
+}
+
 /// Exercise the ordinary service path for the source-level shape that reaches
 /// a handler, a partial aggregate move, and a nonlocal lexical exit together.
 /// The Core test inspects the intermediate frozen MIR; this companion proves
