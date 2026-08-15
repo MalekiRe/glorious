@@ -3671,6 +3671,8 @@ fn service_rebuilds_nested_record_write_paths_from_leaf_to_root() {
 fn service_failures_preserve_source_identity_classification_and_request_provenance() {
     let request = request("pub fn main() -> i64 { missing_name }");
     let expected_world = request.clone().normalize().unwrap().fingerprint;
+    let mut reordered = request.clone();
+    reordered.sources.reverse();
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
         StageZeroCompiler::new().compile(request)
     else {
@@ -10537,6 +10539,92 @@ fn service_rejects_recursive_hyphenated_dependency_facades_with_generic_effect_g
         "each reciprocal package import must retain its source diagnostic"
     );
     assert_eq!(first, second, "package-cycle diagnostics must be canonical");
+}
+
+#[test]
+fn service_executes_three_package_diamond_gat_effect_facades_canonically() {
+    // The provider sits at the point of a package DAG: both hyphenated
+    // facades publicly re-export its generic effect and child-trait GAT
+    // contract.  The root imports both globs, so equivalent identities must
+    // deduplicate rather than become source-order-dependent ambiguities.
+    let root = "use left_facade::*; use right_facade::*; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: Capability<i64>::relay(0, 41) }; Trace<i64>::note(packet.value) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {}";
+    let facade = "pub use effect_core::{Child as Capability, Trace};";
+    let mut request = request(root);
+    for (package, source) in [
+        ("effect-core@0.1.0", provider),
+        ("left-facade@0.1.0", facade),
+        ("right-facade@0.1.0", facade),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("a package-DAG facade diamond must preserve provider identities");
+    let mut reordered = request;
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("package-DAG artifact identity must not depend on source enumeration");
+    assert!(first.diagnostics.is_empty(), "{:#?}", first.diagnostics);
+    assert!(second.diagnostics.is_empty(), "{:#?}", second.diagnostics);
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 43);
+    assert_eq!(second.run_i64().unwrap(), 43);
+}
+
+#[test]
+fn service_rejects_private_generic_effects_through_three_package_diamond_facades() {
+    let mut request = request("pub fn main() -> i64 { 42 }");
+    for (package, source) in [
+        (
+            "effect-core@0.1.0",
+            "effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Effects<U>: EffectRow; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; } impl Child<i64> for i64 {}",
+        ),
+        (
+            "left-facade@0.1.0",
+            "pub use effect_core::{Child as Capability, Trace};",
+        ),
+        (
+            "right-facade@0.1.0",
+            "pub use effect_core::{Child as Capability, Trace};",
+        ),
+    ] {
+        request.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let mut reordered = request.clone();
+    reordered.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("a private generic effect unexpectedly leaked through a package diamond");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "missing private-authority diagnostic: {diagnostics:#?}"
+    );
+    let Err(grandiose_stage0::ServiceError::Failed(reordered_diagnostics)) =
+        StageZeroCompiler::new().compile(reordered)
+    else {
+        panic!("source enumeration changed private-authority rejection into success");
+    };
+    assert_eq!(
+        diagnostics, reordered_diagnostics,
+        "private-authority diagnostics must be canonical across package ordering"
+    );
 }
 
 #[test]

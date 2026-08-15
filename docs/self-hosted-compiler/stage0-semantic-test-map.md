@@ -162,6 +162,12 @@ coarse. The composite fixtures cover:
   identity from provider performance through root replay and VM execution;
   the facade cannot expose the corresponding private effect declaration
   (`service_preserves_generic_effect_identity_through_dependency_reexport_facades`).
+- a three-package DAG diamond may expose the same generic effect, child-trait,
+  and selected associated-GAT contract through two public hyphenated facades.
+  The root deduplicates those provider identities, emits byte-identical VM
+  artifacts under source reordering, and rejects the same diamond if its
+  effect remains private (`service_executes_three_package_diamond_gat_effect_facades_canonically`,
+  `service_rejects_private_generic_effects_through_three_package_diamond_facades`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and
