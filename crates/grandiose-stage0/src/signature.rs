@@ -2214,7 +2214,11 @@ impl ElaboratedInterface {
         if self.ambient_projection_goal_proves(&goal, ambient) {
             return;
         }
-        let outcome = crate::TraitSolver::new(self).solve(goal);
+        // Declaration signatures own the `for<'a>` binders that produced
+        // their bound regions.  Use the scoped query so a projection such as
+        // `<&'a T as Trait>::Effects<'a>` can select evidence without making
+        // that region available to an unscoped source query.
+        let outcome = crate::TraitSolver::new(self).solve_scoped_hrtb(goal);
         let (code, reason) = match outcome {
             crate::TraitAnswer::Proven { .. } => return,
             crate::TraitAnswer::Refuted { .. } => {

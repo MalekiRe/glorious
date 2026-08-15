@@ -439,6 +439,16 @@ impl TraitSolver {
         self.solve_at(goal, 0, false).into()
     }
 
+    /// Solve a trait goal embedded in a syntactically owned higher-ranked
+    /// callable binder.  Unlike [`Self::solve`], bound lifetimes in this goal
+    /// are not escaped: the caller has already established that their De
+    /// Bruijn scope is part of the containing signature.  The solver table
+    /// remains local to this query, so the scoped evidence cannot become a
+    /// general source-level proof for the same spelling outside that binder.
+    pub fn solve_scoped_hrtb(&mut self, goal: TraitGoal) -> TraitAnswer {
+        self.solve_at(goal, 0, false).into()
+    }
+
     /// Begin an independent solver query over the same frozen interface.
     /// Table entries and resource steps are per-query facts: retaining either
     /// would let one body expression consume another expression's limit or
@@ -470,6 +480,9 @@ impl TraitSolver {
         goal: TraitGoal,
         assumptions: &[TraitGoal],
     ) -> TraitAnswer {
+        if trait_goal_contains_escaping_hrtb(&goal) {
+            return TraitAnswer::NoSolution;
+        }
         let mut solver = self.clone();
         // A `TraitSolver` cache is intentionally local to one lexical
         // environment. Cloning also resets neither the cache nor the budget,
@@ -1739,9 +1752,6 @@ impl TraitSolver {
             Ok(goal) => goal,
             Err(answer) => return answer,
         };
-        if trait_goal_contains_escaping_hrtb(&goal) {
-            return TraitAnswerIndex::NoSolution;
-        }
         if self.assumption_proves(&goal, assumptions) {
             return TraitAnswerIndex::Proven(assumption_evidence(&goal));
         }

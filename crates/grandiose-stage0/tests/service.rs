@@ -4747,6 +4747,60 @@ fn service_materializes_inherited_gat_types_effect_rows_and_methods_through_vm()
 }
 
 #[test]
+fn service_executes_reexported_hrtb_inherited_effect_gats_through_vm_handlers() {
+    let mut request = request(
+        "use bridge::Child; use bridge::Trace; pub fn relay<'a>(value: &'a i64) -> &'a i64 / { <&'a i64 as Child<i64>>::Effects<'a> } { Child<i64>::relay(value) } pub fn apply(callback: for<'a> (&'a i64) -> &'a i64 / { <&'a i64 as Child<i64>>::Effects<'a> }) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); Trace<i64>::note(*result) } pub fn main() -> i64 { handle apply(relay) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Child, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Effects<'a>: EffectRow; fn relay<'a>(receiver: &'a T) -> &'a T / Trace<i64>; } pub trait Child<T>: Parent<T> {} impl<'a> Parent<i64> for &'a i64 { type Effects<'b> = {Trace<i64>}; fn relay<'b>(receiver: &'b i64) -> &'b i64 / Trace<i64> { Trace<i64>::note(*receiver); receiver } } impl<'a> Child<i64> for &'a i64 {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("a reexported inherited HRTB method must retain its associated effect GAT");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_reexported_hrtb_inherited_effect_gats_without_selected_evidence() {
+    // The scoped HRTB solver path may open `for<'a>`, but it must not turn the
+    // binder itself into evidence.  The public facade exposes the inherited
+    // associated row; without a matching `Parent` implementation the root
+    // signature remains invalid before any body can reach VM lowering.
+    let mut request = request(
+        "use bridge::Child; pub fn relay<'a>(value: &'a i64) -> &'a i64 / { <&'a i64 as Child<i64>>::Effects<'a> } { value } pub fn main() -> i64 { 0 }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::Child;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub trait Parent<T> { type Effects<'a>: EffectRow; } pub trait Child<T>: Parent<T> {}".as_slice(),
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request)
+    else {
+        panic!("an unselected HRTB associated effect row escaped a dependency facade");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4190"),
+        "missing selected-evidence rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_imports_defaulted_associated_gats_for_local_layouts_and_effect_rows() {
     // Interface serialization must retain generic defaults.  The consumer owns
     // the impl heads, omits both associated definitions, and then needs the

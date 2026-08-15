@@ -2968,7 +2968,7 @@ impl TypedBody {
             .and_then(callable)
             .map(|signature| signature.result.clone());
         elaborator.declared_effects =
-            elaborator.normalize_concrete_effect_row(elaborator.declared_effects.clone());
+            elaborator.normalize_selectable_effect_row(elaborator.declared_effects.clone());
         let expected_result =
             expected_result.map(|result| elaborator.normalize_concrete_type_projections(result));
         let mut parameters = vec![];
@@ -3224,7 +3224,7 @@ impl TypedBody {
             generated_environment_types: std::collections::BTreeSet::new(),
         };
         elaborator.declared_effects =
-            elaborator.normalize_concrete_effect_row(elaborator.declared_effects.clone());
+            elaborator.normalize_selectable_effect_row(elaborator.declared_effects.clone());
         let mut parameters = vec![];
         for (parameter, ty) in context
             .method
@@ -4926,6 +4926,53 @@ impl Elaborator<'_> {
         self.trait_query()
             .normalize_effect_row_in_hrtb(value.clone(), lifetime_binders)
             .unwrap_or(value)
+    }
+
+    /// Reduce effect-row projections whose only symbolic terms are this
+    /// declaration's rigid lifetime parameters.  They are safe to select:
+    /// an impl generic over `'a` proves the row for every caller-supplied
+    /// lifetime, rather than guessing an inference variable.  Keep all other
+    /// symbolic rows intact so ordinary lexical forwarding stays symbolic.
+    fn normalize_selectable_effect_row(&mut self, value: EffectRow) -> EffectRow {
+        let mut result = self.normalize_concrete_effect_row(value);
+        let mut projections = std::mem::take(&mut result.projections);
+        let mut unresolved = vec![];
+        while let Some(projection) = projections.pop() {
+            if !projection_is_concrete(&projection.subject)
+                || !projection
+                    .trait_arguments
+                    .iter()
+                    .all(generic_argument_is_selectable_effect_projection)
+                || !projection
+                    .item_arguments
+                    .iter()
+                    .all(generic_argument_is_selectable_effect_projection)
+            {
+                unresolved.push(projection);
+                continue;
+            }
+            match self
+                .trait_query()
+                .normalize_associated_effect_row_application(
+                    TraitGoal {
+                        relation: crate::ElaboratedTraitReference {
+                            definition: projection.trait_definition,
+                            arguments: projection.trait_arguments.clone(),
+                        },
+                        subject: (*projection.subject).clone(),
+                    },
+                    &projection.name,
+                    &projection.item_arguments,
+                ) {
+                TraitEffectRowProjectionAnswer::Normalized { row, .. } if row.tail.is_none() => {
+                    result.effects.extend(row.effects);
+                    projections.extend(row.projections);
+                }
+                _ => unresolved.push(projection),
+            }
+        }
+        result.projections = unresolved;
+        result
     }
 
     /// Every former `TraitSolver::new` call represented a fresh resource
@@ -10466,7 +10513,7 @@ impl Elaborator<'_> {
                 || !projection
                     .item_arguments
                     .iter()
-                    .all(generic_argument_is_concrete)
+                    .all(generic_argument_is_selectable_effect_projection)
             {
                 self.error(
                     span,
@@ -12435,6 +12482,18 @@ fn generic_argument_is_concrete(value: &GenericArgument) -> bool {
         | GenericArgument::ConstProjection { .. }
         | GenericArgument::ConstInfer { .. } => false,
     }
+}
+
+/// Whether an associated effect-row application may be selected while
+/// checking a body.  A callable's own lifetime parameter is a rigid,
+/// declaration-owned term: it is not an inference variable and selecting an
+/// implementation generic over that lifetime does not choose a lifetime for
+/// the caller.  Treat it as selectable here so signatures such as
+/// `<&'a T as Capability>::Effects<'a>` can normalize their concrete effect
+/// implementation.  Other symbolic arguments remain deliberately rejected.
+fn generic_argument_is_selectable_effect_projection(value: &GenericArgument) -> bool {
+    generic_argument_is_concrete(value)
+        || matches!(value, GenericArgument::Lifetime(Lifetime::Generic(_)))
 }
 
 fn literal_type(text: &str) -> Type {
