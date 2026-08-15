@@ -2217,6 +2217,49 @@ fn checked_mir_editor_splits_preserves_ids_and_merge_tombstones() {
 }
 
 #[test]
+fn mir_tombstones_are_permanently_non_executable() {
+    let mut forged = editor_cfg_function();
+    forged.blocks.push(MirBlock {
+        scope: MirScopeId::ROOT,
+        parameters: vec![],
+        instructions: vec![MirInstruction::ConstI64 {
+            dst: MirLocal(0),
+            value: 3,
+        }],
+        terminator: MirTerminator::Return { value: MirLocal(0) },
+    });
+    forged.control.tombstoned_blocks.insert(MirBlockId(1));
+    assert!(
+        forged
+            .validate()
+            .is_err_and(|error| error.contains("remains executable")),
+        "a tombstone must not retain a parameterized executable block"
+    );
+
+    let mut editor = MirEditor::open(editor_cfg_function()).unwrap();
+    let suffix = editor.split_block(MirBlockId(0), 1).unwrap();
+    editor.merge_blocks(MirBlockId(0), suffix).unwrap();
+    assert!(
+        editor
+            .replace_terminator(
+                suffix,
+                MirTerminator::Return { value: MirLocal(1) },
+            )
+            .is_err(),
+        "a checked editor must restore a failed attempt to revive a retired block"
+    );
+    let function = editor.finish();
+    assert!(function.control.tombstoned_blocks.contains(&suffix));
+    assert!(function.blocks[suffix.0 as usize].parameters.is_empty());
+    assert!(function.blocks[suffix.0 as usize].instructions.is_empty());
+    assert!(matches!(
+        function.blocks[suffix.0 as usize].terminator,
+        MirTerminator::Unreachable
+    ));
+    assert!(function.validate().is_ok(), "{:#?}", function.validate());
+}
+
+#[test]
 fn checked_mir_editor_rejects_invalid_split_without_spending_identities() {
     let original = editor_cfg_function();
     let mut editor = MirEditor::open(original.clone()).unwrap();
