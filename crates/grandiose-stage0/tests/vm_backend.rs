@@ -7045,6 +7045,61 @@ fn verifier_rejects_dynamic_label_targets_at_private_handler_clauses() {
 }
 
 #[test]
+fn verifier_rejects_dynamic_labels_with_one_brand_and_contradictory_targets() {
+    let owner = DefKey(Digest::of_bytes(b"contradictory-dynamic-label-owner"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // Both values are well-typed labels and neither target is a handler
+    // entry. Their shared proof-only brand is nonetheless one static label,
+    // so it cannot name two runtime destinations.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, label.clone(), label],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeLabel {
+                    dst: 1,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 4,
+                    destination: 0,
+                },
+                VmInstruction::MakeLabel {
+                    dst: 2,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 5,
+                    destination: 0,
+                },
+                VmInstruction::Return { value: 0 },
+                VmInstruction::Return { value: 0 },
+                VmInstruction::Return { value: 0 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"contradictory-dynamic-label-fingerprint"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+}
+
+#[test]
 fn vm_emits_and_executes_the_checked_mir_unreachable_terminal_as_a_trap() {
     let i64_ty = Type::Scalar(ScalarType::I64);
     let local = |ty| MirLocalDecl {

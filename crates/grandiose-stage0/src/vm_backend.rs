@@ -7031,25 +7031,37 @@ impl DerefMut for VerifierState {
 fn verify_label_brand_contracts(function: &VmFunction) -> Result<(), VmArtifactError> {
     let mut contracts = BTreeMap::<(DefKey, u32), (u32, Vec<u32>, Vec<VmType>)>::new();
     for instruction in &function.instructions {
-        let VmInstruction::Leave {
-            brand_owner,
-            brand_label,
-            target,
-            destinations,
-            ..
-        } = instruction
-        else {
-            continue;
+        let (brand_owner, brand_label, target, destinations) = match instruction {
+            VmInstruction::Leave {
+                brand_owner,
+                brand_label,
+                target,
+                destinations,
+                ..
+            } => (*brand_owner, *brand_label, *target, destinations.clone()),
+            // First-class labels are the dynamic spelling of the same static
+            // brand.  They must therefore agree with direct `Leave`s and
+            // with every other materialization of that brand; otherwise a
+            // hostile artifact could forge an equally typed label that exits
+            // to a contradictory destination.
+            VmInstruction::MakeLabel {
+                brand_owner,
+                brand_label,
+                target,
+                destination,
+                ..
+            } => (*brand_owner, *brand_label, *target, vec![*destination]),
+            _ => continue,
         };
-        if *target as usize >= function.instructions.len() {
-            return Err(VmArtifactError::InvalidInstructionTarget { target: *target });
+        if target as usize >= function.instructions.len() {
+            return Err(VmArtifactError::InvalidInstructionTarget { target });
         }
         let layout = destinations
             .iter()
             .map(|destination| register_type(function, *destination))
             .collect::<Result<Vec<_>, _>>()?;
-        let contract = (*target, destinations.clone(), layout);
-        match contracts.get(&(*brand_owner, *brand_label)) {
+        let contract = (target, destinations, layout);
+        match contracts.get(&(brand_owner, brand_label)) {
             Some(previous) if previous != &contract => {
                 return Err(VmArtifactError::InvalidLabelContract {
                     message: "label brand has contradictory destination or payload layout",
@@ -7057,7 +7069,7 @@ fn verify_label_brand_contracts(function: &VmFunction) -> Result<(), VmArtifactE
             }
             Some(_) => {}
             None => {
-                contracts.insert((*brand_owner, *brand_label), contract);
+                contracts.insert((brand_owner, brand_label), contract);
             }
         }
     }
