@@ -32,9 +32,9 @@ retained below but scheduled after the core language and tooling tranche.
   label/handler scope tree, and scope-aware handler candidates;
 - the checked editor now covers edge redirection, block and typed-edge
   splitting, scope-compatible merging, individual terminator operands,
-  terminator replacement, and ordinary unreachable-block retirement with
-  persistent block/operation tombstones. Remaining work is general
-  instruction-operand rewriting and control/storage-aware CFG normalization;
+  terminator replacement, general source-order operation-input replacement,
+  and ordinary unreachable-block retirement with persistent block/operation
+  tombstones. Remaining work is control/storage-aware CFG normalization;
 - extend the implemented deterministic checked predecessor, reachability/RPO,
   dominator, natural-loop/preheader, irreducible-SCC, and edge-liveness bundles
   with place versions, alias sets, integer ranges, aggregate facts, shared

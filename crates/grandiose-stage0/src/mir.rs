@@ -2440,6 +2440,45 @@ impl MirEditor {
         })?;
         Ok(invalidation)
     }
+    /// Replace one input operand of a live operation without rebuilding that
+    /// operation's non-local semantic payload. `input` is zero-based in the
+    /// instruction's source-order input list; destinations are deliberately
+    /// excluded. The exact replacement remains subject to the normal MIR
+    /// type, liveness, control-site, and storage validation transaction.
+    pub fn replace_operation_input(
+        &mut self,
+        id: MirOperationId,
+        input: u32,
+        replacement: MirLocal,
+    ) -> Result<MirAnalysisInvalidation, String> {
+        let original = self
+            .operation(id)
+            .cloned()
+            .ok_or_else(|| format!("MIR edit targets absent or deleted operation {}", id.0))?;
+        let mut rewritten = original.clone();
+        let replaced = *operation_input_mut(&mut rewritten, input)?;
+        if self.function.local_type(replaced)? != self.function.local_type(replacement)? {
+            return Err("MIR operation input replacement changes the operand type".into());
+        }
+        *operation_input_mut(&mut rewritten, input)? = replacement;
+        let invalidation = operation_replacement_invalidation(&original, &rewritten);
+        self.transaction(invalidation, |function| {
+            let data = function
+                .control
+                .operations
+                .get(id)
+                .cloned()
+                .ok_or_else(|| format!("MIR edit targets absent or deleted operation {}", id.0))?;
+            let operation = function
+                .blocks
+                .get_mut(data.block.0 as usize)
+                .and_then(|block| block.instructions.get_mut(data.instruction_index as usize))
+                .ok_or_else(|| format!("MIR operation {} has no live instruction", id.0))?;
+            *operation_input_mut(operation, input)? = replacement;
+            Ok(())
+        })?;
+        Ok(invalidation)
+    }
     /// Insert an instruction before a live operation.  The new instruction
     /// receives a fresh ID; existing operation IDs remain stable and their
     /// recorded positions are shifted atomically.
@@ -3027,6 +3066,225 @@ fn predecessor_count(function: &MirFunction, target: MirBlockId) -> usize {
         .flat_map(|(_, block)| terminator_successors(&block.terminator))
         .filter(|successor| *successor == target)
         .count()
+}
+
+fn operation_input_slot<'a>(
+    input: u32,
+    inputs: impl IntoIterator<Item = &'a mut MirLocal>,
+) -> Result<&'a mut MirLocal, String> {
+    inputs
+        .into_iter()
+        .nth(input as usize)
+        .ok_or_else(|| format!("MIR operation input index {input} is outside the instruction"))
+}
+
+fn operation_input_mut(
+    instruction: &mut MirInstruction,
+    input: u32,
+) -> Result<&mut MirLocal, String> {
+    match instruction {
+        MirInstruction::ConstUnit { .. }
+        | MirInstruction::ConstI64 { .. }
+        | MirInstruction::ConstU8 { .. }
+        | MirInstruction::ConstU16 { .. }
+        | MirInstruction::ConstU32 { .. }
+        | MirInstruction::ConstU64 { .. }
+        | MirInstruction::ConstUsize { .. }
+        | MirInstruction::ConstU128 { .. }
+        | MirInstruction::ConstI8 { .. }
+        | MirInstruction::ConstI16 { .. }
+        | MirInstruction::ConstI32 { .. }
+        | MirInstruction::ConstIsize { .. }
+        | MirInstruction::ConstI128 { .. }
+        | MirInstruction::ConstF32 { .. }
+        | MirInstruction::ConstF64 { .. }
+        | MirInstruction::ConstBool { .. }
+        | MirInstruction::ConstChar { .. }
+        | MirInstruction::ConstText { .. }
+        | MirInstruction::ArrayEmpty { .. }
+        | MirInstruction::InstallHandler { .. }
+        | MirInstruction::UninstallHandler
+        | MirInstruction::CaptureResumption { .. }
+        | MirInstruction::Forward { .. }
+        | MirInstruction::Cancel { .. }
+        | MirInstruction::StorageLive { .. }
+        | MirInstruction::StorageDead { .. }
+        | MirInstruction::SetDropFlag { .. }
+        | MirInstruction::Abort
+        | MirInstruction::MakeLabel { .. } => Err(format!(
+            "MIR operation input index {input} is outside an input-free instruction"
+        )),
+        MirInstruction::FloatIntrinsic { arguments, .. }
+        | MirInstruction::IntIntrinsic { arguments, .. }
+        | MirInstruction::IntGenericIntrinsic { arguments, .. }
+        | MirInstruction::Perform { arguments, .. }
+        | MirInstruction::Call { arguments, .. }
+        | MirInstruction::HostCall { arguments, .. } => operation_input_slot(input, arguments),
+        MirInstruction::TextByteLen { value, .. }
+        | MirInstruction::TextFromUtf8Checked { value, .. }
+        | MirInstruction::TextAsBytes { value, .. }
+        | MirInstruction::CharFromU32Checked { value, .. }
+        | MirInstruction::CharToU32 { value, .. }
+        | MirInstruction::BytesLen { value, .. }
+        | MirInstruction::BytesFromArrayMove { value, .. }
+        | MirInstruction::BytesToArray { value, .. }
+        | MirInstruction::BytesUtf8ValidUpTo { value, .. }
+        | MirInstruction::ArrayLen { value, .. }
+        | MirInstruction::ArrayCapacity { value, .. }
+        | MirInstruction::ArrayPopMove { value, .. }
+        | MirInstruction::U32ToUsize { value, .. }
+        | MirInstruction::UsizeToU32Checked { value, .. }
+        | MirInstruction::I64ToU32Checked { value, .. }
+        | MirInstruction::I64ToU32Wrapping { value, .. }
+        | MirInstruction::I64ToUsizeChecked { value, .. }
+        | MirInstruction::I64ToUsizeWrapping { value, .. }
+        | MirInstruction::I64ToU8Checked { value, .. }
+        | MirInstruction::I64ToU8Wrapping { value, .. }
+        | MirInstruction::I64ToU16Checked { value, .. }
+        | MirInstruction::I64ToU16Wrapping { value, .. }
+        | MirInstruction::I64ToI16Checked { value, .. }
+        | MirInstruction::I64ToI16Wrapping { value, .. }
+        | MirInstruction::I64ToI32Checked { value, .. }
+        | MirInstruction::I64ToI32Wrapping { value, .. }
+        | MirInstruction::I64ToI8Checked { value, .. }
+        | MirInstruction::I64ToI8Wrapping { value, .. }
+        | MirInstruction::I64ToU64Checked { value, .. }
+        | MirInstruction::I64ToU64Wrapping { value, .. }
+        | MirInstruction::I64ToIsizeChecked { value, .. }
+        | MirInstruction::I64ToIsizeWrapping { value, .. }
+        | MirInstruction::I64ToU128Checked { value, .. }
+        | MirInstruction::I64ToU128Wrapping { value, .. }
+        | MirInstruction::I64ToI128Checked { value, .. }
+        | MirInstruction::I64ToI128Wrapping { value, .. }
+        | MirInstruction::NotBool { value, .. }
+        | MirInstruction::BitNotI64 { value, .. }
+        | MirInstruction::DerefCopy {
+            reference: value, ..
+        }
+        | MirInstruction::Resume { value, .. }
+        | MirInstruction::ResumeReturn { value, .. }
+        | MirInstruction::Copy { src: value, .. }
+        | MirInstruction::Store { src: value, .. }
+        | MirInstruction::Move { src: value, .. }
+        | MirInstruction::Borrow { src: value, .. } => operation_input_slot(input, [value]),
+        MirInstruction::TextConcat { left, right, .. }
+        | MirInstruction::TextEq { left, right, .. }
+        | MirInstruction::BytesConcat { left, right, .. }
+        | MirInstruction::U32CheckedAdd { left, right, .. }
+        | MirInstruction::U32CheckedSub { left, right, .. }
+        | MirInstruction::U32CheckedMul { left, right, .. }
+        | MirInstruction::U32CheckedDiv { left, right, .. }
+        | MirInstruction::U32CheckedRem { left, right, .. }
+        | MirInstruction::U32WrappingAdd { left, right, .. }
+        | MirInstruction::U32WrappingSub { left, right, .. }
+        | MirInstruction::U32WrappingMul { left, right, .. }
+        | MirInstruction::U32WrappingShl { left, right, .. }
+        | MirInstruction::U32WrappingShr { left, right, .. }
+        | MirInstruction::U32CheckedShl { left, right, .. }
+        | MirInstruction::U32CheckedShr { left, right, .. }
+        | MirInstruction::U32Eq { left, right, .. }
+        | MirInstruction::U32Lt { left, right, .. }
+        | MirInstruction::U32Le { left, right, .. }
+        | MirInstruction::AddI64 { left, right, .. }
+        | MirInstruction::WrappingAddI64 { left, right, .. }
+        | MirInstruction::WrappingSubI64 { left, right, .. }
+        | MirInstruction::WrappingMulI64 { left, right, .. }
+        | MirInstruction::IntEqualI64 { left, right, .. }
+        | MirInstruction::IntLessI64 { left, right, .. }
+        | MirInstruction::IntGreaterI64 { left, right, .. }
+        | MirInstruction::BitAndI64 { left, right, .. }
+        | MirInstruction::BitAndU32 { left, right, .. }
+        | MirInstruction::BitAndU64 { left, right, .. }
+        | MirInstruction::BitAndGeneric { left, right, .. }
+        | MirInstruction::BitXorI64 { left, right, .. }
+        | MirInstruction::IntShrI64 { left, right, .. }
+        | MirInstruction::BitOrI64 { left, right, .. }
+        | MirInstruction::SubI64 { left, right, .. }
+        | MirInstruction::MulI64 { left, right, .. }
+        | MirInstruction::DivI64 { left, right, .. }
+        | MirInstruction::RemI64 { left, right, .. }
+        | MirInstruction::AddF64 { left, right, .. }
+        | MirInstruction::ConcatText { left, right, .. }
+        | MirInstruction::SubF64 { left, right, .. }
+        | MirInstruction::MulF64 { left, right, .. }
+        | MirInstruction::DivF64 { left, right, .. }
+        | MirInstruction::RemF64 { left, right, .. }
+        | MirInstruction::EqI64 { left, right, .. }
+        | MirInstruction::NeI64 { left, right, .. }
+        | MirInstruction::NeU32 { left, right, .. }
+        | MirInstruction::NeU64 { left, right, .. }
+        | MirInstruction::LtI64 { left, right, .. }
+        | MirInstruction::LeI64 { left, right, .. }
+        | MirInstruction::GtI64 { left, right, .. }
+        | MirInstruction::GeI64 { left, right, .. }
+        | MirInstruction::EqF64 { left, right, .. }
+        | MirInstruction::NeF64 { left, right, .. }
+        | MirInstruction::LtF64 { left, right, .. }
+        | MirInstruction::LeF64 { left, right, .. }
+        | MirInstruction::GtF64 { left, right, .. }
+        | MirInstruction::GeF64 { left, right, .. }
+        | MirInstruction::EqBool { left, right, .. }
+        | MirInstruction::NeBool { left, right, .. }
+        | MirInstruction::EqText { left, right, .. }
+        | MirInstruction::NeText { left, right, .. }
+        | MirInstruction::EqChar { left, right, .. }
+        | MirInstruction::NeChar { left, right, .. }
+        | MirInstruction::LtChar { left, right, .. }
+        | MirInstruction::LeChar { left, right, .. }
+        | MirInstruction::GtChar { left, right, .. }
+        | MirInstruction::GeChar { left, right, .. } => operation_input_slot(input, [left, right]),
+        MirInstruction::BytesGet { bytes, index, .. }
+        | MirInstruction::ArrayGetCopy {
+            value: bytes,
+            index,
+            ..
+        }
+        | MirInstruction::ArrayGetMove {
+            value: bytes,
+            index,
+            ..
+        }
+        | MirInstruction::ArrayGetBorrow {
+            value: bytes,
+            index,
+            ..
+        } => operation_input_slot(input, [bytes, index]),
+        MirInstruction::BytesSlice {
+            bytes, start, end, ..
+        } => operation_input_slot(input, [bytes, start, end]),
+        MirInstruction::ArrayNew { length, fill, .. } => operation_input_slot(input, [length, fill]),
+        MirInstruction::ArraySetMove {
+            value, index, item, ..
+        } => operation_input_slot(input, [value, index, item]),
+        MirInstruction::ArrayPushMove { value, item, .. } => {
+            operation_input_slot(input, [value, item])
+        }
+        MirInstruction::ArrayReserve {
+            value, additional, ..
+        } => operation_input_slot(input, [value, additional]),
+        MirInstruction::ArrayFinishDrained { value, .. } => operation_input_slot(input, [value]),
+        MirInstruction::MakeTuple { fields, .. }
+        | MirInstruction::MakeArray { fields, .. }
+        | MirInstruction::MakeRecord { fields, .. }
+        | MirInstruction::MakeEnum { fields, .. }
+        | MirInstruction::MakeCallable {
+            captures: fields, ..
+        } => operation_input_slot(input, fields),
+        MirInstruction::ProjectRecord { base, .. }
+        | MirInstruction::ProjectTuple { base, .. }
+        | MirInstruction::ProjectArray { base, .. }
+        | MirInstruction::PatternTest { subject: base, .. } => operation_input_slot(input, [base]),
+        MirInstruction::UpdateRecord { base, value, .. } => operation_input_slot(input, [base, value]),
+        MirInstruction::ResumeSnapshot {
+            snapshot, value, ..
+        } => operation_input_slot(input, [snapshot, value]),
+        MirInstruction::DestroyIf { local, flag } => operation_input_slot(input, [local, flag]),
+        MirInstruction::DerefStore { reference, src } => operation_input_slot(input, [reference, src]),
+        MirInstruction::ShlI64 { value, count, .. } => operation_input_slot(input, [value, count]),
+        MirInstruction::CallIndirect {
+            callee, arguments, ..
+        } => operation_input_slot(input, std::iter::once(callee).chain(arguments.iter_mut())),
+    }
 }
 
 fn operation_replacement_invalidation(

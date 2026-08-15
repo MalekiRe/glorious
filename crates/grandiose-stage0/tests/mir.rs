@@ -2234,6 +2234,86 @@ fn checked_mir_editor_preserves_operation_ids_and_tombstones() {
 }
 
 #[test]
+fn checked_mir_editor_rewrites_operation_inputs_transactionally() {
+    let i64_ty = Type::Scalar(ScalarType::I64);
+    let bool_ty = Type::Scalar(ScalarType::Bool);
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"mir-operation-input-rewrite")),
+        captures: 0,
+        parameters: vec![MirLocal(3), MirLocal(4)],
+        locals: vec![
+            local(i64_ty.clone()),
+            local(i64_ty.clone()),
+            local(i64_ty),
+            local(Type::Scalar(ScalarType::I64)),
+            local(bool_ty),
+        ],
+        result: Type::Scalar(ScalarType::I64),
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: vec![
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 20,
+                },
+                MirInstruction::ConstI64 {
+                    dst: MirLocal(1),
+                    value: 22,
+                },
+                MirInstruction::AddI64 {
+                    dst: MirLocal(2),
+                    left: MirLocal(0),
+                    right: MirLocal(1),
+                },
+            ],
+            terminator: MirTerminator::Return { value: MirLocal(2) },
+        }],
+    };
+    let mut editor = MirEditor::open(function.clone()).unwrap();
+    let invalidation = editor
+        .replace_operation_input(MirOperationId(2), 1, MirLocal(3))
+        .unwrap();
+    assert_eq!(
+        invalidation,
+        MirAnalysisInvalidation::USES
+            | MirAnalysisInvalidation::FLOW
+            | MirAnalysisInvalidation::VALUES
+            | MirAnalysisInvalidation::COST
+    );
+    assert!(matches!(
+        editor.operation(MirOperationId(2)),
+        Some(MirInstruction::AddI64 {
+            left: MirLocal(0),
+            right: MirLocal(3),
+            ..
+        })
+    ));
+
+    let mut rejected_index = MirEditor::open(function.clone()).unwrap();
+    assert!(rejected_index
+        .replace_operation_input(MirOperationId(0), 0, MirLocal(3))
+        .is_err());
+    assert_eq!(
+        rejected_index.finish(),
+        function.clone().with_frozen_operation_arena()
+    );
+
+    let mut rejected_type = MirEditor::open(function.clone()).unwrap();
+    assert!(rejected_type
+        .replace_operation_input(MirOperationId(2), 0, MirLocal(4))
+        .is_err());
+    assert_eq!(
+        rejected_type.finish(),
+        function.with_frozen_operation_arena(),
+        "a live but wrong-typed input must not escape the edit transaction"
+    );
+}
+
+#[test]
 fn optimizer_folds_checked_scalar_constants_and_eliminates_known_branches() {
     let mut function = graph();
     function.blocks[0].instructions = vec![MirInstruction::ConstBool {
