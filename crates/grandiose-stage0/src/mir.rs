@@ -3554,6 +3554,27 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A normal completion and an operation clause can both exit the same
+        // enclosing label.  This is not the ordinary value-level completion
+        // matrix: the protected path must uninstall its frame before testing
+        // the completion subject, while the operation path must retain the
+        // suspended frame until its explicit resumption/Leave edge commits.
+        if let Some(function) = lowerer
+            .lower_root_label_completion_handler_leaves(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_label_handler_leave(body.root, parameters.clone())
         {
@@ -8785,6 +8806,297 @@ impl Lowerer<'_> {
             entry: MirBlockId(0),
             blocks,
         })
+    }
+
+    /// Lower the shared-boundary form where both a resumptive operation arm
+    /// and a normal completion arm leave one lexical label.  The two routes
+    /// intentionally remain separate blocks: the former owns a live handler
+    /// continuation, while the latter has already uninstalled that frame.
+    fn lower_root_label_completion_handler_leaves(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        // Earlier shape probes are deliberately allowed to stop as soon as
+        // their CFG preconditions no longer hold.  This more specific shape
+        // must nevertheless start from the callable ABI, rather than reuse a
+        // partially materialized value cache (in particular, an argument
+        // local allocated by a rejected handler-only probe without its
+        // defining instruction).
+        self.reset_speculative_body_state(&parameters);
+        let (label, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Label { .. } => (root, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Label { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Label { brand, body } = self.body.expression(label).kind.clone() else {
+            return None;
+        };
+        let (completion, label_prefix) = match self.body.expression(body).kind.clone() {
+            CoreKind::Completion { .. } => (body, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                matches!(self.body.expression(*last).kind, CoreKind::Completion { .. })
+                    .then_some((*last, prefix.to_vec()))?
+            }
+            _ => return None,
+        };
+        let CoreKind::Completion {
+            computation: handler,
+            clauses: completion_clauses,
+        } = self.body.expression(completion).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Handle {
+            computation,
+            clauses: handler_clauses,
+        } = self.body.expression(handler).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments: argument_ids,
+            terminal: false,
+            ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let matching = handler_clauses
+            .iter()
+            .filter(|clause| clause.effect == effect && clause.operation == operation)
+            .collect::<Vec<_>>();
+        let [handler_clause] = matching.as_slice() else {
+            return None;
+        };
+        let [completion_clause] = completion_clauses.as_slice() else {
+            return None;
+        };
+        let CoreHandlerResumption::Explicit { name, quantity } = &handler_clause.resumption else {
+            return None;
+        };
+        if *quantity != crate::quantity::Quantity::ONCE
+            || handler_clause.terminal
+            || handler_clause.patterns.len() != argument_ids.len()
+            || !handler_clause.patterns.iter().all(pattern_is_irrefutable)
+            || !pattern_is_irrefutable(&completion_clause.pattern)
+            || !self.contains_label_transfer(handler_clause.body, brand)
+            || !self.contains_label_transfer(completion_clause.body, brand)
+        {
+            return None;
+        }
+
+        for expression in root_prefix.iter().chain(label_prefix.iter()) {
+            self.statement(*expression)?;
+        }
+        let arguments = argument_ids
+            .iter()
+            .map(|id| self.value(*id))
+            .collect::<Option<Vec<_>>>()?;
+        let payloads = handler_clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), computation))
+            .collect::<Vec<_>>();
+        let performed = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let completed = self.alloc(self.body.expression(handler).ty.clone(), handler);
+        let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
+        let mut entry = std::mem::take(&mut self.instructions);
+        entry.push(MirInstruction::InstallHandler {
+            site: MirHandlerSiteId::UNASSIGNED,
+            effect: effect.definition,
+            effect_arguments: effect.arguments.clone(),
+            operation,
+            payload_destinations: payloads.clone(),
+            resume_type: self.body.expression(computation).ty.clone(),
+            continuation: MirContinuationPolicy::Consume,
+            target: MirBlockId(2),
+        });
+        entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_completion_clause(&completion_clause, completed)?;
+        let completed_value = self.lower_label_transfer_path(completion_clause.body, brand)?;
+        let mut completion_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values;
+        self.bind_handler_patterns(&handler_clause.patterns, &payloads)?;
+        let previous = self.direct_resumption.replace(DirectResumptionState {
+            name: name.clone(),
+            quantity: *quantity,
+            calls: 0,
+            plan: DirectResumptionPlan::Identity,
+        });
+        let handler_value = self.lower_label_transfer_path(handler_clause.body, brand)?;
+        let state = self
+            .direct_resumption
+            .take()
+            .expect("direct handler transfer retains its resumption state");
+        self.direct_resumption = previous;
+        let actual = crate::quantity::Quantity::new(state.calls, Some(state.calls)).ok()?;
+        if !state.quantity.contains(actual) {
+            self.error(
+                "G6005",
+                "direct resumptive handler transfer does not satisfy its declared quantity",
+            );
+            return None;
+        }
+        let handler_instructions = std::mem::take(&mut self.instructions);
+        self.named = boundary_named;
+
+        // Some direct-resumption Core shapes retain a proof-only temporary
+        // used solely while recognizing the lexical handler path.  It has no
+        // defining instruction and no downstream use once that path becomes
+        // an explicit handler/Leave CFG. Do not serialize a dead `Copy` from
+        // that construction marker: executable MIR must never rely on an
+        // incidental uninitialized register for erased recognition state.
+        let defined = entry
+            .iter()
+            .chain(&handler_instructions)
+            .chain(&completion_instructions)
+            .filter_map(destination)
+            .collect::<BTreeSet<_>>();
+        let completion_reads = completion_instructions
+            .iter()
+            .flat_map(references)
+            .collect::<BTreeSet<_>>();
+        let mut completion_rebinds = Vec::new();
+        entry.retain(|instruction| {
+            let MirInstruction::Copy { dst, src } = instruction else {
+                return true;
+            };
+            if !defined.contains(src)
+                && !parameters.contains(src)
+                && completion_reads.contains(dst)
+                && self.locals.get(*src).is_some_and(|local| {
+                    local.ty == self.locals[completed.0 as usize].ty
+                })
+            {
+                completion_rebinds.push(*dst);
+                false
+            } else {
+                true
+            }
+        });
+        completion_instructions.splice(
+            0..0,
+            completion_rebinds
+                .into_iter()
+                .map(|dst| MirInstruction::Copy {
+                    dst,
+                    src: completed,
+                }),
+        );
+
+        let cleanup = || MirCleanupPlan {
+            source_storage_scope: MirSourceStorageScopeId::ROOT,
+            target_storage_scope: MirSourceStorageScopeId::ROOT,
+            moved_paths: vec![],
+            moved_places: self.leave_cleanup.moved_places.clone(),
+            active_loans: self.leave_cleanup.active_loans.clone(),
+            drop_flags: vec![],
+            actions: vec![],
+            protected_values: vec![],
+        };
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![performed],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![join],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: join },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: handler_instructions,
+                    terminator: MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
+                        brand,
+                        target: MirBlockId(1),
+                        arguments: vec![handler_value],
+                        cleanup: cleanup(),
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![completed],
+                    instructions: completion_instructions,
+                    terminator: MirTerminator::Leave {
+                        label: MirLabelId::UNASSIGNED,
+                        brand,
+                        target: MirBlockId(1),
+                        arguments: vec![completed_value],
+                        cleanup: cleanup(),
+                    },
+                },
+            ],
+        })
+    }
+
+    /// Discard materialized state left by an unsuccessful CFG shape probe.
+    ///
+    /// The dispatcher shares one lowering arena so stable parameter identities
+    /// remain ABI-visible.  Probes that reject a shape after evaluating part
+    /// of a body must not, however, lend cached values or instructions to the
+    /// next probe: a cached value can otherwise name a local whose defining
+    /// instruction belonged only to the rejected CFG.
+    fn reset_speculative_body_state(&mut self, parameters: &[MirLocal]) {
+        self.locals.entries.truncate(parameters.len());
+        self.places = MirPlaceArena::default();
+        self.values.clear();
+        self.named.clear();
+        self.instructions.clear();
+        self.lifted.clear();
+        self.resumption_snapshots.clear();
+        self.label_rejoins.clear();
+        self.label_values.clear();
+        self.direct_resumption = None;
+        self.immediate_resumption_closures.clear();
+        self.suspend_completion = false;
+        self.deferred_completion = None;
+        for ((name, _), local) in self.body.parameters.iter().zip(parameters) {
+            self.named.insert(name.clone(), *local);
+        }
     }
 
     /// Lower the first frame-aware label boundary: one directly selected,
