@@ -5212,6 +5212,21 @@ fn service_materializes_hrtb_instance_type_gat_values_through_inherited_aliases(
 }
 
 #[test]
+fn service_materializes_hrtb_static_values_with_selected_const_gat_arguments() {
+    let mut request = request(
+        "use facade::{Callback, Gateway as Capability, Trace}; pub fn apply(callback: Callback) -> i64 / Trace<7, i64> { let value = 40; let result = callback(&value); Trace<7, i64>::note(result) } pub fn main() -> i64 { handle apply(Capability::relay) { Trace<7, i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Top as Gateway, Trace}; pub type Callback = provider::Callback;".as_slice()));
+    request.sources.push(SourceInput::new(PackageKey("provider@2.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } pub struct Witness<n: u32> { value: i64 } pub trait Gate { const Width: u32; type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; } pub trait Base: Gate { fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a, <i64 as Gate>::Width> / { <i64 as Gate>::Effects<'a, <i64 as Gate>::Width> }; } pub trait Top: Base {} pub type Callback = for<'a> (&'a i64) -> <i64 as Gate>::Item<'a, <i64 as Gate>::Width> / { <i64 as Gate>::Effects<'a, <i64 as Gate>::Width> }; impl Gate for i64 { const Width = 7; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n, i64>}; } impl Base for i64 { fn relay<'a>(value: &'a i64) -> <i64 as Gate>::Item<'a, <i64 as Gate>::Width> / { <i64 as Gate>::Effects<'a, <i64 as Gate>::Width> } { let witness = Witness<<i64 as Gate>::Width> { value: 1 }; *value + witness.value } } impl Top for i64 where i64: Base {}".as_slice()));
+    let first = StageZeroCompiler::new().compile(request.clone()).expect("selected const GAT method value must materialize");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new().compile(request).expect("source order must preserve selected const GAT method values");
+    let first = first.artifact.unwrap(); let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint()); assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42); assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_normalizes_generic_associated_consts_in_hrtb_gat_body_results() {
     let mut request = request(
         "use facade::layout; pub fn main() -> i64 { layout() }",
