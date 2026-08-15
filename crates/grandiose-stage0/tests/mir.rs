@@ -631,6 +631,56 @@ fn cfg_validation_checks_typed_block_edges_and_returns() {
 }
 
 #[test]
+fn optimizer_does_not_fold_blocks_without_static_entry_evidence() {
+    let text = Type::Scalar(ScalarType::Text);
+    let i64 = Type::Scalar(ScalarType::I64);
+    let function = MirFunction {
+        nominal_copy_descriptors: vec![],
+        definition: DefKey(Digest::of_bytes(b"mir-unreached-folding-boundary")),
+        captures: 0,
+        parameters: vec![MirLocal(0)],
+        locals: vec![local(i64.clone()), local(text), local(i64.clone())],
+        result: i64,
+        control: MirControlTables::default(),
+        entry: MirBlockId(0),
+        blocks: vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![],
+                terminator: MirTerminator::Return { value: MirLocal(0) },
+            },
+            // This detached block models a dynamic-only control region. Its
+            // source instruction stream must be preserved until a transform
+            // has actual entry facts, rather than folding the Copy into a
+            // differently typed constant.
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![
+                    MirInstruction::ConstText {
+                        dst: MirLocal(1),
+                        value: "deferred".into(),
+                    },
+                    MirInstruction::Copy {
+                        dst: MirLocal(2),
+                        src: MirLocal(1),
+                    },
+                ],
+                terminator: MirTerminator::Return { value: MirLocal(2) },
+            },
+        ],
+    };
+
+    let (optimized, report) = optimize_mir(function).unwrap();
+    assert_eq!(report.constant_folds, 0);
+    assert!(matches!(
+        optimized.blocks[1].instructions.as_slice(),
+        [MirInstruction::ConstText { .. }, MirInstruction::Copy { .. }]
+    ));
+}
+
+#[test]
 fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
     let mut function = graph();
     function.blocks[0].instructions.push(MirInstruction::AddI64 {

@@ -3365,8 +3365,14 @@ pub fn optimize(function: MirFunction) -> Result<(MirFunction, MirOptimizationRe
     let entry_constants = block_entry_constants(&editor.function);
     for (index, entry_constants) in entry_constants.into_iter().enumerate() {
         let block = editor.function.blocks[index].clone();
-        let (instructions, constants, folds) =
-            fold_block(block.instructions, entry_constants.unwrap_or_default());
+        // A `None` entry has no ordinary CFG proof from the function entry.
+        // It may be genuinely unreachable or dynamically entered by a label
+        // or handler frame; in either case this sparse pass has no valid
+        // incoming fact basis and must leave the block untouched.
+        let Some(entry_constants) = entry_constants else {
+            continue;
+        };
+        let (instructions, constants, folds) = fold_block(block.instructions, entry_constants);
         report.constant_folds += folds;
         editor.replace_instructions(MirBlockId(index as u32), instructions)?;
         if let MirTerminator::SwitchBool {
