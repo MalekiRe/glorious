@@ -66,32 +66,21 @@ retained below but scheduled after the core language and tooling tranche.
   public-`LEAVE` boundaries, now consumes numeric MIR move-path and binding
   identities (with root text retained only for diagnostics) and is
   independently checked by the VM verifier.
-- source-storage lifecycle and cleanup-action conformance: frozen MIR still
-  lacks executable `StorageLive`/`StorageDead`, per-local storage kind and
-  initialization state, compiler-created drop-flag transitions, and ordered
-  `EndBorrow`/`Destroy`/`StorageDead` cleanup actions with protected payloads.
-  The enabled red forged-MIR matrix covers uninitialized reads,
-  unique-loan invalidation, path-dependent initialization at joins, and cleanup
-  disarming protected `Leave` payloads. The composite witnesses additionally
-  cover nested lexical exits, reverse destruction, loan-before-storage ordering,
-  branch-correlated drop-flag transitions, and VM erasure proof.
-  `storage_statement_contract.rs` closes the remaining program-point audit:
-  store-before-live, reuse after transfer/death, and replacement without a
-  zero-use `Destroy` must all fail at MIR validation; its all-false branch
-  fixture proves that a `DestroyIf` skip path erases to `StorageDead` without
-  inventing a destroy or touching a protected payload. Completing this slice
-  requires executable statements to turn those contracts green, including
-  direct dead-with-live-loan, wrong drop-flag transitions, and cleanup plans
-  that omit or reorder required actions. VM lowering must either execute the
-  verified action sequence or prove its compact erasure preserves both true and
-  false flag arms exactly; a candidate artifact must be rejected unless its
-  decode-time witness is derived from validated MIR rather than a register
-  cleanup shape alone. Source-driven red coverage in
-  `source_storage_lowering.rs` additionally requires the contract to survive
-  parameter shadowing, partial moves, handler payload/resumption and completion
-  binders, captured closures, and nonlocal `Leave` exits; current lowering has
-  no completion-form MIR path for the composite fixture and does not map
-  handler payload/resumption storage to executable locals in lifted closures.
+- source-storage lifecycle and cleanup-action conformance is executable through
+  frozen `StorageLive`/`StorageDead`, initialized-state and VM lifetime facts,
+  compiler-created drop flags, checked `DestroyIf`, and compact cleanup-erasure
+  witnesses. Source initialization is materialized through an ordinary
+  temporary and typed `Store`; replacement destroys while armed and then
+  disarms; a moved slot is reused without a second destroy. Lifted callables
+  receive an independent ABI-seeded PlaceFlow/storage arena, so mutable capture
+  parameters retain child-local provenance without a duplicate `StorageLive`.
+  The passing hostile-MIR and source suites cover uninitialized reads,
+  unique-loan invalidation, join facts, protected `Leave` payloads, nested
+  lexical exits, reverse destruction, branch-correlated flags, VM erasure,
+  shadowing, partial moves, handlers, completion binders, closures, and
+  nonlocal exits. Remaining work is broader cleanup scheduling and selection
+  for all general CFG transformations, not the executable source-storage
+  contract itself.
 
 ### 5.4 Bytecode peepholes and validation
 
