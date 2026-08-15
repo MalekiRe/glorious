@@ -20357,6 +20357,26 @@ fn service_materializes_operator_dispatch_from_a_generic_where_bound() {
 }
 
 #[test]
+fn service_specializes_numeric_literals_from_generic_operator_contracts() {
+    let source = r#"
+        infixl 40 **;
+        trait Choose { **(left: Self, right: Self) -> Self; }
+        impl Choose for i64 {
+            **(left: i64, right: i64) -> i64 { right }
+        }
+        pub fn zero<T>(left: T) -> T where T: Choose {
+            left ** 0
+        }
+        pub fn main() -> i64 { zero(41) }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("generic operator parameters must contextualize numeric literals");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 0);
+}
+
+#[test]
 fn service_selects_prefix_trait_operators_and_preserves_callable_contracts() {
     let source = r#"
         prefix 80 ~;

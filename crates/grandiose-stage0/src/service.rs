@@ -2970,6 +2970,22 @@ fn materialize_deferred_scalar_operations(function: &mut MirFunction) -> Result<
     for block in &mut function.blocks {
         for instruction in &mut block.instructions {
             match instruction {
+                MirInstruction::DeferredLiteral { dst, text } => {
+                    let scalar = function
+                        .locals
+                        .get(dst.0 as usize)
+                        .map(|local| local.ty.clone())
+                        .ok_or_else(|| {
+                            "deferred literal destination is not a MIR local".to_owned()
+                        })?;
+                    let Type::Scalar(scalar) = scalar else {
+                        return Err(
+                            "generic numeric literal did not specialize to a scalar type".into(),
+                        );
+                    };
+                    *instruction =
+                        crate::mir::materialize_numeric_literal(*dst, text, scalar)?;
+                }
                 MirInstruction::BitAndGeneric { dst, left, right } => {
                     let scalar = function
                         .locals

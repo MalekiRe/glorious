@@ -4466,6 +4466,15 @@ impl Elaborator<'_> {
             {
                 Type::Scalar(scalar)
             }
+            // A generic callable may promise a numeric operator contract
+            // through an ambient trait bound before the caller fixes `T`.
+            // Keep the literal at that declaration-owned type rather than
+            // prematurely defaulting it to `i64`; instance materialization
+            // later specializes the literal's MIR local together with the
+            // rest of the generic body.
+            (Some(Type::Generic(slot)), literal) if literal_is_numeric(literal) => {
+                Type::Generic(slot)
+            }
             _ => literal_type(&text),
         };
         self.alloc(CoreKind::Literal(text), ty, span)
@@ -12398,11 +12407,16 @@ impl Elaborator<'_> {
             _ => None,
         };
         let left_ty = self.expressions[left.0 as usize].ty.clone();
-        if let (Some(text), Type::Scalar(scalar)) = (numeric_literal, left_ty.clone())
-            && scalar_is_numeric(scalar)
-        {
-            let literal_span = self.expressions[right.0 as usize].span;
-            right = self.literal_expected(text, Some(Type::Scalar(scalar)), literal_span);
+        if let Some(text) = numeric_literal {
+            let expected = match left_ty.clone() {
+                Type::Scalar(scalar) if scalar_is_numeric(scalar) => Some(Type::Scalar(scalar)),
+                Type::Generic(_) => Some(left_ty.clone()),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                let literal_span = self.expressions[right.0 as usize].span;
+                right = self.literal_expected(text, Some(expected), literal_span);
+            }
         }
         let right_ty = self.expressions[right.0 as usize].ty.clone();
         // The receiver need not be syntactically left-most. Comparisons such
@@ -12413,11 +12427,16 @@ impl Elaborator<'_> {
             CoreKind::Literal(text) if literal_is_numeric(text) => Some(text.clone()),
             _ => None,
         };
-        if let (Some(text), Type::Scalar(scalar)) = (numeric_literal, right_ty.clone())
-            && scalar_is_numeric(scalar)
-        {
-            let literal_span = self.expressions[left.0 as usize].span;
-            left = self.literal_expected(text, Some(Type::Scalar(scalar)), literal_span);
+        if let Some(text) = numeric_literal {
+            let expected = match right_ty.clone() {
+                Type::Scalar(scalar) if scalar_is_numeric(scalar) => Some(Type::Scalar(scalar)),
+                Type::Generic(_) => Some(right_ty.clone()),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                let literal_span = self.expressions[left.0 as usize].span;
+                left = self.literal_expected(text, Some(expected), literal_span);
+            }
         }
         let left_ty = self.expressions[left.0 as usize].ty.clone();
         // Built-in arithmetic is homogeneous, but a trait operator is not:
@@ -13583,7 +13602,7 @@ fn literal_type(text: &str) -> Type {
     }
 }
 
-fn literal_is_numeric(text: &str) -> bool {
+pub(crate) fn literal_is_numeric(text: &str) -> bool {
     !matches!(text, "true" | "false") && !text.starts_with('"') && !text.starts_with('\'')
 }
 

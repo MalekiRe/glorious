@@ -661,6 +661,14 @@ pub enum MirInstruction {
         dst: MirLocal,
         bits: u32,
     },
+    /// A numeric source literal whose scalar representation is fixed only
+    /// when an enclosing generic callable is materialized. This instruction
+    /// is internal to generic MIR templates and must be rewritten before VM
+    /// verification or emission.
+    DeferredLiteral {
+        dst: MirLocal,
+        text: String,
+    },
     /// A finite manifest-authorized IEEE-754 operation.  The primitive
     /// selector is retained as sealed semantic data (not a callable name),
     /// so every f32/f64 conversion and bit cast remains explicit through VM
@@ -3120,6 +3128,7 @@ fn operation_input_mut(
         | MirInstruction::ConstI128 { .. }
         | MirInstruction::ConstF32 { .. }
         | MirInstruction::ConstF64 { .. }
+        | MirInstruction::DeferredLiteral { .. }
         | MirInstruction::ConstBool { .. }
         | MirInstruction::ConstChar { .. }
         | MirInstruction::ConstText { .. }
@@ -4218,6 +4227,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::ConstI128 { dst, .. }
         | MirInstruction::ConstF32 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
+        | MirInstruction::DeferredLiteral { dst, .. }
         | MirInstruction::FloatIntrinsic { dst, .. }
         | MirInstruction::IntIntrinsic { dst, .. }
         | MirInstruction::IntGenericIntrinsic { dst, .. }
@@ -9042,6 +9052,7 @@ fn validate_mir_lifetime(
 fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(), String> {
     let mut lifetime_binders = vec![];
     match instruction {
+        MirInstruction::DeferredLiteral { .. } => Ok(()),
         MirInstruction::MakeArray { element_type, .. } => {
             validate_mir_type(element_type, &mut lifetime_binders)
         }
@@ -10017,6 +10028,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::ConstI128 { dst, .. }
         | MirInstruction::ConstF32 { dst, .. }
         | MirInstruction::ConstF64 { dst, .. }
+        | MirInstruction::DeferredLiteral { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
         | MirInstruction::ConstText { dst, .. } => vec![*dst],
@@ -26943,6 +26955,9 @@ impl Lowerer<'_> {
                         return None;
                     }
                 },
+                Type::Generic(_) if crate::core::literal_is_numeric(&text) => self
+                    .instructions
+                    .push(MirInstruction::DeferredLiteral { dst, text }),
                 _ => {
                     let message =
                         format!("literal type has no runtime representation in this MIR: {ty:?}");
@@ -30964,6 +30979,70 @@ fn literal_type(text: &str) -> Option<Type> {
 /// Lexing has already validated integer structure.  MIR still performs a
 /// checked conversion so an out-of-range source value cannot wrap while it is
 /// becoming the stage-zero VM's i64 representation.
+/// Resolve a generic numeric source literal after enclosing-instance
+/// specialization has fixed its scalar representation.
+pub(crate) fn materialize_numeric_literal(
+    dst: MirLocal,
+    text: &str,
+    scalar: crate::ScalarType,
+) -> Result<MirInstruction, String> {
+    use crate::ScalarType;
+    let invalid = || format!("invalid {scalar:?} literal during instance materialization");
+    match scalar {
+        ScalarType::I64 => parse_i64_literal(text)
+            .map(|value| MirInstruction::ConstI64 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::U8 => parse_u8_literal(text)
+            .map(|value| MirInstruction::ConstU8 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::U16 => parse_u16_literal(text)
+            .map(|value| MirInstruction::ConstU16 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::U32 => parse_u32_literal(text)
+            .map(|value| MirInstruction::ConstU32 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::U64 => parse_u64_literal(text)
+            .map(|value| MirInstruction::ConstU64 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::Usize => parse_u64_literal(text)
+            .map(|value| MirInstruction::ConstUsize { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::U128 => parse_u128_literal(text)
+            .map(|value| MirInstruction::ConstU128 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::I8 => parse_i8_literal(text)
+            .map(|value| MirInstruction::ConstI8 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::I16 => parse_i16_literal(text)
+            .map(|value| MirInstruction::ConstI16 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::I32 => parse_i32_literal(text)
+            .map(|value| MirInstruction::ConstI32 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::Isize => parse_i64_literal(text)
+            .map(|value| MirInstruction::ConstIsize { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::I128 => parse_i128_literal(text)
+            .map(|value| MirInstruction::ConstI128 { dst, value })
+            .map_err(|_| invalid()),
+        ScalarType::F64 => parse_f64_literal(text)
+            .map(|value| MirInstruction::ConstF64 {
+                dst,
+                bits: canonical_f64_bits(value.to_bits()),
+            })
+            .map_err(|_| invalid()),
+        ScalarType::F32 => parse_f32_literal(text)
+            .map(|value| MirInstruction::ConstF32 {
+                dst,
+                bits: canonical_f32_bits(value.to_bits()),
+            })
+            .map_err(|_| invalid()),
+        ScalarType::Bool | ScalarType::Char | ScalarType::Text | ScalarType::Bytes => {
+            Err(format!("generic numeric literal cannot specialize to {scalar:?}"))
+        }
+    }
+}
+
 fn parse_i64_literal(text: &str) -> Result<i64, ()> {
     let (radix, digits) = normalized_integer_literal(text);
     i64::from_str_radix(&digits, radix).map_err(|_| ())

@@ -6308,6 +6308,11 @@ fn lower_instruction(
             dst: dst.0,
             bits: *bits,
         },
+        MirInstruction::DeferredLiteral { .. } => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "generic deferred literal reached VM lowering",
+            });
+        }
         MirInstruction::FloatIntrinsic {
             dst,
             primitive,
