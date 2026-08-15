@@ -76,6 +76,15 @@ impl Budget {
         })
     }
 
+    /// The maximum cumulative work this budget may admit.  Callers use this
+    /// when issuing a child whose independent limit is intentionally no
+    /// broader than its owning phase.  The parent is still charged on every
+    /// child checkpoint, so a stale observation of this value can never let a
+    /// sibling overspend the request.
+    pub fn ceiling(&self) -> u64 {
+        self.ceiling
+    }
+
     pub fn spent(&self) -> u64 {
         self.spent.load(Ordering::Acquire)
     }

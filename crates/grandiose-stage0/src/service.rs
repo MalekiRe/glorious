@@ -477,6 +477,9 @@ struct PublishedBody {
     valid: bool,
     core: TypedBody,
     flow: PlaceFlow,
+    /// The body remains the parent of its MIR lowering work even after its
+    /// syntax/core scratch has been frozen into this request-local product.
+    budget: Arc<Budget>,
 }
 
 /// Request-local owner for one package's demanded body work.
@@ -490,6 +493,7 @@ struct PublishedBody {
 struct PackageSession<'request> {
     request: &'request RequestSession,
     lease: PackageSessionLease<'request>,
+    budget: Arc<Budget>,
     package: PackageKey,
     demanded_bodies: BTreeSet<DefKey>,
     staged_bodies: Vec<PublishedBody>,
@@ -504,6 +508,7 @@ impl<'request> PackageSession<'request> {
         Ok(Self {
             request,
             lease,
+            budget: request.package_budget(),
             package,
             demanded_bodies: BTreeSet::new(),
             staged_bodies: Vec::new(),
@@ -526,12 +531,18 @@ impl<'request> PackageSession<'request> {
             "body `{definition:?}` was admitted twice by package `{}`",
             self.package.0,
         );
+        let budget = self.budget.child("body", self.budget.ceiling());
         BodySession {
             package: self,
             definition,
             is_constant,
             syntax,
+            budget,
         }
+    }
+
+    fn checkpoint(&self, cost: u64) -> Result<(), RequestControlError> {
+        self.request.checkpoint_in(&self.budget, cost)
     }
 
     fn finish(mut self) -> Result<Vec<PublishedBody>, PackageSessionError> {
@@ -559,6 +570,7 @@ struct BodySession<'package, 'request> {
     definition: DefKey,
     is_constant: bool,
     syntax: BodySyntax,
+    budget: Arc<Budget>,
 }
 
 impl BodySession<'_, '_> {
@@ -566,18 +578,22 @@ impl BodySession<'_, '_> {
         &self.syntax
     }
 
+    fn checkpoint(&self, cost: u64) -> Result<(), RequestControlError> {
+        self.package.request.checkpoint_in(&self.budget, cost)
+    }
+
     /// Stage a complete immutable body product.  The checkpoint happens
     /// before mutation of package staging, so cancellation/resource failure
     /// cannot publish this body even to request-local staging.  The enclosing
     /// request transaction remains the sole external publication boundary.
     fn publish(self, valid: bool, core: TypedBody, flow: PlaceFlow) -> Result<(), ServiceError> {
-        self.package.request.checkpoint(1)?;
         self.package.staged_bodies.push(PublishedBody {
             definition: self.definition,
             is_constant: self.is_constant,
             valid,
             core,
             flow,
+            budget: self.budget,
         });
         Ok(())
     }
@@ -644,14 +660,24 @@ enum EmissionFailure {
 struct EmissionSession {
     program: MirProgram,
     runtime_manifest: Option<TrustedRuntimeManifest>,
+    budget: Arc<Budget>,
 }
 
 impl EmissionSession {
-    fn new(program: MirProgram, runtime_manifest: Option<TrustedRuntimeManifest>) -> Self {
+    fn new(
+        program: MirProgram,
+        runtime_manifest: Option<TrustedRuntimeManifest>,
+        budget: Arc<Budget>,
+    ) -> Self {
         Self {
             program,
             runtime_manifest,
+            budget,
         }
+    }
+
+    fn checkpoint(&self, session: &RequestSession, cost: u64) -> Result<(), RequestControlError> {
+        session.checkpoint_in(&self.budget, cost)
     }
 
     fn mir_dependencies(&self) -> Vec<DependencyNode> {
@@ -1429,7 +1455,10 @@ impl StageZeroCompiler {
             })
             .collect::<Result<BTreeMap<_, _>, PackageSessionError>>()?;
         for node in graphs.values().flat_map(|graph| graph.modules.values()) {
-            session.checkpoint(1)?;
+            package_sessions
+                .get(&node.key.package)
+                .expect("every module graph has a request-local package session")
+                .checkpoint(1)?;
             let Some(source) = snapshot
                 .world()
                 .sources
@@ -1469,7 +1498,6 @@ impl StageZeroCompiler {
                         )
                 })
             {
-                session.checkpoint(1)?;
                 if runtime_manifest.as_ref().is_some_and(|manifest| {
                     manifest.host_imports.contains_key(&declaration.key)
                         || [
@@ -1563,6 +1591,10 @@ impl StageZeroCompiler {
                             role.is_float() && definition == &declaration.key
                         })
                 }) {
+                    package_sessions
+                        .get(&node.key.package)
+                        .expect("every module graph has a request-local package session")
+                        .checkpoint(1)?;
                     // This exact manifest-bound runtime leaf has an opaque
                     // source body. Do not parse or elaborate it as `Unit`:
                     // only a bound identity may bypass ordinary source-body
@@ -1570,6 +1602,10 @@ impl StageZeroCompiler {
                     continue;
                 }
                 let Some(body_range) = declaration.body else {
+                    package_sessions
+                        .get(&node.key.package)
+                        .expect("every module graph has a request-local package session")
+                        .checkpoint(1)?;
                     diagnostics.push(CompileDiagnostic::source(
                         "G7002",
                         format!(
@@ -1601,6 +1637,7 @@ impl StageZeroCompiler {
                     .get_mut(&node.key.package)
                     .expect("every module graph has a request-local package session")
                     .open_body(declaration.key, is_constant, body);
+                body_session.checkpoint(1)?;
                 let body = body_session.syntax();
                 dependencies.record(
                     DependencyNode::Body(declaration.key),
@@ -1773,6 +1810,7 @@ impl StageZeroCompiler {
                         .get_mut(&node.key.package)
                         .expect("every module graph has a request-local package session")
                         .open_body(method_key, false, body);
+                    body_session.checkpoint(1)?;
                     let body = body_session.syntax();
                     dependencies.record(
                         DependencyNode::Body(method_key),
@@ -2124,9 +2162,14 @@ impl StageZeroCompiler {
             valid,
             core,
             flow,
+            budget,
         } in body_products
         {
-            session.checkpoint(1)?;
+            // Lowering remains owned by the completed body rather than by an
+            // ambient request counter.  The child propagates every charge
+            // through body and package to the request cap.
+            let lowering_budget = budget.child("lowering", budget.ceiling());
+            session.checkpoint_in(&lowering_budget, 1)?;
             if !valid {
                 continue;
             }
@@ -2240,12 +2283,12 @@ impl StageZeroCompiler {
             functions: linked_functions,
             instances: linked_instances,
         };
-        session.checkpoint(
-            u64::try_from(program.functions.len())
-                .expect("reachable function count fits in request work budget")
-                .saturating_add(1),
-        )?;
-        let emission = EmissionSession::new(program, runtime_manifest.clone());
+        let emission_cost = u64::try_from(program.functions.len())
+            .expect("reachable function count fits in request work budget")
+            .saturating_add(1);
+        let emission =
+            EmissionSession::new(program, runtime_manifest.clone(), session.emission_budget());
+        emission.checkpoint(session, emission_cost)?;
         let artifact_dependencies = emission.mir_dependencies();
         let artifact = emission
             .emit(|capability| {

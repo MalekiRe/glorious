@@ -643,6 +643,21 @@ impl RequestSession {
         &self.budget
     }
 
+    /// Issue the root-owned budget for one mutable package session.  A
+    /// package budget is not an independent allowance: every charge also
+    /// charges the request parent, which keeps sibling packages beneath the
+    /// request cap without ambient accounting.
+    pub(crate) fn package_budget(&self) -> Arc<Budget> {
+        self.budget.child("package", self.budget.ceiling())
+    }
+
+    /// Issue the root-owned budget for final artifact construction.  It is
+    /// deliberately separate from package work so cancellation or failure can
+    /// drop the emission staging and its accounting owner together.
+    pub(crate) fn emission_budget(&self) -> Arc<Budget> {
+        self.budget.child("emission", self.budget.ceiling())
+    }
+
     /// Return the package-session lifecycle observed by this request.  This
     /// is an inspection API: it grants neither mutable package authority nor
     /// access to source inputs beyond the request's immutable snapshot.
@@ -693,12 +708,22 @@ impl RequestSession {
     /// phase returns: otherwise a long request could repeatedly pass a
     /// zero-cost checkpoint while exceeding its advertised resource ceiling.
     pub(crate) fn checkpoint(&self, cost: u64) -> Result<(), RequestControlError> {
+        self.checkpoint_in(&self.budget, cost)
+    }
+
+    /// Poll the request control plane while charging a phase-owned child
+    /// budget.  `Budget::charge` propagates to all parents, so this cannot
+    /// bypass the request ceiling even though service phases own distinct
+    /// child budgets.
+    pub(crate) fn checkpoint_in(
+        &self,
+        budget: &Arc<Budget>,
+        cost: u64,
+    ) -> Result<(), RequestControlError> {
         self.cancellation
             .check()
             .map_err(|_| RequestControlError::Cancelled)?;
-        self.budget
-            .charge(cost)
-            .map_err(RequestControlError::Resource)
+        budget.charge(cost).map_err(RequestControlError::Resource)
     }
 }
 
