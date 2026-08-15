@@ -559,6 +559,23 @@ fn nominal_identity_arguments(kinds: &[GenericKind]) -> Vec<GenericArgument> {
         .collect()
 }
 
+fn instantiate_nominal_default(
+    default: &GenericArgument,
+    arguments: &[GenericArgument],
+) -> GenericArgument {
+    match default {
+        GenericArgument::ConstGeneric { index, .. } => arguments
+            .get(*index as usize)
+            .cloned()
+            .unwrap_or_else(|| default.clone()),
+        GenericArgument::ConstU32Expr(value) => match value.substitute(arguments) {
+            StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
+            value => GenericArgument::ConstU32Expr(value),
+        },
+        value => value.clone(),
+    }
+}
+
 fn owned_nominal_layout_cycle(
     value: &Type,
     signatures: &ElaboratedInterface,
@@ -5135,15 +5152,13 @@ impl Elaborator<'_> {
                     self.index
                         .resolve_path(DefinitionNamespace::Type, self.module, path)
             {
-                let expected = self.index.type_generic_arity(definition).unwrap_or(0) as usize;
-                if expected != arguments.len() {
-                    self.arity(name, expected, arguments.len());
+                let Some(arguments) = self.nominal_generic_arguments(definition, name, &arguments)
+                else {
                     return Type::Error;
-                }
-                let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
+                };
                 return Type::Nominal {
                     definition,
-                    arguments: self.elaborate_type_generic_arguments(name, &arguments, kinds),
+                    arguments,
                 };
             }
             if let Some(scalar) = scalar(name) {
@@ -5171,16 +5186,13 @@ impl Elaborator<'_> {
             .resolve_path(DefinitionNamespace::Type, self.module, path)
         {
             ResolutionState::Resolved(definition) => {
-                let expected = self.index.type_generic_arity(definition).unwrap_or(0) as usize;
-                if expected != arguments.len() {
-                    self.arity(name, expected, arguments.len());
-                    Type::Error
-                } else {
-                    let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
-                    Type::Nominal {
-                        definition,
-                        arguments: self.elaborate_type_generic_arguments(name, &arguments, kinds),
-                    }
+                let Some(arguments) = self.nominal_generic_arguments(definition, name, &arguments)
+                else {
+                    return Type::Error;
+                };
+                Type::Nominal {
+                    definition,
+                    arguments,
                 }
             }
             ResolutionState::Ambiguous(_) => {
@@ -5204,6 +5216,33 @@ impl Elaborator<'_> {
         kinds: &[GenericKind],
     ) -> Vec<GenericArgument> {
         self.elaborate_trait_generic_arguments(name, arguments, kinds)
+    }
+
+    fn nominal_generic_arguments(
+        &mut self,
+        definition: DefKey,
+        name: &str,
+        source: &[HeaderGenericArgument],
+    ) -> Option<Vec<GenericArgument>> {
+        let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
+        let defaults = self.index.type_generic_defaults(definition).unwrap_or(&[]);
+        if source.len() > kinds.len()
+            || (source.len()..kinds.len())
+                .any(|index| defaults.get(index).is_none_or(Option::is_none))
+        {
+            self.arity(name, kinds.len(), source.len());
+            return None;
+        }
+        let mut arguments =
+            self.elaborate_type_generic_arguments(name, source, &kinds[..source.len()]);
+        for index in source.len()..kinds.len() {
+            let default = defaults
+                .get(index)
+                .and_then(Option::as_ref)
+                .expect("missing nominal default was rejected above");
+            arguments.push(instantiate_nominal_default(default, &arguments));
+        }
+        Some(arguments)
     }
 
     /// Trait references are identity-bearing rather than immediately runtime

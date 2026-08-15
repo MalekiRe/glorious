@@ -1828,6 +1828,7 @@ fn service_compact_label_transfer_is_terminal_but_preserves_its_typed_result() {
         .expect("terminal compact label transfer must not type-check its dead suffix");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
 }
 
 #[test]
@@ -4769,6 +4770,41 @@ fn service_materializes_generic_nominal_layouts_with_associated_const_arguments(
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_materializes_quantity_generic_layouts_with_associated_const_arguments() {
+    let source = "trait Budget { const Value: Quantity; } impl Budget for i64 { const Value = [1, 1]; } pub struct Carrier<q: Quantity, T> { value: T } pub fn unpack<T>(value: Carrier<<T as Budget>::Value, T>) -> T where T: Budget { value.value } pub fn main() -> i64 { unpack<i64>(Carrier<[1, 1], i64> { value: 42 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_folds_symbolic_u32_layout_arguments_after_specialization() {
+    let source = "pub struct Carrier<n: u32, T> { value: T } pub fn unpack<n: u32>(value: Carrier<n + 1, i64>) -> i64 { value.value } pub fn main() -> i64 { unpack<6>(Carrier<7, i64> { value: 42 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_applies_trailing_const_generic_defaults_to_nominal_layouts() {
+    let source = "pub struct Carrier<T, n: u32 = 7> { value: T } pub struct Offset<T, n: u32, m: u32 = n + 1> { value: T } pub struct Budget<T, q: Quantity = [1, 1]> { value: T } pub fn unpack(value: Carrier<i64>) -> i64 { value.value } pub fn offset(value: Offset<i64, 6>) -> i64 { value.value } pub fn budget(value: Budget<i64>) -> i64 { value.value } pub fn main() -> i64 { unpack(Carrier<i64> { value: 20 }) + offset(Offset<i64, 6> { value: 21 }) + budget(Budget<i64> { value: 1 }) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let non_trailing = "pub struct Broken<T, n: u32 = 7, m: u32> { value: T } pub fn main() -> i64 { 42 }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(non_trailing))
+    else {
+        panic!("a non-trailing structural generic default unexpectedly compiled");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G3205"),
+        "missing trailing-default diagnostic: {diagnostics:#?}"
+    );
 }
 
 #[test]

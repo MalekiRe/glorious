@@ -7,11 +7,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
-    header::ParsedHeader,
+    header::{GenericParameters, HeaderStructuralConst, HeaderStructuralU32Expr, ParsedHeader},
     identity::{DefKey, ModuleKey, package_module_alias},
     interface::{DefinitionNamespace, PackageInterface},
     source::Span,
-    types::GenericKind,
+    types::{GenericArgument, GenericKind, StructuralU32Expr},
 };
 
 /// The language prelude owns the quantitative relation and destruction hook.
@@ -118,6 +118,10 @@ pub struct DefinitionIndex {
     definition_contracts: BTreeMap<DefKey, DefinitionContract>,
     type_generic_arities: BTreeMap<DefKey, u32>,
     type_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
+    /// Structural defaults are frozen by binder position, not source name, so
+    /// a consuming body can complete a trailing nominal application without
+    /// reopening declaration parsing or changing specialization identity.
+    type_generic_defaults: BTreeMap<DefKey, Vec<Option<GenericArgument>>>,
     trait_generic_arities: BTreeMap<DefKey, u32>,
     trait_generic_kinds: BTreeMap<DefKey, Vec<GenericKind>>,
     associated_type_generic_kinds: BTreeMap<(DefKey, String), Vec<GenericKind>>,
@@ -141,6 +145,83 @@ struct IndexedDefinition {
 struct DefinitionContract {
     header_fingerprint: crate::identity::Digest,
     constant_value_fingerprint: Option<crate::identity::Digest>,
+}
+
+fn generic_const_defaults(generics: &GenericParameters) -> Vec<Option<GenericArgument>> {
+    fn u32_expression(
+        value: &HeaderStructuralU32Expr,
+        generics: &GenericParameters,
+    ) -> Option<StructuralU32Expr> {
+        Some(match value {
+            HeaderStructuralU32Expr::Literal(value) => StructuralU32Expr::Literal(*value),
+            HeaderStructuralU32Expr::Param(name) => {
+                let index = generics.names.iter().position(|candidate| candidate == name)?;
+                (generics.kind(name) == GenericKind::Const(crate::ConstKind::U32))
+                    .then_some(StructuralU32Expr::Param(index as u32))?
+            }
+            HeaderStructuralU32Expr::Add(left, right) => StructuralU32Expr::Add(
+                Box::new(u32_expression(left, generics)?),
+                Box::new(u32_expression(right, generics)?),
+            ),
+            HeaderStructuralU32Expr::Sub(left, right) => StructuralU32Expr::Sub(
+                Box::new(u32_expression(left, generics)?),
+                Box::new(u32_expression(right, generics)?),
+            ),
+            HeaderStructuralU32Expr::Mul(left, right) => StructuralU32Expr::Mul(
+                Box::new(u32_expression(left, generics)?),
+                Box::new(u32_expression(right, generics)?),
+            ),
+            HeaderStructuralU32Expr::Div(left, right) => StructuralU32Expr::Div(
+                Box::new(u32_expression(left, generics)?),
+                Box::new(u32_expression(right, generics)?),
+            ),
+            HeaderStructuralU32Expr::Rem(left, right) => StructuralU32Expr::Rem(
+                Box::new(u32_expression(left, generics)?),
+                Box::new(u32_expression(right, generics)?),
+            ),
+        })
+    }
+
+    generics
+        .names
+        .iter()
+        .map(|name| {
+            let kind = generics.kind(name);
+            let value = generics.const_defaults.get(name)?;
+            match (kind, value) {
+                (GenericKind::Const(crate::ConstKind::U32), HeaderStructuralConst::U32(value)) => {
+                    Some(GenericArgument::ConstU32(*value))
+                }
+                (
+                    GenericKind::Const(crate::ConstKind::U32),
+                    HeaderStructuralConst::U32Expression(value),
+                ) => match u32_expression(value, generics)?.normalized().ok()? {
+                    StructuralU32Expr::Literal(value) => Some(GenericArgument::ConstU32(value)),
+                    value => Some(GenericArgument::ConstU32Expr(value)),
+                },
+                (
+                    GenericKind::Const(expected),
+                    HeaderStructuralConst::Generic(source_name),
+                ) => {
+                    let index = generics
+                        .names
+                        .iter()
+                        .position(|candidate| candidate == source_name)?;
+                    (generics.kind(source_name) == GenericKind::Const(expected)).then_some(
+                        GenericArgument::ConstGeneric {
+                            index: index as u32,
+                            kind: expected,
+                        },
+                    )
+                }
+                (
+                    GenericKind::Const(crate::ConstKind::Quantity),
+                    HeaderStructuralConst::Quantity(value),
+                ) => Some(GenericArgument::ConstQuantity(*value)),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 /// An explicit source-level import binding, retained independently of body
@@ -206,15 +287,20 @@ impl DefinitionIndex {
                 self.module_targets.entry(definition.key).or_insert(child);
             }
             if definition.namespace == Some(DefinitionNamespace::Type) {
-                let (arity, kinds) = match &definition.syntax.header {
+                let (arity, kinds, defaults) = match &definition.syntax.header {
                     ParsedHeader::Nominal { generics, .. }
                     | ParsedHeader::TypeAlias { generics, .. } => {
-                        (generics.len() as u32, generics.kinds())
+                        (
+                            generics.len() as u32,
+                            generics.kinds(),
+                            generic_const_defaults(generics),
+                        )
                     }
-                    _ => (0, vec![]),
+                    _ => (0, vec![], vec![]),
                 };
                 self.type_generic_arities.insert(definition.key, arity);
                 self.type_generic_kinds.insert(definition.key, kinds);
+                self.type_generic_defaults.insert(definition.key, defaults);
             }
             match &definition.syntax.header {
                 ParsedHeader::Trait(header) => {
@@ -599,6 +685,13 @@ impl DefinitionIndex {
     /// constants out of the type-substitution namespace.
     pub fn type_generic_kinds(&self, definition: DefKey) -> Option<&[GenericKind]> {
         self.type_generic_kinds.get(&definition).map(Vec::as_slice)
+    }
+
+    /// Position-aligned defaults for nominal and alias binders.  A `None`
+    /// entry remains a required source argument (or an inference site where
+    /// that form is explicitly permitted).
+    pub fn type_generic_defaults(&self, definition: DefKey) -> Option<&[Option<GenericArgument>]> {
+        self.type_generic_defaults.get(&definition).map(Vec::as_slice)
     }
 
     pub fn trait_generic_arity(&self, definition: DefKey) -> Option<u32> {

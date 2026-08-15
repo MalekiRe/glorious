@@ -4,7 +4,7 @@
 //! shell's header range. Function bodies therefore remain demand-driven while
 //! type spelling, generic binders, and callable contracts have one syntax.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::{
     quantity::Quantity,
@@ -24,6 +24,10 @@ pub struct GenericParameters {
     pub effect_rows: BTreeSet<String>,
     pub lifetimes: BTreeSet<String>,
     pub consts: BTreeSet<(String, ConstKind)>,
+    /// Trailing structural defaults are declaration-interface facts.  They
+    /// remain source-shaped until the receiving application's earlier
+    /// arguments are known, so `m: u32 = n + 1` folds at specialization.
+    pub const_defaults: BTreeMap<String, HeaderStructuralConst>,
 }
 
 impl GenericParameters {
@@ -1671,6 +1675,7 @@ impl Parser<'_> {
             return GenericParameters::default();
         }
         let mut generics = GenericParameters::default();
+        let mut saw_default = false;
         while self.current().is_some() && !self.at_operator(">") {
             if let Some(name) = self.identifier() {
                 let is_lifetime = name.starts_with('\'');
@@ -1709,6 +1714,25 @@ impl Parser<'_> {
                 }
                 if let Some(GenericKind::Const(kind)) = kind {
                     generics.consts.insert((name.clone(), kind));
+                }
+                let default = self.operator("=").then(|| self.structural_const_value());
+                if default.is_none() && saw_default {
+                    self.error(
+                        "G3205",
+                        "generic defaults must be trailing declaration binders",
+                    );
+                }
+                if let Some(default) = default {
+                    if !matches!(kind, Some(GenericKind::Const(_))) {
+                        self.error(
+                            "G3205",
+                            "only structural const generic binders may declare defaults",
+                        );
+                        self.recovered = true;
+                    } else {
+                        saw_default = true;
+                        generics.const_defaults.insert(name.clone(), default);
+                    }
                 }
                 if is_lifetime {
                     generics.lifetimes.insert(name.clone());

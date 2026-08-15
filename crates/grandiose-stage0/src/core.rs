@@ -5443,7 +5443,8 @@ impl Elaborator<'_> {
         span: Span,
     ) -> Option<Vec<GenericArgument>> {
         let kinds = self.index.type_generic_kinds(definition)?.to_vec();
-        let arguments = self.body_generic_arguments(
+        let arguments = self.complete_nominal_generic_arguments(
+            definition,
             source,
             &kinds,
             span,
@@ -5464,6 +5465,45 @@ impl Elaborator<'_> {
         );
         self.recovered = true;
         None
+    }
+
+    /// Complete an explicitly written nominal application with its declaration
+    /// owned trailing structural defaults.  The default is substituted only
+    /// after earlier source arguments are elaborated, so its canonical const
+    /// identity is identical to spelling that value at every call site.
+    fn complete_nominal_generic_arguments(
+        &mut self,
+        definition: DefKey,
+        source: &[crate::header::HeaderGenericArgument],
+        kinds: &[crate::GenericKind],
+        span: Span,
+        code: &'static str,
+        arity_message: &'static str,
+    ) -> Option<Vec<GenericArgument>> {
+        let defaults = self.index.type_generic_defaults(definition).unwrap_or(&[]);
+        if source.len() > kinds.len()
+            || (source.len()..kinds.len())
+                .any(|index| defaults.get(index).is_none_or(Option::is_none))
+        {
+            self.error(span, code, arity_message);
+            self.recovered = true;
+            return None;
+        }
+        let mut arguments = self.body_generic_arguments(
+            source,
+            &kinds[..source.len()],
+            span,
+            code,
+            arity_message,
+        )?;
+        for index in source.len()..kinds.len() {
+            let default = defaults
+                .get(index)
+                .and_then(Option::as_ref)
+                .expect("missing nominal default was rejected above");
+            arguments.push(instantiate_nominal_default(default, &arguments));
+        }
+        Some(arguments)
     }
     fn projection_error(&mut self, code: &'static str, message: &str) {
         let span = self.body.expression(self.body.root).span;
@@ -7179,7 +7219,8 @@ impl Elaborator<'_> {
     ) -> Option<Vec<GenericArgument>> {
         let kinds = self.index.type_generic_kinds(definition)?.to_vec();
         if !source_arguments.is_empty() {
-            let arguments = self.body_generic_arguments(
+            let arguments = self.complete_nominal_generic_arguments(
+                definition,
                 source_arguments,
                 &kinds,
                 span,
@@ -7201,21 +7242,24 @@ impl Elaborator<'_> {
             self.recovered = true;
             return None;
         }
-        Some(
-            kinds
-                .into_iter()
-                .enumerate()
-                .map(|(index, kind)| match kind {
-                    crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
-                    crate::GenericKind::EffectRow => GenericArgument::EffectRow(EffectRow::empty()),
-                    crate::GenericKind::Lifetime => GenericArgument::Lifetime(Lifetime::Elided),
-                    crate::GenericKind::Const(kind) => GenericArgument::ConstGeneric {
-                        index: index as u32,
-                        kind,
-                    },
-                })
-                .collect(),
-        )
+        let defaults = self.index.type_generic_defaults(definition).unwrap_or(&[]);
+        let mut arguments = Vec::with_capacity(kinds.len());
+        for (index, kind) in kinds.into_iter().enumerate() {
+            if let Some(default) = defaults.get(index).and_then(Option::as_ref) {
+                arguments.push(instantiate_nominal_default(default, &arguments));
+                continue;
+            }
+            arguments.push(match kind {
+                crate::GenericKind::Type => GenericArgument::Type(self.inference.fresh()),
+                crate::GenericKind::EffectRow => GenericArgument::EffectRow(EffectRow::empty()),
+                crate::GenericKind::Lifetime => GenericArgument::Lifetime(Lifetime::Elided),
+                crate::GenericKind::Const(kind) => GenericArgument::ConstGeneric {
+                    index: index as u32,
+                    kind,
+                },
+            });
+        }
+        Some(arguments)
     }
     /// A replayed continuation may use an enclosing label in its clause
     /// *after* all resumed activations have returned. What is unsound is a
@@ -12814,6 +12858,23 @@ fn instantiate_nominal_generic_argument(
             instantiate_nominal_field_type(ty, arguments).map(GenericArgument::Type)
         }
         value => Ok(value.clone()),
+    }
+}
+
+fn instantiate_nominal_default(
+    default: &GenericArgument,
+    arguments: &[GenericArgument],
+) -> GenericArgument {
+    match default {
+        GenericArgument::ConstGeneric { index, .. } => arguments
+            .get(*index as usize)
+            .cloned()
+            .unwrap_or_else(|| default.clone()),
+        GenericArgument::ConstU32Expr(value) => match value.substitute(arguments) {
+            crate::StructuralU32Expr::Literal(value) => GenericArgument::ConstU32(value),
+            value => GenericArgument::ConstU32Expr(value),
+        },
+        value => value.clone(),
     }
 }
 

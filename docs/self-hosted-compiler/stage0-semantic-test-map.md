@@ -109,6 +109,11 @@ coarse. The composite fixtures cover:
   referents, handler boundaries, and body/scope completion while the referent
   hole is open are rejected
   (`whole_unique_referent_move_requires_exact_restoration_before_reuse`).
+- trailing structural const defaults on nominal declarations, including direct
+  `u32`, defaults derived from an earlier `u32` binder, and `Quantity`, are
+  completed consistently in source signatures and record construction before
+  VM execution; non-trailing defaults are rejected
+  (`service_applies_trailing_const_generic_defaults_to_nominal_layouts`).
 - defaulted generic associated types and associated effect rows through source
   layout construction, outward-effect checking, handler lowering, VM execution,
   and dependency-interface serialization. The selected local impl may omit both
