@@ -7365,6 +7365,83 @@ fn source_lowering_executes_handler_partial_move_and_label_leave() {
 }
 
 #[test]
+fn source_lowering_preserves_branch_correlated_drop_flags_across_handler_label_cleanup() {
+    // Both dynamically selected handler arms partially move a distinct field,
+    // reinitialize that aggregate, and leave the same label.  The lexical
+    // prefix also keeps two other aggregate owners live.  Frozen MIR must
+    // carry every owner through the label cleanup plan without confusing the
+    // branch-correlated old field move with the reinitialized aggregate.
+    let source = r#"
+        effect Ask { [1, 1] ask(value: Bool) -> i64; }
+        struct Pair { left: i64, right: i64 }
+        pub fn main() -> i64 {
+            label done {
+                let first = Pair { left: 10, right: 11 };
+                let pair = Pair { left: 3, right: 7 };
+                let last = Pair { left: 8, right: 25 };
+                handle Ask::ask(true) {
+                    Ask::ask(true) => {
+                        let moved = move pair.left;
+                        pair = Pair { left: 4, right: 5 };
+                        transfer done first.left + moved + pair.left + last.right
+                    },
+                    Ask::ask(false) => {
+                        let moved = move pair.right;
+                        pair = Pair { left: 6, right: 7 };
+                        transfer done first.left + moved + pair.left + last.right
+                    },
+                    Ask::ask(_) => transfer done first.left + pair.left + last.right,
+                }
+            }
+        }
+    "#;
+    let core = core_for("core-handler-label-branch-drop-flags@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } => Some(brand.owner),
+            _ => None,
+        })
+        .expect("source label owner");
+    let lowered = MirLowering::lower(owner, &core, &flow);
+    let mir = lowered
+        .function
+        .unwrap_or_else(|| panic!("combined cleanup source must lower: {:#?}", lowered.diagnostics));
+    mir.validate()
+        .unwrap_or_else(|error| panic!("combined cleanup MIR must validate: {error}\n{mir:#?}"));
+    let leaves = mir
+        .blocks
+        .iter()
+        .filter_map(|block| match &block.terminator {
+            grandiose_stage0::MirTerminator::Leave { cleanup, .. } => Some(cleanup),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(leaves.len(), 3, "one leave per handler arm: {mir:#?}");
+    assert!(leaves.iter().all(|cleanup| cleanup.drop_flags.len() >= 3));
+    assert!(
+        mir.blocks.iter().flat_map(|block| &block.instructions).any(|instruction| {
+            matches!(instruction, MirInstruction::DestroyIf { .. })
+        }),
+        "reinitialization must retain branch-safe conditional destruction: {mir:#?}"
+    );
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("combined cleanup MIR must emit");
+    let verified = grandiose_stage0::verify_vm(artifact.clone()).unwrap_or_else(|error| {
+        panic!("combined cleanup VM must verify: {error:#?}\n{artifact:#?}")
+    });
+    assert_eq!(
+        verified
+            .run_i64()
+            .unwrap_or_else(|error| panic!("combined cleanup VM must execute: {error:#?}\n{verified:#?}")),
+        42
+    );
+}
+
+#[test]
 fn source_lowering_drops_protected_custom_aggregate_once_after_forwarded_cancellation() {
     // The inner refutable arm forwards `ask(1)` while Probe remains owned by
     // the enclosing handled computation.  The outer `[0,1]` arm cancels that

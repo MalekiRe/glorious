@@ -3648,6 +3648,46 @@ fn service_executes_handler_partial_move_and_label_leave() {
 }
 
 #[test]
+fn service_round_trips_branch_reinitialized_aggregate_cleanup_through_handler_leaves() {
+    // The refutable handler matrix conditionally moves either field of
+    // `pair`, each matching arm reinitializes it, and all arms leave the same
+    // label while `first`, `pair`, and `last` remain live.  The catch-all arm
+    // is deliberate: source pattern coverage, not the Bool runtime type,
+    // proves that no residual performance can reach an unhandled Forward.
+    let source = r#"
+        effect Ask { [1, 1] ask(value: Bool) -> i64; }
+        struct Pair { left: i64, right: i64 }
+        pub fn main() -> i64 {
+            label done {
+                let first = Pair { left: 10, right: 11 };
+                let pair = Pair { left: 3, right: 7 };
+                let last = Pair { left: 8, right: 25 };
+                handle Ask::ask(true) {
+                    Ask::ask(true) => {
+                        let moved = move pair.left;
+                        pair = Pair { left: 4, right: 5 };
+                        transfer done first.left + moved + pair.left + last.right
+                    },
+                    Ask::ask(false) => {
+                        let moved = move pair.right;
+                        pair = Pair { left: 6, right: 7 };
+                        transfer done first.left + moved + pair.left + last.right
+                    },
+                    Ask::ask(_) => transfer done first.left + pair.left + last.right,
+                }
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_reports_overlapping_use_after_a_partial_move() {
     let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let pair = Pair { left: 1, right: 2 }; move pair.left; pair.left }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
