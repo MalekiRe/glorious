@@ -242,9 +242,16 @@ fn verifier_rejects_malformed_storage_witness_state_machine_actions() {
 #[test]
 fn verifier_rejects_duplicate_storage_binding_witness_identity() {
     let mut artifact = witnessed_storage_exit();
-    let VmInstruction::Leave { cleanup, .. } = &mut artifact.function.instructions[1] else { panic!() };
-    let VmStorageErasureWitness::Verified { storages, .. } = &mut cleanup.storage_erasure else { panic!() };
-    let mut duplicate = storages[0].clone(); duplicate.storage = 1; storages.push(duplicate);
+    let VmInstruction::Leave { cleanup, .. } = &mut artifact.function.instructions[1] else {
+        panic!("fixture must retain its leave instruction");
+    };
+    let VmStorageErasureWitness::Verified { storages, .. } = &mut cleanup.storage_erasure
+    else {
+        panic!("fixture must carry a verified storage witness");
+    };
+    let mut duplicate = storages[0].clone();
+    duplicate.storage = 1;
+    storages.push(duplicate);
     artifact.fingerprint = artifact.computed_fingerprint();
     assert!(decode_and_verify_artifact(&encode_artifact(&artifact)).is_err());
 }
