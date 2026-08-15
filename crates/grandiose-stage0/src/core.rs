@@ -6967,6 +6967,12 @@ impl Elaborator<'_> {
                 for capture in &mut environment.captures {
                     capture.ty = self.zonk_type(capture.ty.clone(), span);
                 }
+                // RunsIn repeats the callable's effect contract as sealed
+                // evidence.  It is allocated while a contextual closure may
+                // still carry an effect-row inference variable, so freeze it
+                // alongside the closure type and capture layout.
+                environment.runs_in.effects =
+                    self.zonk_effect_row(environment.runs_in.effects.clone(), span);
             }
             CoreKind::Assign { place, .. } => self.zonk_place(place, span),
             CoreKind::Label { .. } | CoreKind::LabelValue { .. } | CoreKind::Transfer { .. } => {}
@@ -9052,12 +9058,29 @@ impl Elaborator<'_> {
                 .then(|| binding.value.clone())
             })
             .unwrap_or_else(EffectRow::empty);
+        // A contextual callback is a concrete value for the declaration's
+        // `F`.  Preserve any explicit `F: Use<Q>` contract on that value so
+        // a closure captured for a zero-use forwarding callback carries the
+        // same quantitative proof rather than the parser's default `once`.
+        let invocation = signature
+            .where_bounds
+            .iter()
+            .find_map(|(subject, relation)| {
+                (subject == parameter
+                    && relation.definition == crate::resolution::language_use_trait_definition())
+                .then(|| match relation.arguments.as_slice() {
+                    [GenericArgument::ConstQuantity(quantity)] => Some(*quantity),
+                    _ => None,
+                })
+                .flatten()
+            })
+            .unwrap_or(crate::Quantity::ONCE);
         Some(Type::Callable {
             lifetime_binders: 0,
             parameters,
             result: Box::new(result),
             effects,
-            invocation: crate::Quantity::ONCE,
+            invocation,
         })
     }
 
@@ -11470,7 +11493,12 @@ impl Elaborator<'_> {
             effects.tail = self.declared_effects.tail;
         }
         if let Some(tail) = effects.tail
-            && self.declared_effects.tail != Some(tail)
+            && self
+                .inference
+                .zonk_effects_allowing_generic_tail(self.declared_effects.clone())
+                .ok()
+                .and_then(|declared| declared.tail)
+                != Some(tail)
         {
             self.error(
                 span,
@@ -11554,7 +11582,12 @@ impl Elaborator<'_> {
                         }
                     }
                     if let Some(tail) = effects.tail
-                        && self.declared_effects.tail != Some(tail)
+                        && self
+                            .inference
+                            .zonk_effects_allowing_generic_tail(self.declared_effects.clone())
+                            .ok()
+                            .and_then(|declared| declared.tail)
+                            != Some(tail)
                     {
                         self.error(span, "G4155", "normalized effect row remains open");
                         self.recovered = true;
@@ -12155,8 +12188,8 @@ impl Elaborator<'_> {
             if let [binding] = outputs.as_slice()
                 && self
                     .inference
-                    .zonk(binding.value.clone())
-                    .is_ok_and(|output| output != *result)
+                    .unify(binding.value.clone(), *result.clone())
+                    .is_err()
             {
                 self.error(
                     span,
@@ -12175,10 +12208,14 @@ impl Elaborator<'_> {
                 })
                 .collect::<Vec<_>>();
             if let [binding] = rows.as_slice()
-                && self
+                && (self
                     .inference
-                    .zonk_effects_allowing_generic_tail(binding.value.clone())
-                    .is_ok_and(|row| row != effects)
+                    .constrain_effect_subset(binding.value.clone(), effects.clone())
+                    .is_err()
+                    || self
+                        .inference
+                        .constrain_effect_subset(effects.clone(), binding.value.clone())
+                        .is_err())
             {
                 self.error(
                     span,

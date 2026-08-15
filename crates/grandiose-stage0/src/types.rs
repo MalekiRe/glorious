@@ -1008,6 +1008,28 @@ impl InferContext {
                 }
                 .canonicalized())
             }
+            // A contextual callable row is an inference hole owned by the
+            // closure being elaborated.  It may be constrained by an
+            // ambient generic callback row without choosing a concrete
+            // effect implementation: record the declared tail on the
+            // closure-local variable, just as type inference records a
+            // `Type::Generic` in an ordinary type hole.
+            (Some(EffectTail::Generic(generic)), Some(EffectTail::Infer(variable))) => {
+                self.bind_effect(
+                    variable,
+                    EffectRow {
+                        effects: allowed_only,
+                        projections: allowed.projections,
+                        tail: Some(EffectTail::Generic(generic)),
+                    },
+                )?;
+                Ok(EffectRow {
+                    effects: required.effects,
+                    projections,
+                    tail: Some(EffectTail::Generic(generic)),
+                }
+                .canonicalized())
+            }
             _ => Err(TypeError::EffectRow {
                 expected: allowed,
                 found: required,

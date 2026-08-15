@@ -20463,6 +20463,36 @@ fn service_infers_the_boolean_result_carrier_for_polymorphic_if() {
 }
 
 #[test]
+fn service_preserves_contextual_callback_use_contracts() {
+    let source = r#"
+        enum Range<T> { Range(T, T) }
+        pub fn fold_until<L, A, B, F>(
+            range: Range<usize>, seed: A, exit: L, body: F
+        ) -> A
+        where L: Label<B>,
+        F: Fn<(A, usize, L), Output=A>,
+        F: Use<[0, 0]> { seed }
+        pub fn for_range_control<L, B, F>(
+            range: Range<usize>, exit: L, body: F
+        )
+        where L: Label<B>,
+        F: Fn<(usize, L), Output=()>,
+        F: Use<[0, 0]> {
+            fold_until(range, (), exit, { accumulator, index, destination => {
+                body(index, destination);
+                accumulator
+            }})
+        }
+        pub fn main() -> i64 { 42 }
+    "#;
+    let outcome = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("contextual callbacks must preserve the callee's Use contract");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_selects_prefix_trait_operators_and_preserves_callable_contracts() {
     let source = r#"
         prefix 80 ~;
