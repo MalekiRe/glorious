@@ -9453,3 +9453,136 @@ fn verifier_allows_explicit_drop_flag_transitions_without_relaxing_value_writes(
     candidate.fingerprint = candidate.computed_fingerprint();
     assert_eq!(verify_vm(candidate).unwrap().run_i64().unwrap(), 42);
 }
+
+#[test]
+fn verifier_rejects_cfg_join_that_revives_dead_source_storage() {
+    // The ordinary arm keeps `r1` live, while the other arm ends it.  Before
+    // the verifier treated storage liveness as a must fact, the arm processed
+    // first made the join look live and a later write revived the dead slot.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"cfg-storage-revival")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::Bool, VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstBool {
+                    dst: 0,
+                    value: true,
+                },
+                VmInstruction::StorageLive {
+                    binding: 1,
+                    local: 1,
+                },
+                VmInstruction::ConstI64 { dst: 2, value: 42 },
+                VmInstruction::BranchBool {
+                    condition: 0,
+                    then_target: 6,
+                    else_target: 4,
+                },
+                VmInstruction::Jump { target: 9 },
+                VmInstruction::Trap,
+                VmInstruction::StorageDead {
+                    binding: 1,
+                    local: 1,
+                },
+                VmInstruction::Jump { target: 9 },
+                VmInstruction::Trap,
+                VmInstruction::Copy { dst: 1, src: 2 },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"cfg-storage-revival-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    let direct = verify_vm(candidate);
+    assert!(
+        matches!(direct, Err(VmArtifactError::ReadBeforeWrite { register: 1 })),
+        "unexpected direct verification result: {direct:?}"
+    );
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::ReadBeforeWrite { register: 1 })
+    ));
+}
+
+#[test]
+fn verifier_retains_all_possible_reference_roots_across_cfg_joins() {
+    // `r3` is a reference to source storage on one arm and an ordinary SSA
+    // value on the other.  The join must retain both possible roots: choosing
+    // the first predecessor's root lets the source-storage arm die while its
+    // live borrow remains reachable.
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"cfg-reference-origin-join")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::Bool,
+                VmType::I64,
+                VmType::I64,
+                VmType::Reference {
+                    unique: false,
+                    referent: Box::new(VmType::I64),
+                },
+                VmType::I64,
+            ],
+            instructions: vec![
+                VmInstruction::StorageLive {
+                    binding: 1,
+                    local: 1,
+                },
+                VmInstruction::ConstI64 { dst: 2, value: 42 },
+                VmInstruction::Copy { dst: 1, src: 2 },
+                VmInstruction::ConstBool {
+                    dst: 0,
+                    value: true,
+                },
+                VmInstruction::BranchBool {
+                    condition: 0,
+                    then_target: 7,
+                    else_target: 5,
+                },
+                VmInstruction::Borrow {
+                    dst: 3,
+                    src: 2,
+                    fields: vec![],
+                    unique: false,
+                    reborrow: false,
+                },
+                VmInstruction::Jump { target: 8 },
+                VmInstruction::Borrow {
+                    dst: 3,
+                    src: 1,
+                    fields: vec![],
+                    unique: false,
+                    reborrow: false,
+                },
+                VmInstruction::Move { dst: 4, src: 1 },
+                VmInstruction::StorageDead {
+                    binding: 1,
+                    local: 1,
+                },
+                VmInstruction::Return { value: 4 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"cfg-reference-origin-join-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::ReadBeforeWrite { register: 1 })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::ReadBeforeWrite { register: 1 })
+    ));
+}

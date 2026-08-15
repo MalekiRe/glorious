@@ -7034,7 +7034,11 @@ struct VerifierContinuation {
     /// this fact: `Some(false)` means either a moved SSA value or a live,
     /// uninitialized addressable slot.
     storage_live: Vec<bool>,
-    reference_origins: Vec<Option<u32>>,
+    /// Every source-storage root a reference value may address.  A join of
+    /// two references with distinct roots must retain both possibilities:
+    /// preserving only the predecessor that happened to arrive first would
+    /// permit `StorageDead` to erase the other live loan.
+    reference_origins: Vec<BTreeSet<u32>>,
     snapshots: Vec<Option<u32>>,
     labels: Vec<bool>,
     /// Whether a value contains a frame-branded resumption token.  This is
@@ -7070,11 +7074,11 @@ struct VerifierState {
     /// true after `StorageDead` so an attacker cannot revive a dead slot by
     /// exploiting the otherwise identical empty SSA register state.
     source_storage: Vec<bool>,
-    /// Root source register for direct reference values. This is deliberately
-    /// separate from their type: a reference remains a live loan after its
-    /// owner has been moved, so StorageDead must inspect the root rather than
-    /// only the owner's resident-value state.
-    reference_origins: Vec<Option<u32>>,
+    /// Source-storage roots a reference value may address. This is deliberately
+    /// separate from its type: a reference remains a live loan after its
+    /// owner has been moved, so StorageDead must inspect every possible root
+    /// rather than only the owner's resident-value state.
+    reference_origins: Vec<BTreeSet<u32>>,
     /// Provenance for first-class continuation values. `Some(frame)` means
     /// this register was produced by `CaptureResumption` for that exact live
     /// frame. The type system still sees a callable; this parallel proof fact
@@ -7281,7 +7285,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             registers: initial,
             storage_live: initial_storage_live,
             source_storage,
-            reference_origins: vec![None; function.registers.len()],
+            reference_origins: vec![BTreeSet::new(); function.registers.len()],
             snapshots: vec![None; function.registers.len()],
             labels: vec![false; function.registers.len()],
             resumptions: vec![false; function.registers.len()],
@@ -8687,7 +8691,8 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize];
                 if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
-                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize];
+                    states.reference_origins[*dst as usize] =
+                        states.reference_origins[*src as usize].clone();
                 }
             }
             VmInstruction::StorageLive { local, .. } => {
@@ -8704,7 +8709,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
                 states.resumptions[*local as usize] = false;
-                states.reference_origins[*local as usize] = None;
+                states.reference_origins[*local as usize].clear();
             }
             VmInstruction::StorageDead { local, .. } => {
                 let index = *local as usize;
@@ -8717,8 +8722,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     || states
                         .reference_origins
                         .iter()
-                        .flatten()
-                        .any(|origin| *origin as usize == index)
+                        .any(|origins| origins.contains(&(*local)))
                 {
                     return Err(VmArtifactError::ReadBeforeWrite { register: *local });
                 }
@@ -8727,7 +8731,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.snapshots[*local as usize] = None;
                 states.labels[*local as usize] = false;
                 states.resumptions[*local as usize] = false;
-                states.reference_origins[*local as usize] = None;
+                states.reference_origins[*local as usize].clear();
             }
             VmInstruction::SetDropFlag { flag, .. } => {
                 expect_type(function, *flag, VmType::Bool)?;
@@ -8775,9 +8779,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize];
                 if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
-                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize];
+                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize].clone();
                 } else {
-                    states.reference_origins[*dst as usize] = None;
+                    states.reference_origins[*dst as usize].clear();
                 }
             }
             VmInstruction::Move { dst, src } => {
@@ -8792,9 +8796,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.resumptions[*src as usize] = false;
                 write(&mut states, *dst)?;
                 if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
-                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize];
+                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize].clone();
                 }
-                states.reference_origins[*src as usize] = None;
+                states.reference_origins[*src as usize].clear();
             }
             VmInstruction::Borrow {
                 dst,
@@ -8889,9 +8893,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize];
                 states.reference_origins[*dst as usize] = if *reborrow {
-                    states.reference_origins[*src as usize]
+                    states.reference_origins[*src as usize].clone()
                 } else {
-                    Some(*src)
+                    BTreeSet::from([*src])
                 };
             }
             VmInstruction::DerefCopy { dst, reference } => {
@@ -8912,7 +8916,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 states.labels[*dst as usize] = states.labels[*reference as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*reference as usize];
                 if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
-                    states.reference_origins[*dst as usize] = states.reference_origins[*reference as usize];
+                    states.reference_origins[*dst as usize] = states.reference_origins[*reference as usize].clone();
                 }
             }
             VmInstruction::DerefStore { reference, src } => {
@@ -8947,11 +8951,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 // as an ordinary capturable callable. This remains local to
                 // the active frame; labels still pass through ordinary calls.
                 states.labels[*reference as usize] = states.labels[*src as usize];
-                if let Some(origin) = states.reference_origins[*reference as usize]
-                    && states.source_storage[origin as usize]
-                    && !states.storage_live[origin as usize]
-                {
-                    return Err(VmArtifactError::ReadBeforeWrite { register: origin });
+                for &origin in &states.reference_origins[*reference as usize] {
+                    if states.source_storage[origin as usize]
+                        && !states.storage_live[origin as usize]
+                    {
+                        return Err(VmArtifactError::ReadBeforeWrite { register: origin });
+                    }
                 }
             }
             VmInstruction::NotBool { dst, value } => {
@@ -9621,6 +9626,25 @@ fn propagate_state(
                     _ => None,
                 })
                 .collect::<Vec<_>>();
+            // Source-storage liveness is also a must fact.  A post-join
+            // write may initialize an addressable slot only when that slot
+            // remains live on every incoming edge; otherwise bytecode could
+            // revive a slot which a sibling arm already erased.
+            let storage_live = existing
+                .storage_live
+                .iter()
+                .zip(&state.storage_live)
+                .map(|(left, right)| *left && *right)
+                .collect::<Vec<_>>();
+            // Reference provenance is a may fact.  A merged reference can
+            // address any root reached by either predecessor, and a later
+            // StorageDead must therefore respect every retained loan.
+            let reference_origins = existing
+                .reference_origins
+                .iter()
+                .zip(&state.reference_origins)
+                .map(|(left, right)| left.union(right).copied().collect::<BTreeSet<_>>())
+                .collect::<Vec<_>>();
             let snapshots = existing
                 .snapshots
                 .iter()
@@ -9650,6 +9674,8 @@ fn propagate_state(
                 None
             };
             if existing.registers != joined
+                || existing.storage_live != storage_live
+                || existing.reference_origins != reference_origins
                 || existing.snapshots != snapshots
                 || existing.labels != labels
                 || existing.resumptions != resumptions
@@ -9657,6 +9683,8 @@ fn propagate_state(
                 || handler_changed
             {
                 existing.registers = joined;
+                existing.storage_live = storage_live;
+                existing.reference_origins = reference_origins;
                 existing.snapshots = snapshots;
                 existing.labels = labels;
                 existing.resumptions = resumptions;
@@ -9981,7 +10009,7 @@ fn write(states: &mut VerifierState, register: u32) -> Result<(), VmArtifactErro
         .registers
         .get_mut(index)
         .ok_or(VmArtifactError::InvalidRegister { register })?;
-    states.reference_origins[index] = None;
+    states.reference_origins[index].clear();
     match *state {
         None if !source_storage || storage_live => {
             *state = Some(true);
