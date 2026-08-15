@@ -11,7 +11,8 @@ use grandiose_stage0::{
     LogicalPath, PackageKey, SourceInput, TokenKind,
     query::{
         MemoTable, Query, QueryCompleteness, QueryContext, QueryEngine, QueryExecutionKind,
-        QueryFailure, QueryFrame, QueryRecomputeReason, QueryRecoveryPolicy, QueryValue,
+        QueryFailure, QueryFrame, QueryRecomputeReason, QueryRecoveryPolicy, QueryRetentionStats,
+        QueryValue,
     },
 };
 
@@ -660,6 +661,14 @@ fn retirement_reclaims_registered_query_products_and_provenance_at_safe_point() 
     );
     assert_eq!(engine.memo().retained_entry_count(), 1);
     assert_eq!(engine.retained_execution_count(), 1);
+    assert_eq!(
+        engine.retention_stats_for_revision(revision),
+        QueryRetentionStats {
+            retained_products: 1,
+            retained_dependency_edges: 1,
+            retained_execution_explanations: 1,
+        }
+    );
 
     database.retire_revision(revision).unwrap();
     assert_eq!(database.collect_retired().retained_pinned, 1);
@@ -670,6 +679,7 @@ fn retirement_reclaims_registered_query_products_and_provenance_at_safe_point() 
     assert_eq!(database.collect_retired().collected, 1);
     assert_eq!(engine.memo().retained_entry_count(), 0);
     assert_eq!(engine.retained_execution_count(), 0);
+    assert_eq!(engine.retention_stats(), QueryRetentionStats::default());
 
     // Re-importing equivalent source receives a fresh revision and must
     // recompute; a collected revision cannot supply a stale cache result.

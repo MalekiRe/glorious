@@ -108,8 +108,8 @@ pub use resolution::{
 };
 pub use revision::{
     CompilerDatabase, DatabaseSnapshot, PackageSessionError, PackageSessionMetadata,
-    PackageSessionStatus, RequestSession, RetentionReport, RetentionStats, RevisionCache,
-    RevisionError, RevisionMetadata, RevisionRetentionMetadata,
+    PackageSessionStatus, RequestRetentionMetadata, RequestSession, RetentionReport,
+    RetentionStats, RevisionCache, RevisionError, RevisionMetadata, RevisionRetentionMetadata,
 };
 pub use runtime_manifest::{
     HostImportSelector, ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput,

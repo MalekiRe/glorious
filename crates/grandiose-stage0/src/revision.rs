@@ -161,6 +161,24 @@ pub enum PackageSessionStatus {
 pub struct PackageSessionMetadata {
     pub package: PackageKey,
     pub status: PackageSessionStatus,
+    /// Body-local syntax/elaboration/lowering scratch currently owned by this
+    /// package. These are lifecycle units, not exposed AST/Core/MIR values.
+    pub active_body_scratch: u64,
+    /// Completed bodies still awaiting the enclosing request publication
+    /// boundary. This returns to zero on request commit or rollback.
+    pub staged_body_products: u64,
+}
+
+/// Inspection-safe accounting for request-local mutable ownership.  The
+/// request remains the only authority able to mutate these sessions; callers
+/// receive counts and package lifecycle states only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RequestRetentionMetadata {
+    pub revision: RevisionId,
+    pub active_packages: u64,
+    pub active_body_scratch: u64,
+    pub staged_body_products: u64,
+    pub packages: Vec<PackageSessionMetadata>,
 }
 
 /// Failure to admit or publish package-local work through a request session.
@@ -181,7 +199,19 @@ struct PackageSessionRegistry {
     /// This guards against a mutable service worklist becoming a backdoor for
     /// ambient packages or source blobs.
     permitted: BTreeSet<PackageKey>,
-    states: Mutex<BTreeMap<PackageKey, PackageSessionStatus>>,
+    states: Mutex<BTreeMap<PackageKey, PackageSessionState>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct PackageScratchAccounting {
+    active_bodies: u64,
+    staged_bodies: u64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PackageSessionState {
+    status: PackageSessionStatus,
+    scratch: PackageScratchAccounting,
 }
 
 impl PackageSessionRegistry {
@@ -209,14 +239,20 @@ impl PackageSessionRegistry {
             .expect("package session registry mutex poisoned");
         if states
             .values()
-            .any(|status| *status == PackageSessionStatus::RolledBack)
+            .any(|entry| entry.status == PackageSessionStatus::RolledBack)
         {
             return Err(PackageSessionError::RequestRolledBack);
         }
         if states.contains_key(package) {
             return Err(PackageSessionError::PackageAlreadyActive(package.clone()));
         }
-        states.insert(package.clone(), PackageSessionStatus::Open);
+        states.insert(
+            package.clone(),
+            PackageSessionState {
+                status: PackageSessionStatus::Open,
+                scratch: PackageScratchAccounting::default(),
+            },
+        );
         Ok(())
     }
 
@@ -226,8 +262,8 @@ impl PackageSessionRegistry {
             .lock()
             .expect("package session registry mutex poisoned");
         match states.get_mut(package) {
-            Some(status @ PackageSessionStatus::Open) => {
-                *status = PackageSessionStatus::Staged;
+            Some(entry) if entry.status == PackageSessionStatus::Open => {
+                entry.status = PackageSessionStatus::Staged;
                 Ok(())
             }
             _ => Err(PackageSessionError::PackageNotOpen(package.clone())),
@@ -241,8 +277,8 @@ impl PackageSessionRegistry {
             .expect("package session registry mutex poisoned");
         let unstaged = states
             .iter()
-            .filter_map(|(package, status)| {
-                (*status != PackageSessionStatus::Staged).then(|| package.clone())
+            .filter_map(|(package, entry)| {
+                (entry.status != PackageSessionStatus::Staged).then(|| package.clone())
             })
             .collect::<Vec<_>>();
         if !unstaged.is_empty() {
@@ -250,8 +286,9 @@ impl PackageSessionRegistry {
         }
         // Validate before changing any entry: publication is all-or-nothing
         // across the request's demanded package set.
-        for status in states.values_mut() {
-            *status = PackageSessionStatus::Committed;
+        for entry in states.values_mut() {
+            entry.status = PackageSessionStatus::Committed;
+            entry.scratch = PackageScratchAccounting::default();
         }
         Ok(())
     }
@@ -261,10 +298,14 @@ impl PackageSessionRegistry {
             .states
             .lock()
             .expect("package session registry mutex poisoned");
-        if let Some(status @ (PackageSessionStatus::Open | PackageSessionStatus::Staged)) =
-            states.get_mut(package)
+        if let Some(entry) = states.get_mut(package)
+            && matches!(
+                entry.status,
+                PackageSessionStatus::Open | PackageSessionStatus::Staged
+            )
         {
-            *status = PackageSessionStatus::RolledBack;
+            entry.status = PackageSessionStatus::RolledBack;
+            entry.scratch = PackageScratchAccounting::default();
         }
     }
 
@@ -273,13 +314,65 @@ impl PackageSessionRegistry {
             .states
             .lock()
             .expect("package session registry mutex poisoned");
-        for status in states.values_mut() {
+        for entry in states.values_mut() {
             if matches!(
-                status,
+                entry.status,
                 PackageSessionStatus::Open | PackageSessionStatus::Staged
             ) {
-                *status = PackageSessionStatus::RolledBack;
+                entry.status = PackageSessionStatus::RolledBack;
+                entry.scratch = PackageScratchAccounting::default();
             }
+        }
+    }
+
+    fn open_body(&self, package: &PackageKey) -> Result<(), PackageSessionError> {
+        let mut states = self
+            .states
+            .lock()
+            .expect("package session registry mutex poisoned");
+        match states.get_mut(package) {
+            Some(entry) if entry.status == PackageSessionStatus::Open => {
+                entry.scratch.active_bodies = entry
+                    .scratch
+                    .active_bodies
+                    .checked_add(1)
+                    .expect("body scratch count overflow");
+                Ok(())
+            }
+            _ => Err(PackageSessionError::PackageNotOpen(package.clone())),
+        }
+    }
+
+    fn publish_body(&self, package: &PackageKey) -> Result<(), PackageSessionError> {
+        let mut states = self
+            .states
+            .lock()
+            .expect("package session registry mutex poisoned");
+        match states.get_mut(package) {
+            Some(entry) if entry.status == PackageSessionStatus::Open => {
+                entry.scratch.active_bodies = entry
+                    .scratch
+                    .active_bodies
+                    .checked_sub(1)
+                    .expect("published body without active scratch");
+                entry.scratch.staged_bodies = entry
+                    .scratch
+                    .staged_bodies
+                    .checked_add(1)
+                    .expect("staged body count overflow");
+                Ok(())
+            }
+            _ => Err(PackageSessionError::PackageNotOpen(package.clone())),
+        }
+    }
+
+    fn abandon_body(&self, package: &PackageKey) {
+        let mut states = self
+            .states
+            .lock()
+            .expect("package session registry mutex poisoned");
+        if let Some(entry) = states.get_mut(package) {
+            entry.scratch.active_bodies = entry.scratch.active_bodies.saturating_sub(1);
         }
     }
 
@@ -288,9 +381,11 @@ impl PackageSessionRegistry {
             .lock()
             .expect("package session registry mutex poisoned")
             .iter()
-            .map(|(package, status)| PackageSessionMetadata {
+            .map(|(package, entry)| PackageSessionMetadata {
                 package: package.clone(),
-                status: *status,
+                status: entry.status,
+                active_body_scratch: entry.scratch.active_bodies,
+                staged_body_products: entry.scratch.staged_bodies,
             })
             .collect()
     }
@@ -752,6 +847,33 @@ impl RequestSession {
         self.package_sessions.metadata()
     }
 
+    /// Inspect request/package/body scratch without exposing the scratch
+    /// values themselves. This is suitable for leak detection and retention
+    /// gates, not for observing another request's semantic work in progress.
+    pub fn retention_metadata(&self) -> RequestRetentionMetadata {
+        let packages = self.package_sessions.metadata();
+        let active_packages = packages
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.status,
+                    PackageSessionStatus::Open | PackageSessionStatus::Staged
+                )
+            })
+            .count();
+        RequestRetentionMetadata {
+            revision: self.revision(),
+            active_packages: u64::try_from(active_packages)
+                .expect("active package count exceeds u64"),
+            active_body_scratch: packages.iter().map(|entry| entry.active_body_scratch).sum(),
+            staged_body_products: packages
+                .iter()
+                .map(|entry| entry.staged_body_products)
+                .sum(),
+            packages,
+        }
+    }
+
     /// Admit the one mutable staging owner for `package`.  Service code holds
     /// the returned lease while it performs package work; dropping an
     /// un-staged lease rolls that package back automatically.
@@ -764,6 +886,21 @@ impl RequestSession {
             registry: &self.package_sessions,
             package,
             staged: false,
+        })
+    }
+
+    /// Admit one affine body-local scratch owner within an already-open
+    /// package. The lease records no syntax or semantic product and releases
+    /// its count automatically on early return or failed elaboration.
+    pub(crate) fn open_body_scratch(
+        &self,
+        package: PackageKey,
+    ) -> Result<BodyScratchLease<'_>, PackageSessionError> {
+        self.package_sessions.open_body(&package)?;
+        Ok(BodyScratchLease {
+            registry: &self.package_sessions,
+            package,
+            published: false,
         })
     }
 
@@ -836,6 +973,34 @@ impl Drop for PackageSessionLease<'_> {
     fn drop(&mut self) {
         if !self.staged {
             self.registry.rollback(&self.package);
+        }
+    }
+}
+
+/// Affine accounting lease for one body-local parser/elaboration/lowering
+/// scratch root. Keeping this separate from the service's `BodySession`
+/// prevents ownership inspection from depending on phase-specific layouts.
+#[derive(Debug)]
+pub(crate) struct BodyScratchLease<'request> {
+    registry: &'request PackageSessionRegistry,
+    package: PackageKey,
+    published: bool,
+}
+
+impl BodyScratchLease<'_> {
+    /// Transfer a finished body from active scratch to request-local package
+    /// staging. A later package commit or rollback clears this staging count.
+    pub(crate) fn publish(mut self) -> Result<(), PackageSessionError> {
+        self.registry.publish_body(&self.package)?;
+        self.published = true;
+        Ok(())
+    }
+}
+
+impl Drop for BodyScratchLease<'_> {
+    fn drop(&mut self) {
+        if !self.published {
+            self.registry.abandon_body(&self.package);
         }
     }
 }

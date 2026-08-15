@@ -9,7 +9,9 @@ use std::{
     sync::Arc,
 };
 
-use crate::revision::{PackageSessionError, PackageSessionLease, RequestControlError};
+use crate::revision::{
+    BodyScratchLease, PackageSessionError, PackageSessionLease, RequestControlError,
+};
 use crate::{
     BodySyntax, BootstrapManifest, Budget, BudgetError, CancellationToken, CoherenceSet,
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
@@ -524,7 +526,7 @@ impl<'request> PackageSession<'request> {
         definition: DefKey,
         is_constant: bool,
         syntax: BodySyntax,
-    ) -> BodySession<'_, 'request> {
+    ) -> Result<BodySession<'_, 'request>, PackageSessionError> {
         let inserted = self.demanded_bodies.insert(definition);
         assert!(
             inserted,
@@ -532,13 +534,15 @@ impl<'request> PackageSession<'request> {
             self.package.0,
         );
         let budget = self.budget.child("body", self.budget.ceiling());
-        BodySession {
+        let scratch = self.request.open_body_scratch(self.package.clone())?;
+        Ok(BodySession {
             package: self,
             definition,
             is_constant,
             syntax,
             budget,
-        }
+            scratch,
+        })
     }
 
     fn checkpoint(&self, cost: u64) -> Result<(), RequestControlError> {
@@ -571,6 +575,7 @@ struct BodySession<'package, 'request> {
     is_constant: bool,
     syntax: BodySyntax,
     budget: Arc<Budget>,
+    scratch: BodyScratchLease<'request>,
 }
 
 impl BodySession<'_, '_> {
@@ -587,13 +592,22 @@ impl BodySession<'_, '_> {
     /// cannot publish this body even to request-local staging.  The enclosing
     /// request transaction remains the sole external publication boundary.
     fn publish(self, valid: bool, core: TypedBody, flow: PlaceFlow) -> Result<(), ServiceError> {
-        self.package.staged_bodies.push(PublishedBody {
-            definition: self.definition,
-            is_constant: self.is_constant,
+        let Self {
+            package,
+            definition,
+            is_constant,
+            budget,
+            scratch,
+            ..
+        } = self;
+        scratch.publish()?;
+        package.staged_bodies.push(PublishedBody {
+            definition,
+            is_constant,
             valid,
             core,
             flow,
-            budget: self.budget,
+            budget,
         });
         Ok(())
     }
@@ -1636,7 +1650,7 @@ impl StageZeroCompiler {
                 let body_session = package_sessions
                     .get_mut(&node.key.package)
                     .expect("every module graph has a request-local package session")
-                    .open_body(declaration.key, is_constant, body);
+                    .open_body(declaration.key, is_constant, body)?;
                 body_session.checkpoint(1)?;
                 let body = body_session.syntax();
                 dependencies.record(
@@ -1809,7 +1823,7 @@ impl StageZeroCompiler {
                     let body_session = package_sessions
                         .get_mut(&node.key.package)
                         .expect("every module graph has a request-local package session")
-                        .open_body(method_key, false, body);
+                        .open_body(method_key, false, body)?;
                     body_session.checkpoint(1)?;
                     let body = body_session.syntax();
                     dependencies.record(

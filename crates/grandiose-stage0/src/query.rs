@@ -176,6 +176,57 @@ pub struct MemoEntry<V> {
     pub dependencies: Vec<Dependency>,
 }
 
+/// Inspection-safe accounting for the immutable products retained by one
+/// query family.  Counts deliberately describe ownership classes instead of
+/// keys, values, source text, or dependency identities: a host can audit cache
+/// pressure without gaining authority to inspect another request's products.
+///
+/// A memoized product owns one canonical dependency journal.  Execution
+/// explanations are tracked separately because they are provenance-only state
+/// and must be reclaimed with the product at the same revision safe point.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct QueryRetentionStats {
+    /// Complete or explicitly recovered immutable query values.
+    pub retained_products: u64,
+    /// Exact canonical dependency edges retained by those products.
+    pub retained_dependency_edges: u64,
+    /// Revision-qualified memo/reuse/recompute explanations.
+    pub retained_execution_explanations: u64,
+}
+
+impl QueryRetentionStats {
+    fn products<K, V>(entries: &HashMap<(RevisionId, K), MemoEntry<V>>) -> Self
+    where
+        K: Eq + Hash,
+    {
+        let mut stats = Self::default();
+        for entry in entries.values() {
+            stats.record_product(entry);
+        }
+        stats
+    }
+
+    fn record_product<V>(&mut self, entry: &MemoEntry<V>) {
+        self.retained_products = self
+            .retained_products
+            .checked_add(1)
+            .expect("query memo entry count overflow");
+        self.retained_dependency_edges = self
+            .retained_dependency_edges
+            .checked_add(
+                u64::try_from(entry.dependencies.len())
+                    .expect("query dependency edge count exceeds u64"),
+            )
+            .expect("query dependency edge count overflow");
+    }
+
+    fn add_execution_explanations(mut self, count: usize) -> Self {
+        self.retained_execution_explanations =
+            u64::try_from(count).expect("query execution entry count exceeds u64");
+        self
+    }
+}
+
 /// A deterministic explanation for work performed after a revision change.
 /// Query-family owners decide whether a parent memo entry remains valid; the
 /// engine records that decision instead of making cache warmth invisible to
@@ -300,6 +351,20 @@ where
         u64::try_from(before - entries.len()).expect("query memo entry count exceeds u64")
     }
 
+    fn discard_revision_with_stats(&self, revision: RevisionId) -> QueryRetentionStats {
+        let mut entries = self.entries.lock().expect("query memo mutex poisoned");
+        let mut discarded = QueryRetentionStats::default();
+        entries.retain(|(entry_revision, _), entry| {
+            if *entry_revision == revision {
+                discarded.record_product(entry);
+                false
+            } else {
+                true
+            }
+        });
+        discarded
+    }
+
     /// Inspection accounting for bounded-retention hosts and tests. It never
     /// exposes keys or values from a revision that has been retired.
     pub fn retained_entry_count(&self) -> u64 {
@@ -310,6 +375,26 @@ where
                 .len(),
         )
         .expect("query memo entry count exceeds u64")
+    }
+
+    /// Return all retention classes owned by this memo table.  This is useful
+    /// for a cache family that owns products but no execution provenance.
+    pub fn retention_stats(&self) -> QueryRetentionStats {
+        let entries = self.entries.lock().expect("query memo mutex poisoned");
+        QueryRetentionStats::products(&entries)
+    }
+
+    /// Revision-qualified retention accounting that exposes neither memo keys
+    /// nor values.  Collected and never-published revisions report zero.
+    pub fn retention_stats_for_revision(&self, revision: RevisionId) -> QueryRetentionStats {
+        let entries = self.entries.lock().expect("query memo mutex poisoned");
+        let mut stats = QueryRetentionStats::default();
+        for ((entry_revision, _), entry) in entries.iter() {
+            if *entry_revision == revision {
+                stats.record_product(entry);
+            }
+        }
+        stats
     }
 
     /// Begin the sole publication path for a completed frame. Until its guard
@@ -649,27 +734,55 @@ impl<Q: Query> QueryEngine<Q> {
         &self.memo
     }
     /// Remove both materialized products and their inspection history for a
-    /// collected revision. An executing query always holds a snapshot pin, so
-    /// the database safe point cannot call this while the same revision is in
-    /// `running`.
-    pub fn discard_revision(&self, revision: RevisionId) {
-        self.memo.discard_revision(revision);
-        self.execution
+    /// collected revision. The returned counts make the release observable to
+    /// bounded-retention hosts without exposing the discarded products. An
+    /// executing query always holds a snapshot pin, so the database safe point
+    /// cannot call this while the same revision is in `running`.
+    pub fn discard_revision(&self, revision: RevisionId) -> QueryRetentionStats {
+        let mut discarded = self.memo.discard_revision_with_stats(revision);
+        let mut execution = self
+            .execution
+            .lock()
+            .expect("query execution mutex poisoned");
+        let before = execution.len();
+        execution.retain(|(entry_revision, _), _| *entry_revision != revision);
+        discarded.retained_execution_explanations = u64::try_from(before - execution.len())
+            .expect("query execution entry count exceeds u64");
+        discarded
+    }
+
+    /// Inspection-safe counts for every retention class owned by this query
+    /// family. This reports products, their dependency journals, and cache
+    /// provenance together because retirement must reclaim all three.
+    pub fn retention_stats(&self) -> QueryRetentionStats {
+        let memo = self.memo.retention_stats();
+        let execution = self
+            .execution
             .lock()
             .expect("query execution mutex poisoned")
-            .retain(|(entry_revision, _), _| *entry_revision != revision);
+            .len();
+        memo.add_execution_explanations(execution)
+    }
+
+    /// Inspect the retained footprint of one revision within this family.
+    /// The result contains counts only and is therefore safe for tooling to
+    /// request even when it cannot open the revision itself.
+    pub fn retention_stats_for_revision(&self, revision: RevisionId) -> QueryRetentionStats {
+        let memo = self.memo.retention_stats_for_revision(revision);
+        let execution = self
+            .execution
+            .lock()
+            .expect("query execution mutex poisoned")
+            .keys()
+            .filter(|(entry_revision, _)| *entry_revision == revision)
+            .count();
+        memo.add_execution_explanations(execution)
     }
     /// Number of revision-qualified execution explanations still retained by
     /// this engine. This is deliberately separate from memo counts: a host
     /// can audit that retirement releases both value and provenance state.
     pub fn retained_execution_count(&self) -> u64 {
-        u64::try_from(
-            self.execution
-                .lock()
-                .expect("query execution mutex poisoned")
-                .len(),
-        )
-        .expect("query execution entry count exceeds u64")
+        self.retention_stats().retained_execution_explanations
     }
     /// Explain whether this revision/key was memoized, validated from its
     /// parent, or recomputed. Missing data means no successful publication has
