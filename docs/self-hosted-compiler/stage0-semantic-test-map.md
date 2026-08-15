@@ -209,6 +209,12 @@ coarse. The composite fixtures cover:
   authority failure, leaves cache accounting unchanged, publishes no partial
   dependency traces, and is deterministic under reversed source enumeration
   (`service_discards_downstream_private_fixity_facade_staging_after_reusing_generic_upstreams`).
+- replacing a provider package with a new version under the same import alias
+  changes a generic facade's selected associated contracts and public fixity
+  metadata. The cached facade interface and downstream linked product change,
+  canonical VM bytes/fingerprints change with the associativity result, and
+  the interface cache records fresh misses rather than reusing stale metadata
+  (`service_invalidates_generic_facade_artifacts_across_provider_versioned_fixity_updates`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and

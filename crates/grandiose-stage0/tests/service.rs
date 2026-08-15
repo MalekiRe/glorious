@@ -11358,6 +11358,99 @@ fn service_discards_downstream_private_fixity_facade_staging_after_reusing_gener
 }
 
 #[test]
+fn service_invalidates_generic_facade_artifacts_across_provider_versioned_fixity_updates() {
+    let root = "use semantic_facade::*; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn call(callback: Callback<i64>) -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: call(Capability<i64>::relay) }; Trace<i64>::note(packet.value) } pub fn effect_value() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let provider = |fixity: &str| {
+        format!(
+            "pub {fixity} 30 **; pub trait Combine<T> {{ **(left: T, right: T) -> T; }} impl Combine<i64> for i64 {{ **(left: i64, right: i64) -> i64 {{ left - right }} }} pub effect Trace<T> {{ [1,1] note(value: T) -> i64; }} pub trait Parent<T> {{ type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / {{ <Self as Parent<T>>::Effects<U> }}; }} pub trait Child<T>: Parent<T> {{}} impl Parent<i64> for i64 {{ type Item<U> = i64; type Effects<U> = {{Trace<U>}}; fn relay<U>(receiver: i64, value: U) -> i64 / {{Trace<U>}} {{ Trace<U>::note(value) }} }} impl Child<i64> for i64 {{}} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / {{ <i64 as Child<i64>>::Effects<U> }};"
+        )
+    };
+    let facade = "pub use semantic_core::{Callback, Child as Capability, Trace}; pub use semantic_core::*;";
+    let world = |core_package: &str, core_source: String| {
+        let mut input = request(root);
+        for (package, source) in [
+            (core_package, core_source),
+            ("semantic-facade@0.1.0", facade.into()),
+        ] {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                source.as_bytes(),
+            ));
+        }
+        input
+    };
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(world("semantic-core@0.1.0", provider("infixl")), None)
+        .unwrap();
+    let first = compiler
+        .compile_revision(parent)
+        .expect("the initial generic provider facade must compile")
+        .artifact
+        .unwrap();
+    assert_eq!(first.run_i64().unwrap(), 48);
+    let cached_parent = compiler.interface_cache_stats();
+
+    let child = compiler
+        .import_revision(
+            world("semantic-core@0.2.0", provider("infixr")),
+            Some(parent),
+        )
+        .unwrap();
+    let second = compiler
+        .compile_revision(child)
+        .expect("a versioned provider update must re-elaborate the facade artifact")
+        .artifact
+        .unwrap();
+    assert_eq!(second.run_i64().unwrap(), 52);
+    assert_ne!(first.fingerprint(), second.fingerprint());
+    assert_ne!(first.canonical_bytes(), second.canonical_bytes());
+    assert!(
+        compiler.interface_cache_stats().misses > cached_parent.misses,
+        "the new provider version and dependent facade cannot reuse stale frozen interfaces"
+    );
+
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("semantic-facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let first_facade = compiler
+        .dependency_trace(parent, &facade)
+        .expect("parent facade interface must be published");
+    let second_facade = compiler
+        .dependency_trace(child, &facade)
+        .expect("child facade interface must be published");
+    assert_ne!(first_facade.fingerprint, second_facade.fingerprint);
+    assert!(matches!(second_facade.status, DependencyStatus::Red { .. }));
+    let parent_artifact = compiler
+        .dependency_traces(parent)
+        .into_iter()
+        .find(|trace| {
+            matches!(
+                &trace.node,
+                DependencyNode::Artifact(package) if package == &PackageKey("app@0.1.0".into())
+            )
+        })
+        .expect("the parent must publish its linked artifact trace");
+    let child_artifact = compiler
+        .dependency_traces(child)
+        .into_iter()
+        .find(|trace| {
+            matches!(
+                &trace.node,
+                DependencyNode::Artifact(package) if package == &PackageKey("app@0.1.0".into())
+            )
+        })
+        .expect("the child must publish a freshly linked artifact trace");
+    assert_ne!(
+        parent_artifact.fingerprint, child_artifact.fingerprint,
+        "the linked root product must not retain stale canonical metadata"
+    );
+}
+
+#[test]
 fn service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping() {
     let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
     let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
