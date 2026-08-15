@@ -8192,6 +8192,79 @@ fn service_dispatches_facaded_associated_nominal_array_patterns_with_moved_paylo
 }
 
 #[test]
+fn service_composes_facaded_associated_refinements_moves_closures_and_handlers() {
+    // A public associated nominal type enters a refutable structural match.
+    // The selected arm proves an enum variant, fixed array length, and record
+    // field, then moves a disjoint affine payload while a closure retains the
+    // refined scalar. The result crosses a lexical label boundary and must survive
+    // Core, MIR, VM emission, and independent decoding unchanged.
+    let root = "use facade::{make, Boxed, Element, Packet}; pub fn main() -> i64 { let packet = make(42); let refined = handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { let closure = () -> i64 { found }; move ticket; closure() }, _ => 0 }; label done { refined } }";
+    let provider = "pub trait Element { type Item; } pub struct Boxed<T> { value: T } pub struct Ticket { marker: i64 } impl Use<[1, 1]> for Ticket {} pub enum Packet<T> { Data(Array<Boxed<T>>, Ticket) } impl Element for i64 { type Item = i64; } pub fn make(value: i64) -> Packet<<i64 as Element>::Item> { Packet::Data([Boxed { value: value }], Ticket { marker: 0 }) }";
+    let mut input = request(root);
+    input.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{make, Boxed, Element, Packet};".as_slice(),
+    ));
+    input.sources.push(SourceInput::new(
+        PackageKey("provider@1.0.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        provider.as_bytes(),
+    ));
+    let mut reordered = input.clone();
+    reordered.sources.reverse();
+    let artifact = StageZeroCompiler::new()
+        .compile(input)
+        .expect("facaded associated refinement must retain disjoint move and closure capture")
+        .artifact
+        .unwrap();
+    let reordered_artifact = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("source order must not alter facaded refinement ownership")
+        .artifact
+        .unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("facaded refinement artifact must decode and verify");
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered_artifact.run_i64().unwrap(), 42);
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+
+    // A refinement binder belongs only to the selected pattern arm. A closure
+    // returned from that arm cannot retain a reference to the arm-local scalar
+    // after the structural match has been left.
+    let escaping = "use facade::{make, Boxed, Element, Packet}; pub fn bad() -> () -> &i64 { let packet = make(42); handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { move ticket; () -> &i64 { &found } }, _ => { let zero = 0; () -> &i64 { &zero } } } } pub fn main() -> i64 { 0 }";
+    let mut escape_input = request(escaping);
+    escape_input.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{make, Boxed, Element, Packet};".as_slice(),
+    ));
+    escape_input.sources.push(SourceInput::new(
+        PackageKey("provider@1.0.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        provider.as_bytes(),
+    ));
+    let mut reordered_escape = escape_input.clone();
+    reordered_escape.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(escape_input)
+    else {
+        panic!("a refinement-local reference unexpectedly escaped in a returned closure");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G5014"),
+        "missing refinement closure escape diagnostic: {diagnostics:#?}"
+    );
+    let Err(grandiose_stage0::ServiceError::Failed(reordered_diagnostics)) =
+        StageZeroCompiler::new().compile(reordered_escape)
+    else {
+        panic!("source order admitted a refinement-local reference escape");
+    };
+    assert_eq!(diagnostics, reordered_diagnostics);
+}
+
+#[test]
 fn service_normalizes_hrtb_associated_effect_operation_payloads_and_results_through_aliases() {
     // The generic effect operation's concrete payload/result is an associated
     // type carrying the selected const. The outward row is an
