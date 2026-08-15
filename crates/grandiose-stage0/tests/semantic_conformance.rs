@@ -192,7 +192,9 @@ fn semantic_inventory_is_total_enabled_and_machine_checkable() {
     );
     for index in 1..=18 {
         assert!(
-            safety.lines().any(|line| line.starts_with(&format!("{index}. "))),
+            safety
+                .lines()
+                .any(|line| line.starts_with(&format!("{index}. "))),
             "section 17 no longer contains safety invariant {index}"
         );
     }
@@ -208,10 +210,7 @@ fn semantic_inventory_is_total_enabled_and_machine_checkable() {
         8,
         "section 18 rejection inventory changed"
     );
-    let checklist = spec_section(
-        "## 19. Conformance checklist",
-        "## 20. Compact formulation",
-    );
+    let checklist = spec_section("## 19. Conformance checklist", "## 20. Compact formulation");
     assert_eq!(
         checklist
             .lines()
@@ -231,7 +230,10 @@ fn semantic_inventory_is_total_enabled_and_machine_checkable() {
         .iter()
         .map(|row| row.id.to_owned())
         .collect::<BTreeSet<_>>();
-    assert_eq!(observed, required, "the normative semantic rule set changed");
+    assert_eq!(
+        observed, required,
+        "the normative semantic rule set changed"
+    );
     assert_eq!(
         rows.len(),
         observed.len(),
@@ -321,9 +323,9 @@ fn semantic_inventory_is_total_enabled_and_machine_checkable() {
     }
 }
 
-#[path = "semantic_conformance/surface.rs"]
-mod surface;
-#[path = "semantic_conformance/ownership.rs"]
-mod ownership;
 #[path = "semantic_conformance/backend.rs"]
 mod backend;
+#[path = "semantic_conformance/ownership.rs"]
+mod ownership;
+#[path = "semantic_conformance/surface.rs"]
+mod surface;

@@ -75,8 +75,14 @@ fn semantic_callable_brands_and_runs_in_evidence_are_fresh_and_sealed() {
     let core_source = fs::read_to_string(crate_path("src/core.rs")).unwrap();
     let types_source = fs::read_to_string(crate_path("src/types.rs")).unwrap();
     for forbidden in ["ReceiverMode", "CallableReceiverMode"] {
-        assert!(!core_source.contains(forbidden), "found {forbidden} in Core");
-        assert!(!types_source.contains(forbidden), "found {forbidden} in types");
+        assert!(
+            !core_source.contains(forbidden),
+            "found {forbidden} in Core"
+        );
+        assert!(
+            !types_source.contains(forbidden),
+            "found {forbidden} in types"
+        );
     }
 }
 
@@ -121,7 +127,10 @@ fn semantic_available_and_compiler_evidence_cannot_be_forged() {
     assert_semantic_rejection(
         forged_available,
         "Available<E> is compiler-generated",
-        &[&["available"], &["forge", "construct", "intrinsic", "compiler"]],
+        &[
+            &["available"],
+            &["forge", "construct", "intrinsic", "compiler"],
+        ],
     );
 
     let forged_refinement = r#"
@@ -134,7 +143,10 @@ fn semantic_available_and_compiler_evidence_cannot_be_forged() {
     assert_semantic_rejection(
         forged_refinement,
         "refinement bindings are compiler-generated",
-        &[&["bindings", "refinement"], &["forge", "construct", "intrinsic", "compiler"]],
+        &[
+            &["bindings", "refinement"],
+            &["forge", "construct", "intrinsic", "compiler"],
+        ],
     );
 
     for (relation, source) in [
@@ -185,7 +197,10 @@ fn semantic_manual_use_may_restrict_but_never_widen_structure() {
     assert_semantic_rejection(
         widening,
         "manual Use implementation cannot widen the structural interval",
-        &[&["use", "principal"], &["widen", "subset", "structural", "interval"]],
+        &[
+            &["use", "principal"],
+            &["widen", "subset", "structural", "interval"],
+        ],
     );
 }
 
@@ -202,7 +217,10 @@ fn semantic_incompatible_structural_use_intervals_are_rejected() {
     assert_semantic_rejection(
         source,
         "structural principal intervals must have a nonempty intersection",
-        &[&["use", "principal", "quantity"], &["intersection", "empty", "interval"]],
+        &[
+            &["use", "principal", "quantity"],
+            &["intersection", "empty", "interval"],
+        ],
     );
 }
 
@@ -302,7 +320,10 @@ fn semantic_custom_drop_types_cannot_be_partially_moved_or_deconstructed() {
         assert_semantic_rejection(
             source,
             "custom-Drop aggregate must remain opaque to consuming projection",
-            &[&["drop", "destructor"], &["partial", "move", "deconstruct", "pattern"]],
+            &[
+                &["drop", "destructor"],
+                &["partial", "move", "deconstruct", "pattern"],
+            ],
         );
     }
 }
@@ -318,7 +339,9 @@ fn semantic_restricted_use_globals_are_rejected() {
     assert_semantic_rejection(
         source,
         "restricted-use memoized global is outside the G1 language",
-        &[&["global", "top-level", "memoized"], &["use", "quantity", "restricted"]],
+        &[
+            &["global", "top-level", "memoized"],
+            &["use", "quantity", "restricted"],
+        ],
     );
 }
-
