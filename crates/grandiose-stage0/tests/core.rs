@@ -7365,6 +7365,94 @@ fn source_lowering_executes_handler_partial_move_and_label_leave() {
 }
 
 #[test]
+fn source_lowering_drops_protected_custom_aggregate_once_after_forwarded_cancellation() {
+    // The inner refutable arm forwards `ask(1)` while Probe remains owned by
+    // the enclosing handled computation.  The outer `[0,1]` arm cancels that
+    // continuation, so this source shape needs one Drop call on the outer
+    // cancellation edge and must never duplicate it at the rejoin.
+    let source = r#"
+        effect Ask { [0, 1] ask(value: i64) -> i64; }
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0, 1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> {
+            drop(&mut self) -> { *self.target = *self.target + 1; }
+        }
+        pub fn main() -> i64 {
+            let count = 41;
+            handle {
+                let probe = Probe { target: &mut count };
+                handle Ask::ask(1) { Ask::ask(0, _) => 0 }
+            } {
+                Ask::ask(_, _) => 0,
+            };
+            count
+        }
+    "#;
+    let package = PackageKey("core-forwarded-cancellation-drop@0.1.0".into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        definition.key,
+        &core,
+        &flow,
+        &std::collections::BTreeMap::new(),
+        Some(&signatures),
+    );
+    let mir = lowered
+        .function
+        .unwrap_or_else(|| panic!("forwarded cancellation must lower: {:#?}", lowered.diagnostics));
+    mir.validate()
+        .unwrap_or_else(|error| panic!("forwarded cancellation MIR must validate: {error}\n{mir:#?}"));
+    assert!(
+        mir.blocks.iter().any(|block| {
+            block
+                .instructions
+                .iter()
+                .any(|instruction| matches!(instruction, MirInstruction::Forward { .. }))
+        }),
+        "the refutable inner arm must retain its real forwarding edge: {mir:#?}"
+    );
+    let outer_cancellation = mir
+        .control
+        .handlers
+        .first()
+        .expect("outer handler control entry")
+        .target;
+    let outer_drop_calls = mir.blocks[outer_cancellation.0 as usize]
+        .instructions
+        .iter()
+        .filter(|instruction| matches!(instruction, MirInstruction::Call { .. }))
+        .count();
+    assert_eq!(
+        outer_drop_calls, 1,
+        "the forwarded outer-cancellation path must execute exactly one Probe::drop: {mir:#?}"
+    );
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("MIR must emit VM");
+    grandiose_stage0::verify_vm(artifact).expect("VM cleanup/control proof must verify");
+}
+
+#[test]
 fn nested_handler_leave_preserves_the_outer_label_destination_contract() {
     let core = core_for(
         "core-nested-handler-label-contract@0.1.0",

@@ -4557,6 +4557,38 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A discarded outer operation may receive a performance forwarded by
+        // a refutable inner handler while values introduced in the protected
+        // outer computation still own custom Drop hooks.  This is a normal
+        // two-frame control shape: the forwarding edge removes only the
+        // inner frame, and the outer cancellation owns lexical cleanup
+        // before rejoining the enclosing suffix.
+        if let Some(function) = lowerer
+            .lower_root_nested_partial_forward_cancellation_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_statement_cancellation_handler(body.root, parameters.clone())
         {
@@ -16268,6 +16300,248 @@ impl Lowerer<'_> {
             blocks,
         })
     }
+    /// Lower an exact two-frame discarded operation where an inner partial
+    /// handler forwards to an outer cancellation arm.  The outer computation
+    /// may establish lexical storage before installing the inner frame; that
+    /// storage survives the forward and is destroyed on the selected outer
+    /// cancellation edge as well as on the ordinary completion edge.
+    fn lower_root_nested_partial_forward_cancellation_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let CoreKind::Block(root_values) = self.body.expression(root).kind.clone() else {
+            return None;
+        };
+        let handler_index = root_values
+            .iter()
+            .position(|id| matches!(self.body.expression(*id).kind, CoreKind::Handle { .. }))?;
+        if handler_index + 1 >= root_values.len() {
+            return None;
+        }
+        let CoreKind::Handle {
+            computation: outer_computation,
+            clauses: outer_clauses,
+        } = self.body.expression(root_values[handler_index]).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Block(outer_values) = self.body.expression(outer_computation).kind.clone()
+        else {
+            return None;
+        };
+        let (inner, outer_prefix) = outer_values.split_last()?;
+        let CoreKind::Handle {
+            computation,
+            clauses: inner_clauses,
+        } = self.body.expression(*inner).kind.clone()
+        else {
+            return None;
+        };
+        let CoreKind::Perform {
+            effect,
+            operation,
+            arguments,
+            terminal: false,
+            ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let [outer_clause] = outer_clauses.as_slice() else {
+            return None;
+        };
+        let [inner_clause] = inner_clauses.as_slice() else {
+            return None;
+        };
+        let cancellation = |clause: &CoreHandlerClause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Discard { quantity }
+                    if !quantity.requires_positive_use()
+            )
+        };
+        if outer_clause.terminal
+            || inner_clause.terminal
+            || outer_clause.effect != effect
+            || inner_clause.effect != effect
+            || outer_clause.operation != operation
+            || inner_clause.operation != operation
+            || outer_clause.patterns.len() != arguments.len()
+            || inner_clause.patterns.len() != arguments.len()
+            || !outer_clause.patterns.iter().all(pattern_is_irrefutable)
+            || inner_clause.patterns.iter().all(pattern_is_irrefutable)
+            || !cancellation(outer_clause)
+            || !cancellation(inner_clause)
+            || outer_clause.continuation.is_none()
+            || inner_clause.continuation.is_none()
+        {
+            return None;
+        }
+
+        for expression in &root_values[..handler_index] {
+            self.statement(*expression)?;
+        }
+        let root_named = self.named.clone();
+        let root_values_before_handler = self.values.clone();
+        for expression in outer_prefix {
+            self.statement(*expression)?;
+        }
+        let protected_named = self.named.clone();
+        let protected_values = self.values.clone();
+        let payloads = |lowerer: &mut Self, clause: &CoreHandlerClause| {
+            clause
+                .payload_types
+                .iter()
+                .map(|ty| lowerer.alloc(ty.clone(), computation))
+                .collect::<Vec<_>>()
+        };
+        let outer_payloads = payloads(self, outer_clause);
+        let inner_payloads = payloads(self, inner_clause);
+        let performed = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let arguments = arguments
+            .iter()
+            .map(|argument| self.value(*argument))
+            .collect::<Option<Vec<_>>>()?;
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (clause, payloads, target) in [
+            (outer_clause, outer_payloads.clone(), MirBlockId(1)),
+            (inner_clause, inner_payloads.clone(), MirBlockId(2)),
+        ] {
+            entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads,
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target,
+            });
+        }
+        entry.push(MirInstruction::Perform {
+            site: MirPerformSiteId::UNASSIGNED,
+            dst: performed,
+            effect: effect.definition,
+            effect_arguments: effect.arguments,
+            operation,
+            arguments,
+        });
+        entry.push(MirInstruction::UninstallHandler);
+        entry.push(MirInstruction::UninstallHandler);
+        self.instructions = Vec::new();
+        self.cleanup_scope_bindings(&root_named, None)?;
+        entry.extend(std::mem::take(&mut self.instructions));
+
+        self.named = root_named.clone();
+        self.values = root_values_before_handler.clone();
+        self.instructions = Vec::new();
+        let (last, suffix) = root_values[handler_index + 1..].split_last()?;
+        for expression in suffix {
+            self.statement(*expression)?;
+        }
+        let result = self.value(*last)?;
+        let suffix_instructions = std::mem::take(&mut self.instructions);
+
+        self.named = protected_named.clone();
+        self.values = protected_values.clone();
+        self.instructions = Vec::new();
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads)?;
+        let _ = self.value(outer_clause.body)?;
+        self.cleanup_scope_bindings(&root_named, None)?;
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
+        let outer_instructions = std::mem::take(&mut self.instructions);
+
+        self.named = protected_named.clone();
+        self.values = protected_values.clone();
+        self.instructions = Vec::new();
+        let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+        let pattern = lower_pattern(inner_clause.patterns.first()?.clone())?;
+        let inner_test = vec![MirInstruction::PatternTest {
+            dst: condition,
+            subject: *inner_payloads.first()?,
+            pattern,
+        }];
+        self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads)?;
+        let _ = self.value(inner_clause.body)?;
+        self.cleanup_scope_bindings(&root_named, None)?;
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
+        self.instructions.push(MirInstruction::UninstallHandler);
+        let inner_instructions = std::mem::take(&mut self.instructions);
+        self.named = root_named;
+        self.values = root_values_before_handler;
+
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: outer_instructions,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: inner_test,
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: MirBlockId(4),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(5),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: suffix_instructions,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: inner_instructions,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
+        })
+    }
+
     /// A discarded affine continuation is a real control transfer, not an
     /// erased `Perform`. The handler target consumes its suspended frame with
     /// `Cancel` and then joins the enclosing suffix explicitly.

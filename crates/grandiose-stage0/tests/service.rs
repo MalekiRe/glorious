@@ -8609,15 +8609,15 @@ fn service_drops_a_custom_aggregate_once_across_forward_and_cancellation() {
         }
         pub fn main() -> i64 {
             let count = 41;
-            let result = handle {
+            handle {
                 let probe = Probe { target: &mut count };
                 handle Ask::ask(1) {
-                    Ask::ask(0) => 0,
+                    Ask::ask(0, _) => 0,
                 }
             } {
-                Ask::ask(_) => 0,
+                Ask::ask(_, _) => 0,
             };
-            count + result
+            count
         }
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
