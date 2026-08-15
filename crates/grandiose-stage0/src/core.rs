@@ -2961,6 +2961,7 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            allow_rigid_trait_arguments: false,
         };
         let expected_result = signatures
             .definitions
@@ -2969,10 +2970,10 @@ impl TypedBody {
             .map(|signature| signature.result.clone());
         elaborator.declared_effects =
             elaborator.normalize_selectable_effect_row(elaborator.declared_effects.clone());
-        // A callable owns its declared generic binders just as an impl method
-        // does.  Select concrete trait heads through those rigid arguments
-        // before supplying the result as a body expectation; an abstract head
-        // remains symbolic and cannot acquire global implementation evidence.
+        // Ordinary callable interfaces are public contracts. Their generic
+        // trait arguments remain opaque in the body unless a local where
+        // clause supplies explicit evidence; only implementation bodies own
+        // selected implementation evidence for rigid trait arguments.
         let expected_result = expected_result
             .map(|result| elaborator.normalize_selectable_type_projections(result));
         let mut parameters = vec![];
@@ -3226,6 +3227,7 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            allow_rigid_trait_arguments: true,
         };
         elaborator.declared_effects =
             elaborator.normalize_selectable_effect_row(elaborator.declared_effects.clone());
@@ -3324,6 +3326,7 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            allow_rigid_trait_arguments: false,
         };
         let expected = match signatures.definitions.get(&definition.key) {
             Some(ElaboratedHeader::Constant(Some(ty))) => Some(ty.clone()),
@@ -3421,6 +3424,7 @@ impl TypedBody {
             active_labels: vec![],
             resumption_use_trackers: vec![],
             generated_environment_types: std::collections::BTreeSet::new(),
+            allow_rigid_trait_arguments: false,
         };
         let root = elaborator.expression_expected(body.root, None);
         let initializer_type = match elaborator
@@ -3591,6 +3595,9 @@ struct Elaborator<'a> {
     /// tracked separately from source nominal definitions: a source path can
     /// never resolve to one of these identities.
     generated_environment_types: std::collections::BTreeSet<DefKey>,
+    /// Only an implementation body may use its selected implementation
+    /// evidence to reduce projections carrying rigid trait arguments.
+    allow_rigid_trait_arguments: bool,
 }
 impl Elaborator<'_> {
     fn pattern_generic_scope(&self) -> PatternGenericScope {
@@ -4859,7 +4866,11 @@ impl Elaborator<'_> {
                     item_generic_kinds,
                     item_arguments,
                 };
-                if !projection_is_selectable_type_projection(&projection, hrtb_binders) {
+                if !projection_is_selectable_type_projection(
+                    &projection,
+                    hrtb_binders,
+                    self.allow_rigid_trait_arguments,
+                ) {
                     return projection;
                 }
                 let Type::Projection {
@@ -12955,7 +12966,11 @@ fn generic_argument_is_selectable_effect_projection(value: &GenericArgument) -> 
 /// set.  Treating either as rigid would allow a concrete head to choose an
 /// implementation based on evidence that belongs to a caller or has not been
 /// inferred yet.
-fn projection_is_selectable_type_projection(value: &Type, hrtb_binders: &[u32]) -> bool {
+fn projection_is_selectable_type_projection(
+    value: &Type,
+    hrtb_binders: &[u32],
+    allow_rigid_trait_arguments: bool,
+) -> bool {
     let Type::Projection {
         subject,
         trait_arguments,
@@ -12972,7 +12987,9 @@ fn projection_is_selectable_type_projection(value: &Type, hrtb_binders: &[u32]) 
         // be fully concrete leaves `<i64 as Parent<T>>::Item<'a>` opaque in
         // precisely the body that establishes `Parent<T> for i64`.
         && trait_arguments.iter().all(|argument| {
-            generic_argument_is_selectable_type_projection(argument, hrtb_binders)
+            allow_rigid_trait_arguments
+                && generic_argument_is_selectable_type_projection(argument, hrtb_binders)
+                || generic_argument_is_concrete(argument)
         })
         && item_arguments
             .iter()

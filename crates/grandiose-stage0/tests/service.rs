@@ -5463,6 +5463,18 @@ fn service_closes_generic_supertrait_selected_items_across_facade_revisions() {
 }
 
 #[test]
+fn service_rejects_external_generic_selected_hrtb_projection_facades() {
+    let mut request = request("use facade::{Callback, Parent}; pub type External<T> = Callback<T>; pub fn relay<T, 'a>(value: &'a i64) -> <i64 as Parent<T>>::Item<'a> / { <i64 as Parent<T>>::Effects<'a> } { *value } pub fn accept<T>(callback: External<T>) -> i64 { let value = 41; callback(&value); 0 } pub fn main() -> i64 { 0 }");
+    request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Parent};".as_slice()));
+    request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub trait Parent<T> { type Item<'a>; type Effects<'a>: EffectRow; } pub type Callback<T> = for<'a> (&'a i64) -> <i64 as Parent<T>>::Item<'a> / { <i64 as Parent<T>>::Effects<'a> }; impl<T> Parent<T> for i64 { type Item<'a> = i64; type Effects<'a> = {}; }".as_slice()));
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request.clone()) else { panic!("external generic selected projection facade unexpectedly normalized"); };
+    request.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(second)) = StageZeroCompiler::new().compile(request) else { panic!("source reordering must not normalize an external generic selected projection facade"); };
+    assert!(first.iter().any(|diagnostic| diagnostic.code == "G4110"), "external generic projection must remain opaque at the body boundary: {first:#?}");
+    assert_eq!(first, second, "external generic facade diagnostics must be canonical");
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,
