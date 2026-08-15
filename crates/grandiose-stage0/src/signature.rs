@@ -4095,6 +4095,15 @@ impl Elaborator<'_> {
                         );
                     }
                     vec![]
+                } else if is_intrinsic_runs_in_trait(&relation) {
+                    if !matches!(name.as_str(), "Output" | "After") || !item_arguments.is_empty() {
+                        self.error(
+                            "G4165",
+                            "intrinsic `RunsIn` only accepts zero-arity `Output` and `After` type equalities"
+                                .into(),
+                        );
+                    }
+                    vec![]
                 } else {
                     self.index
                         .associated_type_generic_kinds(relation.definition, name)
@@ -4370,6 +4379,25 @@ impl Elaborator<'_> {
                     }
                     return ElaboratedTraitReference {
                         definition: intrinsic_label_trait_definition(),
+                        arguments,
+                    };
+                }
+                if path == ["RunsIn"] {
+                    let arguments = self.elaborate_unresolved_generic_arguments(source_arguments);
+                    if !matches!(
+                        arguments.as_slice(),
+                        [
+                            GenericArgument::Type(_),
+                            GenericArgument::Type(Type::Tuple(_) | Type::Unit)
+                        ]
+                    ) {
+                        self.error(
+                            "G4173",
+                            "intrinsic `RunsIn` requires an environment type and tuple input argument".into(),
+                        );
+                    }
+                    return ElaboratedTraitReference {
+                        definition: intrinsic_runs_in_trait_definition(),
                         arguments,
                     };
                 }

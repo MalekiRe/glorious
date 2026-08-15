@@ -7552,7 +7552,7 @@ impl Elaborator<'_> {
             span,
         );
         let call = self.call(callee, values, span);
-        self.check_callable_contract_bounds(*signature, span);
+        self.check_callable_contract_bounds(*signature, None, span);
         call
     }
     /// Recover the concrete callable shape promised by an intrinsic `Fn`
@@ -7676,7 +7676,7 @@ impl Elaborator<'_> {
         let result = self.strict_result(&strict_operands, result);
         if !matches!(result, Type::Never) {
             self.check_effects(&effects, span);
-            self.check_call_where_bounds(callee, span);
+            self.check_call_where_bounds(callee, &arguments, span);
         }
         let reference_shape = call_reference_shape(self.signatures, &result, &reference_contract);
         self.alloc(
@@ -7966,7 +7966,7 @@ impl Elaborator<'_> {
                 "qualified trait method value does not match its contextual callable type",
             ));
         }
-        self.check_callable_contract_bounds(*signature.clone(), span);
+        self.check_callable_contract_bounds(*signature.clone(), None, span);
         Some(self.alloc(
             CoreKind::TraitMethod {
                 evidence,
@@ -8138,7 +8138,7 @@ impl Elaborator<'_> {
             span,
         );
         let call = self.call(callee, values, span);
-        self.check_callable_contract_bounds(*signature.clone(), span);
+        self.check_callable_contract_bounds(*signature.clone(), None, span);
         Some(call)
     }
     fn perform(
@@ -9779,8 +9779,9 @@ impl Elaborator<'_> {
     /// bounds can be checked: argument unification has constrained the
     /// variables, while no unresolved inference state has crossed into a
     /// persistence boundary.
-    fn check_call_where_bounds(&mut self, callee: CoreId, span: Span) {
-        let (definition, arguments) = match &self.expressions[callee.0 as usize].kind {
+    fn check_call_where_bounds(&mut self, callee: CoreId, arguments: &[CoreId], span: Span) {
+        let actual_arguments = arguments.to_vec();
+        let (definition, generic_arguments) = match &self.expressions[callee.0 as usize].kind {
             CoreKind::Function {
                 definition,
                 arguments,
@@ -9790,7 +9791,7 @@ impl Elaborator<'_> {
         };
         let Ok(signature) = self
             .signatures
-            .instantiate_callable_generic(definition, &arguments)
+            .instantiate_callable_generic(definition, &generic_arguments)
         else {
             self.error(
                 span,
@@ -9800,20 +9801,26 @@ impl Elaborator<'_> {
             self.recovered = true;
             return;
         };
-        self.check_callable_contract_bounds(signature, span);
+        self.check_callable_contract_bounds(signature, Some(&actual_arguments), span);
     }
 
     /// Verify the whole frozen callable contract after argument inference has
     /// constrained it.  A trait predicate is only one part of that contract:
     /// associated type and effect-row equalities are obligations too.
-    fn check_callable_contract_bounds(&mut self, signature: CallableSignature, span: Span) {
+    fn check_callable_contract_bounds(
+        &mut self,
+        signature: CallableSignature,
+        arguments: Option<&[CoreId]>,
+        span: Span,
+    ) {
         self.check_where_bounds(signature.where_bounds.clone(), span);
         self.check_intrinsic_callable_bindings(
-            signature.where_bounds,
+            signature.where_bounds.clone(),
             signature.where_associated_type_bindings.clone(),
             signature.where_associated_effect_bindings.clone(),
             span,
         );
+        self.check_intrinsic_runs_in_bindings(&signature, arguments, span);
         self.check_nonintrinsic_associated_bindings(
             signature.where_associated_type_bindings,
             signature.where_associated_effect_bindings,
@@ -9828,7 +9835,9 @@ impl Elaborator<'_> {
         span: Span,
     ) {
         for binding in type_bindings {
-            if crate::is_intrinsic_callable_trait(&binding.relation) {
+            if crate::is_intrinsic_callable_trait(&binding.relation)
+                || crate::is_intrinsic_runs_in_trait(&binding.relation)
+            {
                 continue;
             }
             let Some((subject, relation, item_arguments, value)) =
@@ -9866,7 +9875,9 @@ impl Elaborator<'_> {
             }
         }
         for binding in effect_bindings {
-            if crate::is_intrinsic_callable_trait(&binding.relation) {
+            if crate::is_intrinsic_callable_trait(&binding.relation)
+                || crate::is_intrinsic_runs_in_trait(&binding.relation)
+            {
                 continue;
             }
             let Some((subject, relation, item_arguments, value)) =
@@ -10021,6 +10032,13 @@ impl Elaborator<'_> {
         let assumptions = self.ambient_trait_solver_assumptions();
         let mut failed = false;
         for (subject, relation) in bounds {
+            // `RunsIn` is compiler-generated evidence carried by a concrete
+            // closure environment, rather than a globally selectable trait
+            // implementation. Direct-call checking below validates that
+            // evidence against the actual callable argument.
+            if crate::is_intrinsic_runs_in_trait(&relation) {
+                continue;
+            }
             let subject = match self.inference.zonk(subject) {
                 Ok(subject) => subject,
                 Err(_) => {
@@ -10189,6 +10207,121 @@ impl Elaborator<'_> {
                     span,
                     "G4168",
                     "intrinsic `Fn` Effects equality does not match callable effects",
+                );
+                self.recovered = true;
+            }
+        }
+    }
+    fn check_intrinsic_runs_in_bindings(
+        &mut self,
+        signature: &CallableSignature,
+        arguments: Option<&[CoreId]>,
+        span: Span,
+    ) {
+        let Some(arguments) = arguments else {
+            return;
+        };
+        for (subject, relation) in &signature.where_bounds {
+            if !crate::is_intrinsic_runs_in_trait(relation) {
+                continue;
+            }
+            let Ok(subject) = self.inference.zonk(subject.clone()) else {
+                continue;
+            };
+            let argument =
+                signature
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, parameter)| {
+                        self.inference
+                            .zonk(parameter.clone())
+                            .ok()
+                            .filter(|parameter| *parameter == subject)
+                            .and_then(|_| arguments.get(index).copied())
+                    });
+            let Some(argument) = argument else {
+                continue;
+            };
+            let CoreKind::Closure { environment, .. } = &self.expressions[argument.0 as usize].kind
+            else {
+                self.error(
+                    span,
+                    "G4188",
+                    "intrinsic `RunsIn` requires compiler-generated callable environment evidence",
+                );
+                self.recovered = true;
+                continue;
+            };
+            let empty_environment = match relation.arguments.as_slice() {
+                [
+                    GenericArgument::Type(Type::Unit),
+                    GenericArgument::Type(Type::Unit),
+                ] => true,
+                [
+                    GenericArgument::Type(Type::Unit),
+                    GenericArgument::Type(Type::Tuple(values)),
+                ] => values.is_empty(),
+                _ => false,
+            };
+            let callable = self.expressions[argument.0 as usize].ty.clone();
+            let Ok(Type::Callable {
+                parameters, result, ..
+            }) = self.inference.zonk(callable)
+            else {
+                self.error(
+                    span,
+                    "G4188",
+                    "compiler-generated `RunsIn` evidence is attached to a non-callable value",
+                );
+                self.recovered = true;
+                continue;
+            };
+            let inputs_match = matches!(
+                relation.arguments.get(1),
+                Some(GenericArgument::Type(Type::Unit)) if parameters.is_empty()
+            ) || matches!(
+                relation.arguments.get(1),
+                Some(GenericArgument::Type(Type::Tuple(inputs))) if *inputs == parameters
+            );
+            let output_matches = signature
+                .where_associated_type_bindings
+                .iter()
+                .filter(|binding| {
+                    binding.subject == subject
+                        && binding.relation == *relation
+                        && binding.name == "Output"
+                        && binding.item_arguments.is_empty()
+                })
+                .all(|binding| {
+                    self.inference
+                        .zonk(binding.value.clone())
+                        .is_ok_and(|output| output == *result)
+                });
+            let after_matches = signature
+                .where_associated_type_bindings
+                .iter()
+                .filter(|binding| {
+                    binding.subject == subject
+                        && binding.relation == *relation
+                        && binding.name == "After"
+                        && binding.item_arguments.is_empty()
+                })
+                .all(|binding| {
+                    self.inference
+                        .zonk(binding.value.clone())
+                        .is_ok_and(|after| after == Type::Unit)
+                });
+            if !empty_environment
+                || !environment.captures.is_empty()
+                || !inputs_match
+                || !output_matches
+                || !after_matches
+            {
+                self.error(
+                    span,
+                    "G4188",
+                    "intrinsic `RunsIn` evidence does not match the callable's sealed environment",
                 );
                 self.recovered = true;
             }
