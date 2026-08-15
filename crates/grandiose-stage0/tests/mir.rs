@@ -10,7 +10,7 @@ use grandiose_stage0::{
     MirOperationId, MirPattern, MirPatternField, MirPerformSiteId, MirPlaceBindingData,
     MirPlaceBindingId, MirProgram, MirResumptionSiteId, MirScopeId, MirSourceStorageScopeId,
     MirTerminator, MirTerminatorOperand, MirTraitMethodInstance, MoveFact, Mutability, PlaceBindingId,
-    PlaceBindingOrigin, Quantity, ScalarType, Type, VmArtifactError, emit_vm, emit_vm_program,
+    PlaceBindingOrigin, PrimitiveRole, Quantity, ScalarType, Type, VmArtifactError, emit_vm, emit_vm_program,
     optimize_mir, verify_vm,
 };
 use grandiose_stage0::runtime_manifest::{FloatPrimitive, FloatWidth};
@@ -693,6 +693,38 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
             .validate()
             .is_err_and(|error| error.contains("floating runtime primitive operand")),
         "an i64 register must not be accepted as an f64 floating-leaf operand"
+    );
+
+    let mut integer_result = graph();
+    integer_result.blocks[0]
+        .instructions
+        .push(MirInstruction::IntIntrinsic {
+            dst: MirLocal(1),
+            primitive: PrimitiveRole::IntEqual,
+            scalar: ScalarType::I64,
+            arguments: vec![MirLocal(1), MirLocal(2)],
+        });
+    assert!(
+        integer_result
+            .validate()
+            .is_err_and(|error| error.contains("integer runtime primitive result")),
+        "an i64 register must not be accepted as an integer comparison result"
+    );
+
+    let mut integer_operand = graph();
+    integer_operand.blocks[0]
+        .instructions
+        .push(MirInstruction::IntIntrinsic {
+            dst: MirLocal(1),
+            primitive: PrimitiveRole::IntWrappingNeg,
+            scalar: ScalarType::I64,
+            arguments: vec![MirLocal(0)],
+        });
+    assert!(
+        integer_operand
+            .validate()
+            .is_err_and(|error| error.contains("integer runtime primitive operand")),
+        "a Bool register must not be accepted as an i64 integer-leaf operand"
     );
 
     let mut text = graph();

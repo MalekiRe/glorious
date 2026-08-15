@@ -3089,62 +3089,11 @@ fn integer_intrinsic_signature(
             message: "integer runtime primitive has a non-integer scalar",
         });
     }
-    let binary = vec![scalar, scalar];
-    Ok(match primitive {
-        PrimitiveRole::IntCheckedAdd
-        | PrimitiveRole::IntWrappingAdd
-        | PrimitiveRole::IntWrappingSub
-        | PrimitiveRole::IntWrappingMul
-        | PrimitiveRole::IntBitAnd
-        | PrimitiveRole::IntBitOr
-        | PrimitiveRole::IntBitXor => (binary, scalar),
-        PrimitiveRole::IntEqual | PrimitiveRole::IntLess | PrimitiveRole::IntGreater => {
-            (binary, ScalarType::U32)
-        }
-        PrimitiveRole::IntBitNot | PrimitiveRole::IntWrappingNeg => (vec![scalar], scalar),
-        PrimitiveRole::IntShl | PrimitiveRole::IntShr => (vec![scalar, ScalarType::U32], scalar),
-        PrimitiveRole::IntConvertCheckedToI64 | PrimitiveRole::IntConvertWrappingToI64 => {
-            (vec![scalar], ScalarType::I64)
-        }
-        PrimitiveRole::IntConvertCheckedToU32 | PrimitiveRole::IntConvertWrappingToU32 => {
-            (vec![scalar], ScalarType::U32)
-        }
-        PrimitiveRole::IntConvertCheckedToUsize | PrimitiveRole::IntConvertWrappingToUsize => {
-            (vec![scalar], ScalarType::Usize)
-        }
-        PrimitiveRole::IntConvertCheckedToU8 | PrimitiveRole::IntConvertWrappingToU8 => {
-            (vec![scalar], ScalarType::U8)
-        }
-        PrimitiveRole::IntConvertCheckedToU16 | PrimitiveRole::IntConvertWrappingToU16 => {
-            (vec![scalar], ScalarType::U16)
-        }
-        PrimitiveRole::IntConvertCheckedToI16 | PrimitiveRole::IntConvertWrappingToI16 => {
-            (vec![scalar], ScalarType::I16)
-        }
-        PrimitiveRole::IntConvertCheckedToI32 | PrimitiveRole::IntConvertWrappingToI32 => {
-            (vec![scalar], ScalarType::I32)
-        }
-        PrimitiveRole::IntConvertCheckedToI8 | PrimitiveRole::IntConvertWrappingToI8 => {
-            (vec![scalar], ScalarType::I8)
-        }
-        PrimitiveRole::IntConvertCheckedToU64 | PrimitiveRole::IntConvertWrappingToU64 => {
-            (vec![scalar], ScalarType::U64)
-        }
-        PrimitiveRole::IntConvertCheckedToIsize | PrimitiveRole::IntConvertWrappingToIsize => {
-            (vec![scalar], ScalarType::Isize)
-        }
-        PrimitiveRole::IntConvertCheckedToU128 | PrimitiveRole::IntConvertWrappingToU128 => {
-            (vec![scalar], ScalarType::U128)
-        }
-        PrimitiveRole::IntConvertCheckedToI128 | PrimitiveRole::IntConvertWrappingToI128 => {
-            (vec![scalar], ScalarType::I128)
-        }
-        _ => {
-            return Err(VmArtifactError::MalformedEncoding {
-                message: "non-integer primitive used by integer runtime opcode",
-            });
-        }
-    })
+    primitive
+        .integer_scalar_signature(scalar)
+        .ok_or(VmArtifactError::MalformedEncoding {
+            message: "non-integer primitive used by integer runtime opcode",
+        })
 }
 
 /// Lower a Core effect row into its source-free, canonical VM identity.  The

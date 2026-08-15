@@ -7030,6 +7030,31 @@ impl MirFunction {
                     )?;
                 }
             }
+            MirInstruction::IntIntrinsic {
+                dst,
+                primitive,
+                scalar,
+                arguments,
+            } => {
+                let Some((parameters, result)) = primitive.integer_scalar_signature(*scalar) else {
+                    return Err("MIR integer runtime primitive has an invalid ABI".into());
+                };
+                if arguments.len() != parameters.len() {
+                    return Err("MIR integer runtime primitive has the wrong arity".into());
+                }
+                self.require_scalar_locals(
+                    &[*dst],
+                    result,
+                    "integer runtime primitive result",
+                )?;
+                for (argument, parameter) in arguments.iter().zip(parameters) {
+                    self.require_scalar_locals(
+                        &[*argument],
+                        parameter,
+                        "integer runtime primitive operand",
+                    )?;
+                }
+            }
             MirInstruction::TextByteLen { dst, value } => {
                 self.require_scalar_locals(&[*dst], ScalarType::Usize, "Text byte length result")?;
                 self.require_scalar_locals(&[*value], ScalarType::Text, "Text byte length input")?;

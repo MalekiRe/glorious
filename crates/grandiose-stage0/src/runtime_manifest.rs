@@ -637,6 +637,84 @@ impl PrimitiveRole {
     pub(crate) const fn is_float(self) -> bool {
         matches!(self, Self::Float(_))
     }
+
+    /// The closed ABI of one concrete materialization of a generic integer
+    /// runtime leaf. Both MIR validation and VM verification consume this
+    /// authority so a new manifest selector cannot make their contracts
+    /// diverge.
+    pub(crate) fn integer_scalar_signature(
+        self,
+        scalar: ScalarType,
+    ) -> Option<(Vec<ScalarType>, ScalarType)> {
+        if !matches!(
+            scalar,
+            ScalarType::U8
+                | ScalarType::U16
+                | ScalarType::U32
+                | ScalarType::U64
+                | ScalarType::U128
+                | ScalarType::Usize
+                | ScalarType::I8
+                | ScalarType::I16
+                | ScalarType::I32
+                | ScalarType::I64
+                | ScalarType::I128
+                | ScalarType::Isize
+        ) {
+            return None;
+        }
+        let binary = vec![scalar, scalar];
+        Some(match self {
+            Self::IntCheckedAdd
+            | Self::IntWrappingAdd
+            | Self::IntWrappingSub
+            | Self::IntWrappingMul
+            | Self::IntBitAnd
+            | Self::IntBitOr
+            | Self::IntBitXor => (binary, scalar),
+            Self::IntEqual | Self::IntLess | Self::IntGreater => (binary, ScalarType::U32),
+            Self::IntBitNot | Self::IntWrappingNeg => (vec![scalar], scalar),
+            Self::IntShl | Self::IntShr => (vec![scalar, ScalarType::U32], scalar),
+            Self::IntConvertCheckedToI64 | Self::IntConvertWrappingToI64 => {
+                (vec![scalar], ScalarType::I64)
+            }
+            Self::IntConvertCheckedToU32 | Self::IntConvertWrappingToU32 => {
+                (vec![scalar], ScalarType::U32)
+            }
+            Self::IntConvertCheckedToUsize | Self::IntConvertWrappingToUsize => {
+                (vec![scalar], ScalarType::Usize)
+            }
+            Self::IntConvertCheckedToU8 | Self::IntConvertWrappingToU8 => {
+                (vec![scalar], ScalarType::U8)
+            }
+            Self::IntConvertCheckedToU16 | Self::IntConvertWrappingToU16 => {
+                (vec![scalar], ScalarType::U16)
+            }
+            Self::IntConvertCheckedToI16 | Self::IntConvertWrappingToI16 => {
+                (vec![scalar], ScalarType::I16)
+            }
+            Self::IntConvertCheckedToI32 | Self::IntConvertWrappingToI32 => {
+                (vec![scalar], ScalarType::I32)
+            }
+            Self::IntConvertCheckedToI8 | Self::IntConvertWrappingToI8 => {
+                (vec![scalar], ScalarType::I8)
+            }
+            Self::IntConvertCheckedToU64 | Self::IntConvertWrappingToU64 => {
+                (vec![scalar], ScalarType::U64)
+            }
+            Self::IntConvertCheckedToIsize | Self::IntConvertWrappingToIsize => {
+                (vec![scalar], ScalarType::Isize)
+            }
+            Self::IntConvertCheckedToU128 | Self::IntConvertWrappingToU128 => {
+                (vec![scalar], ScalarType::U128)
+            }
+            Self::IntConvertCheckedToI128 | Self::IntConvertWrappingToI128 => {
+                (vec![scalar], ScalarType::I128)
+            }
+            _ => return None,
+        })
+    }
+
     pub fn selector_name(self) -> String {
         if let Self::Float(primitive) = self {
             return primitive.selector_name();
