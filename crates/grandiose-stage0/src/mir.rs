@@ -12215,7 +12215,8 @@ impl Lowerer<'_> {
         let ([outer], [inner]) = (outer.as_slice(), inner.as_slice()) else {
             return None;
         };
-        if outer.patterns.len() != argument_ids.len()
+        if argument_ids.len() != 1
+            || outer.patterns.len() != argument_ids.len()
             || inner.patterns.len() != argument_ids.len()
             || !outer.patterns.iter().all(pattern_is_irrefutable)
             || inner.patterns.iter().all(pattern_is_irrefutable)
