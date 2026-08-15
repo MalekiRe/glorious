@@ -5436,10 +5436,10 @@ fn service_requires_child_evidence_for_inherited_hrtb_method_values_through_faca
 #[test]
 fn service_materializes_aliased_hrtb_inherited_method_values_from_child_bounds() {
     // The imported `Value: Gateway<i64>` clause gives a lexical Child proof.
-    // That proof entails Parent, but method lowering still needs Parent's
-    // concrete implementation identity to survive the HRTB callable ABI.
+    // It entails Parent and Gate; Parent's conditional implementation still
+    // supplies the concrete identity required by the HRTB callable ABI.
     let root = "use facade::{Gateway, Value}; pub fn select() -> for<'a> (Value, &'a i64) -> i64 where Value: Gateway<i64> { Gateway<i64>::relay } pub fn apply(callback: for<'a> (Value, &'a i64) -> i64) -> i64 { let value = 42; callback(Value {}, &value) } pub fn main() -> i64 { apply(select()) }";
-    let provider = "pub trait Parent<U> { fn relay<'a>(receiver: Self, value: &'a i64) -> i64; } pub trait Child<U>: Parent<U> {} pub struct Value {} impl Parent<i64> for Value { fn relay<'a>(receiver: Value, value: &'a i64) -> i64 { *value } } impl Child<i64> for Value where Value: Parent<i64> {}";
+    let provider = "pub trait Gate {} pub trait Parent<U> { fn relay<'a>(receiver: Self, value: &'a i64) -> i64; } pub trait Child<U>: Parent<U> + Gate {} pub struct Value {} impl Gate for Value {} impl Parent<i64> for Value where Value: Gate { fn relay<'a>(receiver: Value, value: &'a i64) -> i64 { *value } } impl Child<i64> for Value {}";
     let mut request = request(root);
     request.sources.push(SourceInput::new(
         PackageKey("facade@0.1.0".into()),

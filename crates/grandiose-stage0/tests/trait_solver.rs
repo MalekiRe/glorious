@@ -459,7 +459,7 @@ fn parent_lexical_evidence_cannot_select_an_inherited_child_method() {
 #[test]
 fn child_lexical_evidence_selects_an_inherited_blanket_method() {
     let (interface, signatures) = signatures(
-        "trait Parent<U> { fn relay(receiver: Self, value: i64) -> i64; } trait Child<U>: Parent<U> {} impl<T> Parent<i64> for T { fn relay(receiver: T, value: i64) -> i64 { value } }",
+        "trait Gate {} trait Parent<U> { fn relay(receiver: Self, value: i64) -> i64; } trait Child<U>: Parent<U> + Gate {} impl<T> Parent<i64> for T where T: Gate { fn relay(receiver: T, value: i64) -> i64 { value } }",
     );
     let child = key(&interface, "Child");
     let generic = Type::Generic(0);
