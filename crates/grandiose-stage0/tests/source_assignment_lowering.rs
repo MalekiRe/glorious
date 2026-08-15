@@ -9,8 +9,8 @@
 use grandiose_stage0::{
     BodySyntax, CompilationMode, CompilationRequest, CompilerBuildIdentity, DeclarationScan,
     DefinitionIndex, Digest, ElaboratedInterface, FileKey, InterfaceSet, LexedFile, LogicalPath,
-    MirFunction, MirInstruction, MirLocal, MirLowering, PackageKey, PlaceBindingOrigin, PlaceFlow,
-    SourceInput, StageZeroCompiler, TypedBody,
+    MirCleanupAction, MirFunction, MirInstruction, MirLocal, MirLowering, MirTerminator,
+    PackageKey, PlaceBindingOrigin, PlaceFlow, SourceInput, StageZeroCompiler, TypedBody,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -369,5 +369,180 @@ fn lifted_closure_assignment_preserves_a_mapped_addressable_capture_slot() {
             .run_i64()
             .expect("lifted source assignment must execute"),
         42
+    );
+}
+
+/// Assignment flags are useful only if the lexical exit consumes them.  After
+/// a whole move and reinitialization, leaving the label must use the exact
+/// frozen source-storage scope, process its owners in reverse initialization
+/// order, clear every flag, and end every addressable lifetime with
+/// `StorageDead`.  None of those facts may be inferred later from temporary
+/// register lifetimes.
+#[test]
+fn source_assignment_leave_emits_reverse_storage_dead_cleanup_after_move_and_reinit() {
+    let source = "pub struct Token { number: i64 } pub fn main() -> i64 { label done { let owner = Token { number: 1 }; move owner; owner = Token { number: 2 }; let later = 40; transfer done owner.number + later } }";
+    let (_core, _flow, lowered) = lower_main(source);
+    let function = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "assigned lexical leave must lower: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    function.validate().unwrap_or_else(|error| {
+        panic!("assigned lexical leave MIR must validate: {error}\n{function:#?}")
+    });
+    let cleanup = function
+        .blocks
+        .iter()
+        .find_map(|block| match &block.terminator {
+            MirTerminator::Leave { cleanup, .. } => Some(cleanup),
+            _ => None,
+        })
+        .expect("label transfer must remain a MIR Leave");
+    assert_ne!(
+        cleanup.source_storage_scope, cleanup.target_storage_scope,
+        "the lexical label exit must cross the source-storage boundary: {function:#?}"
+    );
+    let expected = function
+        .control
+        .source_storage
+        .exited_bindings(cleanup.source_storage_scope, cleanup.target_storage_scope)
+        .expect("Leave storage scopes must be valid");
+    assert!(
+        expected.len() >= 2,
+        "fixture must exit both the reinitialized owner and later binding: {function:#?}"
+    );
+    assert_eq!(
+        cleanup
+            .drop_flags
+            .iter()
+            .map(|flag| flag.binding)
+            .collect::<Vec<_>>(),
+        expected,
+        "every exited source owner needs exactly one stable cleanup drop flag"
+    );
+    let terminal = cleanup
+        .actions
+        .iter()
+        .filter_map(|action| match action {
+            MirCleanupAction::Drop { binding, .. } | MirCleanupAction::Protect { binding, .. } => {
+                Some(*binding)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminal, expected,
+        "cleanup must process source owners in reverse lexical initialization order"
+    );
+    for (binding, flag) in expected.iter().zip(&cleanup.drop_flags) {
+        let terminal_index = cleanup
+            .actions
+            .iter()
+            .position(|action| {
+                matches!(
+                    action,
+                    MirCleanupAction::Drop { binding: candidate, flag: action_flag }
+                        if candidate == binding && *action_flag == flag.id
+                )
+            })
+            .expect("unprotected assigned owner must have conditional drop");
+        let clear_index = cleanup
+            .actions
+            .iter()
+            .position(|action| {
+                matches!(
+                    action,
+                    MirCleanupAction::ClearDropFlag { flag: candidate } if *candidate == flag.id
+                )
+            })
+            .expect("cleanup must clear its assignment drop flag");
+        let dead_index = cleanup
+            .actions
+            .iter()
+            .position(|action| {
+                matches!(
+                    action,
+                    MirCleanupAction::StorageDead { binding: candidate } if candidate == binding
+                )
+            })
+            .expect("cleanup must emit StorageDead for every exited owner");
+        assert!(
+            terminal_index < clear_index && clear_index < dead_index,
+            "each source owner must be terminally cleaned, then disarmed, then StorageDead: {cleanup:#?}"
+        );
+    }
+    assert_eq!(
+        compile_main(source)
+            .artifact
+            .expect("assigned lexical leave must publish an artifact")
+            .run_i64()
+            .expect("assigned lexical leave must execute"),
+        42
+    );
+}
+
+/// If a source owner itself is the non-local payload, cleanup has to protect
+/// that exact mapped slot.  It may clear the drop flag and end the lexical
+/// storage after transfer, but must never emit a Drop action for the payload
+/// owner before the label target receives it.
+#[test]
+fn source_leave_protects_reinitialized_owner_payload_before_storage_dead() {
+    let source = "pub struct Token { number: i64 } pub fn main() -> Token { label done { let value = Token { number: 1 }; move value; value = Token { number: 42 }; transfer done value } }";
+    let (_core, _flow, lowered) = lower_main(source);
+    let function = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "protected source payload leave must lower: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    function.validate().unwrap_or_else(|error| {
+        panic!("protected source payload MIR must validate: {error}\n{function:#?}")
+    });
+    let slot = let_slot(&function);
+    let (arguments, cleanup) = function
+        .blocks
+        .iter()
+        .find_map(|block| match &block.terminator {
+            MirTerminator::Leave {
+                arguments, cleanup, ..
+            } => Some((arguments, cleanup)),
+            _ => None,
+        })
+        .expect("source transfer must remain a MIR Leave");
+    assert_eq!(
+        arguments,
+        &[slot],
+        "the transferred source owner must remain the exact protected payload slot: {function:#?}"
+    );
+    assert_eq!(cleanup.protected_values, vec![slot]);
+    let binding = function
+        .control
+        .source_storage
+        .binding_locals
+        .iter()
+        .position(|local| *local == Some(slot))
+        .map(|index| grandiose_stage0::MirPlaceBindingId(index as u32))
+        .expect("protected source slot must retain frozen binding provenance");
+    assert!(
+        cleanup.actions.iter().any(|action| matches!(
+            action,
+            MirCleanupAction::Protect { binding: candidate, local } if *candidate == binding && *local == slot
+        )),
+        "cleanup must Protect the payload source owner rather than infer a temporary: {cleanup:#?}"
+    );
+    assert!(
+        !cleanup.actions.iter().any(|action| matches!(
+            action,
+            MirCleanupAction::Drop { binding: candidate, .. } if *candidate == binding
+        )),
+        "cleanup must never drop a protected transferred source owner: {cleanup:#?}"
+    );
+    assert!(
+        cleanup.actions.iter().any(|action| matches!(
+            action,
+            MirCleanupAction::StorageDead { binding: candidate } if *candidate == binding
+        )),
+        "the transferred source owner still needs an explicit lexical StorageDead: {cleanup:#?}"
     );
 }
