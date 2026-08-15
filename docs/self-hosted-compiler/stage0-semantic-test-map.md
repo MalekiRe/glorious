@@ -76,6 +76,11 @@ coarse. The composite fixtures cover:
 - custom `Drop` eligibility, exactly-once cleanup, nonlocal cleanup, opacity to
   partial moves/deconstruction, and the prohibition on effects or label
   transfer from a destructor;
+- conditional custom `Drop` selection: an inapplicable generic destructor
+  leaves its concrete aggregate eligible for ordinary partial movement, while
+  a selected instantiation remains opaque
+  (`service_allows_partial_move_when_a_conditional_drop_impl_is_not_selected`,
+  `service_rejects_partial_move_when_a_conditional_drop_impl_is_selected`);
 - the absence of compiler-known control/arithmetic variants in `CoreKind`;
 - a small independent evaluator/verified-VM differential for branded label
   execution;

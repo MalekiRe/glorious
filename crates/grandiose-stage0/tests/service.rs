@@ -3569,6 +3569,34 @@ fn service_preserves_disjoint_aggregate_fields_after_a_partial_move() {
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 2);
 }
 
+#[test]
+fn service_allows_partial_move_when_a_conditional_drop_impl_is_not_selected() {
+    // A `Drop` implementation is selected trait evidence, not a nominal-name
+    // property.  `Pair<i64>` has no `Mark` evidence, so its conditional hook
+    // does not apply and its visible fields retain ordinary partial-move
+    // semantics.
+    let source = "trait Mark: Use<[0, 0]> {} pub struct Pair<T> { left: T, right: i64 } impl<T> Use<[0, 0]> for Pair<T> where T: Mark {} impl<T> Drop for Pair<T> where T: Mark { drop(&mut self) -> {} } pub fn main() -> i64 { let pair = Pair<i64> { left: 40, right: 2 }; move pair.left + pair.right }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_partial_move_when_a_conditional_drop_impl_is_selected() {
+    // The matching instantiation remains opaque: selecting a conditional
+    // hook must retain the same complete-aggregate guarantee as a direct
+    // `Drop` implementation.
+    let source = "trait Mark: Use<[0, 0]> {} pub struct Marker {} impl Use<[0, 0]> for Marker {} impl Mark for Marker {} pub struct Pair<T> { left: T, right: i64 } impl<T> Use<[0, 0]> for Pair<T> where T: Mark {} impl<T> Drop for Pair<T> where T: Mark { drop(&mut self) -> {} } pub fn main() -> i64 { let pair = Pair<Marker> { left: Marker {}, right: 2 }; move pair.left; pair.right }";
+    let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
+        Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
+        outcome => panic!("selected conditional Drop unexpectedly compiled: {outcome:#?}"),
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G4188"),
+        "expected custom-Drop partial-move rejection, got {diagnostics:#?}"
+    );
+}
+
 /// Exercise the ordinary service path for the source-level shape that reaches
 /// a handler, a partial aggregate move, and a nonlocal lexical exit together.
 /// The Core test inspects the intermediate frozen MIR; this companion proves

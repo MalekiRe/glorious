@@ -4043,8 +4043,15 @@ impl Elaborator<'_> {
             }
             ExprKind::Move(value) => {
                 let value = self.expression(value);
-                if let CoreKind::Field { base, .. } = self.expressions[value.0 as usize].kind
-                    && self.type_has_custom_drop(&self.expressions[base.0 as usize].ty)
+                let projected_base_ty = match self.expressions[value.0 as usize].kind {
+                    CoreKind::Field { base, .. } => {
+                        Some(self.expressions[base.0 as usize].ty.clone())
+                    }
+                    _ => None,
+                };
+                if projected_base_ty
+                    .as_ref()
+                    .is_some_and(|ty| self.type_has_custom_drop(ty))
                 {
                     self.error(
                         expression.span,
@@ -7575,24 +7582,28 @@ impl Elaborator<'_> {
     /// `Drop` observes the complete initialized aggregate.  The hook cannot
     /// run after a field has been moved out, so safe source may only transfer
     /// such a value as a whole (or use a legal zero-use destruction path).
-    fn type_has_custom_drop(&self, ty: &Type) -> bool {
-        let Type::Nominal { definition, .. } = ty else {
-            return false;
-        };
-        self.signatures.definitions.values().any(|header| {
-            let crate::ElaboratedHeader::Implementation(implementation) = header else {
-                return false;
-            };
-            implementation.relation.definition
-                == crate::resolution::language_drop_trait_definition()
-                && matches!(
-                    implementation.self_ty,
-                    Type::Nominal {
-                        definition: implemented,
-                        ..
-                    } if implemented == *definition
-                )
-        })
+    fn type_has_custom_drop(&mut self, ty: &Type) -> bool {
+        // A destructor is not a nominal declaration property: an impl with a
+        // `where` clause applies only to the instantiations for which trait
+        // selection proves that clause.  Match cleanup lowering's selected
+        // evidence so an inapplicable generic `Drop` impl does not make an
+        // otherwise ordinary aggregate spuriously opaque to partial moves.
+        // Keep unknown selection conservative: moving a field would make a
+        // subsequently selected destructor observe an incomplete aggregate.
+        let assumptions = self.ambient_trait_solver_assumptions();
+        !matches!(
+            self.trait_query().solve_with_assumptions(
+                TraitGoal {
+                    relation: crate::ElaboratedTraitReference {
+                        definition: crate::resolution::language_drop_trait_definition(),
+                        arguments: Vec::new(),
+                    },
+                    subject: ty.clone(),
+                },
+                &assumptions,
+            ),
+            TraitAnswer::NoSolution | TraitAnswer::Refuted { .. }
+        )
     }
     /// Return the payload layout of a selected enum variant only while the
     /// enclosing positive refinement proves that this exact Core place has
