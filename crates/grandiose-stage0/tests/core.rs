@@ -4060,7 +4060,7 @@ fn nominal_bool_control_accepts_concrete_integer_comparisons_and_terminal_handle
 
     let reversed_comparison = core_for(
         "core-nominal-bool-reversed-integer-comparison@0.1.0",
-        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; infixl 20 <; pub fn main(value: u32) -> Bool { handle value < 55296 { true => true, false => handle 57343 < value { true => true, false => false } } }",
+        "enum Result<T, E> { Ok(T), Err(E) } type Bool = Result<(), ()>; infixl 20 <; pub fn main(value: u32) -> Bool { handle value < 55296 { true => true, false => 57343 < value } }",
     );
     assert!(
         reversed_comparison.diagnostics.is_empty(),

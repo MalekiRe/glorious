@@ -4270,6 +4270,7 @@ impl Elaborator<'_> {
                 operands,
                 operators,
             } if expected.is_some() => {
+                let fallback_expected = expected.clone();
                 if let ([left, right], [operator]) = (operands.as_slice(), operators.as_slice())
                     && let Some(value) = self.direct_infix_callable(
                         operator,
@@ -4281,7 +4282,12 @@ impl Elaborator<'_> {
                 {
                     return value;
                 }
-                self.expression(id)
+                let value = self.expression(id);
+                self.lift_scalar_bool_to_canonical_carrier(
+                    value,
+                    fallback_expected,
+                    expression.span,
+                )
             }
             ExprKind::Closure { parameters, body } => self.closure(
                 parameters
@@ -4425,6 +4431,67 @@ impl Elaborator<'_> {
             .instantiate_enum_variant_generic(*definition, arguments, name)
             .ok()?;
         (fields == vec![Type::Unit]).then(|| (*definition, arguments.clone(), variant))
+    }
+
+    /// A primitive comparison yields the VM scalar predicate, while the
+    /// distributed source surface represents control as `Bool = Result<(),
+    /// ()>`.  Literals already receive this contextual lift in
+    /// `literal_expected`; apply the same explicit two-arm conversion to a
+    /// computed scalar predicate so a nested branch may return `value < 7`
+    /// wherever the canonical Bool carrier is expected.
+    fn lift_scalar_bool_to_canonical_carrier(
+        &mut self,
+        value: CoreId,
+        expected: Option<Type>,
+        span: Span,
+    ) -> CoreId {
+        let Some(expected) = expected else {
+            return value;
+        };
+        if self.expressions[value.0 as usize].ty != Type::Scalar(ScalarType::Bool) {
+            return value;
+        }
+        let Some((definition, arguments, _true_variant)) =
+            self.canonical_bool_literal_variant(Some(&expected), "true")
+        else {
+            return value;
+        };
+        let Some((false_definition, false_arguments, _false_variant)) =
+            self.canonical_bool_literal_variant(Some(&expected), "false")
+        else {
+            return value;
+        };
+        if definition != false_definition || arguments != false_arguments {
+            return value;
+        }
+        let true_value = self.literal_expected("true".into(), Some(expected.clone()), span);
+        let false_value = self.literal_expected("false".into(), Some(expected.clone()), span);
+        self.alloc(
+            CoreKind::Completion {
+                computation: value,
+                clauses: vec![
+                    CoreCompletionClause {
+                        pattern: CorePattern::Literal("true".into()),
+                        bindings: vec![],
+                        refinement: None,
+                        body: true_value,
+                        span,
+                    },
+                    CoreCompletionClause {
+                        pattern: CorePattern::Literal("false".into()),
+                        bindings: vec![],
+                        refinement: None,
+                        body: false_value,
+                        span,
+                    },
+                ],
+            },
+            Type::Nominal {
+                definition,
+                arguments,
+            },
+            span,
+        )
     }
     /// Strict expression forms evaluate their children from left to right. If
     /// any child cannot return normally, the enclosing construction cannot
