@@ -8,7 +8,7 @@
 //! equivalent live/dead sequence for every lexical source scope.
 
 use crate::{
-    mir::{MirMovePathId, MirMovePathTables, MirPlaceBindingId},
+    mir::{MirLocal, MirMovePathId, MirMovePathTables, MirPlaceBindingId},
     placeflow::{PlaceFlow, SourceStorageScopeId},
 };
 use std::collections::BTreeSet;
@@ -57,6 +57,11 @@ pub struct MirSourceStorageScopeData {
 pub struct MirSourceStorageTables {
     pub scopes: Vec<MirSourceStorageScopeData>,
     pub binding_scopes: Vec<MirSourceStorageScopeId>,
+    /// Optional executable local for each source storage binding. `None` is
+    /// valid only for a binder whose compact lowering currently carries its
+    /// storage solely through a block/handler payload; it must never be
+    /// filled by guessing from a spelling.
+    pub binding_locals: Vec<Option<MirLocal>>,
 }
 
 impl Default for MirSourceStorageTables {
@@ -69,6 +74,7 @@ impl Default for MirSourceStorageTables {
                 events: vec![],
             }],
             binding_scopes: vec![],
+            binding_locals: vec![],
         }
     }
 }
@@ -114,6 +120,7 @@ impl MirSourceStorageTables {
                 .iter()
                 .map(|scope| MirSourceStorageScopeId(scope.0))
                 .collect(),
+            binding_locals: vec![None; flow.bindings.len()],
         }
     }
 
@@ -126,6 +133,9 @@ impl MirSourceStorageTables {
         }
         if self.binding_scopes.len() != paths.bindings.len() {
             return Err("MIR source-storage bindings do not cover frozen move bindings".into());
+        }
+        if self.binding_locals.len() != paths.bindings.len() {
+            return Err("MIR source-storage local mapping does not cover frozen move bindings".into());
         }
         let mut observed_bindings = vec![None; paths.bindings.len()];
         for (index, scope) in self.scopes.iter().enumerate() {
@@ -186,6 +196,28 @@ impl MirSourceStorageTables {
         }
         if observed_bindings.iter().any(Option::is_none) {
             return Err("MIR source-storage arena omits a frozen move binding".into());
+        }
+        Ok(())
+    }
+
+    pub fn validate_local_mapping(
+        &self,
+        paths: &MirMovePathTables,
+        locals: usize,
+    ) -> Result<(), String> {
+        for (binding, local) in self.binding_locals.iter().enumerate() {
+            let Some(local) = local else {
+                continue;
+            };
+            if local.0 as usize >= locals {
+                return Err(format!(
+                    "MIR source-storage binding {binding} maps to absent local {}",
+                    local.0
+                ));
+            }
+            if binding >= paths.bindings.len() {
+                return Err("MIR source-storage local map exceeds frozen bindings".into());
+            }
         }
         Ok(())
     }

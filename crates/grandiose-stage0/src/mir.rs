@@ -4346,7 +4346,22 @@ impl MirFunction {
     /// product as move paths.  Consumers therefore obtain a typed lifetime
     /// graph rather than reconstructing lexical scope from local spellings.
     pub fn with_frozen_source_storage(mut self, flow: &PlaceFlow) -> Self {
-        self.control.source_storage = MirSourceStorageTables::from_placeflow(flow);
+        let mut storage = MirSourceStorageTables::from_placeflow(flow);
+        for (index, binding) in self.control.move_paths.bindings.iter().enumerate() {
+            let local = match binding.origin {
+                PlaceBindingOrigin::Parameter { index } => self.parameters.get(index as usize).copied(),
+                PlaceBindingOrigin::Let { expression } => self
+                    .locals
+                    .iter()
+                    .position(|local| local.source == expression)
+                    .map(|index| MirLocal(index as u32)),
+                PlaceBindingOrigin::HandlerBinder { .. }
+                | PlaceBindingOrigin::HandlerResumption { .. }
+                | PlaceBindingOrigin::CompletionBinder { .. } => None,
+            };
+            storage.binding_locals[index] = local;
+        }
+        self.control.source_storage = storage;
         self
     }
 
@@ -4528,6 +4543,9 @@ impl MirFunction {
         validate_nominal_copy_descriptors(&self.nominal_copy_descriptors)?;
         self.validate_move_path_tables()?;
         self.control.source_storage.validate(&self.control.move_paths)?;
+        self.control
+            .source_storage
+            .validate_local_mapping(&self.control.move_paths, self.locals.len())?;
         validate_mir_type(&self.result, &mut vec![])?;
         for local in &self.locals {
             validate_mir_type(&local.ty, &mut vec![])?;
@@ -4549,6 +4567,115 @@ impl MirFunction {
         self.validate_operation_arena()?;
         self.validate_label_contracts()?;
         self.validate_control_tables()?;
+        self.validate_local_storage_liveness()?;
+        Ok(())
+    }
+    /// Validate the explicit compact-MIR storage state before any VM emission.
+    /// Parameters and block parameters enter initialized; every other local
+    /// starts dead and becomes readable only after a defining instruction on
+    /// every reachable predecessor. This is the register representation of
+    /// source `StorageLive` plus initialization, and rejects forged local
+    /// reads even when no PlaceFlow sidecar was supplied.
+    fn validate_local_storage_liveness(&self) -> Result<(), String> {
+        let mut entries = vec![None::<BTreeSet<MirLocal>>; self.blocks.len()];
+        entries[self.entry.0 as usize] = Some(self.parameters.iter().copied().collect());
+        let mut worklist = VecDeque::from([self.entry.0 as usize]);
+        while let Some(index) = worklist.pop_front() {
+            let Some(mut live) = entries[index].clone() else {
+                continue;
+            };
+            let block = &self.blocks[index];
+            live.extend(block.parameters.iter().copied());
+            for instruction in &block.instructions {
+                let destination = destination(instruction);
+                let mut inputs = references(instruction);
+                // A label instruction names a destination block parameter;
+                // that payload local is defined on the nonlocal target, not
+                // read while the label capability is installed. Likewise
+                // handler payload destinations are definitions supplied by
+                // dynamic dispatch, never eager reads at installation.
+                match instruction {
+                    MirInstruction::MakeLabel { destination, .. } => {
+                        inputs.retain(|local| local != destination);
+                    }
+                    MirInstruction::InstallHandler { .. } => inputs.clear(),
+                    _ => {}
+                }
+                for local in inputs {
+                    if Some(local) != destination && !live.contains(&local) {
+                        return Err(format!(
+                            "MIR reads dead/uninitialized local {} before source-storage initialization",
+                            local.0
+                        ));
+                    }
+                }
+                if let Some(destination) = destination {
+                    live.insert(destination);
+                }
+            }
+            let mut check_edge = |target: MirBlockId, arguments: &[MirLocal]| -> Result<(), String> {
+                for local in arguments {
+                    if !live.contains(local) {
+                        return Err(format!(
+                            "MIR edge reads dead/uninitialized local {} before source-storage initialization",
+                            local.0
+                        ));
+                    }
+                }
+                let target_index = target.0 as usize;
+                if target_index >= entries.len() {
+                    return Err(format!("MIR edge targets absent block {}", target.0));
+                }
+                let changed = match &mut entries[target_index] {
+                    Some(current) => {
+                        let next = current.intersection(&live).copied().collect::<BTreeSet<_>>();
+                        if *current == next {
+                            false
+                        } else {
+                            *current = next;
+                            true
+                        }
+                    }
+                    slot => {
+                        *slot = Some(live.clone());
+                        true
+                    }
+                };
+                if changed {
+                    worklist.push_back(target_index);
+                }
+                Ok(())
+            };
+            match &block.terminator {
+                MirTerminator::Goto { target, arguments }
+                | MirTerminator::Leave { target, arguments, .. } => check_edge(*target, arguments)?,
+                MirTerminator::SwitchBool {
+                    condition,
+                    then_target,
+                    then_arguments,
+                    else_target,
+                    else_arguments,
+                } => {
+                    if !live.contains(condition) {
+                        return Err(format!(
+                            "MIR switch reads dead/uninitialized local {} before source-storage initialization",
+                            condition.0
+                        ));
+                    }
+                    check_edge(*then_target, then_arguments)?;
+                    check_edge(*else_target, else_arguments)?;
+                }
+                MirTerminator::Return { value } => {
+                    if !live.contains(value) {
+                        return Err(format!(
+                            "MIR return reads dead/uninitialized local {} before source-storage initialization",
+                            value.0
+                        ));
+                    }
+                }
+                MirTerminator::Unreachable => {}
+            }
+        }
         Ok(())
     }
     fn validate_operation_arena(&self) -> Result<(), String> {

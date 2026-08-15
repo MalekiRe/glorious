@@ -562,7 +562,7 @@ fn graph() -> MirFunction {
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-cfg")),
         captures: 0,
-        parameters: vec![],
+        parameters: vec![MirLocal(0), MirLocal(1), MirLocal(2)],
         locals: vec![
             local(Type::Scalar(ScalarType::Bool)),
             local(Type::Scalar(ScalarType::I64)),
@@ -629,7 +629,7 @@ fn mir_templates_may_defer_associated_const_projection_but_vm_emission_rejects_i
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"mir-associated-const-function")),
         captures: 0,
-        parameters: vec![],
+        parameters: vec![MirLocal(0)],
         locals: vec![local(nominal.clone())],
         result: nominal,
         control: MirControlTables::default(),
@@ -1826,6 +1826,8 @@ fn externally_visible_label_merge_function() -> MirFunction {
                     target: MirBlockId(2),
                     arguments: vec![MirLocal(0)],
                     cleanup: MirCleanupPlan {
+                        source_storage_scope: MirSourceStorageScopeId::ROOT,
+                        target_storage_scope: MirSourceStorageScopeId::ROOT,
                         moved_places: vec![],
                         moved_paths: vec![],
                         active_loans: vec![],
