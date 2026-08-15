@@ -10,7 +10,8 @@
 
 use grandiose_stage0::{
     decode_and_verify_artifact, decode_artifact, encode_artifact, CandidateVmArtifact, DefKey,
-    Digest, VmCleanupProof, VmFunction, VmInstruction, VmType, STAGE0_VM_SCHEMA,
+    Digest, VmCleanupProof, VmFunction, VmInstruction, VmStorageErasureAction,
+    VmStorageErasureStorage, VmStorageErasureWitness, VmType, STAGE0_VM_SCHEMA,
 };
 
 fn compact_exit_without_storage_witness() -> CandidateVmArtifact {
@@ -41,6 +42,7 @@ fn compact_exit_without_storage_witness() -> CandidateVmArtifact {
                     cleanup: VmCleanupProof {
                         moved_places: vec![],
                         active_loans: vec![],
+                        storage_erasure: VmStorageErasureWitness::Missing,
                     },
                 },
                 VmInstruction::Return { value: 2 },
@@ -73,4 +75,76 @@ fn verifier_rejects_compact_exit_without_source_storage_erasure_witness() {
         "the verifier accepted an exit which has no source-storage lifecycle, \
          drop-flag, or ordered cleanup-erasure witness"
     );
+}
+
+fn witnessed_storage_exit() -> CandidateVmArtifact {
+    let mut artifact = CandidateVmArtifact {
+        schema: STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"storage-erasure-witnessed")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::I64, VmType::I64],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::Leave {
+                    brand_owner: DefKey(Digest::of_bytes(b"storage-erasure-witnessed-label")),
+                    brand_label: 0,
+                    target: 2,
+                    arguments: vec![0],
+                    destinations: vec![1],
+                    cleanup: VmCleanupProof {
+                        moved_places: vec![],
+                        active_loans: vec![],
+                        storage_erasure: VmStorageErasureWitness::Verified {
+                            storages: vec![VmStorageErasureStorage {
+                                storage: 0,
+                                binding: 0,
+                                value_register: 0,
+                                initialized: true,
+                                drop_flag: Some(0),
+                            }],
+                            actions: vec![
+                                VmStorageErasureAction::EndBorrow { storage: 0 },
+                                VmStorageErasureAction::Protect {
+                                    storage: 0,
+                                    register: 0,
+                                },
+                                VmStorageErasureAction::SetDropFlag {
+                                    drop_flag: 0,
+                                    initialized: false,
+                                },
+                                VmStorageErasureAction::StorageDead { storage: 0 },
+                            ],
+                            protected_registers: vec![0],
+                        },
+                    },
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"stale-storage-erasure-witnessed"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    artifact
+}
+
+#[test]
+fn source_storage_erasure_witness_round_trips_and_malformed_actions_fail_decode() {
+    let artifact = witnessed_storage_exit();
+    let bytes = encode_artifact(&artifact);
+    assert_eq!(decode_artifact(&bytes).unwrap(), artifact);
+    assert!(decode_and_verify_artifact(&bytes).is_ok());
+
+    // This fixture's final payload is its protected-register list (12 bytes)
+    // followed by `Return` (5 bytes).  The preceding action stream is fixed:
+    // EndBorrow (5), Protect (9), SetDropFlag (6), StorageDead (5). Mutating
+    // the first action tag therefore exercises decoder rejection before the
+    // artifact fingerprint is consulted.
+    let mut malformed = bytes;
+    let first_action_tag = malformed.len() - 5 - 12 - (5 + 9 + 6 + 5);
+    malformed[first_action_tag] = 9;
+    assert!(decode_artifact(&malformed).is_err());
 }

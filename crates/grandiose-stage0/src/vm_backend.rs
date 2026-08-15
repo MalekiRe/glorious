@@ -1052,6 +1052,58 @@ pub enum VmInstruction {
 pub struct VmCleanupProof {
     pub moved_places: Vec<VmCleanupPlace>,
     pub active_loans: Vec<VmCleanupLoan>,
+    /// Checked summary of the source-storage lifecycle that was compacted
+    /// before this nonlocal edge entered the VM artifact.  `Missing` is a
+    /// deliberately representable hostile-artifact state; the verifier never
+    /// accepts it.  Keeping it explicit rather than inferring it from the
+    /// register cleanup facts prevents a newer decoder from accidentally
+    /// treating pre-schema artifacts as having completed storage cleanup.
+    pub storage_erasure: VmStorageErasureWitness,
+}
+/// A decoder-verifiable account of source storage erased at a lexical exit.
+///
+/// This is intentionally VM-shaped: `storage`, `binding`, and register
+/// identities are frozen numeric artifacts, not MIR types or source spans.
+/// The frontend/MIR bridge can therefore construct it without making the
+/// runtime artifact depend on compiler-only storage structures.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VmStorageErasureWitness {
+    /// Never valid in a verified artifact.  It exists so malformed and stale
+    /// wire payloads can be represented and rejected deterministically.
+    Missing,
+    Verified {
+        /// Source storages in lexical creation order.  Cleanup actions run in
+        /// the inverse order and complete each storage's lifecycle exactly.
+        storages: Vec<VmStorageErasureStorage>,
+        /// Ordered lifetime/drop/storage-release actions compacted from MIR.
+        actions: Vec<VmStorageErasureAction>,
+        /// The exact, sorted set of registers transferred as protected Leave
+        /// payloads.  A storage that owns one must use `Protect` rather than
+        /// `Destroy` before its `StorageDead` action.
+        protected_registers: Vec<u32>,
+    },
+}
+/// A source-storage identity visible at the VM artifact boundary.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct VmStorageErasureStorage {
+    pub storage: u32,
+    pub binding: u32,
+    pub value_register: u32,
+    pub initialized: bool,
+    /// The compiler-created drop flag for an initialized storage, if it has
+    /// one.  The corresponding cleanup action must disarm it before death.
+    pub drop_flag: Option<u32>,
+}
+/// Canonically ordered source-storage cleanup actions.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum VmStorageErasureAction {
+    EndBorrow { storage: u32 },
+    /// Move a protected Leave payload out of source storage.  This disarms
+    /// destruction while preserving the payload for parallel transfer.
+    Protect { storage: u32, register: u32 },
+    Destroy { storage: u32 },
+    SetDropFlag { drop_flag: u32, initialized: bool },
+    StorageDead { storage: u32 },
 }
 /// The runtime control payload for a verified `Leave`.  It is deliberately
 /// separate from a program counter: a perform can capture a continuation
@@ -1125,7 +1177,16 @@ impl VmCleanupProof {
         Self {
             moved_places,
             active_loans,
+            storage_erasure: VmStorageErasureWitness::without_source_storage(),
         }
+    }
+    /// Attach the protected values for one concrete Leave transfer.  This is
+    /// done at instruction selection, where MIR locals have become registers;
+    /// it deliberately does not make the generic cleanup proof depend on a
+    /// particular edge's block arguments.
+    pub fn with_protected_registers(mut self, arguments: &[u32]) -> Self {
+        self.storage_erasure.set_protected_registers(arguments);
+        self
     }
     pub fn validate(&self) -> bool {
         if self.moved_places.iter().any(|place| {
@@ -1170,6 +1231,137 @@ impl VmCleanupProof {
                         || loan.fields.starts_with(&moved.fields))
             })
         })
+    }
+}
+impl VmStorageErasureWitness {
+    /// A valid witness for a Leave which has no source-storage owners to
+    /// erase.  It is still an explicit proof: instruction selection fills in
+    /// the protected transfer registers before serialization.
+    pub fn without_source_storage() -> Self {
+        Self::Verified {
+            storages: vec![],
+            actions: vec![],
+            protected_registers: vec![],
+        }
+    }
+
+    pub fn set_protected_registers(&mut self, registers: &[u32]) {
+        let protected_registers = registers.iter().copied().collect::<BTreeSet<_>>().into_iter().collect();
+        match self {
+            Self::Missing => {}
+            Self::Verified {
+                protected_registers: current,
+                ..
+            } => *current = protected_registers,
+        }
+    }
+
+    fn validate(&self, leave_arguments: &[u32], register_count: usize) -> bool {
+        let Self::Verified {
+            storages,
+            actions,
+            protected_registers,
+        } = self
+        else {
+            return false;
+        };
+        let leave_registers = leave_arguments.iter().copied().collect::<BTreeSet<_>>();
+        if protected_registers.iter().copied().collect::<BTreeSet<_>>().len()
+            != protected_registers.len()
+            || protected_registers
+                .iter()
+                .any(|register| !leave_registers.contains(register))
+            || protected_registers.iter().any(|register| *register as usize >= register_count)
+            || !storages.windows(2).all(|pair| pair[0].storage < pair[1].storage)
+            || storages.iter().any(|storage| {
+                storage.storage == u32::MAX
+                    || storage.binding == u32::MAX
+                    || storage.value_register as usize >= register_count
+                    || storage.drop_flag == Some(u32::MAX)
+            })
+        {
+            return false;
+        }
+        let storage_by_id = storages
+            .iter()
+            .map(|storage| (storage.storage, storage))
+            .collect::<BTreeMap<_, _>>();
+        let drop_flags = storages
+            .iter()
+            .filter_map(|storage| storage.drop_flag)
+            .collect::<BTreeSet<_>>();
+        if drop_flags.len() != storages.iter().filter_map(|storage| storage.drop_flag).count() {
+            return false;
+        }
+        if storages.iter().any(|storage| {
+            protected_registers.binary_search(&storage.value_register).is_ok()
+                && !leave_registers.contains(&storage.value_register)
+        }) {
+            return false;
+        }
+
+        // Each storage has one complete, adjacent cleanup group, emitted in
+        // reverse lexical order.  This makes the wire proof independently
+        // checkable without retaining arbitrary source action graphs.
+        let mut cursor = 0;
+        for storage in storages.iter().rev() {
+            if actions.get(cursor) != Some(&VmStorageErasureAction::EndBorrow {
+                storage: storage.storage,
+            }) {
+                return false;
+            }
+            cursor += 1;
+            let protected = protected_registers.binary_search(&storage.value_register).is_ok();
+            if storage.initialized {
+                if protected {
+                    if actions.get(cursor)
+                        != Some(&VmStorageErasureAction::Protect {
+                            storage: storage.storage,
+                            register: storage.value_register,
+                        })
+                    {
+                        return false;
+                    }
+                } else if actions.get(cursor)
+                    != Some(&VmStorageErasureAction::Destroy {
+                        storage: storage.storage,
+                    })
+                {
+                    return false;
+                }
+                cursor += 1;
+                if let Some(drop_flag) = storage.drop_flag {
+                    if actions.get(cursor)
+                        != Some(&VmStorageErasureAction::SetDropFlag {
+                            drop_flag,
+                            initialized: false,
+                        })
+                    {
+                        return false;
+                    }
+                    cursor += 1;
+                }
+            } else if storage.drop_flag.is_some() {
+                // An uninitialized local cannot carry a live compiler drop
+                // flag into cleanup.  Requiring no transition makes forged
+                // paths fail closed rather than silently disarming one.
+                return false;
+            }
+            if actions.get(cursor) != Some(&VmStorageErasureAction::StorageDead {
+                storage: storage.storage,
+            }) {
+                return false;
+            }
+            cursor += 1;
+        }
+        cursor == actions.len()
+            && actions.iter().all(|action| match action {
+                VmStorageErasureAction::EndBorrow { storage }
+                | VmStorageErasureAction::Destroy { storage }
+                | VmStorageErasureAction::StorageDead { storage }
+                | VmStorageErasureAction::Protect { storage, .. } => storage_by_id.contains_key(storage),
+                VmStorageErasureAction::SetDropFlag { drop_flag, .. } => drop_flags.contains(drop_flag),
+            })
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1456,8 +1648,10 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// Schema 80 also adds the sealed f32/f64 runtime intrinsic opcode and
 /// first-class f32 VM layout. Older artifacts cannot be decoded under the
 /// merged runtime contract. Schema 81 encodes numeric cleanup path and
-/// binding identities, making diagnostic root strings non-semantic.
-pub const STAGE0_VM_SCHEMA: u32 = 81;
+/// binding identities, making diagnostic root strings non-semantic. Schema
+/// 82 adds canonical source-storage lifecycle/drop-flag/action witnesses to
+/// every nonlocal Leave, so compact VM cleanup cannot lose its MIR proof.
+pub const STAGE0_VM_SCHEMA: u32 = 82;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2136,17 +2330,19 @@ pub fn emit(function: &MirFunction) -> Result<CandidateVmArtifact, VmArtifactErr
                 let target = *starts
                     .get(target.0 as usize)
                     .ok_or(VmArtifactError::UnsupportedControlFlow)?;
+                let arguments = arguments.iter().map(|argument| argument.0).collect::<Vec<_>>();
                 instructions.push(VmInstruction::Leave {
                     brand_owner: brand.owner,
                     brand_label: brand.label,
                     target,
-                    arguments: arguments.iter().map(|argument| argument.0).collect(),
+                    arguments: arguments.clone(),
                     destinations: function.blocks[target_index(target, &starts)?]
                         .parameters
                         .iter()
                         .map(|parameter| parameter.0)
                         .collect(),
-                    cleanup: VmCleanupProof::from_mir(cleanup, &function.control.move_paths),
+                    cleanup: VmCleanupProof::from_mir(cleanup, &function.control.move_paths)
+                        .with_protected_registers(&arguments),
                 });
             }
             MirTerminator::SwitchBool {
@@ -3586,7 +3782,90 @@ impl<'a> Decoder<'a> {
         Ok(VmCleanupProof {
             moved_places,
             active_loans,
+            storage_erasure: self.storage_erasure_witness()?,
         })
+    }
+    fn storage_erasure_witness(&mut self) -> Result<VmStorageErasureWitness, VmArtifactError> {
+        match self.byte()? {
+            0 => Ok(VmStorageErasureWitness::Missing),
+            1 => {
+                let count = self.count("source-storage erasure storages", MAX_DECODE_REGISTERS)?;
+                let mut storages = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let storage = self.u32()?;
+                    let binding = self.u32()?;
+                    let value_register = self.u32()?;
+                    let initialized = match self.byte()? {
+                        0 => false,
+                        1 => true,
+                        _ => {
+                            return Err(VmArtifactError::MalformedEncoding {
+                                message: "invalid source-storage initialized tag",
+                            });
+                        }
+                    };
+                    let drop_flag = match self.byte()? {
+                        0 => None,
+                        1 => Some(self.u32()?),
+                        _ => {
+                            return Err(VmArtifactError::MalformedEncoding {
+                                message: "invalid source-storage drop-flag tag",
+                            });
+                        }
+                    };
+                    storages.push(VmStorageErasureStorage {
+                        storage,
+                        binding,
+                        value_register,
+                        initialized,
+                        drop_flag,
+                    });
+                }
+                let count = self.count("source-storage erasure actions", MAX_DECODE_REGISTERS)?;
+                let mut actions = Vec::with_capacity(count);
+                for _ in 0..count {
+                    actions.push(match self.byte()? {
+                        0 => VmStorageErasureAction::EndBorrow { storage: self.u32()? },
+                        1 => VmStorageErasureAction::Protect {
+                            storage: self.u32()?,
+                            register: self.u32()?,
+                        },
+                        2 => VmStorageErasureAction::Destroy { storage: self.u32()? },
+                        3 => VmStorageErasureAction::SetDropFlag {
+                            drop_flag: self.u32()?,
+                            initialized: match self.byte()? {
+                                0 => false,
+                                1 => true,
+                                _ => {
+                                    return Err(VmArtifactError::MalformedEncoding {
+                                        message: "invalid source-storage drop-flag state",
+                                    });
+                                }
+                            },
+                        },
+                        4 => VmStorageErasureAction::StorageDead { storage: self.u32()? },
+                        _ => {
+                            return Err(VmArtifactError::MalformedEncoding {
+                                message: "unknown source-storage erasure action",
+                            });
+                        }
+                    });
+                }
+                let count = self.count("source-storage protected registers", MAX_DECODE_REGISTERS)?;
+                let mut protected_registers = Vec::with_capacity(count);
+                for _ in 0..count {
+                    protected_registers.push(self.u32()?);
+                }
+                Ok(VmStorageErasureWitness::Verified {
+                    storages,
+                    actions,
+                    protected_registers,
+                })
+            }
+            _ => Err(VmArtifactError::MalformedEncoding {
+                message: "invalid source-storage erasure witness tag",
+            }),
+        }
     }
     fn function(&mut self) -> Result<VmFunction, VmArtifactError> {
         let definition = self.def_key()?;
@@ -8180,6 +8459,14 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 if !cleanup.validate() {
                     return Err(VmArtifactError::MalformedEncoding {
                         message: "leave cleanup proof is not canonical",
+                    });
+                }
+                if !cleanup
+                    .storage_erasure
+                    .validate(arguments, function.registers.len())
+                {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "leave source-storage erasure witness is not canonical",
                     });
                 }
                 if arguments.len() != destinations.len() {
@@ -12788,7 +13075,13 @@ fn complete_pending_leave(
     handlers: &mut Vec<RuntimeHandlerFrame>,
     leave: PendingLeave,
 ) -> Result<usize, VmArtifactError> {
-    if !leave.cleanup.validate() || leave.arguments.len() != leave.destinations.len() {
+    if !leave.cleanup.validate()
+        || !leave
+            .cleanup
+            .storage_erasure
+            .validate(&leave.arguments, registers.len())
+        || leave.arguments.len() != leave.destinations.len()
+    {
         return Err(VmArtifactError::HandlerStateMismatch);
     }
     let values = leave
@@ -13902,6 +14195,67 @@ fn encode_cleanup_proof(value: &VmCleanupProof, output: &mut Vec<u8>) {
             output.extend_from_slice(&field.to_le_bytes());
         }
         output.push(u8::from(loan.unique));
+    }
+    encode_storage_erasure_witness(&value.storage_erasure, output);
+}
+fn encode_storage_erasure_witness(value: &VmStorageErasureWitness, output: &mut Vec<u8>) {
+    match value {
+        VmStorageErasureWitness::Missing => output.push(0),
+        VmStorageErasureWitness::Verified {
+            storages,
+            actions,
+            protected_registers,
+        } => {
+            output.push(1);
+            output.extend_from_slice(&(storages.len() as u64).to_le_bytes());
+            for storage in storages {
+                output.extend_from_slice(&storage.storage.to_le_bytes());
+                output.extend_from_slice(&storage.binding.to_le_bytes());
+                output.extend_from_slice(&storage.value_register.to_le_bytes());
+                output.push(u8::from(storage.initialized));
+                match storage.drop_flag {
+                    None => output.push(0),
+                    Some(drop_flag) => {
+                        output.push(1);
+                        output.extend_from_slice(&drop_flag.to_le_bytes());
+                    }
+                }
+            }
+            output.extend_from_slice(&(actions.len() as u64).to_le_bytes());
+            for action in actions {
+                match action {
+                    VmStorageErasureAction::EndBorrow { storage } => {
+                        output.push(0);
+                        output.extend_from_slice(&storage.to_le_bytes());
+                    }
+                    VmStorageErasureAction::Protect { storage, register } => {
+                        output.push(1);
+                        output.extend_from_slice(&storage.to_le_bytes());
+                        output.extend_from_slice(&register.to_le_bytes());
+                    }
+                    VmStorageErasureAction::Destroy { storage } => {
+                        output.push(2);
+                        output.extend_from_slice(&storage.to_le_bytes());
+                    }
+                    VmStorageErasureAction::SetDropFlag {
+                        drop_flag,
+                        initialized,
+                    } => {
+                        output.push(3);
+                        output.extend_from_slice(&drop_flag.to_le_bytes());
+                        output.push(u8::from(*initialized));
+                    }
+                    VmStorageErasureAction::StorageDead { storage } => {
+                        output.push(4);
+                        output.extend_from_slice(&storage.to_le_bytes());
+                    }
+                }
+            }
+            output.extend_from_slice(&(protected_registers.len() as u64).to_le_bytes());
+            for register in protected_registers {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+        }
     }
 }
 fn encode_pattern_fields(fields: &[VmPatternField], output: &mut Vec<u8>) {

@@ -7,7 +7,8 @@ use grandiose_stage0::{
     PlaceFlow, ScalarType, Type, TypedBody, VmArtifactError, VmCapture, VmCaptureEnvironment,
     VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmContinuationPolicy,
     VmEffectRow, VmExecutionLimits, VmFunction, VmGenericArgument, VmInstruction,
-    VmNominalCopyDescriptor, VmPattern, VmPatternField, VmType, decode_and_verify_artifact,
+    VmNominalCopyDescriptor, VmPattern, VmPatternField, VmStorageErasureWitness, VmType,
+    decode_and_verify_artifact,
     decode_and_verify_program, decode_artifact, decode_program, emit_vm, emit_vm_program,
     encode_artifact, encode_program, verify_vm, verify_vm_program,
 };
@@ -2555,6 +2556,7 @@ fn encoded_leave_fixture() -> Vec<u8> {
                             fields: vec![1],
                             unique: false,
                         }],
+                        storage_erasure: VmStorageErasureWitness::without_source_storage(),
                     },
                 },
                 VmInstruction::Return { value: 1 },
@@ -2600,14 +2602,15 @@ fn cleanup_carrying_leave_entry(definition: DefKey, first: VmInstruction) -> VmF
                         root: "result".into(),
                         fields: vec![0],
                     }],
-                    active_loans: vec![VmCleanupLoan {
+                        active_loans: vec![VmCleanupLoan {
                         owner: Some("frame".into()),
                         binding: 0,
                         root: "result".into(),
                         fields: vec![1],
-                        unique: true,
-                    }],
-                },
+                            unique: true,
+                        }],
+                        storage_erasure: VmStorageErasureWitness::without_source_storage(),
+                    },
             },
             VmInstruction::Return { value: 1 },
             // This is a private handler-clause entry. The Leave skips it and
@@ -2659,6 +2662,7 @@ fn cleanup_leave_budget_loop(definition: DefKey) -> VmFunction {
                         fields: vec![0],
                     }],
                     active_loans: vec![],
+                    storage_erasure: VmStorageErasureWitness::without_source_storage(),
                 },
             },
             VmInstruction::Return { value: 1 },
@@ -5866,6 +5870,7 @@ fn verifier_rejects_a_label_brand_retargeted_to_another_typed_destination() {
                 cleanup: VmCleanupProof {
                     moved_places: vec![],
                     active_loans: vec![],
+                    storage_erasure: VmStorageErasureWitness::without_source_storage(),
                 },
             },
             VmInstruction::ConstI64 { dst: 2, value: 2 },
@@ -5878,6 +5883,7 @@ fn verifier_rejects_a_label_brand_retargeted_to_another_typed_destination() {
                 cleanup: VmCleanupProof {
                     moved_places: vec![],
                     active_loans: vec![],
+                    storage_erasure: VmStorageErasureWitness::without_source_storage(),
                 },
             },
             VmInstruction::Return { value: 3 },
@@ -6626,6 +6632,7 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
                             fields: vec![0],
                         }],
                         active_loans: vec![],
+                        storage_erasure: VmStorageErasureWitness::without_source_storage(),
                     },
                 },
                 VmInstruction::Return { value: 1 },
@@ -6761,6 +6768,7 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
                             },
                         ],
                         active_loans: vec![],
+                        storage_erasure: VmStorageErasureWitness::without_source_storage(),
                     },
                 },
                 VmInstruction::Return { value: 1 },
@@ -6803,6 +6811,7 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
                     cleanup: VmCleanupProof {
                         moved_places: vec![],
                         active_loans: vec![],
+                        storage_erasure: VmStorageErasureWitness::without_source_storage(),
                     },
                 },
                 VmInstruction::Return { value: 1 },
@@ -6865,6 +6874,7 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
                 },
             ],
             active_loans: vec![],
+            storage_erasure: VmStorageErasureWitness::without_source_storage(),
         })),
         Err(VmArtifactError::MalformedEncoding { .. })
     ));
@@ -6883,6 +6893,7 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
                 fields: vec![],
                 unique: false,
             }],
+            storage_erasure: VmStorageErasureWitness::without_source_storage(),
         })),
         Err(VmArtifactError::MalformedEncoding { .. })
     ));
@@ -6901,6 +6912,7 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
                 fields: vec![],
                 unique: false,
             }],
+            storage_erasure: VmStorageErasureWitness::without_source_storage(),
         })),
         Err(VmArtifactError::MalformedEncoding { .. })
     ));
@@ -6919,6 +6931,7 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
                 fields: vec![],
                 unique: false,
             }],
+            storage_erasure: VmStorageErasureWitness::without_source_storage(),
         }))
         .is_ok(),
         "presentation text must not create a numeric cleanup overlap"
@@ -6964,6 +6977,7 @@ fn leave_from_a_handler_clause_abandons_its_suspended_continuation() {
                 cleanup: VmCleanupProof {
                     moved_places: vec![],
                     active_loans: vec![],
+                    storage_erasure: VmStorageErasureWitness::without_source_storage(),
                 },
             },
             VmInstruction::Trap,

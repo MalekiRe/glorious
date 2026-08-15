@@ -169,7 +169,8 @@ pub use vm_backend::{
     VmCaptureEnvironment, VmCaptureMode, VmCleanupLoan, VmCleanupPlace, VmCleanupProof, VmCompare,
     VmContinuationPolicy, VmEffectInstance, VmEffectRow, VmEffectRowProjection, VmExecutionLimits,
     VmFunction, VmGenericArgument, VmInstruction, VmNominalCopyDescriptor, VmPattern,
-    VmPatternField, VmType, decode_and_verify_artifact, decode_and_verify_program, decode_artifact,
+    VmPatternField, VmStorageErasureAction, VmStorageErasureStorage, VmStorageErasureWitness,
+    VmType, decode_and_verify_artifact, decode_and_verify_program, decode_artifact,
     decode_program, emit as emit_vm, emit_program as emit_vm_program, encode_artifact,
     encode_program, verify as verify_vm, verify_program as verify_vm_program,
 };
