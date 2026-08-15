@@ -5475,6 +5475,79 @@ fn service_rejects_external_generic_selected_hrtb_projection_facades() {
 }
 
 #[test]
+fn service_executes_generic_supertrait_selected_const_hrtb_facades() {
+    let mut request = request("use facade::{Callback, Parent, Trace}; pub fn apply(callback: Callback) -> i64 / Trace<6, i64> { let value = 41; let result = callback(0, &value); Trace<6, i64>::note(result) } pub fn main() -> i64 { handle apply(Parent<i64>::relay) { Trace<6, i64>::note(value) with resume => resume(value) } }");
+    let provider = concat!(
+        "pub effect Trace<n: u32, T> { [1,1] note(value: T) -> i64; } ",
+        "pub struct Witness<n: u32> { value: i64 } ",
+        "pub trait Seed<T> { const Base: u32; } ",
+        "pub trait Parent<T>: Seed<T> { const Width: u32; type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Parent<T>>::Effects<'a, <Self as Parent<T>>::Width> }; } ",
+        "pub trait Child<T>: Parent<T> {} ",
+        "pub type Callback = for<'a> (i64, &'a i64) -> i64 / { <i64 as Child<i64>>::Effects<'a, <i64 as Child<i64>>::Width> }; ",
+        "impl<T> Seed<T> for i64 { const Base = 6; } ",
+        "impl<T> Parent<T> for i64 where i64: Seed<T> { const Width = <i64 as Seed<T>>::Base; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n, i64>}; fn relay<'a>(marker: T, value: &'a i64) -> i64 / { <Self as Parent<T>>::Effects<'a, <Self as Parent<T>>::Width> } { marker; let witness = Witness<1 + 6> { value: 1 }; *value + witness.value } } ",
+        "impl<T> Child<T> for i64 where i64: Parent<T> {}",
+    );
+    request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{Callback, Parent, Trace};".as_slice()));
+    request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+    let first = StageZeroCompiler::new().compile(request.clone()).expect("generic selected supertrait consts must materialize through the HRTB facade").artifact.unwrap();
+    request.sources.reverse();
+    let second = StageZeroCompiler::new().compile(request.clone()).expect("source order must preserve generic selected supertrait const materialization").artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(request.clone(), None).unwrap();
+    let artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey { package: PackageKey("facade@0.1.0".into()), path: "crate".into() });
+    let trace = compiler.dependency_trace(parent, &facade).expect("legal const facade must freeze an interface trace");
+    let mut revised = request;
+    let provider_index = revised.sources.iter().position(|source| source.package == PackageKey("provider@1.0.0".into())).expect("provider source is present");
+    let provider = &revised.sources[provider_index];
+    revised.sources[provider_index] = SourceInput::new(provider.package.clone(), provider.logical_path.clone(), std::str::from_utf8(&provider.bytes).expect("provider source is UTF-8").replace("const Base = 6", "const Base = 7").into_bytes());
+    let rejected = compiler.import_revision(revised.clone(), Some(parent)).unwrap();
+    let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("changed associated const revision must not satisfy the old facade contract");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4155"), "changed selected const must invalidate the concrete effect contract: {:#?}", error.diagnostics());
+    assert_eq!(compiler.interface_cache_stats(), cached);
+    assert!(compiler.dependency_traces(rejected).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace));
+    revised.sources.reverse();
+    assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(revised).expect_err("source order cannot admit a changed selected const revision").diagnostics());
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), artifact.canonical_bytes());
+}
+
+#[test]
+fn service_rejects_generic_supertrait_selected_const_cycles_canonically() {
+    let root = "use facade::Callback; pub fn accept(callback: Callback) -> i64 { let value = 41; callback(0, &value) } pub fn main() -> i64 { 0 }";
+    let provider = "pub effect Trace<n: u32> { [1,1] note(value: i64) -> i64; } pub trait Seed<T> { const Base: u32; } pub trait Parent<T>: Seed<T> { const Width: u32; type Item<'a, n: u32>; type Effects<'a, n: u32>: EffectRow; } pub trait Child<T>: Parent<T> {} pub type Callback = for<'a> (i64, &'a i64) -> <i64 as Child<i64>>::Item<'a, <i64 as Child<i64>>::Width> / { <i64 as Child<i64>>::Effects<'a, <i64 as Child<i64>>::Width> }; impl<T> Seed<T> for i64 { const Base = <i64 as Seed<T>>::Base; } impl<T> Parent<T> for i64 where i64: Seed<T> { const Width = <i64 as Seed<T>>::Base; type Item<'a, n: u32> = i64; type Effects<'a, n: u32> = {Trace<n>}; } impl<T> Child<T> for i64 where i64: Parent<T> {}";
+    let mut request = request(root);
+    request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::Callback;".as_slice()));
+    request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request.clone()) else { panic!("recursive generic selected const facade entered an artifact"); };
+    request.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(second)) = StageZeroCompiler::new().compile(request) else { panic!("source reordering must not admit recursive generic selected consts"); };
+    assert!(first.iter().any(|diagnostic| diagnostic.code == "G4157"), "missing finite generic selected-const cycle rejection: {first:#?}");
+    assert_eq!(first, second, "recursive generic selected-const diagnostics must be canonical");
+}
+
+#[test]
+fn service_rejects_mutual_generic_supertrait_selected_const_cycles_canonically() {
+    let root = "use facade::Callback; pub fn accept(callback: Callback) -> i64 { let value = 41; callback(0, &value) } pub fn main() -> i64 { 0 }";
+    let provider = "pub trait First<T> { const Base: u32; } pub trait Second<T> { const Base: u32; } pub trait Parent<T>: First<T> { const Width: u32; type Item<'a, n: u32>; } pub trait Child<T>: Parent<T> {} pub type Callback = for<'a> (i64, &'a i64) -> <i64 as Child<i64>>::Item<'a, <i64 as Child<i64>>::Width>; impl<T> First<T> for i64 { const Base = <i64 as Second<T>>::Base; } impl<T> Second<T> for i64 { const Base = <i64 as First<T>>::Base; } impl<T> Parent<T> for i64 where i64: First<T> { const Width = <i64 as First<T>>::Base; type Item<'a, n: u32> = i64; } impl<T> Child<T> for i64 where i64: Parent<T> {}";
+    let mut request = request(root);
+    request.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::Callback;".as_slice()));
+    request.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+    let Err(grandiose_stage0::ServiceError::Failed(first)) = StageZeroCompiler::new().compile(request.clone()) else { panic!("mutually recursive generic selected const facade entered an artifact"); };
+    request.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(second)) = StageZeroCompiler::new().compile(request) else { panic!("source reordering must not admit mutually recursive generic selected consts"); };
+    assert!(first.iter().any(|diagnostic| diagnostic.code == "G4157"), "missing finite mutual generic selected-const cycle rejection: {first:#?}");
+    assert_eq!(first, second, "mutual generic selected-const diagnostics must be canonical");
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,

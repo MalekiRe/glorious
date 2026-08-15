@@ -3367,6 +3367,50 @@ fn normalize_selected_contract_generic_argument(
         GenericArgument::EffectRow(value) => {
             GenericArgument::EffectRow(normalize_selected_contract_effect_row(value, solver, fuel))
         }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } if fuel > 0 => {
+            let subject = normalize_selected_contract_type(*subject, solver, fuel - 1);
+            let trait_arguments = trait_arguments
+                .into_iter()
+                .map(|argument| {
+                    normalize_selected_contract_generic_argument(argument, solver, fuel - 1)
+                })
+                .collect::<Vec<_>>();
+            let projection = GenericArgument::ConstProjection {
+                subject: Box::new(subject.clone()),
+                trait_definition,
+                trait_arguments: trait_arguments.clone(),
+                name: name.clone(),
+                kind,
+            };
+            // This normalizer is only reached after an implementation head
+            // has instantiated its trait contract. Its rigid trait arguments
+            // are therefore backed by the selected implementation, even
+            // though the general declaration normalizer must keep them
+            // symbolic. Try the selected const query here, retaining the
+            // projection on missing, ambiguous, or recursive evidence.
+            match solver.normalize_associated_const(
+                crate::TraitGoal {
+                    relation: ElaboratedTraitReference {
+                        definition: trait_definition,
+                        arguments: trait_arguments,
+                    },
+                    subject,
+                },
+                &name,
+                kind,
+            ) {
+                crate::TraitConstProjectionAnswer::Normalized { value, .. } => {
+                    normalize_selected_contract_generic_argument(value, solver, fuel - 1)
+                }
+                _ => projection,
+            }
+        }
         value => value,
     }
 }
@@ -3543,6 +3587,22 @@ fn replace_trait_self_generic_argument(value: GenericArgument, self_ty: &Type) -
         GenericArgument::EffectRow(value) => {
             GenericArgument::EffectRow(replace_trait_self_effect_row(value, self_ty))
         }
+        GenericArgument::ConstProjection {
+            subject,
+            trait_definition,
+            trait_arguments,
+            name,
+            kind,
+        } => GenericArgument::ConstProjection {
+            subject: Box::new(replace_trait_self_type(*subject, self_ty)),
+            trait_definition,
+            trait_arguments: trait_arguments
+                .into_iter()
+                .map(|value| replace_trait_self_generic_argument(value, self_ty))
+                .collect(),
+            name,
+            kind,
+        },
         value => value,
     }
 }
