@@ -5212,6 +5212,36 @@ fn service_materializes_hrtb_instance_type_gat_values_through_inherited_aliases(
 }
 
 #[test]
+fn service_normalizes_generic_associated_consts_in_hrtb_gat_body_results() {
+    let mut request = request(
+        "use facade::layout; pub fn main() -> i64 { layout() }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::layout;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub trait Gate<T> { type Item<'a, U, n: u32>; type Effects<'a, U, n: u32>: EffectRow; const Width: u32; } impl Gate<i64> for i64 { type Item<'a, U, n: u32> = i64; type Effects<'a, U, n: u32> = {}; const Width = 7; } pub fn prove<'a, U>(value: &'a i64, marker: U) -> <i64 as Gate<i64>>::Item<'a, U, <i64 as Gate<i64>>::Width> / { <i64 as Gate<i64>>::Effects<'a, U, <i64 as Gate<i64>>::Width> } { *value } pub fn layout() -> i64 { 42 }".as_slice(),
+    ));
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("generic associated consts in selected HRTB GAT bodies must materialize");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(request)
+        .expect("source order must preserve generic associated const identities");
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,
