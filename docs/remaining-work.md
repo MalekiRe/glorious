@@ -78,7 +78,15 @@ retained below but scheduled after the core language and tooling tranche.
   without zero-use destruction, direct dead-with-live-loan, wrong drop-flag
   transitions, and cleanup plans that omit or reorder required actions; VM
   lowering must either execute the verified action sequence or
-  prove its compact erasure preserves that sequence exactly.
+  prove its compact erasure preserves that sequence exactly. The current
+  candidate-artifact `Leave` wire record carries only canonical numeric
+  moved-path/binding identities and active-loan facts. It has no
+  source-storage lifecycle, drop-flag-transition, or ordered-action witness,
+  so `vm_storage_erasure.rs` deliberately proves the decoded verifier still
+  accepts an otherwise canonical compact exit with none of those facts. That
+  test must turn green only when artifact encode/decode/verifier checks a
+  witness derived from validated MIR rather than trusting register cleanup
+  shape alone.
 
 ### 5.4 Bytecode peepholes and validation
 
