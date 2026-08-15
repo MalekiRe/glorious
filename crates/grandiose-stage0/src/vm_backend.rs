@@ -2754,12 +2754,16 @@ fn reachable_return_values(instructions: &[VmInstruction]) -> Vec<u32> {
 }
 
 fn edge_length(arguments: &[MirLocal], target: &crate::mir::MirBlock) -> u32 {
-    let transfers = arguments
+    parallel_edge_transfers(arguments, target)
         .iter()
-        .zip(&target.parameters)
-        .filter(|(argument, parameter)| argument != parameter)
-        .count();
-    transfers as u32 * 2 + 1
+        .map(|transfer| match transfer {
+            EdgeTransfer::Direct { .. } => 1,
+            // Save one source, rotate every remaining assignment, then write
+            // the saved value into the first destination.
+            EdgeTransfer::Cycle(transfers) => transfers.len() + 1,
+        })
+        .sum::<usize>() as u32
+        + 1
 }
 fn target_index(target: u32, starts: &[u32]) -> Result<usize, VmArtifactError> {
     starts
@@ -2767,10 +2771,12 @@ fn target_index(target: u32, starts: &[u32]) -> Result<usize, VmArtifactError> {
         .position(|start| *start == target)
         .ok_or(VmArtifactError::UnsupportedControlFlow)
 }
-/// Materialize a CFG edge through fresh temporaries. Identity transfers are
-/// omitted; every remaining argument is read before any destination is
-/// written, preserving the MIR's parallel edge-argument semantics for swaps
-/// and other cycles.
+/// Materialize a CFG edge with the minimal temporary set required for its
+/// parallel assignments. Acyclic moves are ordered destination-first, so a
+/// write never destroys an unread source. Each remaining cycle saves exactly
+/// one source before rotating its assignments. This preserves the MIR's
+/// parallel edge-argument semantics without allocating one register per edge
+/// argument.
 fn emit_edge(
     arguments: &[MirLocal],
     target: &crate::mir::MirBlock,
@@ -2778,28 +2784,85 @@ fn emit_edge(
     registers: &mut Vec<VmType>,
     instructions: &mut Vec<VmInstruction>,
 ) {
-    let mut temporaries = Vec::with_capacity(arguments.len());
-    for (argument, parameter) in arguments.iter().zip(&target.parameters) {
-        if argument == parameter {
-            continue;
+    for transfer in parallel_edge_transfers(arguments, target) {
+        match transfer {
+            EdgeTransfer::Direct { dst, src } => instructions.push(VmInstruction::Copy {
+                dst: dst.0,
+                src: src.0,
+            }),
+            EdgeTransfer::Cycle(transfers) => {
+                let (first_destination, first_source) = transfers[0];
+                let temporary = registers.len() as u32;
+                registers.push(registers[first_source.0 as usize].clone());
+                instructions.push(VmInstruction::Copy {
+                    dst: temporary,
+                    src: first_source.0,
+                });
+                for &(destination, source) in transfers.iter().skip(1) {
+                    instructions.push(VmInstruction::Copy {
+                        dst: destination.0,
+                        src: source.0,
+                    });
+                }
+                instructions.push(VmInstruction::Copy {
+                    dst: first_destination.0,
+                    src: temporary,
+                });
+            }
         }
-        let temporary = registers.len() as u32;
-        registers.push(registers[argument.0 as usize].clone());
-        instructions.push(VmInstruction::Copy {
-            dst: temporary,
-            src: argument.0,
-        });
-        temporaries.push((temporary, *parameter));
-    }
-    for (temporary, parameter) in temporaries {
-        instructions.push(VmInstruction::Copy {
-            dst: parameter.0,
-            src: temporary,
-        });
     }
     instructions.push(VmInstruction::Jump {
         target: destination,
     });
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum EdgeTransfer {
+    Direct { dst: MirLocal, src: MirLocal },
+    /// Ordered as `destination <- source`. The first source is saved before
+    /// the remaining transfers rotate values around the cycle.
+    Cycle(Vec<(MirLocal, MirLocal)>),
+}
+
+/// Build a deterministic schedule for one MIR parallel edge assignment.
+///
+/// Target block parameters are distinct by MIR validation. After repeatedly
+/// removing a destination that no remaining transfer reads, every remaining
+/// component is a bijective directed cycle; duplicated sources necessarily
+/// peel into the acyclic portion first. `BTreeMap` makes both categories
+/// stable across host iteration order.
+fn parallel_edge_transfers(
+    arguments: &[MirLocal],
+    target: &crate::mir::MirBlock,
+) -> Vec<EdgeTransfer> {
+    let mut pending = arguments
+        .iter()
+        .zip(&target.parameters)
+        .filter_map(|(&source, &destination)| (source != destination).then_some((destination, source)))
+        .collect::<BTreeMap<_, _>>();
+    let mut transfers = Vec::new();
+    while let Some((&destination, &source)) = pending.iter().find(|(destination, _)| {
+        !pending.values().any(|source| source == *destination)
+    }) {
+        pending.remove(&destination);
+        transfers.push(EdgeTransfer::Direct { dst: destination, src: source });
+    }
+    while let Some(&start) = pending.keys().next() {
+        let mut cycle = Vec::new();
+        let mut destination = start;
+        loop {
+            let source = pending
+                .remove(&destination)
+                .expect("unpeeled parallel edge transfer must form a cycle");
+            cycle.push((destination, source));
+            destination = source;
+            if destination == start {
+                break;
+            }
+        }
+        transfers.push(EdgeTransfer::Cycle(cycle));
+    }
+    transfers
 }
 pub fn verify(artifact: CandidateVmArtifact) -> Result<VerifiedVmArtifact, VmArtifactError> {
     if artifact.schema != STAGE0_VM_SCHEMA {
@@ -17916,7 +17979,86 @@ impl ExecutionBudget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PrimitiveRole;
+    use crate::{MirBlock, MirScopeId, PrimitiveRole};
+
+    fn edge_target(parameters: Vec<MirLocal>) -> MirBlock {
+        MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters,
+            instructions: vec![],
+            terminator: MirTerminator::Unreachable,
+        }
+    }
+
+    #[test]
+    fn parallel_edge_transfer_schedule_orders_chains_without_temporaries() {
+        let target = edge_target(vec![MirLocal(1), MirLocal(2)]);
+        let schedule = parallel_edge_transfers(&[MirLocal(0), MirLocal(1)], &target);
+
+        assert_eq!(
+            schedule,
+            vec![
+                EdgeTransfer::Direct {
+                    dst: MirLocal(2),
+                    src: MirLocal(1),
+                },
+                EdgeTransfer::Direct {
+                    dst: MirLocal(1),
+                    src: MirLocal(0),
+                },
+            ],
+            "the destination that no later transfer reads is written first"
+        );
+        assert_eq!(edge_length(&[MirLocal(0), MirLocal(1)], &target), 3);
+    }
+
+    #[test]
+    fn parallel_edge_transfer_schedule_breaks_each_cycle_once() {
+        let target = edge_target(vec![MirLocal(0), MirLocal(1), MirLocal(2)]);
+        let schedule = parallel_edge_transfers(&[MirLocal(1), MirLocal(2), MirLocal(0)], &target);
+
+        assert_eq!(
+            schedule,
+            vec![EdgeTransfer::Cycle(vec![
+                (MirLocal(0), MirLocal(1)),
+                (MirLocal(1), MirLocal(2)),
+                (MirLocal(2), MirLocal(0)),
+            ])]
+        );
+        assert_eq!(
+            edge_length(&[MirLocal(1), MirLocal(2), MirLocal(0)], &target),
+            5,
+            "three assignments use one save plus three writes and one jump"
+        );
+    }
+
+    #[test]
+    fn edge_emission_uses_one_temporary_for_a_three_way_parallel_cycle() {
+        let target = edge_target(vec![MirLocal(0), MirLocal(1), MirLocal(2)]);
+        let mut registers = vec![VmType::I64, VmType::I64, VmType::I64];
+        let mut instructions = vec![];
+
+        emit_edge(
+            &[MirLocal(1), MirLocal(2), MirLocal(0)],
+            &target,
+            17,
+            &mut registers,
+            &mut instructions,
+        );
+
+        assert_eq!(registers, vec![VmType::I64, VmType::I64, VmType::I64, VmType::I64]);
+        assert_eq!(
+            instructions,
+            vec![
+                VmInstruction::Copy { dst: 3, src: 1 },
+                VmInstruction::Copy { dst: 1, src: 2 },
+                VmInstruction::Copy { dst: 2, src: 0 },
+                VmInstruction::Copy { dst: 0, src: 3 },
+                VmInstruction::Jump { target: 17 },
+            ]
+        );
+    }
+
 
     fn artifact(registers: Vec<VmType>, instructions: Vec<VmInstruction>) -> CandidateVmArtifact {
         let mut artifact = CandidateVmArtifact {
