@@ -1700,6 +1700,42 @@ fn checked_mir_editor_redirects_edges_transactionally() {
 }
 
 #[test]
+fn checked_mir_editor_splits_typed_cfg_edges_without_rebinding_identities() {
+    let original = graph();
+    let mut editor = MirEditor::open(original.clone()).unwrap();
+    let bridge = editor.split_edge(MirBlockId(0), MirEdge::Then).unwrap();
+    assert_eq!(bridge, MirBlockId(3));
+    assert_eq!(editor.invalidation(), MirAnalysisInvalidation::ALL);
+    let split = editor.finish();
+    assert!(matches!(
+        split.blocks[0].terminator,
+        MirTerminator::SwitchBool {
+            then_target: MirBlockId(3),
+            ref then_arguments,
+            ..
+        } if then_arguments == &vec![MirLocal(1)]
+    ));
+    assert_eq!(split.blocks[bridge.0 as usize].parameters, vec![MirLocal(3)]);
+    assert!(matches!(
+        split.blocks[bridge.0 as usize].terminator,
+        MirTerminator::Goto {
+            target: MirBlockId(1),
+            ref arguments,
+        } if arguments == &vec![MirLocal(3)]
+    ));
+    assert_eq!(split.control.operations.len(), 0);
+    assert!(split.validate().is_ok(), "{:#?}", split.validate());
+
+    let mut rejected = MirEditor::open(original.clone()).unwrap();
+    assert!(rejected.split_edge(MirBlockId(0), MirEdge::Goto).is_err());
+    assert_eq!(
+        rejected.finish(),
+        original.with_frozen_operation_arena(),
+        "a rejected edge split must not allocate a bridge or change the source edge"
+    );
+}
+
+#[test]
 fn checked_mir_editor_replaces_typed_terminator_operands_transactionally() {
     let mut original = graph();
     original.locals.push(local(Type::Scalar(ScalarType::Bool)));
@@ -1954,6 +1990,31 @@ fn externally_visible_label_merge_function() -> MirFunction {
         ],
     }
     .with_frozen_control_tables()
+}
+
+#[test]
+fn checked_mir_editor_splits_leave_edges_and_updates_the_label_rejoin() {
+    let original = externally_visible_label_merge_function();
+    let mut editor = MirEditor::open(original).unwrap();
+    let bridge = editor.split_edge(MirBlockId(0), MirEdge::Leave).unwrap();
+    let split = editor.finish();
+    assert!(matches!(
+        split.blocks[0].terminator,
+        MirTerminator::Leave {
+            target,
+            ref arguments,
+            ..
+        } if target == bridge && arguments == &vec![MirLocal(0)]
+    ));
+    assert!(matches!(
+        split.blocks[bridge.0 as usize].terminator,
+        MirTerminator::Goto {
+            target: MirBlockId(2),
+            ref arguments,
+        } if arguments == &vec![MirLocal(0)]
+    ));
+    assert_eq!(split.control.labels[0].destination, bridge);
+    assert!(split.validate().is_ok(), "{:#?}", split.validate());
 }
 
 #[test]

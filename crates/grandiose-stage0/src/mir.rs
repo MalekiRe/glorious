@@ -2122,6 +2122,63 @@ impl MirEditor {
         Ok(invalidation)
     }
 
+    /// Insert a fresh, typed forwarding block on one successor edge.  The
+    /// bridge receives the old target's block parameters, then forwards those
+    /// same locals to the original destination.  This is the CFG primitive
+    /// needed by cleanup insertion and edge-local rewriting: it preserves the
+    /// original edge's arguments and all pre-existing block identities.
+    pub fn split_edge(
+        &mut self,
+        block: MirBlockId,
+        edge: MirEdge,
+    ) -> Result<MirBlockId, String> {
+        self.transaction(MirAnalysisInvalidation::ALL, |function| {
+            if function.control.tombstoned_blocks.contains(&block) {
+                return Err("MIR cannot split an edge from a tombstoned block".into());
+            }
+            let (target, arguments) = terminator_edge(
+                &function
+                    .blocks
+                    .get(block.0 as usize)
+                    .ok_or_else(|| format!("MIR edit targets absent block {}", block.0))?
+                    .terminator,
+                edge,
+            )?;
+            if function.control.tombstoned_blocks.contains(&target) {
+                return Err("MIR cannot split an edge to a tombstoned block".into());
+            }
+            let target_block = function
+                .blocks
+                .get(target.0 as usize)
+                .ok_or_else(|| format!("MIR edge targets absent block {}", target.0))?;
+            let bridge = MirBlockId(
+                u32::try_from(function.blocks.len())
+                    .map_err(|_| "MIR block identity space exhausted".to_owned())?,
+            );
+            let parameters = target_block.parameters.clone();
+            function.blocks.push(MirBlock {
+                scope: target_block.scope,
+                parameters: parameters.clone(),
+                instructions: vec![],
+                terminator: MirTerminator::Goto {
+                    target,
+                    arguments: parameters,
+                },
+            });
+            let terminator = &mut function
+                .blocks
+                .get_mut(block.0 as usize)
+                .expect("source block was checked before allocating bridge")
+                .terminator;
+            redirect_terminator_edge(terminator, edge, bridge, arguments)?;
+            // In particular, a `Leave` now targets the bridge. This updates
+            // its frozen label destination atomically with the edge, while
+            // the bridge retains the original label rejoin as its only exit.
+            synchronize_terminator_control(function, block)?;
+            Ok(bridge)
+        })
+    }
+
     /// Split a block before instruction `at`, preserving every operation ID.
     /// The original block becomes a plain fallthrough to a fresh suffix block;
     /// frozen handler/perform/resumption locations are relocated with their
@@ -2517,6 +2574,35 @@ fn redirect_terminator_edge(
             *else_arguments = arguments;
             Ok(())
         }
+        _ => Err("MIR edge selector does not match the source terminator".into()),
+    }
+}
+
+fn terminator_edge(
+    terminator: &MirTerminator,
+    edge: MirEdge,
+) -> Result<(MirBlockId, Vec<MirLocal>), String> {
+    match (terminator, edge) {
+        (MirTerminator::Goto { target, arguments }, MirEdge::Goto)
+        | (MirTerminator::Leave {
+            target, arguments, ..
+        }, MirEdge::Leave) => Ok((*target, arguments.clone())),
+        (
+            MirTerminator::SwitchBool {
+                then_target,
+                then_arguments,
+                ..
+            },
+            MirEdge::Then,
+        ) => Ok((*then_target, then_arguments.clone())),
+        (
+            MirTerminator::SwitchBool {
+                else_target,
+                else_arguments,
+                ..
+            },
+            MirEdge::Else,
+        ) => Ok((*else_target, else_arguments.clone())),
         _ => Err("MIR edge selector does not match the source terminator".into()),
     }
 }
