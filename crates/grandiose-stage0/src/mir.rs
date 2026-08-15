@@ -1557,6 +1557,21 @@ pub(crate) fn lifted_callable_definition(brand: EnvironmentBrand) -> DefKey {
     ]))
 }
 
+/// Canonical executable identity for a source-lifted callable instantiated by
+/// one concrete generic owner.  The source lifted identity remains part of
+/// the digest so specialization cannot retarget an environment to a sibling
+/// closure merely because its capture ABI happens to match.
+pub(crate) fn lifted_callable_instance_definition(
+    instance: &InstanceKey,
+    source: DefKey,
+) -> DefKey {
+    DefKey(Digest::of_parts([
+        b"grandiose-stage0-lifted-callable-instance-v1".as_slice(),
+        instance.fingerprint().as_bytes().as_slice(),
+        source.0.as_bytes().as_slice(),
+    ]))
+}
+
 /// The executable use policy for a handler continuation. Typed Core remains
 /// authoritative for exact lower/upper bounds; MIR preserves the distinction
 /// the VM must enforce at runtime: affine continuations are consumed, whereas
@@ -5119,6 +5134,16 @@ impl MirFunction {
         &self.blocks[self.entry.0 as usize]
     }
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_with_lifted_callable_targets(&BTreeMap::new())
+    }
+
+    /// Validate with the exact concrete lifted targets published by a frozen
+    /// `MirProgram`. Standalone MIR remains strict: a branded environment must
+    /// point at its canonical source-lifted definition.
+    fn validate_with_lifted_callable_targets(
+        &self,
+        specialized_lifted_targets: &BTreeMap<DefKey, DefKey>,
+    ) -> Result<(), String> {
         if self.entry.0 as usize >= self.blocks.len() {
             return Err(format!("MIR entry block {} is absent", self.entry.0));
         }
@@ -5161,7 +5186,7 @@ impl MirFunction {
                 for local in references(instruction) {
                     self.local_type(local)?;
                 }
-                self.validate_instruction(instruction)?;
+                self.validate_instruction(instruction, specialized_lifted_targets)?;
                 validate_instruction_semantic_types(instruction)?;
             }
             self.validate_terminator(index, &block.terminator)?;
@@ -5889,7 +5914,11 @@ impl MirFunction {
             .map(|local| &local.ty)
             .ok_or_else(|| format!("MIR references invalid local {}", local.0))
     }
-    fn validate_instruction(&self, instruction: &MirInstruction) -> Result<(), String> {
+    fn validate_instruction(
+        &self,
+        instruction: &MirInstruction,
+        specialized_lifted_targets: &BTreeMap<DefKey, DefKey>,
+    ) -> Result<(), String> {
         match instruction {
             MirInstruction::StorageLive { binding, local }
             | MirInstruction::StorageDead { binding, local } => {
@@ -5956,7 +5985,7 @@ impl MirFunction {
             return Ok(());
         }
         if let MirInstruction::MakeCallable {
-            callee: _,
+            callee,
             captures,
             environment,
             ..
@@ -5964,11 +5993,15 @@ impl MirFunction {
         {
             match environment {
                 Some(environment) => {
-                    // A generic owner can materialize this source-lifted
-                    // callable into a distinct concrete executable body. The
-                    // environment brand still authenticates the source
-                    // layout, while `MirProgram::validate` checks that the
-                    // selected target exists and has the same capture ABI.
+                    let source = lifted_callable_definition(environment.brand);
+                    if *callee != source
+                        && specialized_lifted_targets.get(callee) != Some(&source)
+                    {
+                        return Err(
+                            "MIR callable environment brand does not match its lifted target"
+                                .into(),
+                        );
+                    }
                     if captures.len() != environment.captures.len() {
                         return Err(
                             "MIR callable capture registers do not match their sealed layout"
@@ -7610,8 +7643,39 @@ impl MirProgram {
                 );
             }
         }
+        // Materialized generic owners may retarget their source-lifted
+        // closures to concrete executable bodies.  Admit only the canonical
+        // target derived from both a registered instance and the original
+        // branded lifted definition; a matching capture layout alone is not
+        // authority to retarget a closure.
+        let mut specialized_lifted_targets = BTreeMap::<DefKey, DefKey>::new();
         for function in self.functions.values() {
-            function.validate()?;
+            for block in &function.blocks {
+                for instruction in &block.instructions {
+                    let MirInstruction::MakeCallable {
+                        environment: Some(environment),
+                        ..
+                    } = instruction
+                    else {
+                        continue;
+                    };
+                    let source = lifted_callable_definition(environment.brand);
+                    for instance in self.instances.values() {
+                        let target = lifted_callable_instance_definition(&instance.key, source);
+                        if let Some(previous) = specialized_lifted_targets.insert(target, source)
+                            && previous != source
+                        {
+                            return Err(
+                                "MIR concrete lifted callable target has conflicting source origins"
+                                    .into(),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        for function in self.functions.values() {
+            function.validate_with_lifted_callable_targets(&specialized_lifted_targets)?;
             for block in &function.blocks {
                 for instruction in &block.instructions {
                     if let MirInstruction::Call {
@@ -7682,7 +7746,7 @@ impl MirProgram {
 /// not only local registers: aggregate layouts, patterns, handler frames,
 /// host ABI records, and capture environments are independently consumed by
 /// MIR/VM verification.
-fn materialized_instance_retains_generic_placeholder(function: &MirFunction) -> bool {
+pub(crate) fn materialized_instance_retains_generic_placeholder(function: &MirFunction) -> bool {
     type_retains_generic_placeholder(&function.result)
         || function
             .locals

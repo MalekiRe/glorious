@@ -12,6 +12,9 @@ use std::{
 use crate::revision::{
     BodyScratchLease, PackageSessionError, PackageSessionLease, RequestControlError,
 };
+use crate::mir::{
+    lifted_callable_instance_definition, materialized_instance_retains_generic_placeholder,
+};
 use crate::{
     BodySyntax, BootstrapManifest, Budget, BudgetError, CancellationToken, CoherenceSet,
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
@@ -2572,6 +2575,16 @@ fn materialize_lifted_callable_instances(
     body_arguments: &[GenericArgument],
     signatures: &ElaboratedInterface,
 ) -> Result<(), String> {
+    // A capture-free nested closure has no environment record, but its lifted
+    // body can still retain the enclosing generic binders.  Select templates
+    // from their frozen body metadata rather than using environment presence
+    // as a proxy for whether specialization is needed.
+    let generic_callable_templates = functions
+        .iter()
+        .filter_map(|(definition, function)| {
+            materialized_instance_retains_generic_placeholder(function).then_some(*definition)
+        })
+        .collect::<BTreeSet<_>>();
     let mut targets = BTreeMap::<DefKey, DefKey>::new();
     let mut pending = vec![executable];
 
@@ -2585,15 +2598,14 @@ fn materialize_lifted_callable_instances(
             let mut discovered = Vec::new();
             for block in &mut function.blocks {
                 for instruction in &mut block.instructions {
-                    let MirInstruction::MakeCallable {
-                        callee,
-                        environment: Some(_),
-                        ..
-                    } = instruction
+                    let MirInstruction::MakeCallable { callee, .. } = instruction
                     else {
                         continue;
                     };
                     let source = *callee;
+                    if !generic_callable_templates.contains(&source) {
+                        continue;
+                    }
                     let (target, is_new) = match targets.get(&source).copied() {
                         Some(target) => (target, false),
                         None => {
@@ -2630,14 +2642,6 @@ fn materialize_lifted_callable_instances(
         }
     }
     Ok(())
-}
-
-fn lifted_callable_instance_definition(instance: &InstanceKey, source: DefKey) -> DefKey {
-    DefKey(Digest::of_parts([
-        b"grandiose-stage0-lifted-callable-instance-v1".as_slice(),
-        instance.fingerprint().as_bytes().as_slice(),
-        source.0.as_bytes().as_slice(),
-    ]))
 }
 
 /// Translate the executable instance identity for a selected trait method

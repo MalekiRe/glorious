@@ -18,7 +18,7 @@ use crate::{
     mir::{
         MirCleanupAction, MirContinuationPolicy, MirFunction, MirInstruction, MirLocal, MirPattern,
         MirPatternField, MirProgram, MirTerminator, canonical_f64_bits, is_canonical_f32_bits,
-        is_canonical_f64_bits, lifted_callable_definition,
+        is_canonical_f64_bits,
         parse_char_literal, parse_f64_literal, parse_text_literal,
     },
     runtime_manifest::{FloatBinaryOp, FloatCompareOp, FloatPrimitive, FloatWidth, PrimitiveRole},
