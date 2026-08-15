@@ -97,6 +97,34 @@ pub struct RetentionReport {
     pub retained_pinned: u64,
 }
 
+/// Inspection-safe retention accounting for database-owned immutable worlds.
+///
+/// These are ownership counts rather than allocator-byte estimates: shared
+/// `Arc` capacity cannot be attributed reliably, while revision pins are the
+/// bounded lifetimes a host must be able to diagnose without seeing private
+/// source, interface, or query-cache data.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetentionStats {
+    /// Worlds currently retained by the database, whether active or retired.
+    pub retained_revisions: u64,
+    /// Retained worlds that no longer admit new snapshots or requests.
+    pub retired_revisions: u64,
+    /// Retained worlds with one or more outstanding snapshot/request pins.
+    pub pinned_revisions: u64,
+    /// Exact outstanding pins beyond the database revision-map references.
+    pub snapshot_pins: u64,
+}
+
+/// Inspection-safe lifecycle state for a single retained revision.  The
+/// database-local revision key makes pin reports stable without exposing an
+/// `Arc`, pointer, source blob, or query product to the caller.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RevisionRetentionMetadata {
+    pub revision: RevisionId,
+    pub retired: bool,
+    pub snapshot_pins: u64,
+}
+
 /// Stable, inspection-safe identity for one database-owned immutable world.
 /// It deliberately contains no pointers or local arena IDs; callers can keep
 /// this after the underlying revision is retired without gaining authority to
@@ -455,6 +483,65 @@ impl CompilerDatabase {
     /// source/module interface whose bytes and schema identity matched.
     pub fn interface_cache_stats(&self) -> InterfaceCacheStats {
         self.interface_cache.stats()
+    }
+
+    /// Return bounded retention accounting without exposing cache keys,
+    /// source bytes, or allocator implementation details. A nonzero pin count
+    /// on a retired revision is an observable leaked-pin candidate; it is not
+    /// a semantic dependency and does not grant access to the retired world.
+    pub fn retention_stats(&self) -> RetentionStats {
+        let state = self.state.lock().expect("compiler database mutex poisoned");
+        let mut stats = RetentionStats {
+            retained_revisions: u64::try_from(state.revisions.len())
+                .expect("revision count exceeds u64"),
+            retired_revisions: u64::try_from(state.retired.len())
+                .expect("retired revision count exceeds u64"),
+            ..RetentionStats::default()
+        };
+        for record in state.revisions.values() {
+            // The revisions map owns one strong reference. Every additional
+            // one is a live immutable view held by a snapshot, request
+            // session, or temporary query/inspection operation.
+            let pins = u64::try_from(Arc::strong_count(record).saturating_sub(1))
+                .expect("snapshot pin count exceeds u64");
+            stats.snapshot_pins = stats
+                .snapshot_pins
+                .checked_add(pins)
+                .expect("total snapshot pin count overflow");
+            if pins != 0 {
+                stats.pinned_revisions = stats
+                    .pinned_revisions
+                    .checked_add(1)
+                    .expect("pinned revision count overflow");
+            }
+        }
+        stats
+    }
+
+    /// Inspect one retained revision's lifecycle state. Retired revisions
+    /// remain reportable while pinned; after collection the normal stale/absent
+    /// revision error preserves the fail-closed ownership boundary.
+    pub fn revision_retention(
+        &self,
+        revision: RevisionId,
+    ) -> Result<RevisionRetentionMetadata, RevisionError> {
+        let state = self.state.lock().expect("compiler database mutex poisoned");
+        if revision.database != self.id {
+            return Err(RevisionError::StaleRevision(revision));
+        }
+        // Inspect the database-owned Arc in place. Calling `require_revision`
+        // here would clone it first and turn this inspection operation into a
+        // spurious extra pin in the very count it reports.
+        let record = state
+            .revisions
+            .get(&revision)
+            .ok_or(RevisionError::UnknownRevision(revision))?;
+        Ok(RevisionRetentionMetadata {
+            revision,
+            retired: state.retired.contains(&revision),
+            snapshot_pins: u64::try_from(Arc::strong_count(record).saturating_sub(1))
+                .expect("snapshot pin count exceeds u64"),
+        })
     }
 
     /// Stop admitting new sessions for a revision. Existing snapshots retain
