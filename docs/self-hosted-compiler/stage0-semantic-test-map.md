@@ -243,6 +243,13 @@ coarse. The composite fixtures cover:
   reordering, publishes no cache/interface products, and cannot contaminate a
   later repaired provider version
   (`service_canonicalizes_mixed_invalid_versioned_provider_diagnostics_without_cache_leaks`).
+- a package facade may contain a legal public cycle among its own modules
+  while both sides re-export the same external generic provider. All members
+  retain that one provider interface/fixity identity and emit stable VM bytes
+  under source reordering; a private provider still cannot cross the cyclic
+  public facade, and failure rolls back every staged package product
+  (`service_executes_cross_package_public_module_reexport_cycles_with_one_generic_provider_identity`,
+  `service_rejects_private_provider_authority_through_cross_package_module_reexport_cycles`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and
