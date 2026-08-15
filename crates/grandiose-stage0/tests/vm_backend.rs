@@ -4218,7 +4218,7 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
                     unique: true,
                     referent: Box::new(VmType::I64),
                 }]),
-                label,
+                label.clone(),
                 closure,
                 VmType::Unit,
             ],
@@ -4383,6 +4383,114 @@ fn verifier_rejects_nested_label_callable_capture_before_dynamic_rejoin_can_esca
 }
 
 #[test]
+fn verifier_rejects_label_projected_through_record_array_and_tuple_before_callable_capture() {
+    let owner = DefKey(Digest::of_bytes(b"projected-label-capture-owner"));
+    let record = DefKey(Digest::of_bytes(b"projected-label-capture-record"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let tuple = VmType::Tuple(vec![label.clone()]);
+    let array = VmType::Array(Box::new(tuple.clone()));
+    let closure = VmType::Callable {
+        parameters: vec![],
+        result: Box::new(VmType::I64),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: owner,
+            captures: 0,
+            parameters: 0,
+            registers: vec![
+                VmType::I64,
+                label.clone(),
+                tuple.clone(),
+                array.clone(),
+                VmType::Nominal {
+                    definition: record,
+                    arguments: vec![],
+                },
+                array.clone(),
+                tuple.clone(),
+                label.clone(),
+                closure,
+            ],
+            instructions: vec![
+                VmInstruction::ConstI64 { dst: 0, value: 42 },
+                VmInstruction::MakeLabel {
+                    dst: 1,
+                    brand_owner: owner,
+                    brand_label: 0,
+                    target: 10,
+                    destination: 0,
+                },
+                VmInstruction::MakeTuple {
+                    dst: 2,
+                    fields: vec![1],
+                },
+                VmInstruction::MakeArray {
+                    dst: 3,
+                    fields: vec![2],
+                    element_type: tuple.clone(),
+                },
+                VmInstruction::MakeRecord {
+                    dst: 4,
+                    definition: record,
+                    fields: vec![3],
+                    field_types: vec![array],
+                },
+                VmInstruction::ProjectRecord {
+                    dst: 5,
+                    base: 4,
+                    index: 0,
+                    field_count: 1,
+                    field_type: VmType::Array(Box::new(tuple.clone())),
+                },
+                VmInstruction::ProjectArray {
+                    dst: 6,
+                    base: 5,
+                    index: 0,
+                    field_count: 1,
+                    element_type: tuple.clone(),
+                },
+                VmInstruction::ProjectTuple {
+                    dst: 7,
+                    base: 6,
+                    index: 0,
+                    field_count: 1,
+                    field_type: label.clone(),
+                },
+                VmInstruction::MakeCallable {
+                    dst: 8,
+                    callee: DefKey(Digest::of_bytes(b"projected-label-capture-closure")),
+                    captures: vec![7],
+                    environment: None,
+                },
+                VmInstruction::Return { value: 8 },
+                VmInstruction::Trap,
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"projected-label-capture-candidate"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert!(matches!(
+        verify_vm(candidate),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&bytes),
+        Err(VmArtifactError::InvalidLabelContract { .. })
+    ));
+}
+
+#[test]
 fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can_escape() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-facade"));
@@ -4417,6 +4525,8 @@ fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can
                 snapshot.clone(),
                 VmType::Tuple(vec![snapshot.clone()]),
                 VmType::Array(Box::new(VmType::Tuple(vec![snapshot.clone()]))),
+                VmType::Tuple(vec![snapshot.clone()]),
+                snapshot.clone(),
                 closure,
                 VmType::Unit,
             ],
@@ -4426,7 +4536,7 @@ fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can
                     dst: 1,
                     brand_owner: owner,
                     brand_label: 0,
-                    target: 13,
+                    target: 15,
                     destination: 0,
                 },
                 VmInstruction::InstallHandler {
@@ -4436,7 +4546,7 @@ fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can
                     payload_destinations: vec![],
                     resume_type: VmType::I64,
                     continuation: VmContinuationPolicy::Consume,
-                    target: 15,
+                    target: 17,
                 },
                 VmInstruction::InstallHandler {
                     effect,
@@ -4456,7 +4566,7 @@ fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can
                 },
                 VmInstruction::UninstallHandler,
                 VmInstruction::UninstallHandler,
-                VmInstruction::Jump { target: 13 },
+                VmInstruction::Jump { target: 15 },
                 VmInstruction::CaptureResumption { dst: 3 },
                 VmInstruction::MakeTuple {
                     dst: 4,
@@ -4465,20 +4575,34 @@ fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can
                 VmInstruction::MakeArray {
                     dst: 5,
                     fields: vec![4],
-                    element_type: VmType::Tuple(vec![snapshot]),
+                    element_type: VmType::Tuple(vec![snapshot.clone()]),
+                },
+                VmInstruction::ProjectArray {
+                    dst: 6,
+                    base: 5,
+                    index: 0,
+                    field_count: 1,
+                    element_type: VmType::Tuple(vec![snapshot.clone()]),
+                },
+                VmInstruction::ProjectTuple {
+                    dst: 7,
+                    base: 6,
+                    index: 0,
+                    field_count: 1,
+                    field_type: snapshot,
                 },
                 VmInstruction::MakeCallable {
-                    dst: 6,
+                    dst: 8,
                     callee: DefKey(Digest::of_bytes(b"forged-resumption-closure")),
-                    captures: vec![5],
+                    captures: vec![7],
                     environment: None,
                 },
                 VmInstruction::CallIndirect {
-                    dst: 7,
+                    dst: 9,
                     callee: 1,
                     arguments: vec![0],
                 },
-                VmInstruction::Return { value: 6 },
+                VmInstruction::Return { value: 8 },
                 VmInstruction::Trap,
                 VmInstruction::Trap,
             ],

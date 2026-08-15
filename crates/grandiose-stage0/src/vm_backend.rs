@@ -7945,7 +7945,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 let VmType::Nominal { .. } = register_type(function, *base)? else {
                     unreachable!("checked nominal base")
                 };
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = states.labels[*base as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*base as usize];
             }
             VmInstruction::ProjectTuple {
                 dst,
@@ -7975,7 +7977,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         found: register_type(function, *dst)?,
                     });
                 }
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = states.labels[*base as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*base as usize];
             }
             VmInstruction::ProjectArray {
                 dst,
@@ -8004,7 +8008,9 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         found: register_type(function, *dst)?,
                     });
                 }
-                write(&mut states, *dst)?
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = states.labels[*base as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*base as usize];
             }
             VmInstruction::UpdateRecord {
                 dst,
