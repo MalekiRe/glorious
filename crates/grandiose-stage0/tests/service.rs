@@ -10832,6 +10832,48 @@ fn service_executes_aliased_reexported_generic_trait_gats_through_vm_handlers() 
 }
 
 #[test]
+fn service_executes_recursive_module_facade_gat_effect_contracts_through_vm() {
+    // `left` declares the parent protocol and exports `right`'s child facade;
+    // `right` imports that parent back to define the child and its impls. The
+    // module-interface SCC must settle before the root can select a generic
+    // associated layout/effect row through the recursive public facade.
+    let root = "pub mod left; pub mod right; use left::*; use right::*; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: Capability<i64>::relay<{Trace<i64>}, i64>(0, 41) }; Trace<i64>::note(packet.value) } pub fn main() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let left = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<e: EffectRow, U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U>, | e }; } pub use crate::right::Child as Capability;";
+    let right = "pub use crate::left::{Parent, Trace}; pub trait Child<T>: Parent<T> {} pub use crate::right::Child as Capability; impl Parent<i64> for i64 { type Item<U> = U; type Effects<U> = {Trace<U>}; fn relay<e: EffectRow, U>(receiver: i64, value: U) -> U / {Trace<U>, | e} { value } } impl Child<i64> for i64 {}";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            root,
+            &[("src/left/left.glorious", left), ("src/right/right.glorious", right)],
+        ))
+        .expect("recursive public module interfaces must converge before VM materialization");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_unselected_recursive_module_facade_gat_effect_contracts() {
+    // The same cyclic public interface graph must reach a finite rejected
+    // state when no parent implementation supplies the inherited GAT row.
+    let root = "pub mod left; pub mod right; use left::*; use right::*; pub fn worker() -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { 0 } pub fn main() -> i64 { worker() }";
+    let left = "pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<e: EffectRow, U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U>, | e }; } pub use crate::right::Child as Capability;";
+    let right = "pub use crate::left::Parent; pub trait Child<T>: Parent<T> {} pub use crate::right::Child as Capability;";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            root,
+            &[("src/left/left.glorious", left), ("src/right/right.glorious", right)],
+        ))
+    else {
+        panic!("a recursive facade manufactured an unselected associated effect row");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4190"),
+        "missing bounded recursive-facade evidence rejection: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_aliased_reexported_generic_trait_gats_without_an_impl() {
     // The implementation-contract normalizer is allowed to reduce only after
     // selection.  A facade alias does not manufacture the missing parent

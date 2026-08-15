@@ -106,6 +106,13 @@ coarse. The composite fixtures cover:
   dispatch, and VM execution; without the selected implementation, the facade
   remains a `G4190` rejection (`service_executes_aliased_reexported_generic_trait_gats_through_vm_handlers`,
   `service_rejects_aliased_reexported_generic_trait_gats_without_an_impl`).
+- mutually recursive public module interfaces can likewise converge when two
+  glob imports reach the same child-trait/effect identities through opposite
+  facade paths. A selected generic row and `Self`-projected GAT method reaches
+  the VM, while the identical SCC without an implementation terminates in the
+  required `G4190` rejection rather than retaining a cyclic provisional
+  interface (`service_executes_recursive_module_facade_gat_effect_contracts_through_vm`,
+  `service_rejects_unselected_recursive_module_facade_gat_effect_contracts`).
 - effect declaration visibility across dependency-package boundaries, including
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate
