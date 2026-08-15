@@ -222,6 +222,12 @@ coarse. The composite fixtures cover:
   facade and VM artifact instead of retaining either stale diagnostics or
   canonical metadata
   (`service_recovers_from_hyphen_alias_version_collisions_without_stale_generic_facade_state`).
+- sequential pinned sessions may use the same hyphenated dependency alias with
+  incompatible generic public contracts. A rejected child world reports its
+  own canonical type diagnostic without publishing cache/interface products,
+  while the already-open parent session retains its original trait/effect/
+  fixity identity and executable result
+  (`service_pins_same_alias_generic_dependency_worlds_without_interface_or_diagnostic_leaks`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and

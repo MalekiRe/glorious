@@ -11557,6 +11557,89 @@ fn service_recovers_from_hyphen_alias_version_collisions_without_stale_generic_f
 }
 
 #[test]
+fn service_pins_same_alias_generic_dependency_worlds_without_interface_or_diagnostic_leaks() {
+    let root = "use semantic_lib::*; pub struct Packet { value: <i64 as Child<i64>>::Item<i64> } pub fn call(callback: Callback<i64>) -> i64 / { <i64 as Child<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: call(Child<i64>::relay) }; Trace<i64>::note(packet.value) } pub fn effect_value() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let compatible = "pub infixl 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let incompatible = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = Bool; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> Bool / {Trace<U>} { true } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let world = |provider: &str| request_with_dependency(root, "semantic-lib@0.1.0", provider);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(compatible), None).unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .expect("the first generic dependency world must compile")
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        48
+    );
+    let parent_session = compiler.open_session(parent).unwrap();
+    let cached_parent = compiler.interface_cache_stats();
+    let dependency_interface = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("semantic-lib@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let published_parent_interface = compiler
+        .dependency_trace(parent, &dependency_interface)
+        .expect("the first dependency interface must be published");
+
+    let child_input = world(incompatible);
+    let child = compiler
+        .import_revision(child_input.clone(), Some(parent))
+        .unwrap();
+    let child_session = compiler.open_session(child).unwrap();
+    let Err(grandiose_stage0::ServiceError::Failed(first_diagnostics)) =
+        compiler.compile_session(&child_session)
+    else {
+        panic!("the incompatible same-alias generic dependency unexpectedly compiled");
+    };
+    assert!(
+        first_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4107"),
+        "the child must use its own incompatible generic public contract: {first_diagnostics:#?}"
+    );
+    assert_eq!(
+        compiler.interface_cache_stats(),
+        cached_parent,
+        "a rejected child world must not publish cache evidence into the pinned parent"
+    );
+    assert!(
+        compiler.dependency_traces(child).is_empty(),
+        "a rejected child world must publish neither its dependency interface nor artifact"
+    );
+    assert_eq!(
+        compiler.dependency_trace(parent, &dependency_interface),
+        Some(published_parent_interface),
+        "the child cannot overwrite the parent dependency interface with its same-alias contract"
+    );
+    assert_eq!(
+        compiler
+            .compile_session(&parent_session)
+            .expect("the pinned parent session must not see child generic contracts")
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        48
+    );
+
+    let mut reordered_child = child_input;
+    reordered_child.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(second_diagnostics)) =
+        StageZeroCompiler::new().compile(reordered_child)
+    else {
+        panic!("source reordering changed the incompatible generic child into success");
+    };
+    assert_eq!(
+        first_diagnostics, second_diagnostics,
+        "same-alias generic diagnostics must be canonical across request worlds and source order"
+    );
+}
+
+#[test]
 fn service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping() {
     let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
     let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
