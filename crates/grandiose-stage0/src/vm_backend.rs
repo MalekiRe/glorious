@@ -13504,6 +13504,10 @@ fn execute(
                         cleanup,
                     },
                 )?;
+                // A lexical leave abandons every suspended clause-return
+                // path it crosses.  Restoring one after reaching the label
+                // would resurrect the cancelled continuation and its frames.
+                resumption_returns.clear();
                 continue;
             }
             VmInstruction::BranchBool {
@@ -16788,6 +16792,9 @@ fn execute_with_arguments(
                         cleanup: cleanup.clone(),
                     },
                 )?;
+                // See the standalone interpreter above. A branded leave is
+                // terminal with respect to replay clause-return frames.
+                resumption_returns.clear();
                 continue;
             }
             VmInstruction::BranchBool {

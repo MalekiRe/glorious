@@ -18452,7 +18452,33 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let (completion, outer_clauses, root_prefix) = self.lexical_handle(root)?;
+        // The reentrant graph may be enclosed in a branded Audit cancellation
+        // handler.  Its clause leaves the label after the normal-completion
+        // call crosses the facade, while the replay graph remains unchanged.
+        let top_root = match self.body.expression(root).kind.clone() {
+            CoreKind::Block(values) => {
+                let (tail, prefix) = values.split_last()?;
+                if !prefix.is_empty() {
+                    return None;
+                }
+                *tail
+            }
+            _ => root,
+        };
+        let (reentrant_root, label_cancellation) = match self.body.expression(top_root).kind.clone() {
+            CoreKind::Label { brand, body } => {
+                let (protected, clauses, prefix) = self.lexical_handle(body)?;
+                if !prefix.is_empty() {
+                    return None;
+                }
+                let [clause] = clauses.as_slice() else {
+                    return None;
+                };
+                (protected, Some((brand, clause.clone())))
+            }
+            _ => (root, None),
+        };
+        let (completion, outer_clauses, root_prefix) = self.lexical_handle(reentrant_root)?;
         let completion = match self.body.expression(completion).kind.clone() {
             CoreKind::Completion { .. } => completion,
             CoreKind::Block(values) => {
@@ -18497,6 +18523,18 @@ impl Lowerer<'_> {
                     if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
             )
         };
+        let label_cancellation_valid = label_cancellation.as_ref().is_none_or(|(brand, clause)| {
+            !clause.terminal
+                && clause.patterns.len() == clause.payload_types.len()
+                && clause.continuation.is_some()
+                && matches!(
+                    clause.resumption,
+                    CoreHandlerResumption::Discard { quantity }
+                        if !quantity.requires_positive_use()
+                )
+                && self.contains_label_transfer(clause.body, *brand)
+                && !self.handler_body_uses_snapshot_alias(clause.body)
+        });
         if !root_prefix.is_empty()
             || !middle_prefix.is_empty()
             || outer.terminal
@@ -18526,6 +18564,7 @@ impl Lowerer<'_> {
             || self.handler_body_uses_snapshot_alias(outer.body)
             || self.handler_body_uses_snapshot_alias(middle_clause.body)
             || self.handler_body_uses_snapshot_alias(inner_clause.body)
+            || !label_cancellation_valid
         {
             return None;
         }
@@ -18544,7 +18583,20 @@ impl Lowerer<'_> {
         let outer_payloads = payloads(self, outer);
         let middle_payloads = payloads(self, middle_clause);
         let inner_payloads = payloads(self, inner_clause);
+        let audit_payloads = label_cancellation.as_ref().map(|(_, clause)| payloads(self, clause));
         let mut entry = std::mem::take(&mut self.instructions);
+        if let Some((_, clause)) = &label_cancellation {
+            entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: audit_payloads.clone().expect("audit payloads allocated"),
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target: MirBlockId(6),
+            });
+        }
         for (clause, payloads, target) in [
             (outer, outer_payloads.clone(), MirBlockId(1)),
             (middle_clause, middle_payloads.clone(), MirBlockId(2)),
@@ -18591,6 +18643,9 @@ impl Lowerer<'_> {
         for _ in 0..3 {
             entry.push(MirInstruction::UninstallHandler);
         }
+        if label_cancellation.is_some() {
+            entry.push(MirInstruction::UninstallHandler);
+        }
 
         let arm = |lowerer: &mut Self,
                    clause: &CoreHandlerClause,
@@ -18631,6 +18686,22 @@ impl Lowerer<'_> {
         let (inner_instructions, inner_result) = arm(self, inner_clause, &inner_payloads)?;
         self.named = boundary_named;
         self.values = boundary_values;
+        let audit_leave = if let Some((brand, clause)) = &label_cancellation {
+            self.instructions = Vec::new();
+            self.bind_handler_patterns(
+                &clause.patterns,
+                audit_payloads.as_deref().expect("audit payloads allocated"),
+            )?;
+            let value = self.lower_label_transfer_path(clause.body, *brand)?;
+            self.instructions.push(MirInstruction::Cancel {
+                site: MirResumptionSiteId::UNASSIGNED,
+            });
+            let instructions = std::mem::take(&mut self.instructions);
+            let join = self.alloc(self.body.expression(root).ty.clone(), CoreId(u32::MAX));
+            Some((*brand, instructions, value, join))
+        } else {
+            None
+        };
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
@@ -18640,7 +18711,8 @@ impl Lowerer<'_> {
             result: self.body.expression(root).ty.clone(),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
-            blocks: vec![
+            blocks: {
+                let mut blocks = vec![
                 MirBlock {
                     scope: MirScopeId::ROOT,
                     parameters: vec![],
@@ -18691,7 +18763,38 @@ impl Lowerer<'_> {
                     }],
                     terminator: MirTerminator::Unreachable,
                 },
-            ],
+                ];
+                if let Some((brand, instructions, value, join)) = audit_leave {
+                    blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
+                        parameters: vec![],
+                        instructions,
+                        terminator: MirTerminator::Leave {
+                            label: MirLabelId::UNASSIGNED,
+                            brand,
+                            target: MirBlockId(7),
+                            arguments: vec![value],
+                            cleanup: MirCleanupPlan {
+                                source_storage_scope: MirSourceStorageScopeId::ROOT,
+                                target_storage_scope: MirSourceStorageScopeId::ROOT,
+                                moved_paths: vec![],
+                                moved_places: self.leave_cleanup.moved_places.clone(),
+                                active_loans: self.leave_cleanup.active_loans.clone(),
+                                drop_flags: vec![],
+                                actions: vec![],
+                                protected_values: vec![],
+                            },
+                        },
+                    });
+                    blocks.push(MirBlock {
+                        scope: MirScopeId::ROOT,
+                        parameters: vec![join],
+                        instructions: vec![],
+                        terminator: MirTerminator::Return { value: join },
+                    });
+                }
+                blocks
+            },
         })
     }
 

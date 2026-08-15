@@ -11965,6 +11965,31 @@ fn service_reentrant_tick_resume_forwards_nested_facade_ask_through_completion()
 }
 
 #[test]
+fn service_reentrant_completion_cancels_to_label_through_nested_facades() {
+    // A replayed Console residual first completes through the outer normal
+    // arm, which re-enters the separate Audit handler through bridge::record.
+    // That handler cancels its continuation by leaving the surrounding label.
+    let mut request = request(
+        "use bridge::Ask; use bridge::Audit; use bridge::Tick; use bridge::invoke; use bridge::record; pub fn main() -> i64 { label done { handle { handle { handle { handle invoke() { Ask::ask(true) with k => k(1) + k(2) } } { value => { let audited = record(value); audited + 1 }; Tick::tick() with k => k(10) + k(20) } } { Ask::ask(_) with k => k(30) + k(40) } } { Audit::note(value, _) => transfer done value } } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Ask, Audit, Tick, audit, relay}; pub fn invoke() -> i64 / {Ask, Tick} { relay() } pub fn record(value: i64) -> i64 / Audit { audit(value) }".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Ask { [2,2] ask(value: Bool) -> i64; } pub effect Tick { [2,2] tick() -> i64; } pub effect Audit { [0,1] note(value: i64) -> i64; } pub fn relay() -> i64 / {Ask, Tick} { let tick = Tick::tick(); let asked = Ask::ask(false); tick + asked } pub fn audit(value: i64) -> i64 / Audit { Audit::note(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("reentrant completion cancellation must execute through dependency facades");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 40);
+}
+
+#[test]
 fn service_links_private_helpers_reached_from_specialized_dependency_generics() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(
