@@ -4044,6 +4044,88 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
 }
 
 #[test]
+fn dynamic_label_call_abandons_replay_return_frames() {
+    let owner = DefKey(Digest::of_bytes(b"dynamic-label-replay-owner"));
+    let effect = DefKey(Digest::of_bytes(b"dynamic-label-replay-effect"));
+    let label = VmType::Callable {
+        parameters: vec![VmType::I64],
+        result: Box::new(VmType::Unit),
+        effects: Box::<VmEffectRow>::default(),
+    };
+    // The label is captured before the handler.  `ResumeReturn` restores the
+    // performed computation, whose first action invokes that label.  This is
+    // an abandonment boundary: execution must reach its payload return, not
+    // resurrect the handler clause at the pending return address (the trap).
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: owner,
+        captures: 0,
+        parameters: 0,
+        registers: vec![label, VmType::I64, VmType::I64, VmType::I64, VmType::Unit, VmType::I64],
+        instructions: vec![
+            VmInstruction::MakeLabel {
+                dst: 0,
+                brand_owner: owner,
+                brand_label: 0,
+                target: 9,
+                destination: 5,
+            },
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                payload_destinations: vec![],
+                resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Replay { uses: 2 },
+                target: 6,
+            },
+            VmInstruction::Perform {
+                dst: 1,
+                effect,
+                effect_arguments: vec![],
+                operation: 0,
+                arguments: vec![],
+            },
+            VmInstruction::CallIndirect {
+                dst: 4,
+                callee: 0,
+                arguments: vec![1],
+            },
+            VmInstruction::UninstallHandler,
+            VmInstruction::Return { value: 1 },
+            VmInstruction::ConstI64 { dst: 2, value: 41 },
+            VmInstruction::ResumeReturn { dst: 3, value: 2 },
+            // Reaching this instruction proves the dynamic label left the
+            // stale resumption-return frame alive.
+            VmInstruction::Trap,
+            VmInstruction::Return { value: 5 },
+        ],
+    };
+    let mut artifact = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: function.clone(),
+        fingerprint: Digest::of_bytes(b"dynamic-label-replay-artifact"),
+    };
+    artifact.fingerprint = artifact.computed_fingerprint();
+    let encoded = encode_artifact(&artifact);
+    assert_eq!(decode_artifact(&encoded).unwrap(), artifact);
+    assert_eq!(verify_vm(artifact).unwrap().run_i64().unwrap(), 41);
+
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry: owner,
+        functions: BTreeMap::from([(owner, function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"dynamic-label-replay-program"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    assert_eq!(verify_vm_program(program).unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
 fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
     let mut candidate = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,

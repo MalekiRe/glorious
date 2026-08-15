@@ -13495,6 +13495,10 @@ fn execute(
                 };
                 registers[destination as usize] = registers[*argument as usize].clone();
                 handlers.truncate(handler_depth);
+                // A dynamic label invocation is the same nonlocal control
+                // boundary as a direct Leave: no suspended clause-return
+                // path may survive to resurrect an abandoned replay frame.
+                resumption_returns.clear();
                 pc = target as usize;
                 continue;
             }
@@ -16743,6 +16747,10 @@ fn execute_with_arguments(
                     )?;
                     *slot = Some(payload);
                     handlers.truncate(handler_depth);
+                    // See the standalone interpreter above. Restoring the
+                    // captured lexical label prefix abandons every pending
+                    // handler-clause return path it crossed.
+                    resumption_returns.clear();
                     pc = target as usize;
                     continue;
                 }
