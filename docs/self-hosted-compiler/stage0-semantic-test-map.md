@@ -155,6 +155,12 @@ coarse. The composite fixtures cover:
   hyphenated package aliases publicly re-export a generic effect and selected
   trait GAT contract, and diagnostics are invariant under source enumeration
   (`service_rejects_recursive_hyphenated_dependency_facades_with_generic_effect_gats`).
+- a legal reciprocal module SCC inside one package may re-export a shared
+  provider's generic effect, HRTB GAT callback alias, callable, and fixity
+  while a separate hyphenated package-import SCC is rejected. The illegal
+  SCC emits only canonical cycle diagnostics and publishes nothing; removing
+  it reuses exactly the still-valid module-SCC identities and VM bytes
+  (`service_isolates_illegal_hyphenated_package_cycles_from_legal_hrtb_module_sccs`).
 - generic dependency effect identity through exact replay and optional
   cancellation, including rejection when the imported handler's concrete
   effect instance does not match the performed one.

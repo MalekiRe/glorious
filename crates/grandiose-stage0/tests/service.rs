@@ -11057,6 +11057,133 @@ fn service_rejects_recursive_hyphenated_dependency_facades_with_generic_effect_g
 }
 
 #[test]
+fn service_isolates_illegal_hyphenated_package_cycles_from_legal_hrtb_module_sccs() {
+    let legal_root = "use legal_facade::*; pub fn apply(callback: Callback<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); *result } pub fn effect_value() -> i64 { handle apply(relay) { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let illegal_root = "use legal_facade::*; use effects_lib::Callback as RejectedCallback; pub fn apply(callback: Callback<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); *result } pub fn effect_value() -> i64 { handle apply(relay) { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Effects<U>: EffectRow; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; } impl Child<i64> for i64 {} pub type Callback<U> = for<'a> (&'a i64) -> &'a i64 / { <i64 as Child<i64>>::Effects<U> }; pub fn relay<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value }";
+    let legal_world = |root: &str| {
+        let mut input = request(root);
+        for (package, path, source) in [
+            ("semantic-core@0.1.0", "src/lib.glorious", provider),
+            (
+                "legal-facade@0.1.0",
+                "src/lib.glorious",
+                "pub mod left; pub mod right; pub use crate::left::*; pub use crate::right::*;",
+            ),
+            (
+                "legal-facade@0.1.0",
+                "src/left/left.glorious",
+                "pub use crate::right::*; pub use semantic_core::{Callback, Combine, Trace, relay}; pub use semantic_core::*;",
+            ),
+            (
+                "legal-facade@0.1.0",
+                "src/right/right.glorious",
+                "pub use crate::left::*; pub use semantic_core::{Callback, Combine, Trace, relay}; pub use semantic_core::*;",
+            ),
+        ] {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse(path).unwrap(),
+                source.as_bytes(),
+            ));
+        }
+        input
+    };
+    let illegal_sources = [
+        (
+            "effects-lib@0.1.0",
+            "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub use traits_lib::{Callback, Child as Capability};",
+        ),
+        (
+            "traits-lib@0.1.0",
+            "pub use effects_lib::{Combine, Trace}; pub use effects_lib::*; pub trait Parent<T> { type Effects<U>: EffectRow; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; } impl Child<i64> for i64 {} pub type Callback<U> = for<'a> (&'a i64) -> &'a i64 / { <i64 as Child<i64>>::Effects<U> };",
+        ),
+    ];
+
+    let compiler = StageZeroCompiler::new();
+    let public = legal_world(legal_root);
+    let parent = compiler.import_revision(public.clone(), None).unwrap();
+    let artifact = compiler
+        .compile_revision(parent)
+        .expect("the legal shared-provider module SCC must compile through HRTB callback dispatch")
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 50);
+    let cached_parent = compiler.interface_cache_stats();
+    let provider_interface = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("semantic-core@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let mut published = Vec::new();
+    for path in ["crate", "crate::left", "crate::right"] {
+        let node = DependencyNode::Interface(ModuleKey {
+            package: PackageKey("legal-facade@0.1.0".into()),
+            path: path.into(),
+        });
+        let trace = compiler
+            .dependency_trace(parent, &node)
+            .expect("each legal module-SCC interface must publish");
+        assert!(trace.dependencies.contains(&provider_interface));
+        published.push((node, trace));
+    }
+
+    let mut illegal = legal_world(illegal_root);
+    for (package, source) in illegal_sources {
+        illegal.sources.push(SourceInput::new(
+            PackageKey(package.into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            source.as_bytes(),
+        ));
+    }
+    let child = compiler.import_revision(illegal.clone(), Some(parent)).unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(child).unwrap())
+        .expect_err("the separate hyphenated package SCC must fail before body publication");
+    assert!(
+        error.diagnostics().iter().all(|diagnostic| diagnostic.code == "G3321"),
+        "only package-cycle diagnostics may escape the illegal SCC: {:#?}",
+        error.diagnostics()
+    );
+    assert!(
+        error.diagnostics().len() >= 2,
+        "the reciprocal package edges must each retain a cycle diagnostic"
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached_parent);
+    assert!(compiler.dependency_traces(child).is_empty());
+    for (node, trace) in &published {
+        assert_eq!(compiler.dependency_trace(parent, node), Some(trace.clone()));
+    }
+    let mut reordered = illegal;
+    reordered.sources.reverse();
+    assert_eq!(
+        error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(reordered)
+            .expect_err("source ordering cannot legalize a package SCC")
+            .diagnostics(),
+        "illegal package-SCC diagnostics must be canonical"
+    );
+
+    let repaired = compiler.import_revision(public, Some(parent)).unwrap();
+    assert_eq!(
+        repaired, parent,
+        "repairing by removing the illegal package SCC must reuse only the legal request world"
+    );
+    let replay = compiler.compile_revision(repaired).unwrap().artifact.unwrap();
+    assert_eq!(artifact.fingerprint(), replay.fingerprint());
+    assert_eq!(artifact.canonical_bytes(), replay.canonical_bytes());
+    assert_eq!(replay.run_i64().unwrap(), 50);
+    assert_eq!(compiler.interface_cache_stats().misses, cached_parent.misses);
+    for (node, trace) in published {
+        let replay_trace = compiler
+            .dependency_trace(repaired, &node)
+            .expect("the repaired legal SCC interfaces must remain available");
+        assert_eq!(replay_trace.fingerprint, trace.fingerprint);
+        assert_eq!(replay_trace.dependencies, trace.dependencies);
+    }
+}
+
+#[test]
 fn service_executes_three_package_diamond_gat_effect_facades_canonically() {
     // The provider sits at the point of a package DAG: both hyphenated
     // facades publicly re-export its generic effect and child-trait GAT
