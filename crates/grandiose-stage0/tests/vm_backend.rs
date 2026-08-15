@@ -1526,7 +1526,7 @@ fn vm_seals_symbolic_structural_consts_in_nominal_layouts_and_effect_protocols()
     ));
     assert!(matches!(
         artifact.function.instructions.as_slice(),
-        [VmInstruction::Perform { effect_arguments, .. }, ..]
+        [VmInstruction::DeclareResult { .. }, VmInstruction::Perform { effect_arguments, .. }, ..]
             if effect_arguments == &[VmGenericArgument::ConstU32Expr(expression.clone())]
     ));
     let encoded = encode_artifact(&artifact);
@@ -1697,7 +1697,7 @@ fn vm_lowers_non_type_effect_arguments_with_their_original_kinds() {
     let artifact = emit_vm(&function).expect("const protocol argument has a VM identity");
     assert!(matches!(
         artifact.function.instructions.as_slice(),
-        [VmInstruction::Perform { effect: found, effect_arguments, .. }, ..]
+        [VmInstruction::DeclareResult { .. }, VmInstruction::Perform { effect: found, effect_arguments, .. }, ..]
             if *found == effect && effect_arguments == &[VmGenericArgument::ConstU32(1)]
     ));
     let encoded = encode_artifact(&artifact);
@@ -8344,10 +8344,11 @@ fn vm_omits_identity_cfg_edge_transfers() {
     }
     .with_frozen_control_tables();
     let candidate = emit_vm(&mir).unwrap();
-    assert_eq!(candidate.function.instructions.len(), 3);
+    assert_eq!(candidate.function.instructions.len(), 4);
     assert!(matches!(
         candidate.function.instructions.as_slice(),
         [
+            VmInstruction::DeclareResult { .. },
             VmInstruction::ConstI64 { value: 42, .. },
             VmInstruction::Jump { .. },
             VmInstruction::Return { .. },
@@ -8416,6 +8417,7 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
     assert!(matches!(
         candidate.function.instructions.as_slice(),
         [
+            VmInstruction::DeclareResult { .. },
             VmInstruction::ConstI64 { .. },
             VmInstruction::Leave {
                 brand_owner,
@@ -10198,4 +10200,83 @@ fn verifier_retains_all_possible_reference_roots_across_cfg_joins() {
         decode_and_verify_artifact(&bytes),
         Err(VmArtifactError::ReadBeforeWrite { register: 1 })
     ));
+}
+
+#[test]
+fn declared_nonreturn_abi_preserves_bottom_coerced_direct_and_indirect_calls() {
+    let terminal = DefKey(Digest::of_bytes(b"declared-nonreturn-terminal"));
+    let entry = DefKey(Digest::of_bytes(b"declared-nonreturn-entry"));
+    let terminal_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: terminal,
+        captures: 0,
+        parameters: 0,
+        registers: vec![VmType::Unit],
+        // The trailing Return is intentionally unreachable. The leading ABI
+        // declaration must summarize normal control, not merely scan every
+        // serialized instruction for a return-shaped opcode.
+        instructions: vec![
+            VmInstruction::DeclareResult {
+                result: VmType::Unit,
+                returns: false,
+            },
+            VmInstruction::Trap,
+            VmInstruction::Return { value: 0 },
+        ],
+    };
+    let entry_function = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: entry,
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::I64,
+            VmType::Callable {
+                parameters: vec![],
+                result: Box::new(VmType::I64),
+                effects: Box::new(VmEffectRow::default()),
+            },
+            VmType::I64,
+        ],
+        instructions: vec![
+            VmInstruction::DeclareResult {
+                result: VmType::I64,
+                returns: true,
+            },
+            // The source `!` callee can be coerced to i64 at both call
+            // surfaces. Its sealed `returns: false` ABI proves neither
+            // destination is observable on a normal return edge.
+            VmInstruction::Call {
+                dst: 0,
+                callee: terminal,
+                arguments: vec![],
+            },
+            VmInstruction::MakeCallable {
+                dst: 1,
+                callee: terminal,
+                captures: vec![],
+                environment: None,
+            },
+            VmInstruction::CallIndirect {
+                dst: 2,
+                callee: 1,
+                arguments: vec![],
+            },
+            VmInstruction::Return { value: 2 },
+        ],
+    };
+    let mut program = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        host_capabilities: vec![],
+        entry,
+        functions: BTreeMap::from([(entry, entry_function), (terminal, terminal_function)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"declared-nonreturn-program-stale"),
+    };
+    program.fingerprint = program.computed_fingerprint();
+    let bytes = encode_program(&program);
+    assert_eq!(decode_program(&bytes).unwrap(), program);
+    assert!(verify_vm_program(program).is_ok());
+    assert!(decode_and_verify_program(&bytes).is_ok());
 }

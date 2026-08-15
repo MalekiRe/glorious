@@ -8641,6 +8641,32 @@ enum CompletionChainArm {
 }
 
 impl Lowerer<'_> {
+    /// The callable header is the VM ABI authority. A body may end in a
+    /// terminal operation and therefore have a bottom Core root after source
+    /// coercion, while its declared callable result remains (say) `i64`.
+    /// Preserve that distinction so an emitted non-returning callee still
+    /// presents the signature selected by direct and indirect callers.
+    fn declared_result_type(&self, root: CoreId) -> Type {
+        // Ordinary bodies continue to use their normalized Core result. In
+        // particular, a facade/HRTB header can retain source spellings that
+        // are intentionally normalized only inside the checked body. The
+        // header result becomes an ABI authority only for a proven terminal
+        // root, where no normal Return can reconcile the bottom body with a
+        // source-coerced callable result.
+        if !self.body_ends_in_terminal_control(self.body, root, &mut BTreeSet::new()) {
+            return self.body.expression(root).ty.clone();
+        }
+        self.signatures
+            .and_then(|signatures| signatures.definitions.get(&self.definition))
+            .and_then(|header| match header {
+                crate::signature::ElaboratedHeader::Callable(signature)
+                | crate::signature::ElaboratedHeader::ValueAlias { signature, .. } => {
+                    Some(signature.result.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| self.body.expression(root).ty.clone())
+    }
     /// Lower an ordered, direct normal-completion chain under an enclosing
     /// label.  Every refutable clause receives the protected computation's
     /// result on an explicit block edge; a failed test carries that exact
@@ -8955,7 +8981,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -9245,7 +9271,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -9509,7 +9535,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -9740,7 +9766,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -9913,7 +9939,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -10127,7 +10153,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -10385,7 +10411,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -10594,7 +10620,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -10882,7 +10908,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -11143,7 +11169,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -11438,7 +11464,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -11853,7 +11879,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -12073,7 +12099,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -12134,7 +12160,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -12551,7 +12577,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -12704,7 +12730,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -13918,7 +13944,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -13997,7 +14023,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -14285,7 +14311,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -14587,7 +14613,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -15053,7 +15079,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -15381,7 +15407,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -15737,7 +15763,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -15954,7 +15980,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -16284,7 +16310,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -16581,7 +16607,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -16744,7 +16770,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -16961,7 +16987,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -17196,7 +17222,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -17416,7 +17442,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -17618,7 +17644,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -18066,7 +18092,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -18261,7 +18287,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -18522,7 +18548,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -18579,7 +18605,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![MirBlock {
@@ -18772,7 +18798,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -18868,7 +18894,6 @@ impl Lowerer<'_> {
         {
             return None;
         }
-
         for expression in root_prefix {
             self.statement(expression)?;
         }
@@ -19006,7 +19031,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -19161,7 +19186,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -19414,7 +19439,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -19607,7 +19632,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -20023,7 +20048,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -20309,7 +20334,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -20769,7 +20794,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control,
             entry: MirBlockId(0),
             blocks: {
@@ -21464,7 +21489,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -21753,7 +21778,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -21906,7 +21931,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -22011,8 +22036,14 @@ impl Lowerer<'_> {
             return None;
         }
         let mut active = clauses
-            .into_iter()
+            .iter()
             .filter(|clause| !clause.terminal && effects.effects.contains(&clause.effect))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut terminal = clauses
+            .iter()
+            .filter(|clause| clause.terminal && effects.effects.contains(&clause.effect))
+            .cloned()
             .collect::<Vec<_>>();
         if active.is_empty()
             || active.iter().any(|clause| {
@@ -22043,6 +22074,12 @@ impl Lowerer<'_> {
             // it here would silently change source row ordering.
             return None;
         }
+        terminal.sort_by_key(|clause| (clause.effect.clone(), clause.operation));
+        // Terminal frames sit below resumptive frames so a resumed operation
+        // can subsequently dispatch its terminal sibling without retaining
+        // an already-consumed continuation above the cancellation point.
+        let mut frames = terminal;
+        frames.extend(active.iter().cloned());
         for expression in root_prefix {
             self.statement(expression)?;
         }
@@ -22056,7 +22093,7 @@ impl Lowerer<'_> {
             _ => Some(self.value(callee)?),
         };
         let call_result = self.alloc(self.body.expression(computation).ty.clone(), computation);
-        let payloads = active
+        let payloads = frames
             .iter()
             .map(|clause| {
                 clause
@@ -22067,7 +22104,7 @@ impl Lowerer<'_> {
             })
             .collect::<Vec<_>>();
         let mut entry = std::mem::take(&mut self.instructions);
-        for (index, clause) in active.iter().enumerate() {
+        for (index, clause) in frames.iter().enumerate() {
             entry.push(MirInstruction::InstallHandler {
                 site: MirHandlerSiteId::UNASSIGNED,
                 effect: clause.effect.definition,
@@ -22077,10 +22114,13 @@ impl Lowerer<'_> {
                 resume_type: clause
                     .continuation
                     .as_ref()
-                    .expect("resumptive interprocedural arm has a frozen contract")
-                    .parameter
-                    .clone(),
-                continuation: MirContinuationPolicy::Consume,
+                    .map(|continuation| continuation.parameter.clone())
+                    .unwrap_or(Type::Never),
+                continuation: if clause.terminal {
+                    MirContinuationPolicy::Terminal
+                } else {
+                    MirContinuationPolicy::Consume
+                },
                 target: MirBlockId((index + 1) as u32),
             });
         }
@@ -22118,7 +22158,7 @@ impl Lowerer<'_> {
                 arguments,
             }),
         }
-        for _ in &active {
+        for _ in &frames {
             entry.push(MirInstruction::UninstallHandler);
         }
 
@@ -22153,10 +22193,23 @@ impl Lowerer<'_> {
                     ..
                 }
             );
-        for (clause, payloads) in active.iter().zip(payloads) {
+        for (clause, payloads) in frames.iter().zip(payloads) {
             self.instructions = Vec::new();
             self.named = previous_named.clone();
             self.bind_handler_patterns(&clause.patterns, &payloads)?;
+            if clause.terminal {
+                let result = self.value(clause.body)?;
+                self.instructions.push(MirInstruction::Cancel {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                });
+                blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: std::mem::take(&mut self.instructions),
+                    terminator: MirTerminator::Return { value: result },
+                });
+                continue;
+            }
             let resumed = if consume_returning_clause {
                 self.direct_handler_clause_value_for_consuming_return(clause)?
             } else {
@@ -22191,7 +22244,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -22304,7 +22357,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -22433,7 +22486,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks: vec![
@@ -22622,7 +22675,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -22789,7 +22842,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry,
             blocks,
@@ -23232,7 +23285,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -23406,7 +23459,7 @@ impl Lowerer<'_> {
             captures: 0,
             parameters,
             locals: self.locals.to_entries(),
-            result: self.body.expression(root).ty.clone(),
+            result: self.declared_result_type(root),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
@@ -23828,7 +23881,17 @@ impl Lowerer<'_> {
             return Some(unit);
         }
         let ty = e.ty.clone();
-        let dst = self.alloc(ty.clone(), id);
+        // A terminal operation is bottom-typed for execution even when an
+        // enclosing source coercion has given the expression a concrete
+        // expected type (for example a `-> i64` function whose final action
+        // is `halt() -> !`).  Keeping the coerced type in this destination
+        // would forge a resumable `Perform` result at the VM boundary.
+        let destination_ty = match &e.kind {
+            CoreKind::Perform { terminal: true, .. } => Type::Never,
+            CoreKind::Call { callee, .. } if self.direct_callee_is_terminal(*callee) => Type::Never,
+            _ => ty.clone(),
+        };
+        let dst = self.alloc(destination_ty, id);
         match e.kind {
             CoreKind::Literal(text) => match ty {
                 Type::Scalar(crate::types::ScalarType::I64) => match parse_i64_literal(&text) {
@@ -24190,7 +24253,7 @@ impl Lowerer<'_> {
                 effect,
                 operation,
                 arguments,
-                terminal: _,
+                terminal,
                 ..
             } => {
                 let arguments = arguments
@@ -24205,6 +24268,13 @@ impl Lowerer<'_> {
                     operation,
                     arguments,
                 });
+                if terminal {
+                    // A terminal operation may dynamically transfer to an
+                    // ancestor handler. If no such frame exists, execution
+                    // must still not fall through to a source-coerced value
+                    // or synthetic Return in this callee.
+                    self.instructions.push(MirInstruction::Abort);
+                }
             }
             CoreKind::Handle {
                 computation,
@@ -26516,6 +26586,54 @@ impl Lowerer<'_> {
         };
         self.values.insert(id, dst);
         Some(dst)
+    }
+    /// Calls into a known terminal body have no ordinary result edge. The
+    /// source checker may have coerced such a call through its enclosing
+    /// expression's expected type, but emitting that expected type as a VM
+    /// destination would make a non-returning callee appear resumable.
+    fn direct_callee_is_terminal(&self, callee: CoreId) -> bool {
+        let definition = match self.body.expression(callee).kind {
+            CoreKind::Function { definition, .. }
+            | CoreKind::TraitMethod {
+                method: definition, ..
+            } => definition,
+            _ => return false,
+        };
+        self.bodies
+            .get(&definition)
+            .is_some_and(|body| self.body_ends_in_terminal_control(body, body.root, &mut BTreeSet::new()))
+    }
+    /// Conservative Core-side pre-summary used only to choose a bottom call
+    /// destination. A negative result leaves the ordinary ABI untouched; a
+    /// positive result requires an exact syntactic terminal tail (possibly
+    /// through another directly named helper), so it can never erase an
+    /// executable return edge speculatively.
+    fn body_ends_in_terminal_control(
+        &self,
+        body: &TypedBody,
+        id: CoreId,
+        active: &mut BTreeSet<DefKey>,
+    ) -> bool {
+        match body.expression(id).kind {
+            CoreKind::Perform { terminal: true, .. } => true,
+            CoreKind::Block(ref values) => values
+                .last()
+                .is_some_and(|last| self.body_ends_in_terminal_control(body, *last, active)),
+            CoreKind::Call { callee, .. } => match body.expression(callee).kind {
+                CoreKind::Function { definition, .. }
+                | CoreKind::TraitMethod {
+                    method: definition, ..
+                } if active.insert(definition) => {
+                    let terminal = self.bodies.get(&definition).is_some_and(|target| {
+                        self.body_ends_in_terminal_control(target, target.root, active)
+                    });
+                    active.remove(&definition);
+                    terminal
+                }
+                _ => false,
+            },
+            _ => false,
+        }
     }
     /// The first executable handler lowering path. Terminal operations have no
     /// continuation, so a statically selected irrefutable arm can lower to its

@@ -253,6 +253,15 @@ pub struct VmPatternField {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmInstruction {
+    /// Function-owned ABI declaration emitted before its executable body.
+    /// `returns` distinguishes an ordinary result contract from a body whose
+    /// only reachable exits are terminal control transfers.  `Never` shares
+    /// the VM's zero-sized Unit representation, so this control bit is what
+    /// preserves non-returning intent across serialization.
+    DeclareResult {
+        result: VmType,
+        returns: bool,
+    },
     ConstUnit {
         dst: u32,
     },
@@ -1871,7 +1880,10 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// closure descriptor cannot redirect to an ABI-compatible sibling body.
 /// Schema 83 makes all generic and frozen integer shifts reject a count at or
 /// beyond the operand width instead of silently masking it.
-pub const STAGE0_VM_SCHEMA: u32 = 86;
+/// Schema 87 seals each emitted function's declared result and whether it
+/// returns normally. This lets a terminal callee retain its source callable
+/// ABI even when it contains no Return instruction.
+pub const STAGE0_VM_SCHEMA: u32 = 87;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2519,7 +2531,8 @@ fn emit_with_specialized_lifted_targets(
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut starts = Vec::with_capacity(function.blocks.len());
-    let mut next = 0u32;
+    // Every emitted body starts with its sealed result/control declaration.
+    let mut next = 1u32;
     for block in &function.blocks {
         starts.push(next);
         let control_len = match &block.terminator {
@@ -2545,6 +2558,13 @@ fn emit_with_specialized_lifted_targets(
             .ok_or(VmArtifactError::UnsupportedControlFlow)?;
     }
     let mut instructions = Vec::with_capacity(next as usize);
+    instructions.push(VmInstruction::DeclareResult {
+        result: vm_type(&function.result).map_err(|ty| VmArtifactError::UnsupportedType {
+            local: u32::MAX,
+            ty,
+        })?,
+        returns: false,
+    });
     for (block_index, block) in function.blocks.iter().enumerate() {
         instructions.extend(
             block
@@ -2645,6 +2665,10 @@ fn emit_with_specialized_lifted_targets(
             MirTerminator::Unreachable => instructions.push(VmInstruction::Trap),
         }
     }
+    let returns = vm_instructions_may_return(&instructions);
+    if let Some(VmInstruction::DeclareResult { returns: declared, .. }) = instructions.first_mut() {
+        *declared = returns;
+    }
     let function = VmFunction {
         nominal_copy_descriptors: function
             .nominal_copy_descriptors
@@ -2673,6 +2697,54 @@ fn retained_handler_depth(instructions: &[MirInstruction]) -> u32 {
             _ => depth,
         })
         .max(0) as u32
+}
+
+/// Compute the normal-control half of a function's ABI before it crosses the
+/// VM boundary. Dynamic `Perform` dispatch can transfer to an ancestor, but
+/// it never makes a terminal Trap fall through to a syntactically following
+/// Return. Keeping this small reachability proof in the emitter prevents a
+/// coerced bottom tail from being advertised as a normal Unit return.
+fn vm_instructions_may_return(instructions: &[VmInstruction]) -> bool {
+    !reachable_return_values(instructions).is_empty()
+}
+
+fn reachable_return_values(instructions: &[VmInstruction]) -> Vec<u32> {
+    let mut pending = vec![0u32];
+    let mut seen = BTreeSet::new();
+    let mut values = BTreeSet::new();
+    while let Some(pc) = pending.pop() {
+        if !seen.insert(pc) {
+            continue;
+        }
+        let Some(instruction) = instructions.get(pc as usize) else {
+            continue;
+        };
+        match instruction {
+            VmInstruction::Return { value } => {
+                values.insert(*value);
+            }
+            VmInstruction::Trap
+            | VmInstruction::Resume { .. }
+            | VmInstruction::Forward
+            | VmInstruction::Cancel => {}
+            VmInstruction::Jump { target }
+            | VmInstruction::MakeLabel { target, .. }
+            | VmInstruction::Leave { target, .. } => pending.push(*target),
+            VmInstruction::BranchBool {
+                then_target,
+                else_target,
+                ..
+            } => {
+                pending.push(*then_target);
+                pending.push(*else_target);
+            }
+            // `ResumeReturn` may resume a callee and then return to its
+            // clause. Its local fallthrough is therefore still an ordinary
+            // executable continuation for this function.
+            _ => pending.push(pc.saturating_add(1)),
+        }
+    }
+    values.into_iter().collect()
 }
 
 fn edge_length(arguments: &[MirLocal], target: &crate::mir::MirBlock) -> u32 {
@@ -4650,6 +4722,19 @@ impl<'a> Decoder<'a> {
                 }
                 Ok(VmInstruction::ConstF32 { dst, bits })
             }
+            172 => {
+                let result = self.vm_type_at_depth(0)?;
+                let returns = match self.byte()? {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(VmArtifactError::MalformedEncoding {
+                            message: "invalid function result control tag",
+                        });
+                    }
+                };
+                Ok(VmInstruction::DeclareResult { result, returns })
+            }
             138 => {
                 let dst = self.u32()?;
                 let selector = self.text()?;
@@ -5389,7 +5474,15 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                 verify_effect_operation_specialization(target, &generic_bindings)?;
                 let expected = instantiate_vm_type(&return_type(target)?, &generic_bindings);
                 let found = register_type(function, *dst)?;
-                if expected != found {
+                // A non-returning target has no normal edge on which `dst`
+                // becomes observable. Its source callable may have been
+                // bottom-coerced at the call site, so only the sealed control
+                // declaration (not a synthetic Unit runtime leaf) decides
+                // whether the ordinary result equality is required.
+                let target_returns = declared_result(target)?
+                    .map(|(_, returns)| returns)
+                    .unwrap_or(true);
+                if target_returns && expected != found {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
                         expected,
@@ -5499,7 +5592,10 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                 }
                 verify_effect_operation_specialization(target, &generic_bindings)?;
                 let expected = instantiate_vm_type(&return_type(target)?, &generic_bindings);
-                if expected != *result {
+                let target_returns = declared_result(target)?
+                    .map(|(_, returns)| returns)
+                    .unwrap_or(true);
+                if target_returns && expected != *result {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
                         expected,
@@ -5955,6 +6051,25 @@ fn instantiate_vm_generic_argument(
 }
 
 fn return_type(function: &VmFunction) -> Result<VmType, VmArtifactError> {
+    if let Some((declared, returns)) = declared_result(function)? {
+        let mut observed_return = false;
+        for value in reachable_return_values(&function.instructions) {
+            observed_return = true;
+            let found = register_type(function, value)?;
+            if &found != declared {
+                return Err(VmArtifactError::ResultType {
+                    expected: declared.clone(),
+                    found,
+                });
+            }
+        }
+        if !returns && observed_return {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "non-returning function contains a Return instruction",
+            });
+        }
+        return Ok(declared.clone());
+    }
     let mut result: Option<VmType> = None;
     for instruction in &function.instructions {
         let VmInstruction::Return { value } = instruction else {
@@ -5973,6 +6088,39 @@ fn return_type(function: &VmFunction) -> Result<VmType, VmArtifactError> {
         }
     }
     result.ok_or(VmArtifactError::NoReturn)
+}
+
+/// A declaration is deliberately an instruction so existing in-memory test
+/// fixtures can remain concise, while emitted/decoded artifacts retain the
+/// exact control ABI in their canonical payload.  It must be the unique first
+/// instruction: allowing a jumpable or repeated declaration would make the
+/// summary control-flow dependent.
+fn declared_result(function: &VmFunction) -> Result<Option<(&VmType, bool)>, VmArtifactError> {
+    let Some(first) = function.instructions.first() else {
+        return Ok(None);
+    };
+    let VmInstruction::DeclareResult { result, returns } = first else {
+        if function
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::DeclareResult { .. }))
+        {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "function result declaration is not its first instruction",
+            });
+        }
+        return Ok(None);
+    };
+    validate_vm_type(result)?;
+    if function.instructions[1..]
+        .iter()
+        .any(|instruction| matches!(instruction, VmInstruction::DeclareResult { .. }))
+    {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "function has multiple result declarations",
+        });
+    }
+    Ok(Some((result, *returns)))
 }
 
 fn lower_instruction(
@@ -7402,6 +7550,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
     for register in &function.registers {
         validate_vm_type(register)?;
     }
+    let declared_result = declared_result(function)?;
     validate_vm_nominal_copy_descriptors(&function.nominal_copy_descriptors)?;
     for instruction in &function.instructions {
         match instruction {
@@ -7494,6 +7643,10 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
         let mut advances = true;
         let instruction = &function.instructions[pc];
         match instruction {
+            VmInstruction::DeclareResult { .. } => {
+                // `declared_result` above has already proven this is the
+                // unique leading ABI declaration. It is not executable work.
+            }
             VmInstruction::ConstUnit { dst } => {
                 expect_type(function, *dst, VmType::Unit)?;
                 write(&mut states, *dst)?
@@ -8872,6 +9025,14 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 expire_snapshot_brand(&mut states.snapshots, frame.id);
+                // A terminal handler result is a non-local completion of the
+                // protected computation. In particular, it must not return
+                // through a pending `ResumeReturn` clause after a resumed
+                // callee performs its later terminal operation.
+                if frame.continuation == VmContinuationPolicy::Terminal {
+                    states.resumption_return_depth = 0;
+                    states.resumption_return_handler_ids.clear();
+                }
             }
             VmInstruction::Copy { dst, src } => {
                 read(&states, *src)?;
@@ -9563,7 +9724,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             propagate_state(&mut incoming, &mut worklist, (pc + 1) as u32, &states)?;
         }
     }
-    if returned.is_some() || trapped {
+    if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
         Ok(())
     } else {
         Err(VmArtifactError::NoReturn)
@@ -9747,6 +9908,7 @@ fn verify_handler_entry_boundaries(function: &VmFunction) -> Result<(), VmArtifa
 
     for (pc, instruction) in function.instructions.iter().enumerate() {
         let enters_handler = match instruction {
+            VmInstruction::DeclareResult { .. } => false,
             VmInstruction::Jump { target }
             | VmInstruction::Leave { target, .. }
             | VmInstruction::MakeLabel { target, .. } => {
@@ -12543,6 +12705,7 @@ fn execute(
     while let Some(instruction) = function.instructions.get(pc).cloned() {
         budget.tick()?;
         match instruction {
+            VmInstruction::DeclareResult { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[dst as usize] = Some(VmValue::Unit),
             VmInstruction::ConstI64 { dst, value } => {
                 registers[dst as usize] = Some(VmValue::I64(value))
@@ -13623,6 +13786,9 @@ fn execute(
                 if frame.suspended.is_none() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
+                if frame.continuation == VmContinuationPolicy::Terminal {
+                    resumption_returns.clear();
+                }
             }
             VmInstruction::Copy { dst, src } => {
                 registers[dst as usize] = registers[src as usize].clone()
@@ -14423,6 +14589,11 @@ fn complete_pending_leave(
 }
 fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
     match value {
+        VmInstruction::DeclareResult { result, returns } => {
+            output.push(172);
+            encode_type(result, output);
+            output.push(u8::from(*returns));
+        }
         VmInstruction::ConstUnit { dst } => {
             output.push(28);
             output.extend_from_slice(&dst.to_le_bytes());
@@ -15651,6 +15822,7 @@ fn execute_with_arguments(
         };
         budget.tick()?;
         match instruction {
+            VmInstruction::DeclareResult { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[*dst as usize] = Some(VmValue::Unit),
             VmInstruction::ConstI64 { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::I64(*value))
@@ -16791,6 +16963,9 @@ fn execute_with_arguments(
                 };
                 if frame.suspended.is_none() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
+                }
+                if frame.continuation == VmContinuationPolicy::Terminal {
+                    resumption_returns.clear();
                 }
             }
             VmInstruction::Copy { dst, src } => {
