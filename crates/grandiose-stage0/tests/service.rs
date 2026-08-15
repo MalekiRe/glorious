@@ -10140,6 +10140,17 @@ fn service_compiles_explicit_external_modules_from_the_request_source_world() {
 }
 
 #[test]
+fn service_routes_cross_module_open_effect_row_forwarding_through_root_handler() {
+    let root = "mod math; use math::Trace; use math::forward; use math::leaf; pub fn main() -> i64 { handle forward<{Trace}>(leaf) { Trace::note() with k => k(42) } }";
+    let child = "pub effect Trace { [1,1] note() -> i64; } pub fn leaf() -> i64 / Trace { Trace::note() } pub fn forward<e: EffectRow>(call: () -> i64 / {| e}) -> i64 / {| e} { call() }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_module(root, child))
+        .expect("the root handler must receive a concrete residual row from a child module");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_links_public_dependency_package_interfaces_and_bodies() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(

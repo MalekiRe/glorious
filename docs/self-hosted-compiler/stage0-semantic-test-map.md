@@ -163,6 +163,10 @@ coarse. The composite fixtures cover:
   `perform`/`with`/`resume` spellings normalize to that same path
   (`service_forwards_an_effect_row_generic_function_value_through_a_vm_handler`,
   `service_normalizes_legacy_perform_and_with_migration_syntax_through_vm_handlers`).
+- a public child-module row-polymorphic forwarder preserves its instantiated
+  residual effect through interface freezing and an indirect call, so a root
+  handler dispatches the child's concrete performance
+  (`service_routes_cross_module_open_effect_row_forwarding_through_root_handler`).
 
 ## Previously enabled red semantic cases
 
