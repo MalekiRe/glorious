@@ -5584,6 +5584,49 @@ fn service_proves_enum_constructor_coverage_with_unbounded_payloads() {
 }
 
 #[test]
+fn service_allows_tuple_enum_patterns_to_omit_a_discardable_payload_suffix() {
+    // The omitted second payload is an opaque discard. This is intentionally
+    // source-to-VM: the shared pattern decision must retain the real enum
+    // arity while projecting only the source-selected prefix.
+    let source = "pub enum Pair { Both(i64, i64), None } pub fn main() -> i64 { handle Pair::Both(41, 2) { Pair::Both(left) => left + 1, Pair::None => 0 } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_tuple_enum_patterns_with_excess_payloads() {
+    let source = "pub enum Single { Value(i64) } pub fn main() -> i64 { handle Single::Value(1) { Single::Value(1, 2) => 41, _ => 42 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("tuple enum pattern with too many payloads unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4214"),
+        "missing tuple enum payload-arity diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_rejects_omitting_a_required_use_tuple_enum_payload() {
+    let source = "pub struct Ticket { marker: i64 } impl Use<[1, 1]> for Ticket {} pub enum Pair { Both(i64, Ticket), None } pub fn main() -> i64 { handle Pair::Both(41, Ticket { marker: 0 }) { Pair::Both(left) => left + 1, Pair::None => 0 } }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("omitting a must-use enum payload unexpectedly compiled");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4219"),
+        "missing zero-use discard diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_does_not_treat_a_refined_unbounded_enum_constructor_as_total() {
     let source = "pub enum Result { Ok(Bool), Err(i64) } pub fn main() -> i64 { handle Result::Ok(true) { Result::Ok(true) => 41, Result::Err(_) => 42 } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

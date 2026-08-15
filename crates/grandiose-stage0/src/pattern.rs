@@ -438,9 +438,16 @@ impl Elaborator<'_> {
             self.error(span, "G4213", "enum variant has no matching tuple payload");
             return PatternDecision::Error;
         };
-        if fields.len() != types.len() {
-            self.error(span, "G4214", "enum pattern has the wrong payload arity");
+        if fields.len() > types.len() {
+            self.error(span, "G4214", "enum pattern has too many payload fields");
             return PatternDecision::Error;
+        }
+        // A tuple-variant pattern may name a prefix of its payload. The
+        // remaining suffix is an explicit ownership discard boundary, just
+        // like omitted named record fields; keep only selected slots in the
+        // decision while retaining their types for the pattern contract.
+        for ty in types.iter().skip(fields.len()) {
+            self.discard_omitted_tuple_payload(span, ty.clone());
         }
         PatternDecision::Enum {
             definition,
@@ -452,6 +459,25 @@ impl Elaborator<'_> {
                 .map(|(index, (pattern, ty))| (index as u32, self.pattern(pattern, ty)))
                 .collect(),
         }
+    }
+
+    /// An omitted tuple-variant suffix is an ownership disposal, not a
+    /// wildcard binding. It is legal only when the frozen principal-use
+    /// interval explicitly permits zero uses; an unknown generic interval is
+    /// not proof and must remain source-visible rather than being erased.
+    fn discard_omitted_tuple_payload(&mut self, span: Span, ty: Type) {
+        let zero_use_allowed = self
+            .signatures
+            .principal_use_interval(&ty)
+            .is_some_and(|quantity| quantity.contains(crate::Quantity::ZERO));
+        if !zero_use_allowed {
+            self.error(
+                span,
+                "G4219",
+                "omitted enum payload requires a `Use<[0,0]>` zero-use proof",
+            );
+        }
+        self.discarded.push(ty);
     }
 
     fn resolve_type(&self, path: &[String]) -> Option<DefKey> {
