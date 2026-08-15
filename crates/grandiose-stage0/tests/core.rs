@@ -8084,6 +8084,112 @@ fn nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup() 
 }
 
 #[test]
+fn interprocedural_replay_forwards_after_a_late_payload_then_cancels() {
+    // The first inner payload pattern accepts `true`, while the second
+    // refutes `1`. The decision graph must test both payloads before it
+    // forwards to the outer exact replayer; each replayed residual then
+    // reaches the sibling cancellation clause.
+    let source = r#"
+        effect Console {
+            [2, 2] read(flag: Bool, value: i64) -> i64;
+            [0, 1] write(value: i64) -> i64;
+        }
+        pub fn relay(flag: Bool, value: i64) -> i64 / Console {
+            let read = Console::read(flag, value);
+            Console::write(read)
+        }
+        pub fn main() -> i64 {
+            handle {
+                handle relay(true, 1) {
+                    Console::read(true, 0) with k => k(1) + k(2);
+                    Console::write(_) with _ => 40;
+                }
+            } {
+                Console::read(_, _) with k => k(20) + k(21);
+            }
+        }
+    "#;
+    let package = PackageKey("core-late-payload-replay-cancellation@0.1.0".into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(
+        definition,
+        &body,
+        &DefinitionIndex::from_interface(&interface),
+        &signatures,
+    );
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        definition.key,
+        &core,
+        &flow,
+        &std::collections::BTreeMap::new(),
+        Some(&signatures),
+    );
+    let mir = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "late-payload replay/cancellation must lower: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    mir.validate().unwrap_or_else(|error| {
+        panic!("late-payload replay/cancellation MIR validates: {error}\n{mir:#?}")
+    });
+    assert_eq!(
+        mir.blocks
+            .iter()
+            .filter(|block| block.instructions.iter().any(|instruction| matches!(
+                instruction,
+                MirInstruction::PatternTest { .. }
+            )))
+            .count(),
+        2,
+        "both refutable payload positions must have ordered MIR tests: {mir:#?}"
+    );
+    assert_eq!(
+        mir.blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .filter(|instruction| matches!(
+                instruction,
+                MirInstruction::InstallHandler {
+                    continuation: grandiose_stage0::MirContinuationPolicy::Replay { uses: 2 },
+                    ..
+                }
+            ))
+            .count(),
+        2,
+        "the inner and outer frames must retain exact replay budgets: {mir:#?}"
+    );
+    assert!(mir.blocks.iter().any(|block| block
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, MirInstruction::Forward { .. }))));
+    assert!(mir.blocks.iter().any(|block| block
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, MirInstruction::Cancel { .. }))));
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("late-payload MIR emits VM");
+    grandiose_stage0::decode_and_verify_artifact(&grandiose_stage0::encode_artifact(&artifact))
+        .expect("late-payload replay/cancellation VM bytecode verifies");
+}
+
+#[test]
 fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
     let core = core_for(
         "core-completion-label-transfer@0.1.0",

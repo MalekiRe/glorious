@@ -502,6 +502,12 @@ coarse. The composite fixtures cover:
   each replayed path cancels the inner operation only after closing the three
   inactive lower frames
   (`service_replays_through_two_partial_facade_handlers_before_nested_cancellation`).
+- a late refutation in the second payload of a nested partial replay row
+  preserves the complete ordered test chain before forwarding through public
+  facades to the outer exact replayer; every replayed provider residual then
+  cancels its sibling operation
+  (`interprocedural_replay_forwards_after_a_late_payload_then_cancels`,
+  `service_replays_late_payload_forwarding_then_facade_cancellation`).
 
 ## Previously enabled red semantic cases
 
@@ -520,6 +526,7 @@ bridges executable:
 | Partial-handler forwarding to an outer label transfer | `service_partial_handler_forwarding_may_reach_an_outer_label_transfer` |
 | Finite replay followed by label transfer | `service_replayed_resumption_result_may_transfer_to_an_enclosing_label` |
 | Exact replay through a late refutable forward then generic-label completion, with one protected cleanup | `nested_generic_label_replay_forward_rejoins_completion_with_single_cleanup`, `service_replays_forwarded_multi_payload_operation_then_rejoins_generic_label_completion` |
+| Exact replay forwards after a later refutable payload through a public facade, then cancels a sibling operation | `interprocedural_replay_forwards_after_a_late_payload_then_cancels`, `service_replays_late_payload_forwarding_then_facade_cancellation` |
 | Cancellation through a public effect facade must retain a move-captured callback's lower-use obligation | `service_rejects_move_capture_cancellation_through_public_facades` |
 | A shared-only closure payload is duplicable across an exact `[2,2]` replay handler through public facades | `service_replays_shared_closure_payloads_across_public_facades` |
 | A custom-`Drop` aggregate survives partial-handler forwarding and is destroyed exactly once when the enclosing `[0,1]` handler cancels the suspended continuation | `service_drops_a_custom_aggregate_once_across_forward_and_cancellation` |

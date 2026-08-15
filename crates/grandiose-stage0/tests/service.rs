@@ -16754,6 +16754,76 @@ fn service_replays_effectful_completion_after_facade_cancellation_through_outer_
 }
 
 #[test]
+fn service_replays_late_payload_forwarding_then_facade_cancellation() {
+    // The first inner `read` pattern accepts `true`, but its second payload
+    // refutes `1`; the operation must therefore Forward through both public
+    // facades to the outer exact-two replayer. Each resumed provider path
+    // then reaches the nested `write` cancellation arm.
+    let mut request = request(
+        "use bridge::{Console, invoke}; pub fn main() -> i64 { handle { handle invoke(true, 1) { Console::read(true, 0) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(_, _) with k => k(20) + k(21) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Console, relay}; pub fn invoke(flag: Bool, value: i64) -> i64 / Console { relay(flag, value) }".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Console { [2,2] read(flag: Bool, value: i64) -> i64; [0,1] write(value: i64) -> i64; } pub fn relay(flag: Bool, value: i64) -> i64 / Console { let read = Console::read(flag, value); Console::write(read) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("late payload forwarding must preserve replay and cancellation through facades");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let entry = program.functions.get(&program.entry).unwrap();
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(instruction, VmInstruction::PatternTest { .. }))
+            .count(),
+        2,
+        "both inner payloads must be tested before the forwarding edge: {entry:#?}"
+    );
+    assert_eq!(
+        entry
+            .instructions
+            .iter()
+            .filter(|instruction| matches!(
+                instruction,
+                VmInstruction::InstallHandler {
+                    continuation: VmContinuationPolicy::Replay { uses: 2 },
+                    ..
+                }
+            ))
+            .count(),
+        2,
+        "the nested and outer frames must retain their exact replay budgets: {entry:#?}"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Forward)),
+        "a refutation in the second payload must forward the suspended operation: {entry:#?}"
+    );
+    assert!(
+        entry
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Cancel)),
+        "the replayed provider residual must retain the sibling cancellation: {entry:#?}"
+    );
+    let verified = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("the full facade replay/cancellation VM program must verify");
+    assert_eq!(verified.fingerprint(), artifact.fingerprint());
+    assert_eq!(verified.run_i64().unwrap(), 80);
+}
+
+#[test]
 fn service_reentrant_tick_resume_forwards_nested_facade_ask_through_completion() {
     let mut request = request(
         "use bridge::Ask; use bridge::Tick; use bridge::invoke; pub fn main() -> i64 { handle { handle { handle invoke() { Ask::ask(true) with k => k(1) + k(2) } } { value => value + 1; Tick::tick() with k => k(10) + k(20) } } { Ask::ask(_) with k => k(30) + k(40) } }",
