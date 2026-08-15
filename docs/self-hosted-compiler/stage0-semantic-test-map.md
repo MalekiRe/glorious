@@ -189,6 +189,10 @@ coarse. The composite fixtures cover:
   `service_joins_partial_aggregate_move_captures_across_handler_arms`), while
   `semantic_drop_runs_once_on_normal_and_nonlocal_cleanup` covers custom-Drop
   cleanup through real source compilation.
+- a refutable local handler can forward an unmatched performance from an
+  imported effectful callable to a still-installed outer one-shot frame; the
+  outer resumption result returns through the imported call
+  (`service_forwards_a_partial_local_handler_over_an_imported_deep_effect`).
 - executable effect-row polymorphism preserves an explicitly instantiated
   `{| e}` callable contract across an indirect named function-value call and
   routes its concrete residual performance through a VM handler; legacy

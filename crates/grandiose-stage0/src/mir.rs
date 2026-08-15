@@ -3959,6 +3959,38 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A nested partial handler around an ordinary effectful call needs a
+        // two-frame lowering: the inner matrix may forward its miss to the
+        // still-installed outer resumptive frame.
+        if let Some(function) = lowerer
+            .lower_root_nested_interprocedural_partial_one_shot_handler(
+                body.root,
+                parameters.clone(),
+            )
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) =
             lowerer.lower_root_interprocedural_one_shot_handler(body.root, parameters.clone())
         {
@@ -18061,6 +18093,198 @@ impl Lowerer<'_> {
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
+        })
+    }
+
+    fn lower_root_nested_interprocedural_partial_one_shot_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (inner, outer, root_prefix) = self.lexical_handle(root)?;
+        let (computation, inner_clauses, inner_prefix) = self.lexical_handle(inner)?;
+        // This is the smallest two-frame shape the VM can represent without
+        // a general handler-stack decision graph. The outer frame is total;
+        // a miss in the inner, refutable clause forwards its active
+        // performance to that outer frame.
+        if outer.len() != 1 || inner_clauses.len() != 1 {
+            return None;
+        }
+        let outer_clause = &outer[0];
+        let inner_clause = &inner_clauses[0];
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.effects.len() != 1
+            || effects.tail.is_some()
+            || !effects.projections.is_empty()
+            || !effects.effects.contains(&outer_clause.effect)
+            || outer_clause.effect != inner_clause.effect
+            || outer_clause.operation != inner_clause.operation
+            || outer_clause.terminal
+            || inner_clause.terminal
+            || outer_clause.patterns.len() != outer_clause.payload_types.len()
+            || inner_clause.patterns.len() != 1
+            || inner_clause.patterns.len() != inner_clause.payload_types.len()
+            || !outer_clause.patterns.iter().all(pattern_is_irrefutable)
+            || outer_clause.continuation.is_none()
+            || inner_clause.continuation.is_none()
+            || !matches!(
+                outer_clause.resumption,
+                CoreHandlerResumption::Tail {
+                    quantity: crate::quantity::Quantity::ONCE
+                } | CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                }
+            )
+            || !matches!(
+                inner_clause.resumption,
+                CoreHandlerResumption::Tail {
+                    quantity: crate::quantity::Quantity::ONCE
+                } | CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                }
+            )
+            || self.handler_body_uses_snapshot_alias(outer_clause.body)
+            || self.handler_body_uses_snapshot_alias(inner_clause.body)
+        {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|id| self.value(id))
+            .collect::<Option<Vec<_>>>()?;
+        let result = self.alloc(self.body.expression(root).ty.clone(), root);
+        let outer_payloads = outer_clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), root))
+            .collect::<Vec<_>>();
+        let inner_payloads = inner_clause
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), root))
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (clause, payloads, target) in [
+            (outer_clause, outer_payloads.clone(), MirBlockId(1)),
+            (inner_clause, inner_payloads.clone(), MirBlockId(2)),
+        ] {
+            entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads,
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target,
+            });
+        }
+        for expression in inner_prefix {
+            self.statement(expression)?;
+        }
+        entry.extend(std::mem::take(&mut self.instructions));
+        match self.body.expression(callee).kind.clone() {
+            CoreKind::Function {
+                definition,
+                arguments: generic_arguments,
+                ..
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee: definition,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            _ => return None,
+        }
+        entry.push(MirInstruction::UninstallHandler);
+        entry.push(MirInstruction::UninstallHandler);
+        let saved_named = self.named.clone();
+        self.bind_handler_patterns(&outer_clause.patterns, &outer_payloads)?;
+        let outer_value = self.direct_handler_clause_value(outer_clause)?;
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: outer_value,
+        });
+        let outer_instructions = std::mem::take(&mut self.instructions);
+        self.named = saved_named.clone();
+        let pattern = lower_pattern(inner_clause.patterns.first()?.clone())?;
+        let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+        let inner_instructions = vec![MirInstruction::PatternTest {
+            dst: condition,
+            subject: *inner_payloads.first()?,
+            pattern,
+        }];
+        self.bind_handler_patterns(&inner_clause.patterns, &inner_payloads)?;
+        let inner_value = self.direct_handler_clause_value(inner_clause)?;
+        self.instructions.push(MirInstruction::Resume {
+            site: MirResumptionSiteId::UNASSIGNED,
+            value: inner_value,
+        });
+        let inner_resume = std::mem::take(&mut self.instructions);
+        self.named = saved_named;
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: outer_instructions,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: inner_instructions,
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: MirBlockId(3),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(4),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: inner_resume,
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
         })
     }
 

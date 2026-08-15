@@ -10376,6 +10376,14 @@ fn service_preserves_generic_effect_identity_through_dependency_reexport_facades
 }
 
 #[test]
+fn service_forwards_a_partial_local_handler_over_an_imported_deep_effect() {
+    let dependency = "pub effect Ask { [1,1] ask(value: Bool) -> i64; } pub fn relay(value: Bool) -> i64 / Ask { Ask::ask(value) }";
+    let root = "use dependency::Ask; use dependency::relay; pub fn main() -> i64 { handle { handle relay(false) { Ask::ask(true) with k => k(40) } } { Ask::ask(value) with k => k(42) } }";
+    let outcome = StageZeroCompiler::new().compile(request_with_dependency(root, "dependency@0.1.0", dependency)).unwrap();
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_cancels_an_optional_generic_dependency_resumption() {
     // Cancellation has a separate runtime edge from replay.  Keep the effect
     // and generic helper in a dependency so the imported `Ask<i64>` identity
