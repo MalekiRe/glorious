@@ -8,8 +8,8 @@ set -euo pipefail
 usage() {
     cat >&2 <<'USAGE'
 usage:
-  tooling/self-host-stage0.sh check [--seed GRC]
-  tooling/self-host-stage0.sh emit --artifact PROGRAM --manifest MANIFEST [--seed GRC]
+  tooling/self-host-stage0.sh check [--seed GRC] [--diagnostics text|json]
+  tooling/self-host-stage0.sh emit --artifact PROGRAM --manifest MANIFEST [--seed GRC] [--diagnostics text|json]
 
 `check` verifies the canonical self-host source under the exact supported
 Stage-0 runtime manifest. `emit` additionally writes a verified stage-one VM
@@ -29,6 +29,7 @@ shift
 seed="$repo_root/target/release/grc"
 artifact=""
 manifest=""
+diagnostics="text"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -45,6 +46,11 @@ while [[ $# -gt 0 ]]; do
         --manifest)
             [[ $# -ge 2 ]] || usage
             manifest="$2"
+            shift 2
+            ;;
+        --diagnostics)
+            [[ $# -ge 2 ]] || usage
+            diagnostics="$2"
             shift 2
             ;;
         *) usage ;;
@@ -193,10 +199,10 @@ done
 
 case "$mode" in
     check)
-        "$stage0" "${runtime_manifest[@]}" check "$canonical_source"
+        "$stage0" --diagnostics "$diagnostics" "${runtime_manifest[@]}" check "$canonical_source"
         ;;
     emit)
-        "$stage0" "${runtime_manifest[@]}" emit-bootstrap-vm \
+        "$stage0" --diagnostics "$diagnostics" "${runtime_manifest[@]}" emit-bootstrap-vm \
             "$canonical_source" "$artifact" "$manifest"
         # Do not trust the emitting invocation to validate its own output.
         # The program has crossed a file boundary here, so verify the exact
