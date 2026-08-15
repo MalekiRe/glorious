@@ -7061,6 +7061,48 @@ impl MirFunction {
         }
         Ok(true)
     }
+    fn validate_shared_array_view(
+        &self,
+        value: MirLocal,
+        element_type: &Type,
+        instruction: &str,
+    ) -> Result<(), String> {
+        let expected = Type::Array(Box::new(element_type.clone()));
+        match self.local_type(value)? {
+            Type::Reference {
+                mutability: Mutability::Shared,
+                referent,
+                ..
+            } if referent.as_ref() == &expected => Ok(()),
+            _ => Err(format!("MIR {instruction} requires a shared Array view")),
+        }
+    }
+    fn validate_array_view_instruction(
+        &self,
+        instruction: &MirInstruction,
+    ) -> Result<bool, String> {
+        match instruction {
+            MirInstruction::ArrayLen {
+                dst,
+                value,
+                element_type,
+            }
+            | MirInstruction::ArrayCapacity {
+                dst,
+                value,
+                element_type,
+            } => {
+                self.require_scalar_locals(
+                    &[*dst],
+                    crate::types::ScalarType::Usize,
+                    "array size destination",
+                )?;
+                self.validate_shared_array_view(*value, element_type, "array size")?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
     fn validate_instruction(
         &self,
         instruction: &MirInstruction,
@@ -7132,6 +7174,9 @@ impl MirFunction {
             return Ok(());
         }
         if self.validate_fixed_scalar_instruction(instruction)? {
+            return Ok(());
+        }
+        if self.validate_array_view_instruction(instruction)? {
             return Ok(());
         }
         if let MirInstruction::MakeCallable {
