@@ -18111,6 +18111,16 @@ fn service_rolls_back_projected_open_row_facades_after_overlapping_operation_dis
 }
 
 #[test]
+fn service_lowers_projected_callee_with_resumptive_then_terminal_operations() {
+    let source = "effect Signal { [1,1] ping(value: i64) -> i64; halt(value: i64) -> !; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Signal}; } pub fn relay(value: i64) -> i64 / { <i64 as Capability>::Effects } { let ping = Signal::ping(value); Signal::halt(ping) } pub fn main() -> i64 { handle relay(40) { Signal::ping(value) with k => k(value + 2); Signal::halt(value) => value } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through
