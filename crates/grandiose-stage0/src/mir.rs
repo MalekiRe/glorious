@@ -3822,6 +3822,35 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A resumed imported operation may perform a later discarded
+        // operation. Keep both consuming frames live around the ordinary
+        // call, so the second arm can cancel its own suspended continuation.
+        if let Some(function) = lowerer
+            .lower_root_interprocedural_mixed_consuming_handler(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         // A closed callable effect row is an interprocedural summary, not a
         // request to inline or re-derive the callee's body.  Install the
         // caller's lexical frames around the ordinary call so the VM can
@@ -16780,6 +16809,230 @@ impl Lowerer<'_> {
             });
         }
         self.named = previous_named;
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks,
+        })
+    }
+
+    /// Lower a closed multi-operation caller frame with both a one-shot
+    /// resumption arm and a cancellation arm. This retains the normal VM call
+    /// boundary: resuming one operation may run the imported callee until it
+    /// performs the later operation, whose clause then cancels only that
+    /// later suspended frame.
+    fn lower_root_interprocedural_mixed_consuming_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => (computation, clauses, Vec::new()),
+            CoreKind::Block(values) => {
+                let (handler, prefix) = values.split_last()?;
+                let CoreKind::Handle {
+                    computation,
+                    clauses,
+                } = self.body.expression(*handler).kind.clone()
+                else {
+                    return None;
+                };
+                (computation, clauses, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        if effects.effects.is_empty() || effects.tail.is_some() || !effects.projections.is_empty() {
+            return None;
+        }
+        let mut active = clauses
+            .into_iter()
+            .filter(|clause| !clause.terminal && effects.effects.contains(&clause.effect))
+            .collect::<Vec<_>>();
+        let cancellation = |clause: &CoreHandlerClause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Discard { quantity }
+                    if !quantity.requires_positive_use()
+            )
+        };
+        let one_shot = |clause: &CoreHandlerClause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Tail {
+                    quantity: crate::quantity::Quantity::ONCE
+                } | CoreHandlerResumption::Explicit {
+                    quantity: crate::quantity::Quantity::ONCE,
+                    ..
+                }
+            )
+        };
+        if active.len() < 2
+            || active.iter().any(|clause| {
+                clause.patterns.len() != clause.payload_types.len()
+                    || !clause.patterns.iter().all(pattern_is_irrefutable)
+                    || clause.continuation.is_none()
+                    || self.handler_body_uses_snapshot_alias(clause.body)
+                    || (!cancellation(clause) && !one_shot(clause))
+            })
+            || !active.iter().any(cancellation)
+            || !active.iter().any(one_shot)
+        {
+            return None;
+        }
+        active.sort_by_key(|clause| (clause.effect.clone(), clause.operation));
+        if active
+            .windows(2)
+            .any(|pair| pair[0].effect == pair[1].effect && pair[0].operation == pair[1].operation)
+        {
+            return None;
+        }
+
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let callee_kind = self.body.expression(callee).kind.clone();
+        let indirect = match callee_kind {
+            CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
+            _ => Some(self.value(callee)?),
+        };
+        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let payloads = active
+            .iter()
+            .map(|clause| {
+                clause
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), computation))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (index, clause) in active.iter().enumerate() {
+            entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads[index].clone(),
+                resume_type: clause
+                    .continuation
+                    .as_ref()
+                    .expect("mixed consuming arm has a frozen continuation contract")
+                    .parameter
+                    .clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target: MirBlockId((index + 1) as u32),
+            });
+        }
+        match callee_kind {
+            CoreKind::Function {
+                definition: callee,
+                arguments: generic_arguments,
+                ..
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            CoreKind::TraitMethod {
+                evidence,
+                method: callee,
+                trait_arguments,
+                method_arguments,
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee,
+                generic_arguments: vec![],
+                trait_instance: Some(MirTraitMethodInstance {
+                    evidence,
+                    trait_arguments,
+                    method_arguments,
+                }),
+                arguments,
+            }),
+            _ => entry.push(MirInstruction::CallIndirect {
+                dst: result,
+                callee: indirect.expect("indirect callee was materialized"),
+                arguments,
+            }),
+        }
+        for _ in &active {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: entry,
+            terminator: MirTerminator::Return { value: result },
+        }];
+        for (index, (clause, payloads)) in active.iter().zip(&payloads).enumerate() {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(&clause.patterns, payloads)?;
+            let discarded = cancellation(clause);
+            let value = if discarded {
+                self.value(clause.body)?
+            } else {
+                self.direct_handler_clause_value(clause)?
+            };
+            if discarded {
+                self.instructions.push(MirInstruction::Cancel {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                });
+                // A resumed earlier operation leaves its now-inactive frame
+                // below this selected cancellation frame. Closing the
+                // handler expression must pop those lexical frames before
+                // this arm returns its final value.
+                for _ in 0..index {
+                    self.instructions.push(MirInstruction::UninstallHandler);
+                }
+            } else {
+                self.instructions.push(MirInstruction::Resume {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                    value,
+                });
+            }
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: std::mem::take(&mut self.instructions),
+                terminator: if discarded {
+                    MirTerminator::Return { value }
+                } else {
+                    MirTerminator::Unreachable
+                },
+            });
+        }
+        self.named = boundary_named;
+        self.values = boundary_values;
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,

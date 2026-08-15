@@ -219,6 +219,9 @@ coarse. The composite fixtures cover:
   residual effect through interface freezing and an indirect call, so a root
   handler dispatches the child's concrete performance
   (`service_routes_cross_module_open_effect_row_forwarding_through_root_handler`).
+- an imported two-operation callable can resume its first one-shot effect,
+  then cancel its later effect without leaking the now-inactive earlier
+  handler frame (`service_cancels_a_second_imported_operation_after_resuming_the_first`).
 
 ## Previously enabled red semantic cases
 

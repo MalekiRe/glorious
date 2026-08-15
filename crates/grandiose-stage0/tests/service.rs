@@ -10456,6 +10456,20 @@ fn service_cancels_an_optional_generic_dependency_resumption() {
 }
 
 #[test]
+fn service_cancels_a_second_imported_operation_after_resuming_the_first() {
+    let dependency = "pub effect Console { [1,1] read(value: i64) -> i64; [0,1] write(value: i64) -> i64; } pub fn relay(value: i64) -> i64 / Console { let read = Console::read(value); Console::write(read) }";
+    let root = "use dependency::Console; use dependency::relay; pub fn main() -> i64 { handle relay(40) { Console::read(value) with k => k(value + 1); Console::write(_) with _ => 42 } }";
+    let outcome = StageZeroCompiler::new().compile(request_with_dependency(
+        root,
+        "dependency@0.1.0",
+        dependency,
+    ));
+    let outcome = outcome.expect("a resumed imported call should reach its cancellation arm");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_links_private_helpers_reached_from_specialized_dependency_generics() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(
