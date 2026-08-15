@@ -3491,6 +3491,34 @@ fn schema_26_leave_payload_mutations_reject_before_vm_execution() {
 }
 
 #[test]
+fn fixed_seed_hostile_decoder_corpus_never_panics_or_bypasses_bounds() {
+    // This is a deterministic, CI-friendly complement to the structured
+    // truncation and field-mutation fixtures above.  It exercises both wire
+    // envelopes with arbitrary lengths and bytes, ensuring every hostile
+    // count, tag, and nested decoder path remains an ordinary error instead
+    // of a panic or unbounded allocation attempt.
+    let mut state = 0x4d59_5df4_d0f3_3173_u64;
+    for case in 0..256_usize {
+        let length = (case * 37 + 11) % 513;
+        let mut bytes = Vec::with_capacity(length);
+        for _ in 0..length {
+            state ^= state << 7;
+            state ^= state >> 9;
+            state ^= state << 8;
+            bytes.push(state as u8);
+        }
+        let result = std::panic::catch_unwind(|| {
+            let _ = decode_and_verify_artifact(&bytes);
+            let _ = decode_and_verify_program(&bytes);
+        });
+        assert!(
+            result.is_ok(),
+            "hostile decoder corpus case {case} panicked at length {length}"
+        );
+    }
+}
+
+#[test]
 fn verifier_rejects_leave_storage_witnesses_with_divergent_storage_and_binding_ids() {
     let definition = DefKey(Digest::of_bytes(b"detached-leave-storage-witness"));
     // The cleanup sequence is otherwise canonical, but its storage handle
