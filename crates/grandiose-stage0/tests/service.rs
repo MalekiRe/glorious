@@ -8417,6 +8417,83 @@ fn service_dynamic_label_completion_effect_rejoins_through_enclosing_facade() {
 }
 
 #[test]
+fn service_dynamic_label_rejoin_completion_returns_a_closure_without_stale_capabilities() {
+    // `make` leaves the nested exact-one-shot Ask handlers through a dynamic
+    // label, then its completion returns a closure which captures only the
+    // rejoined value. `main` invokes that closure after every handler frame
+    // and label capability must be gone.
+    let source = r#"
+        effect Ask { [1, 1] ask(value: i64) -> i64; }
+        pub fn make() -> () -> i64 {
+            handle {
+                @done: i64 {
+                    let exit = @done;
+                    handle {
+                        handle {
+                            let answer = Ask::ask(1);
+                            exit(answer + 1)
+                        } {
+                            Ask::ask(0) with k => k(0),
+                        }
+                    } {
+                        Ask::ask(value) with k => k(41),
+                    }
+                }
+            } {
+                value => () -> i64 { value + 100 },
+            }
+        }
+        pub fn main() -> i64 { make()() }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 142);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 142);
+}
+
+#[test]
+fn service_rejects_a_resumption_closure_escaping_through_a_dynamic_label() {
+    // This would return a callable-shaped value, but that callable retains
+    // the one-shot continuation after the label has abandoned its handler.
+    // It must be rejected before any artifact can encode the stale snapshot.
+    let source = r#"
+        effect Ask { [1, 1] ask() -> i64; }
+        pub fn make() -> () -> i64 {
+            @done: () -> i64 {
+                let exit = @done;
+                handle {
+                    handle Ask::ask() {
+                        Ask::ask() with k => {
+                            let saved = k;
+                            exit(() -> i64 { saved(41) })
+                        }
+                    }
+                } {
+                    value => () -> i64 { value },
+                }
+            }
+        }
+        pub fn main() -> i64 { make()() }
+    "#;
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!("a resumption snapshot escaped through a dynamic label");
+    };
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.code == "G6005"),
+        "missing stale-resumption lowering rejection: {diagnostics:#?}"
+    );
+    assert!(
+        !diagnostics.iter().any(|diagnostic| diagnostic.code == "G7010"),
+        "an escaped resumption must not reach malformed handler lowering: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_dynamic_label_completion_facades_outside_the_one_shot_irrefutable_subset() {
     // These shapes intentionally resemble the supported dynamic-label facade,
     // but neither can safely use its synthetic one-shot rejoin. Each must
