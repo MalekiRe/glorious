@@ -8139,6 +8139,17 @@ enum DirectResumptionPlan {
         prefix: Vec<CoreId>,
         result: CoreId,
     },
+    /// The replay-safe residual is followed by one irrefutable normal
+    /// completion arm.  A deep handler reinstalls that completion boundary
+    /// for every replay; treating it as a once-only wrapper around the
+    /// original performance would return the raw residual result to the
+    /// clause and violate handler semantics.
+    PureResidualCompletion {
+        binding: String,
+        prefix: Vec<CoreId>,
+        result: CoreId,
+        completion: CoreCompletionClause,
+    },
 }
 
 /// One runtime dispatch matrix for one operation key in a nested handler.
@@ -14573,23 +14584,69 @@ impl Lowerer<'_> {
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
-            CoreKind::Handle {
-                computation,
-                clauses,
-            } => (computation, clauses, Vec::new()),
-            CoreKind::Block(values) => {
-                let (handler, prefix) = values.split_last()?;
-                let CoreKind::Handle {
+        let (computation, clauses, completion, root_prefix) =
+            match self.body.expression(root).kind.clone() {
+                CoreKind::Handle {
                     computation,
                     clauses,
-                } = self.body.expression(*handler).kind.clone()
-                else {
+                } => (computation, clauses, None, Vec::new()),
+                CoreKind::Completion {
+                    computation: handled,
+                    clauses: completion,
+                } => {
+                    let CoreKind::Handle {
+                        computation,
+                        clauses,
+                    } = self.body.expression(handled).kind.clone()
+                    else {
+                        return None;
+                    };
+                    (computation, clauses, Some(completion), Vec::new())
+                }
+                CoreKind::Block(values) => {
+                    let (tail, prefix) = values.split_last()?;
+                    match self.body.expression(*tail).kind.clone() {
+                        CoreKind::Handle {
+                            computation,
+                            clauses,
+                        } => (computation, clauses, None, prefix.to_vec()),
+                        CoreKind::Completion {
+                            computation: handled,
+                            clauses: completion,
+                        } => {
+                            let CoreKind::Handle {
+                                computation,
+                                clauses,
+                            } = self.body.expression(handled).kind.clone()
+                            else {
+                                return None;
+                            };
+                            (computation, clauses, Some(completion), prefix.to_vec())
+                        }
+                        _ => return None,
+                    }
+                }
+                _ => return None,
+            };
+        // The static replayer can embed one completion arm in every cloned
+        // residual without inventing a branch-local continuation.  Ordered
+        // and refutable completion matrices remain owned by CFG lowering;
+        // accepting only an irrefutable, replay-safe arm here keeps every
+        // finite replay independently equivalent to a reinstalled deep
+        // handler boundary.
+        let completion = match completion {
+            Some(clauses) => {
+                let [clause] = clauses.as_slice() else {
                     return None;
                 };
-                (computation, clauses, prefix.to_vec())
+                if !pattern_is_irrefutable(&clause.pattern)
+                    || !self.core_is_replay_safe(clause.body)
+                {
+                    return None;
+                }
+                Some(clause.clone())
             }
-            _ => return None,
+            None => None,
         };
         let CoreKind::Block(computation_values) = self.body.expression(computation).kind.clone()
         else {
@@ -14692,10 +14749,18 @@ impl Lowerer<'_> {
                 name: continuation.clone(),
                 quantity: *quantity,
                 calls: 0,
-                plan: DirectResumptionPlan::PureResidual {
-                    binding: name.clone(),
-                    prefix: residual_prefix.to_vec(),
-                    result: *residual_result,
+                plan: match &completion {
+                    Some(completion) => DirectResumptionPlan::PureResidualCompletion {
+                        binding: name.clone(),
+                        prefix: residual_prefix.to_vec(),
+                        result: *residual_result,
+                        completion: completion.clone(),
+                    },
+                    None => DirectResumptionPlan::PureResidual {
+                        binding: name.clone(),
+                        prefix: residual_prefix.to_vec(),
+                        result: *residual_result,
+                    },
                 },
             });
             let result = self.value(clause.body);
@@ -20396,6 +20461,34 @@ impl Lowerer<'_> {
                             self.named = previous_named;
                             self.values = previous_values;
                             self.copy_or_move(dst, resumed);
+                        }
+                        DirectResumptionPlan::PureResidualCompletion {
+                            binding,
+                            prefix,
+                            result,
+                            completion,
+                        } => {
+                            // Deep replay re-enters the handler delimiter.
+                            // The normal-completion binder is therefore
+                            // fresh for this particular clone of the
+                            // residual, just like the operation-result
+                            // binding above.  Restore both caches before the
+                            // next source `k(value)` so it cannot reuse a
+                            // previous replay's subject or binder.
+                            let previous_named = self.named.clone();
+                            let previous_values = self.values.clone();
+                            let completed = (|| {
+                                self.named.insert(binding, argument);
+                                for expression in prefix {
+                                    self.statement(expression)?;
+                                }
+                                let resumed = self.value(result)?;
+                                self.bind_completion_clause(&completion, resumed)?;
+                                self.value(completion.body)
+                            })();
+                            self.named = previous_named;
+                            self.values = previous_values;
+                            self.copy_or_move(dst, completed?);
                         }
                     }
                     self.values.insert(id, dst);

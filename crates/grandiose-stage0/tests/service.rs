@@ -5948,6 +5948,18 @@ fn service_replays_the_full_pure_residual_prefix_per_finite_resumption() {
 }
 
 #[test]
+fn service_replays_each_finite_resumption_through_deep_normal_completion() {
+    // A replay restores the whole deep delimiter, not just the suspended
+    // computation.  Each resumed path must therefore enter the normal
+    // completion matrix before returning to the operation clause: (20 + 1)
+    // and (21 + 1) are independently doubled, then observed by the clause.
+    let source = "effect Ask { [2,2] ask() -> i64; } pub fn main() -> i64 { let factor = 2; handle { let value = Ask::ask(); value + 1 } { value => value * factor, Ask::ask() with k => k(20) + k(21) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 86);
+}
+
+#[test]
 fn service_dispatches_ordered_finite_resumption_patterns_before_replay() {
     let source = "effect Ask { [2,2] ask(seed: i64) -> i64; } pub fn main() -> i64 { handle { let value = Ask::ask(2); value + 1 } { Ask::ask(1) with k => k(10) + k(11), Ask::ask(seed) with k => k(seed * 10) + k(seed * 11) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
