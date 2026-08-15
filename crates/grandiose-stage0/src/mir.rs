@@ -4745,23 +4745,75 @@ impl MirFunction {
             }
         }
 
-        for block in &mut self.blocks {
-            let mut rewritten = Vec::with_capacity(block.instructions.len());
-            for instruction in std::mem::take(&mut block.instructions) {
+        for block_index in 0..self.blocks.len() {
+            let instructions = std::mem::take(&mut self.blocks[block_index].instructions);
+            let mut rewritten = Vec::with_capacity(instructions.len());
+            // A block reached through a CFG edge may inherit an initialized
+            // source owner. Start conservatively armed, then retain the
+            // precise same-block transition for an immediately preceding
+            // move. An unnecessary conditional destroy of an uninitialized
+            // slot is a checked no-op; omitting a required destroy is not.
+            let mut initialized = storage_flags.keys().copied().collect::<BTreeSet<_>>();
+            for mut instruction in instructions {
+                // The first definition of a lexical binding is source
+                // storage too. Keep the evaluator's ordinary Copy/Move in a
+                // fresh temporary and funnel the resulting value through the
+                // same typed Store transition used by later assignment.
+                match instruction {
+                    MirInstruction::Copy { dst, src } if storage_flags.contains_key(&dst) => {
+                        let temporary = MirLocal(
+                            u32::try_from(self.locals.len()).expect("MIR local arena overflow"),
+                        );
+                        let ty = self.locals[dst.0 as usize].ty.clone();
+                        self.locals.push(MirLocalDecl {
+                            ty,
+                            source: CoreId(u32::MAX),
+                        });
+                        rewritten.push(MirInstruction::Copy {
+                            dst: temporary,
+                            src,
+                        });
+                        instruction = MirInstruction::Store {
+                            dst,
+                            src: temporary,
+                        };
+                    }
+                    MirInstruction::Move { dst, src } if storage_flags.contains_key(&dst) => {
+                        let temporary = MirLocal(
+                            u32::try_from(self.locals.len()).expect("MIR local arena overflow"),
+                        );
+                        let ty = self.locals[dst.0 as usize].ty.clone();
+                        self.locals.push(MirLocalDecl {
+                            ty,
+                            source: CoreId(u32::MAX),
+                        });
+                        rewritten.push(MirInstruction::Move {
+                            dst: temporary,
+                            src,
+                        });
+                        instruction = MirInstruction::Store {
+                            dst,
+                            src: temporary,
+                        };
+                    }
+                    _ => {}
+                }
                 if let MirInstruction::Store { dst, .. } = &instruction {
                     let dst = *dst;
                     if let Some(flag) = storage_flags.get(&dst) {
-                        // Flags are mutable compiler state cells. Clear the
-                        // old arm before destroying so the following store
-                        // always publishes the new initialization fact.
-                        rewritten.push(MirInstruction::SetDropFlag {
-                            flag: *flag,
-                            value: false,
-                        });
-                        rewritten.push(MirInstruction::DestroyIf {
-                            local: dst,
-                            flag: *flag,
-                        });
+                        if initialized.contains(&dst) {
+                            // Destroy while the flag is still armed, then
+                            // disarm the old resident before publishing the
+                            // replacement value.
+                            rewritten.push(MirInstruction::DestroyIf {
+                                local: dst,
+                                flag: *flag,
+                            });
+                            rewritten.push(MirInstruction::SetDropFlag {
+                                flag: *flag,
+                                value: false,
+                            });
+                        }
                     }
                     rewritten.push(instruction);
                     if let Some(flag) = storage_flags.get(&dst) {
@@ -4770,6 +4822,7 @@ impl MirFunction {
                             value: true,
                         });
                     }
+                    initialized.insert(dst);
                     continue;
                 }
 
@@ -4785,6 +4838,7 @@ impl MirFunction {
                             flag: *flag,
                             value: true,
                         });
+                        initialized.insert(destination);
                     }
                 }
                 if let Some(source) = moved {
@@ -4793,10 +4847,11 @@ impl MirFunction {
                             flag: *flag,
                             value: false,
                         });
+                        initialized.remove(&source);
                     }
                 }
             }
-            block.instructions = rewritten;
+            self.blocks[block_index].instructions = rewritten;
         }
         self.control.source_storage = storage;
         self
