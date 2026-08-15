@@ -15474,6 +15474,154 @@ fn service_cancels_a_second_imported_operation_after_resuming_the_first() {
 }
 
 #[test]
+fn service_cancels_shared_closure_payloads_through_public_facades() {
+    // The callback captures only a shared scalar, so its lower use bound is
+    // zero. Passing it through a public facade into a `[0,1]` payload and
+    // discarding that payload in the handler is therefore legal; an exact or
+    // move capture must not be silently widened to take this path.
+    let mut input = request(
+        "use bridge::Stop; use bridge::invoke; pub fn main() -> i64 { let seed = 41; let callback = () -> i64 { seed + 1 }; handle invoke(callback) { Stop::stop(_, _) => 42 } }",
+    );
+    input.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Stop, relay}; pub fn invoke(callback: () -> i64) -> i64 / Stop { relay(callback) }".as_slice(),
+    ));
+    input.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Stop { [0,1] stop(callback: () -> i64) -> i64; } pub fn relay(callback: () -> i64) -> i64 / Stop { Stop::stop(callback) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(input)
+        .expect("shared closure captures must survive replay and legal cancellation through facades");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejects_move_capture_cancellation_through_public_facades() {
+    // RED: an exact callable captured by the callback is a lower-bound
+    // obligation even when the handler cancels the `[0,1]` payload.  The
+    // direct-handler control already diagnoses this as G5011; the public
+    // facade route currently loses that obligation and accepts this source.
+    let provider = "pub effect Stop { [0,1] stop(callback: () -> i64) -> i64; } pub fn relay(callback: () -> i64) -> i64 / Stop { Stop::stop(callback) }";
+    let bridge = "pub use provider::{Stop, relay}; pub fn invoke(callback: () -> i64) -> i64 / Stop { relay(callback) }";
+    let world = |root: &str| {
+        let mut input = request(root);
+        for (package, source) in [
+            ("provider@0.1.0", provider),
+            ("bridge@0.1.0", bridge),
+        ] {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                source.as_bytes(),
+            ));
+        }
+        input
+    };
+    let legal = "use bridge::Stop; use bridge::invoke; pub fn main() -> i64 { let value = 42; let callback = () -> i64 { value }; handle invoke(callback) { Stop::stop(_, _) => 42 } }";
+    let illegal = "use bridge::Stop; use bridge::invoke; pub fn add_one(value: i64) -> i64 { value + 1 } pub fn run(function: (i64) -> i64) -> i64 { let callback = () -> i64 { move function(41) }; handle invoke(callback) { Stop::stop(_, _) => 42 } } pub fn main() -> i64 { run(add_one) }";
+    assert_eq!(
+        StageZeroCompiler::new()
+            .compile(world(legal))
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+    let error = StageZeroCompiler::new()
+        .compile(world(illegal))
+        .expect_err("cancellation must not discard a move-captured callback through facades");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5011"));
+}
+
+#[test]
+fn service_rejects_duplicated_move_capture_through_public_facades_deterministically() {
+    // Green control for the same public boundary: ordinary duplicate transfer
+    // retains the exact callable obligation and must remain deterministic
+    // across a child revision and source ordering.
+    let provider = "pub fn invoke(callback: () -> i64) -> i64 { callback() }";
+    let bridge = "pub use provider::invoke;";
+    let world = |root: &str| {
+        let mut input = request(root);
+        for (package, source) in [
+            ("provider@0.1.0", provider),
+            ("bridge@0.1.0", bridge),
+        ] {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                source.as_bytes(),
+            ));
+        }
+        input
+    };
+    let legal = "use bridge::invoke; pub fn add_one(value: i64) -> i64 { value + 1 } pub fn run(function: (i64) -> i64) -> i64 { let callback = () -> i64 { move function(41) }; invoke(callback) } pub fn main() -> i64 { run(add_one) }";
+    let illegal = "use bridge::invoke; pub fn add_one(value: i64) -> i64 { value + 1 } pub fn run(function: (i64) -> i64) -> i64 { let callback = () -> i64 { move function(41) }; invoke(callback) + invoke(callback) } pub fn main() -> i64 { run(add_one) }";
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(legal), None).unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+    let cached = compiler.interface_cache_stats();
+    let child = compiler.import_revision(world(illegal), Some(parent)).unwrap();
+    let first = compiler
+        .compile_session(&compiler.open_session(child).unwrap())
+        .expect_err("two facade calls must not duplicate a move capture");
+    assert!(first.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5011"));
+    assert_eq!(compiler.interface_cache_stats(), cached);
+    assert!(compiler.dependency_traces(child).is_empty());
+    let mut reordered = world(illegal);
+    reordered.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect_err("source order must not duplicate capture authority");
+    assert_eq!(first.diagnostics(), second.diagnostics());
+}
+
+#[test]
+fn service_replay_of_shared_closure_payloads_across_public_facades_is_pending_mir_support() {
+    // RED: shared captures are duplicable, so `[2,2]` replay is legal under the
+    // quantitative rules.  This covers the same facade/payload route as the
+    // green cancellation test, but the current general MIR lowerer has not
+    // yet materialized this multi-operation closure-payload frame graph.
+    let mut input = request(
+        "use bridge::Console; use bridge::invoke; pub fn main() -> i64 { let seed = 39; let callback = () -> i64 { seed + 1 }; handle invoke(callback) { Console::read(k) => k(1) + k(2), Console::stop(_, _) => 40 } }",
+    );
+    input.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Console, relay}; pub fn invoke(callback: () -> i64) -> i64 / Console { relay(callback) }".as_slice(),
+    ));
+    input.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Console { [2,2] read() -> i64; [0,1] stop(callback: () -> i64) -> i64; } pub fn relay(callback: () -> i64) -> i64 / Console { let read = Console::read(); Console::stop(callback) + read }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new().compile(input).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 83);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.run_i64().unwrap(), 83);
+}
+
+#[test]
 fn service_replays_a_forwarded_imported_read_then_cancels_its_nested_write() {
     let dependency = "pub effect Console { [2,2] read(value: Bool) -> i64; [0,1] write(value: i64) -> i64; } pub fn relay(value: Bool) -> i64 / Console { let read = Console::read(value); Console::write(read) }";
     let root = "use dependency::Console; use dependency::relay; pub fn main() -> i64 { handle { handle relay(false) { Console::read(true) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(_) with k => k(20) + k(21) } }";
