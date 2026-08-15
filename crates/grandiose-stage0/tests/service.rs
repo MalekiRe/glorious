@@ -5424,6 +5424,14 @@ fn service_normalizes_resume_migration_syntax_to_the_same_direct_resumption() {
 }
 
 #[test]
+fn service_normalizes_legacy_perform_and_with_migration_syntax_through_vm_handlers() {
+    let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle perform Ask::ask() { Ask::ask() with k => resume(k, 42) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_executes_the_pattern_slot_full_control_handler_form() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { Ask::ask(k) => k(42) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -6006,6 +6014,14 @@ fn service_matches_effect_row_generic_instances_in_vm_handler_frames() {
         } if matches!(effect_arguments.as_slice(), [VmGenericArgument::EffectRow(row)] if row.effects.len() == 1 && row.projections.is_empty() && row.tail.is_none())
     )));
     assert_eq!(artifact.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_forwards_an_effect_row_generic_function_value_through_a_vm_handler() {
+    let source = "effect Trace { [1,1] note() -> i64; } pub fn leaf() -> i64 / Trace { Trace::note() } pub fn forward<e: EffectRow>(call: () -> i64 / {| e}) -> i64 / {| e} { call() } pub fn main() -> i64 { handle forward<{Trace}>(leaf) { Trace::note() with k => k(42) } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
 
 #[test]

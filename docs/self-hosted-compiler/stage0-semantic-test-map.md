@@ -152,6 +152,12 @@ coarse. The composite fixtures cover:
   `service_joins_partial_aggregate_move_captures_across_handler_arms`), while
   `semantic_drop_runs_once_on_normal_and_nonlocal_cleanup` covers custom-Drop
   cleanup through real source compilation.
+- executable effect-row polymorphism preserves an explicitly instantiated
+  `{| e}` callable contract across an indirect named function-value call and
+  routes its concrete residual performance through a VM handler; legacy
+  `perform`/`with`/`resume` spellings normalize to that same path
+  (`service_forwards_an_effect_row_generic_function_value_through_a_vm_handler`,
+  `service_normalizes_legacy_perform_and_with_migration_syntax_through_vm_handlers`).
 
 ## Previously enabled red semantic cases
 
