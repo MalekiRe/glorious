@@ -79,7 +79,15 @@ impl InstanceKey {
                     canonical_substitution.extend_from_slice(&fingerprint.as_bytes());
                 }
                 (GenericKind::Lifetime, InstanceArgument::Lifetime(value)) => {
-                    if !matches!(value, Lifetime::Static | Lifetime::Bound { .. }) {
+                    // Borrow checking has already fixed an elided region at
+                    // this boundary. The VM erases regions, but instance
+                    // identity still records the resolved source lifetime so
+                    // it can materialize a method body instead of retaining
+                    // its declaration-local generic effect metadata.
+                    if !matches!(
+                        value,
+                        Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. }
+                    ) {
                         return Err(InstanceKeyError::NonConcreteLifetime { slot });
                     }
                     canonical_substitution.push(2);
@@ -327,7 +335,10 @@ fn is_concrete_type(value: &Type) -> bool {
         Type::Reference {
             lifetime, referent, ..
         } => {
-            matches!(lifetime, Lifetime::Static | Lifetime::Bound { .. })
+            matches!(
+                lifetime,
+                Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. }
+            )
                 && is_concrete_type(referent)
         }
         Type::Callable {
@@ -363,7 +374,10 @@ fn is_concrete_generic_argument(value: &GenericArgument) -> bool {
                     .all(|effect| effect.arguments.iter().all(is_concrete_generic_argument))
         }
         GenericArgument::Lifetime(value) => {
-            matches!(value, Lifetime::Static | Lifetime::Bound { .. })
+            matches!(
+                value,
+                Lifetime::Static | Lifetime::Elided | Lifetime::Bound { .. }
+            )
         }
         GenericArgument::ConstU32(_) | GenericArgument::ConstQuantity(_) => true,
         GenericArgument::ConstU32Expr(_) => false,
@@ -381,7 +395,8 @@ fn encode_lifetime(value: Lifetime, output: &mut Vec<u8>) {
             output.extend_from_slice(&depth.to_le_bytes());
             output.extend_from_slice(&index.to_le_bytes());
         }
-        Lifetime::Generic(_) | Lifetime::Elided => unreachable!("validated concrete lifetime"),
+        Lifetime::Elided => output.push(2),
+        Lifetime::Generic(_) => unreachable!("validated concrete lifetime"),
     }
 }
 
@@ -914,6 +929,25 @@ mod tests {
         );
         assert_eq!(graph.pop_pending(), Some(left));
         assert_eq!(graph.pop_pending(), None);
+    }
+
+    #[test]
+    fn elided_lifetimes_are_closed_distinct_vm_instance_identities() {
+        let kinds = [GenericKind::Lifetime];
+        let elided = InstanceKey::new(
+            definition(b"region-sensitive"),
+            &kinds,
+            vec![InstanceArgument::Lifetime(Lifetime::Elided)],
+        )
+        .expect("an elided VM-erased region is executable metadata");
+        let static_lifetime = InstanceKey::new(
+            definition(b"region-sensitive"),
+            &kinds,
+            vec![InstanceArgument::Lifetime(Lifetime::Static)],
+        )
+        .unwrap();
+        assert_ne!(elided, static_lifetime);
+        assert_ne!(elided.fingerprint(), static_lifetime.fingerprint());
     }
 
     #[test]

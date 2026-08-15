@@ -4780,6 +4780,28 @@ fn service_executes_reexported_hrtb_inherited_effect_gats_through_vm_handlers() 
 }
 
 #[test]
+fn service_selects_aliased_multi_supertrait_hrtb_gat_methods_through_vm() {
+    let mut request = request(
+        "use bridge::Gateway as Alias; use bridge::Trace; pub fn identity<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn main() -> i64 { let source = 40; handle Alias<i64>::apply<'static, {}, i64>(&source, identity, 0) { Trace<i64>::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Composite as Gateway, Trace};".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Primary<T> { type Item<'a>; type Effects<'a>: EffectRow; fn apply<'z, e: EffectRow, U>(receiver: Self, callback: for<'a> (<Self as Primary<T>>::Item<'a>) -> <Self as Primary<T>>::Item<'a> / { <Self as Primary<T>>::Effects<'a> | e }, marker: U) -> i64 / { <Self as Primary<T>>::Effects<'static> | e }; } pub trait Secondary<T> { type Item<'a>; type Effects<'a>: EffectRow; } pub trait Composite<T>: Primary<T> + Secondary<T> {} impl<'a> Primary<i64> for &'a i64 { type Item<'b> = &'b i64; type Effects<'b> = {Trace<i64>}; fn apply<'z, e: EffectRow, U>(receiver: &'a i64, callback: for<'b> (<&'a i64 as Primary<i64>>::Item<'b>) -> <&'a i64 as Primary<i64>>::Item<'b> / { <&'a i64 as Primary<i64>>::Effects<'b> | e }, marker: U) -> i64 / { <&'a i64 as Primary<i64>>::Effects<'static> | e } { let value = 41; let result = callback(&value); Trace<i64>::note(*receiver); *result + 1 } } impl<'a> Secondary<i64> for &'a i64 { type Item<'b> = &'b i64; type Effects<'b> = {Trace<i64>}; } impl<'a> Composite<i64> for &'a i64 {}".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(request)
+        .expect("aliased inherited HRTB GAT method must select deterministically");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_reexported_hrtb_inherited_effect_gats_without_selected_evidence() {
     // The scoped HRTB solver path may open `for<'a>`, but it must not turn the
     // binder itself into evidence.  The public facade exposes the inherited
