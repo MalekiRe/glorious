@@ -17921,6 +17921,109 @@ fn service_executes_recursive_public_hrtb_callable_aliases_through_vm() {
 }
 
 #[test]
+fn service_preserves_recursive_facade_hrtb_trait_method_regions_through_closures_and_revisions() {
+    // The public `Capability` identity crosses the left/right module SCC.
+    // Its inherited method accepts a higher-ranked callback whose associated
+    // item is a shared reference.  The caller closes over a second shared
+    // reference beneath a lexical label, then opens and releases a unique
+    // reborrow before consuming the method result.  This makes lifetime,
+    // variance, closure-capture, label scope, and VM facts meet at one public
+    // recursive interface boundary without depending on handler-stack work.
+    let root = "pub mod left; pub mod right; use left::Capability; pub fn main() -> i64 { let source = 40; let captured = &source; let answer = label done { Capability<i64>::apply(&source, { value => { *captured; value } }) }; let mutable = 1; let parent = &mut mutable; let child = &mut *parent; *child = 0; answer + *parent }";
+    let left = "pub trait Parent<T> { type Item<'a>; fn apply(receiver: Self, callback: for<'a> (<Self as Parent<T>>::Item<'a>) -> <Self as Parent<T>>::Item<'a>) -> i64; } pub use crate::right::Child as Capability;";
+    let right = "pub use crate::left::Parent; pub trait Child<T>: Parent<T> {} impl<'r> Parent<i64> for &'r i64 { type Item<'a> = &'a i64; fn apply(receiver: &'r i64, callback: for<'b> (<&'r i64 as Parent<i64>>::Item<'b>) -> <&'r i64 as Parent<i64>>::Item<'b>) -> i64 { let value = 41; let result = callback(&value); *result + 1 } } impl<'r> Child<i64> for &'r i64 where &'r i64: Parent<i64> {}";
+    let world = |right: &str| {
+        request_with_logical_sources(
+            root,
+            &[
+                ("src/left/left.glorious", left),
+                ("src/right/right.glorious", right),
+            ],
+        )
+    };
+
+    let mut reordered = world(right);
+    let artifact = StageZeroCompiler::new()
+        .compile(reordered.clone())
+        .expect("recursive public HRTB trait method must preserve closure and reborrow regions")
+        .artifact
+        .unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new()
+        .compile(reordered)
+        .expect("source order must not alter recursive public region contracts")
+        .artifact
+        .unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("recursive public region artifact must decode and verify");
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(reordered_artifact.run_i64().unwrap(), 42);
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+
+    // Replacing the covariant callback item with a static reference makes the
+    // trait method body try to pass a short body-local borrow through the
+    // recursive public facade.  The rejected child must have a canonical
+    // outlives diagnostic and must not publish any cache, trace, or artifact
+    // state over the parent revision.
+    let static_item = right.replace("type Item<'a> = &'a i64", "type Item<'a> = &'static i64");
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(right), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let left_node = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("app@0.1.0".into()),
+        path: "crate::left".into(),
+    });
+    let right_node = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("app@0.1.0".into()),
+        path: "crate::right".into(),
+    });
+    let left_trace = compiler
+        .dependency_trace(parent, &left_node)
+        .expect("legal left region facade must freeze");
+    let right_trace = compiler
+        .dependency_trace(parent, &right_node)
+        .expect("legal right region facade must freeze");
+    let rejected_world = world(&static_item);
+    let rejected = compiler
+        .import_revision(rejected_world.clone(), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(rejected).unwrap())
+        .expect_err("static callback item may not accept the method-local borrow");
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5017"),
+        "missing recursive public outlives rejection: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached);
+    assert!(compiler.dependency_traces(rejected).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &left_node), Some(left_trace));
+    assert_eq!(compiler.dependency_trace(parent, &right_node), Some(right_trace));
+    let mut reordered_rejection = rejected_world;
+    reordered_rejection.sources.reverse();
+    assert_eq!(
+        error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(reordered_rejection)
+            .expect_err("source order cannot accept the strengthened region contract")
+            .diagnostics(),
+        "recursive public outlives diagnostics must be canonical"
+    );
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .canonical_bytes(),
+        parent_artifact.canonical_bytes(),
+        "failed recursive region revision disturbed the parent artifact"
+    );
+}
+
+#[test]
 fn service_rolls_back_const_hrtb_supertrait_cycles_before_publication() {
     // The const is selected through `Child`'s inherited Parent edge while the
     // callback carries Parent's HRTB effect row through the reciprocal public
