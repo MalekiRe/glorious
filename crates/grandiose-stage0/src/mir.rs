@@ -70,6 +70,92 @@ impl Deref for MirLocalArena {
         &self.entries
     }
 }
+
+/// Body-local identity for an addressable aggregate place while MIR is being
+/// constructed.  It is deliberately separate from [`MirLocal`]: several
+/// projected places can name one local, while a dereference is not a stable
+/// body-local place until alias analysis supplies a stronger identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct MirPlaceId(u32);
+
+/// One statically known projection in a construction-side place path.
+///
+/// `field_count` is retained beside `index` because it is the structural
+/// proof already carried by `ProjectRecord`/`UpdateRecord`; keeping the same
+/// fact in the arena prevents a builder-only path from silently accepting an
+/// out-of-layout projection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MirPlaceProjection {
+    index: u32,
+    field_count: u32,
+}
+
+/// Append-only typed storage for statically addressable MIR places.
+///
+/// This is intentionally a lowering-side arena, rather than another field on
+/// [`MirFunction`].  The frozen MIR artifact already represents each place as
+/// a local plus explicit projection instruction, and raw arena indices must
+/// not cross that artifact boundary.  Within the builder, however, stable
+/// identities make repeated Core-place reads and writes share one exact root
+/// and projection path without relying on a source spelling or vector index.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct MirPlaceArena {
+    entries: Vec<MirPlace>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MirPlace {
+    root: MirLocal,
+    projections: Vec<MirPlaceProjection>,
+    ty: Type,
+}
+
+impl MirPlaceArena {
+    fn intern_root(&mut self, root: MirLocal, ty: Type) -> MirPlaceId {
+        self.intern(MirPlace {
+            root,
+            projections: vec![],
+            ty,
+        })
+    }
+
+    fn project(
+        &mut self,
+        base: MirPlaceId,
+        index: u32,
+        field_count: u32,
+        ty: Type,
+    ) -> Option<MirPlaceId> {
+        if field_count == 0 || index >= field_count {
+            return None;
+        }
+        let base = self.entries.get(base.0 as usize)?;
+        let mut projections = base.projections.clone();
+        projections.push(MirPlaceProjection { index, field_count });
+        Some(self.intern(MirPlace {
+            root: base.root,
+            projections,
+            ty,
+        }))
+    }
+
+    fn intern(&mut self, place: MirPlace) -> MirPlaceId {
+        if let Some((index, _)) = self
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, existing)| **existing == place)
+        {
+            return MirPlaceId(index as u32);
+        }
+        let id = MirPlaceId(
+            u32::try_from(self.entries.len())
+                .expect("MIR place arena exceeded the representable place identity space"),
+        );
+        self.entries.push(place);
+        id
+    }
+}
 /// Body-local basic-block identity. It never crosses a MIR body boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct MirBlockId(pub u32);
@@ -1999,6 +2085,7 @@ impl MirLowering {
             owner: definition,
             definition,
             locals: MirLocalArena::default(),
+            places: MirPlaceArena::default(),
             nominal_copy_descriptors: vec![],
             building_nominal_copy_descriptors: vec![],
             values: BTreeMap::new(),
@@ -4923,6 +5010,10 @@ struct Lowerer<'a> {
     owner: DefKey,
     definition: DefKey,
     locals: MirLocalArena,
+    /// Construction-side identity space for statically addressable aggregate
+    /// places. It never crosses the frozen MIR artifact boundary; instructions
+    /// retain the canonical local-plus-projection representation instead.
+    places: MirPlaceArena,
     nominal_copy_descriptors: Vec<MirNominalCopyDescriptor>,
     building_nominal_copy_descriptors: Vec<(DefKey, Vec<GenericArgument>)>,
     values: BTreeMap<CoreId, MirLocal>,
@@ -19091,7 +19182,37 @@ impl Lowerer<'_> {
             _ => None,
         }
     }
+
+    /// Intern the statically addressable portion of one sealed Core place.
+    ///
+    /// Dereferences intentionally return no construction-side identity here:
+    /// a reference expression can alias storage outside this body and has no
+    /// stable local root until PlaceFlow/alias facts say otherwise.  Local and
+    /// field paths, in contrast, are exact body-local storage identities and
+    /// are safe to intern before lowering emits their ordinary MIR
+    /// instructions.
+    fn intern_static_place(&mut self, place: &CorePlace) -> Option<MirPlaceId> {
+        match place {
+            CorePlace::Local { name, ty } => self
+                .named
+                .get(name)
+                .copied()
+                .map(|root| self.places.intern_root(root, ty.clone())),
+            CorePlace::Field {
+                base,
+                index,
+                field_count,
+                ty,
+            } => {
+                let base = self.intern_static_place(base)?;
+                self.places.project(base, *index, *field_count, ty.clone())
+            }
+            CorePlace::Deref { .. } | CorePlace::Error => None,
+        }
+    }
+
     fn read_place(&mut self, place: &crate::CorePlace) -> Option<MirLocal> {
+        let _ = self.intern_static_place(place);
         match place {
             crate::CorePlace::Local { name, .. } => self.named.get(name).copied().or_else(|| {
                 self.error("G6009", "MIR place refers to an unknown local");
@@ -19128,6 +19249,7 @@ impl Lowerer<'_> {
         }
     }
     fn store_place(&mut self, place: &crate::CorePlace, value: MirLocal) -> Option<()> {
+        let _ = self.intern_static_place(place);
         match place {
             crate::CorePlace::Local { name, .. } => {
                 let Some(dst) = self.named.get(name).copied() else {
@@ -19277,6 +19399,7 @@ impl Lowerer<'_> {
             owner: self.owner,
             definition,
             locals: MirLocalArena::default(),
+            places: MirPlaceArena::default(),
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             building_nominal_copy_descriptors: vec![],
             values: BTreeMap::new(),
@@ -20037,5 +20160,48 @@ fn ascii_hex(value: Option<char>) -> Option<u8> {
         'a'..='f' => Some(value as u8 - b'a' + 10),
         'A'..='F' => Some(value as u8 - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod mir_place_arena_tests {
+    use super::*;
+
+    #[test]
+    fn static_place_arena_interns_root_and_projection_paths_without_reordering() {
+        let mut places = MirPlaceArena::default();
+        let root = places.intern_root(MirLocal(7), Type::Unit);
+        let first = places
+            .project(root, 1, 3, Type::Unit)
+            .expect("root place must be present");
+        let repeated = places
+            .project(root, 1, 3, Type::Unit)
+            .expect("root place must be present");
+        let nested = places
+            .project(first, 0, 2, Type::Unit)
+            .expect("first projection must be present");
+
+        assert_eq!(first, repeated);
+        assert_eq!(root.0, 0);
+        assert_eq!(first.0, 1);
+        assert_eq!(nested.0, 2);
+        assert_eq!(places.entries.len(), 3);
+        assert_eq!(places.entries[nested.0 as usize].root, MirLocal(7));
+        assert_eq!(
+            places.entries[nested.0 as usize].projections,
+            vec![
+                MirPlaceProjection {
+                    index: 1,
+                    field_count: 3,
+                },
+                MirPlaceProjection {
+                    index: 0,
+                    field_count: 2,
+                },
+            ]
+        );
+        assert!(places.project(root, 3, 3, Type::Unit).is_none());
+        assert!(places.project(root, 0, 0, Type::Unit).is_none());
+        assert_eq!(places.entries.len(), 3);
     }
 }
