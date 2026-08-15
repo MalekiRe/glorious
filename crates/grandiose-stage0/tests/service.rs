@@ -16995,6 +16995,47 @@ fn service_rejects_cross_module_private_enum_payload_pattern_deconstruction() {
 }
 
 #[test]
+fn service_preserves_nominal_pattern_authority_through_generic_associated_facades() {
+    let root = "use facade::{make, Packet}; pub fn main() -> i64 { let packet = make<i64>(38); let head = move packet.head; let tail = packet.tail; let proof = make<i64>(0); handle proof { Packet<i64> { head: found, tail: extra } => head + tail + found + extra } }";
+    let forged = "use facade::{make, Packet}; pub fn main() -> i64 { let packet = make<i64>(40); handle packet { Packet<i64> { forged: found } => found } }";
+    let public = "pub struct Packet<T> { head: T, tail: i64 } pub trait Family { type Item<T>; } impl Family for i64 { type Item<T> = Packet<T>; } pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } }";
+    let private = public.replacen("tail: i64", "private tail: i64", 1);
+    let world = |root: &str, provider: &str| {
+        let mut input = request(root);
+        input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{make, Packet};".as_slice()));
+        input.sources.push(SourceInput::new(PackageKey("provider@1.0.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), provider.as_bytes()));
+        input
+    };
+
+    let mut reordered = world(root, public);
+    let artifact = StageZeroCompiler::new().compile(reordered.clone()).expect("selected generic nominal record may be partially moved then structurally refined through its public facade").artifact.unwrap();
+    reordered.sources.reverse();
+    let reordered_artifact = StageZeroCompiler::new().compile(reordered).expect("nominal authority must be source-order independent").artifact.unwrap();
+    assert_eq!(artifact.canonical_bytes(), reordered_artifact.canonical_bytes());
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(root, public), None).unwrap();
+    let parent_artifact = compiler.compile_revision(parent).unwrap().artifact.unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey { package: PackageKey("facade@0.1.0".into()), path: "crate".into() });
+    let trace = compiler.dependency_trace(parent, &facade).expect("legal nominal facade must be frozen");
+    for (label, candidate_root, provider, code) in [("private field", root, private.as_str(), "G4218"), ("forged pattern", forged, public, "G4209")] {
+        let rejected_world = world(candidate_root, provider);
+        let rejected = compiler.import_revision(rejected_world.clone(), Some(parent)).unwrap();
+        let error = compiler.compile_session(&compiler.open_session(rejected).unwrap()).expect_err("invalid nominal revision must not publish");
+        assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == code), "{label} revision missing {code}: {:#?}", error.diagnostics());
+        assert_eq!(compiler.interface_cache_stats(), cached, "{label} revision published cache state");
+        assert!(compiler.dependency_traces(rejected).is_empty(), "{label} revision published traces");
+        assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace.clone()), "{label} revision disturbed legal trace");
+        let mut reordered = rejected_world;
+        reordered.sources.reverse();
+        assert_eq!(error.diagnostics(), StageZeroCompiler::new().compile(reordered).expect_err("source ordering cannot change nominal authority diagnostics").diagnostics(), "{label} diagnostics must be canonical");
+    }
+    assert_eq!(compiler.compile_revision(parent).unwrap().artifact.unwrap().canonical_bytes(), parent_artifact.canonical_bytes());
+}
+
+#[test]
 fn service_allows_public_nested_module_paths_end_to_end() {
     let root = "mod outer; pub fn main() -> i64 { outer::hidden::answer() }";
     let outcome = StageZeroCompiler::new()
