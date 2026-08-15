@@ -7708,6 +7708,34 @@ fn service_dispatches_facaded_associated_nominal_array_patterns_with_moved_paylo
 }
 
 #[test]
+fn service_normalizes_hrtb_associated_effect_operation_payloads_and_results_through_aliases() {
+    // The generic effect operation's concrete payload/result is an associated
+    // type carrying the selected const. The outward row is an
+    // associated effect-row projection under the alias's HRTB.  This makes
+    // the operation boundary itself (rather than a surrounding callback)
+    // prove that all three contracts agree through the public facade.
+    let root = "use facade::{Ask, Callback, Packet, relay}; pub fn apply(callback: Callback<i64>) -> i64 { let source = Packet<7, i64> { value: 41 }; let ignored = handle callback(&source) { Ask<&Packet<7, i64>>::ask(value) with k => k(value) }; 42 } pub fn main() -> i64 { apply(relay) }";
+    let provider = "pub effect Ask<T> { [1,1] ask(value: T) -> T; } pub struct Packet<n: u32, T> { value: T } pub trait Gate { const Width: u32; type Item<'a, T>; type Effects<'a, T>: EffectRow; } impl Gate for i64 { const Width = 7; type Item<'a, T> = &'a Packet<<i64 as Gate>::Width, T>; type Effects<'a, T> = {Ask<<i64 as Gate>::Item<'a, T>>}; } pub type Callback<T> = for<'a> (<i64 as Gate>::Item<'a, T>) -> <i64 as Gate>::Item<'a, T> / { <i64 as Gate>::Effects<'a, T> }; pub fn relay<'a, T>(value: <i64 as Gate>::Item<'a, T>) -> <i64 as Gate>::Item<'a, T> / { <i64 as Gate>::Effects<'a, T> } { Ask<<i64 as Gate>::Item<'a, T>>::ask(value) }";
+    let mut input = request(root);
+    input.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Callback, Gate, Packet, relay}; pub use provider::Ask;".as_slice(),
+    ));
+    input.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        provider.as_bytes(),
+    ));
+
+    let outcome = StageZeroCompiler::new()
+        .compile(input)
+        .expect("associated operation payload/result contracts must lower through the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rejects_unknown_associated_type_arguments_in_nominal_patterns() {
     let source = "trait Element { type Item; } struct Boxed<T> { value: T } pub fn main() -> Bool { Boxed { value: 42 } is Boxed<<i64 as Element>::Missing> { value: _ } }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
