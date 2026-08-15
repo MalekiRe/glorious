@@ -6084,6 +6084,40 @@ fn service_preserves_a_move_captured_callable_obligation_in_its_closure() {
 }
 
 #[test]
+fn service_rejects_repeated_move_captured_callable_transfer_through_a_local_call() {
+    // The receiver is local in this companion case.  Package linking must
+    // not decide whether two sequential outgoing boundaries activate the
+    // closure environment: both local and imported callables receive the
+    // same exact capability transfer.
+    let source = "pub fn invoke(callback: () -> i64) -> i64 { callback() } pub fn next(value: i64) -> i64 { value + 1 } pub fn run(function: (i64) -> i64) -> i64 { let callback = () -> i64 { move function(41) }; invoke(callback) + invoke(callback) } pub fn main() -> i64 { run(next) }";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =
+        StageZeroCompiler::new().compile(request(source))
+    else {
+        panic!(
+            "a move-captured callback was unexpectedly transferred twice through a local callable"
+        );
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing local move-capture transfer diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_joins_alternative_move_captured_callable_transfers_at_handler_arms() {
+    // Each arm receives the same lexical closure, but only one arm runs for
+    // any performance.  The use summary must branch-hull these transfers;
+    // treating the closure as globally memoized misses sequential uses,
+    // while treating these arms as a sequence would reject valid code.
+    let source = "effect Pick { [1,1] pick(value: Bool) -> i64; } pub fn invoke(callback: () -> i64) -> i64 { callback() } pub fn next(value: i64) -> i64 { value + 1 } pub fn run(value: Bool, function: (i64) -> i64) -> i64 { let callback = () -> i64 { move function(41) }; handle Pick::pick(value) { Pick::pick(true) => invoke(callback), Pick::pick(false) => invoke(callback) } } pub fn main() -> i64 { run(true, next) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_multiplies_move_captured_callable_use_through_handler_replay() {
     let source = "effect Ask { [2,2] ask() -> i64; } pub fn add_one(value: i64) -> i64 { value + 1 } pub fn replay(function: (i64) -> i64) -> i64 { handle { let value = Ask::ask(); let call = (input: i64) -> i64 { move function(input) }; call(value) } { Ask::ask() with k => k(20) + k(21) } } pub fn main() -> i64 { replay(add_one) }";
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) =

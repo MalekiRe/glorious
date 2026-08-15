@@ -136,7 +136,6 @@ impl UseFlow {
             projected_contracts: BTreeMap::new(),
             closure_values: BTreeMap::new(),
             escapes: EscapeSummary::default(),
-            escaped_closures: BTreeSet::new(),
             value_obligations: vec![],
             diagnostics: vec![],
         };
@@ -150,12 +149,13 @@ impl UseFlow {
         let summary = analyzer.expression(body.root, &mut environment);
         analyzer.record(summary);
         let result_type = body.expression(body.root).ty.clone();
-        analyzer.escape_value_as(
+        let result_uses = analyzer.escape_value_as(
             body.root,
             &environment,
             &result_type,
             CallableEscapeBoundary::Result,
         );
+        analyzer.record(result_uses);
         analyzer.finish()
     }
 }
@@ -443,7 +443,6 @@ struct Analyzer<'a> {
     /// resulting closure remains the owner of that capability.
     closure_values: BTreeMap<CoreId, ClosureValue>,
     escapes: EscapeSummary,
-    escaped_closures: BTreeSet<CallableId>,
     value_obligations: Vec<ValueUseFact>,
     diagnostics: Vec<UseDiagnostic>,
 }
@@ -691,8 +690,13 @@ impl Analyzer<'_> {
                 // Do this after evaluating the payloads: a payload can build
                 // a closure or move an aggregate field while it is evaluated,
                 // and the transfer must observe that exact resulting binding.
-                self.escape_perform_arguments(&arguments, &payload_types, environment);
-                summary
+                let transfers = self.escape_perform_arguments(
+                    &arguments,
+                    &payload_types,
+                    environment,
+                    expression.span,
+                );
+                self.compose(expression.span, summary, transfers)
             }
             CoreKind::Call {
                 callee, arguments, ..
@@ -996,7 +1000,8 @@ impl Analyzer<'_> {
         }
         match self.binding_for_value(callee, environment) {
             Binding::Contract(key) => {
-                self.escape_arguments(callee, &arguments, environment);
+                let arguments = self.escape_arguments(callee, &arguments, environment, span);
+                let summary = self.compose(span, summary, arguments);
                 self.compose(span, summary, Summary::one(key))
             }
             Binding::Closure(closure) => {
@@ -1041,8 +1046,8 @@ impl Analyzer<'_> {
                 self.compose(span, summary, body)
             }
             Binding::Aggregate(_) | Binding::GlobalCallable | Binding::Other => {
-                self.escape_arguments(callee, &arguments, environment);
-                summary
+                let arguments = self.escape_arguments(callee, &arguments, environment, span);
+                self.compose(span, summary, arguments)
             }
         }
     }
@@ -1347,23 +1352,27 @@ impl Analyzer<'_> {
         arguments: &[CoreId],
         payload_types: &[Type],
         environment: &Environment,
-    ) {
+        span: Span,
+    ) -> Summary {
         // `TypedBody::validate` independently proves this arity relation.
         // Keep the zip explicit nevertheless: malformed imported Core must
         // fail validation before UseFlow is requested, never manufacture a
         // payload capability from an unmatched sender expression.
+        let mut summary = Summary::default();
         for (argument, payload_type) in arguments.iter().zip(payload_types) {
             // The selected operation declaration, not the sender expression,
             // owns this contract.  A generic argument may have been inferred
             // or coerced into the parameter; `payload_types` is the zonked,
             // instantiated receiver ABI frozen in Core.
-            self.escape_value_as(
+            let next = self.escape_value_as(
                 *argument,
                 environment,
                 payload_type,
                 CallableEscapeBoundary::Argument,
             );
+            summary = self.compose(span, summary, next);
         }
+        summary
     }
 
     fn assignment_place_fact(&self, span: Span) -> Option<MoveFact> {
@@ -1628,16 +1637,18 @@ impl Analyzer<'_> {
         callee: CoreId,
         arguments: &[CoreId],
         environment: &Environment,
-    ) {
+        span: Span,
+    ) -> Summary {
         let parameter_types = self.callable_parameter_types(callee);
+        let mut summary = Summary::default();
         for (index, argument) in arguments.iter().enumerate() {
-            if let Some(parameter_type) = parameter_types.get(index) {
+            let next = if let Some(parameter_type) = parameter_types.get(index) {
                 self.escape_value_as(
                     *argument,
                     environment,
                     parameter_type,
                     CallableEscapeBoundary::Argument,
-                );
+                )
             } else {
                 // Typed Core validates call arity before this analysis. Keep
                 // malformed frozen input fail-closed rather than assuming an
@@ -1647,9 +1658,11 @@ impl Analyzer<'_> {
                     environment,
                     None,
                     CallableEscapeBoundary::Argument,
-                );
-            }
+                )
+            };
+            summary = self.compose(span, summary, next);
         }
+        summary
     }
 
     fn escape_contract(
@@ -1756,10 +1769,19 @@ impl Analyzer<'_> {
         }
     }
 
-    fn escape_closure(&mut self, closure: ClosureValue, span: Span) {
-        if !self.escaped_closures.insert(closure.callable) {
-            return;
-        }
+    fn escape_closure(&mut self, closure: ClosureValue, span: Span) -> Summary {
+        // A closure environment is a first-class owner, not a memoized
+        // summary.  Every outgoing call boundary that receives this closure
+        // may activate its captures, even if the receiver is an imported
+        // declaration and the closure's generated callable identity is the
+        // same.  Suppressing a later transfer by `CallableId` made
+        // `invoke(callback) + invoke(callback)` look like one activation of
+        // a move-captured exact callable.
+        //
+        // Closure capture graphs are lexical snapshots: a closure can refer
+        // to an enclosing closure but cannot capture its own not-yet-bound
+        // local name.  Re-evaluating this snapshot therefore terminates and
+        // accurately charges each independent transfer.
         let enclosing_escapes = self.take_escapes();
         let mut environment = Environment {
             bindings: closure.captures,
@@ -1775,7 +1797,7 @@ impl Analyzer<'_> {
         let escapes = self.scale_escapes(span, escapes, closure.invocation);
         self.sequence_escapes(span, escapes);
         let summary = self.repeat(span, summary, closure.invocation);
-        self.record(summary);
+        summary
     }
 
     fn escape_value(
@@ -1784,31 +1806,46 @@ impl Analyzer<'_> {
         environment: &Environment,
         required: Option<Quantity>,
         boundary: CallableEscapeBoundary,
-    ) {
+    ) -> Summary {
         match self.binding_for_value(id, environment) {
             Binding::Contract(key) => {
-                self.escape_contract(key, required, self.body.expression(id).span, boundary)
+                self.escape_contract(key, required, self.body.expression(id).span, boundary);
+                Summary::default()
             }
             Binding::Closure(closure) => {
                 self.escape_closure(closure, self.body.expression(id).span)
             }
             Binding::Aggregate(fields) => {
+                let mut summary = Summary::default();
                 for binding in fields.values() {
-                    self.escape_binding(binding, required, self.body.expression(id).span, boundary);
+                    let next = self.escape_binding(
+                        binding,
+                        required,
+                        self.body.expression(id).span,
+                        boundary,
+                    );
+                    summary = self.compose(self.body.expression(id).span, summary, next);
                 }
+                summary
             }
             Binding::GlobalCallable | Binding::Other => match &self.body.expression(id).kind {
                 CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
+                    let mut summary = Summary::default();
                     for value in values {
-                        self.escape_value(*value, environment, None, boundary);
+                        let next = self.escape_value(*value, environment, None, boundary);
+                        summary = self.compose(self.body.expression(id).span, summary, next);
                     }
+                    summary
                 }
                 CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
+                    let mut summary = Summary::default();
                     for value in fields {
-                        self.escape_value(*value, environment, None, boundary);
+                        let next = self.escape_value(*value, environment, None, boundary);
+                        summary = self.compose(self.body.expression(id).span, summary, next);
                     }
+                    summary
                 }
-                _ => {}
+                _ => Summary::default(),
             },
         }
     }
@@ -1824,7 +1861,7 @@ impl Analyzer<'_> {
         environment: &Environment,
         expected: &Type,
         boundary: CallableEscapeBoundary,
-    ) {
+    ) -> Summary {
         // An enum constructor carries its active variant at this expression,
         // unlike an enum parameter whose variant is genuinely dynamic. Use
         // that proof to preserve payload capabilities across a call or effect
@@ -1838,10 +1875,12 @@ impl Analyzer<'_> {
                 self.enum_variant_field_types(expected, *definition, *variant)
             && field_types.len() == fields.len()
         {
+            let mut summary = Summary::default();
             for (field, field_type) in fields.iter().zip(field_types.iter()) {
-                self.escape_value_as(*field, environment, field_type, boundary);
+                let next = self.escape_value_as(*field, environment, field_type, boundary);
+                summary = self.compose(self.body.expression(id).span, summary, next);
             }
-            return;
+            return summary;
         }
         let binding = self.binding_for_value(id, environment);
         if matches!(binding, Binding::GlobalCallable | Binding::Other) {
@@ -1849,9 +1888,9 @@ impl Analyzer<'_> {
             // forms such as blocks. They do not retain a field-by-field
             // binding identity, so accepting them as an empty capability
             // would erase a nested callable obligation.
-            self.escape_value(id, environment, callable_invocation(expected), boundary);
+            self.escape_value(id, environment, callable_invocation(expected), boundary)
         } else {
-            self.escape_binding_as(&binding, expected, self.body.expression(id).span, boundary);
+            self.escape_binding_as(&binding, expected, self.body.expression(id).span, boundary)
         }
     }
 
@@ -1861,26 +1900,31 @@ impl Analyzer<'_> {
         expected: &Type,
         span: Span,
         boundary: CallableEscapeBoundary,
-    ) {
+    ) -> Summary {
         match binding {
             Binding::Contract(key) => {
-                self.escape_contract(*key, callable_invocation(expected), span, boundary)
+                self.escape_contract(*key, callable_invocation(expected), span, boundary);
+                Summary::default()
             }
             Binding::Closure(closure) => self.escape_closure(closure.clone(), span),
             Binding::Aggregate(fields) => {
+                let mut summary = Summary::default();
                 for (index, binding) in fields {
-                    if let Some(field_type) = self.structural_field_type(expected, *index) {
-                        self.escape_binding_as(binding, &field_type, span, boundary);
-                    } else {
-                        // For an aggregate whose active layout cannot be
-                        // proven here (notably a dynamic enum parameter),
-                        // retain the existing conservative diagnostic rather
-                        // than silently treating an affine payload as copied.
-                        self.escape_binding(binding, None, span, boundary);
-                    }
+                    let next =
+                        if let Some(field_type) = self.structural_field_type(expected, *index) {
+                            self.escape_binding_as(binding, &field_type, span, boundary)
+                        } else {
+                            // For an aggregate whose active layout cannot be
+                            // proven here (notably a dynamic enum parameter),
+                            // retain the existing conservative diagnostic rather
+                            // than silently treating an affine payload as copied.
+                            self.escape_binding(binding, None, span, boundary)
+                        };
+                    summary = self.compose(span, summary, next);
                 }
+                summary
             }
-            Binding::GlobalCallable | Binding::Other => {}
+            Binding::GlobalCallable | Binding::Other => Summary::default(),
         }
     }
 
@@ -1928,16 +1972,22 @@ impl Analyzer<'_> {
         required: Option<Quantity>,
         span: Span,
         boundary: CallableEscapeBoundary,
-    ) {
+    ) -> Summary {
         match binding {
-            Binding::Contract(key) => self.escape_contract(*key, required, span, boundary),
+            Binding::Contract(key) => {
+                self.escape_contract(*key, required, span, boundary);
+                Summary::default()
+            }
             Binding::Closure(closure) => self.escape_closure(closure.clone(), span),
             Binding::Aggregate(fields) => {
+                let mut summary = Summary::default();
                 for binding in fields.values() {
-                    self.escape_binding(binding, required, span, boundary);
+                    let next = self.escape_binding(binding, required, span, boundary);
+                    summary = self.compose(span, summary, next);
                 }
+                summary
             }
-            Binding::GlobalCallable | Binding::Other => {}
+            Binding::GlobalCallable | Binding::Other => Summary::default(),
         }
     }
 
