@@ -2179,6 +2179,39 @@ impl MirEditor {
         })
     }
 
+    /// Retire every ordinary block that cannot be reached through either a
+    /// CFG edge or a frozen dynamic label/handler destination.  Retired block
+    /// and operation identities remain reserved as tombstones; blocks that
+    /// carry frozen control or source-storage lifecycle facts are rejected
+    /// instead of silently dropping those semantic identities.
+    pub fn remove_unreachable_blocks(&mut self) -> Result<Vec<MirBlockId>, String> {
+        let retired = removable_unreachable_blocks(&self.function)?;
+        if retired.is_empty() {
+            return Ok(retired);
+        }
+        self.transaction(MirAnalysisInvalidation::ALL, |function| {
+            // Recompute inside the transaction so the validation and the
+            // exact tombstone set derive from one immutable body snapshot.
+            let retired = removable_unreachable_blocks(function)?;
+            for block in &retired {
+                for operation in &mut function.control.operations.entries {
+                    if operation.as_ref().is_some_and(|data| data.block == *block) {
+                        *operation = None;
+                    }
+                }
+                let block_data = function
+                    .blocks
+                    .get_mut(block.0 as usize)
+                    .expect("unreachable block was checked before retirement");
+                block_data.parameters.clear();
+                block_data.instructions.clear();
+                block_data.terminator = MirTerminator::Unreachable;
+                function.control.tombstoned_blocks.insert(*block);
+            }
+            Ok(retired)
+        })
+    }
+
     /// Split a block before instruction `at`, preserving every operation ID.
     /// The original block becomes a plain fallthrough to a fresh suffix block;
     /// frozen handler/perform/resumption locations are relocated with their
@@ -2885,6 +2918,99 @@ fn refresh_control_block_sites(
         }
     }
     Ok(())
+}
+
+fn removable_unreachable_blocks(function: &MirFunction) -> Result<Vec<MirBlockId>, String> {
+    let mut reachable = BTreeSet::new();
+    let mut pending = VecDeque::from([function.entry]);
+    // Label values and installed handlers enter their destinations through
+    // dynamic control, not an ordinary terminator edge. Treating those
+    // destinations as roots prevents CFG normalization from erasing a valid
+    // rejoin or handler clause merely because it has no static predecessor.
+    pending.extend(function.control.labels.iter().map(|label| label.destination));
+    pending.extend(function.control.handlers.iter().map(|handler| handler.target));
+    while let Some(block) = pending.pop_front() {
+        if function.control.tombstoned_blocks.contains(&block) || !reachable.insert(block) {
+            continue;
+        }
+        let block_data = function
+            .blocks
+            .get(block.0 as usize)
+            .ok_or_else(|| format!("MIR reachability names absent block {}", block.0))?;
+        pending.extend(terminator_successors(&block_data.terminator));
+    }
+    let retired = function
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, _)| MirBlockId(index as u32))
+        .filter(|block| {
+            !reachable.contains(block) && !function.control.tombstoned_blocks.contains(block)
+        })
+        .collect::<Vec<_>>();
+    if retired.is_empty() {
+        return Ok(retired);
+    }
+    let retired_set = retired.iter().copied().collect::<BTreeSet<_>>();
+    if function
+        .control
+        .labels
+        .iter()
+        .any(|label| retired_set.contains(&label.destination))
+        || function.control.handlers.iter().any(|handler| {
+            retired_set.contains(&handler.block) || retired_set.contains(&handler.target)
+        })
+        || function
+            .control
+            .performs
+            .iter()
+            .any(|perform| retired_set.contains(&perform.block))
+        || function
+            .control
+            .resumptions
+            .iter()
+            .any(|resumption| retired_set.contains(&resumption.block))
+        || function
+            .control
+            .leave_handler_depths
+            .keys()
+            .any(|block| retired_set.contains(block))
+    {
+        return Err(
+            "MIR cannot retire an unreachable block named by frozen control metadata".into(),
+        );
+    }
+    for block in &retired {
+        let block_data = &function.blocks[block.0 as usize];
+        if block_data.instructions.iter().any(instruction_has_persistent_identity)
+            || matches!(block_data.terminator, MirTerminator::Leave { .. })
+        {
+            return Err(
+                "MIR cannot retire an unreachable block with frozen control or storage lifecycle"
+                    .into(),
+            );
+        }
+    }
+    Ok(retired)
+}
+
+fn instruction_has_persistent_identity(instruction: &MirInstruction) -> bool {
+    matches!(
+        instruction,
+        MirInstruction::MakeLabel { .. }
+            | MirInstruction::InstallHandler { .. }
+            | MirInstruction::Perform { .. }
+            | MirInstruction::CaptureResumption { .. }
+            | MirInstruction::Resume { .. }
+            | MirInstruction::ResumeReturn { .. }
+            | MirInstruction::ResumeSnapshot { .. }
+            | MirInstruction::Forward { .. }
+            | MirInstruction::Cancel { .. }
+            | MirInstruction::StorageLive { .. }
+            | MirInstruction::StorageDead { .. }
+            | MirInstruction::SetDropFlag { .. }
+            | MirInstruction::DestroyIf { .. }
+    )
 }
 
 fn predecessor_count(function: &MirFunction, target: MirBlockId) -> usize {

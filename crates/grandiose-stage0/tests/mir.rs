@@ -1736,6 +1736,48 @@ fn checked_mir_editor_splits_typed_cfg_edges_without_rebinding_identities() {
 }
 
 #[test]
+fn checked_mir_editor_retires_unreachable_blocks_and_operation_ids() {
+    let mut function = editor_cfg_function();
+    function.blocks.push(MirBlock {
+        scope: MirScopeId::ROOT,
+        parameters: vec![],
+        instructions: vec![MirInstruction::ConstI64 {
+            dst: MirLocal(0),
+            value: 3,
+        }],
+        terminator: MirTerminator::Goto {
+            target: MirBlockId(2),
+            arguments: vec![],
+        },
+    });
+    function.blocks.push(MirBlock {
+        scope: MirScopeId::ROOT,
+        parameters: vec![],
+        instructions: vec![MirInstruction::ConstI64 {
+            dst: MirLocal(1),
+            value: 4,
+        }],
+        terminator: MirTerminator::Unreachable,
+    });
+    let mut editor = MirEditor::open(function).unwrap();
+    let retired = editor.remove_unreachable_blocks().unwrap();
+    assert_eq!(retired, vec![MirBlockId(1), MirBlockId(2)]);
+    assert!(editor.is_operation_tombstone(MirOperationId(2)));
+    assert!(editor.is_operation_tombstone(MirOperationId(3)));
+    let normalized = editor.finish();
+    for block in retired {
+        assert!(normalized.control.tombstoned_blocks.contains(&block));
+        assert!(normalized.blocks[block.0 as usize].parameters.is_empty());
+        assert!(normalized.blocks[block.0 as usize].instructions.is_empty());
+        assert!(matches!(
+            normalized.blocks[block.0 as usize].terminator,
+            MirTerminator::Unreachable
+        ));
+    }
+    assert!(normalized.validate().is_ok(), "{:#?}", normalized.validate());
+}
+
+#[test]
 fn checked_mir_editor_replaces_typed_terminator_operands_transactionally() {
     let mut original = graph();
     original.locals.push(local(Type::Scalar(ScalarType::Bool)));
