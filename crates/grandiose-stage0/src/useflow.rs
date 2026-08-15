@@ -952,6 +952,30 @@ impl Analyzer<'_> {
             } if handler_definitely_discards(clauses, &effect, operation) => {
                 Some(self.sequence(arguments, environment, expression.span))
             }
+            CoreKind::Call { callee, arguments, .. }
+                if self.call_may_enter_discarded_handler(callee, clauses) =>
+            {
+                // An effectful call is not an eager invocation of its
+                // callable arguments.  A handler can intercept an operation
+                // performed by that callee before it reaches a callback, so
+                // only evaluation of the callee and its arguments belongs to
+                // the live prefix.  In particular, do not use
+                // `self.call` here: its ordinary outgoing-boundary rule is
+                // correct on a normal return, but would incorrectly
+                // discharge a captured callable's lower-use obligation on
+                // this cancellation path.
+                //
+                // This is intentionally based on the frozen callable effect
+                // row and resolved handler operations rather than package or
+                // facade names.  An opaque/imported forwarding function has
+                // exactly the same potential cancellation boundary as a
+                // local function with the same callable interface.
+                Some(self.sequence(
+                    std::iter::once(callee).chain(arguments.into_iter()),
+                    environment,
+                    expression.span,
+                ))
+            }
             CoreKind::Block(values) => {
                 let mut prefix = Summary::default();
                 for value in values {
@@ -975,6 +999,41 @@ impl Analyzer<'_> {
             }
             _ => None,
         }
+    }
+
+    /// Whether one callable invocation may perform an operation that this
+    /// handler definitely cancels.  Effect rows deliberately summarize
+    /// *possible* control exits: when such an exit exists, an exact callable
+    /// argument cannot be counted as used solely because it crossed the call
+    /// boundary.  Its normal-return transfer is still accounted by `call`;
+    /// this helper is used only while constructing the cancelled path.
+    fn call_may_enter_discarded_handler(
+        &self,
+        callee: CoreId,
+        clauses: &[CoreHandlerClause],
+    ) -> bool {
+        let Type::Callable { effects, .. } = &self.body.expression(callee).ty else {
+            return false;
+        };
+        // An open or projected row has no complete operation inventory at
+        // this boundary.  Preserve the existing conservative walker until
+        // its row evidence is normalized into resolved effect instances.
+        if !effects.projections.is_empty() || effects.tail.is_some() {
+            return false;
+        }
+        effects.effects.iter().any(|effect| {
+            self.signatures
+                .and_then(|signatures| signatures.definitions.get(&effect.definition))
+                .and_then(|header| match header {
+                    ElaboratedHeader::Effect(definition) => Some(definition),
+                    _ => None,
+                })
+                .is_some_and(|definition| {
+                    definition.operations.iter().enumerate().any(|(operation, _)| {
+                        handler_definitely_discards(clauses, effect, operation as u32)
+                    })
+                })
+        })
     }
 
     fn call(

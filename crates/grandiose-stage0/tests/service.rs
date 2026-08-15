@@ -15505,10 +15505,10 @@ fn service_cancels_shared_closure_payloads_through_public_facades() {
 
 #[test]
 fn service_rejects_move_capture_cancellation_through_public_facades() {
-    // RED: an exact callable captured by the callback is a lower-bound
-    // obligation even when the handler cancels the `[0,1]` payload.  The
-    // direct-handler control already diagnoses this as G5011; the public
-    // facade route currently loses that obligation and accepts this source.
+    // An exact callable captured by the callback is a lower-bound obligation
+    // even when the handler cancels the `[0,1]` payload.  The same rule must
+    // hold after an imported forwarding call: transfer into a facade is not
+    // proof that the callback body ran before the cancellation boundary.
     let provider = "pub effect Stop { [0,1] stop(callback: () -> i64) -> i64; } pub fn relay(callback: () -> i64) -> i64 / Stop { Stop::stop(callback) }";
     let bridge = "pub use provider::{Stop, relay}; pub fn invoke(callback: () -> i64) -> i64 / Stop { relay(callback) }";
     let world = |root: &str| {
