@@ -5242,6 +5242,34 @@ fn service_normalizes_generic_associated_consts_in_hrtb_gat_body_results() {
 }
 
 #[test]
+fn service_materializes_selected_associated_consts_in_trait_method_computation() {
+    let mut request = request("use facade::Gateway as Capability; pub fn main() -> i64 { Capability::relay(41) }");
+    request.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::Gate as Gateway;".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@1.2.3".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub struct Witness<n: u32> { value: i64 } pub trait Gate { const Width: u32; fn relay(value: i64) -> i64; } impl Gate for i64 { const Width = 7; fn relay(value: i64) -> i64 { let witness = Witness<<i64 as Gate>::Width> { value: 1 }; value + witness.value } }".as_slice(),
+    ));
+    let first = StageZeroCompiler::new()
+        .compile(request.clone())
+        .expect("selected associated const must materialize into method arithmetic");
+    request.sources.reverse();
+    let second = StageZeroCompiler::new()
+        .compile(request)
+        .expect("provider order must not perturb selected associated const arithmetic");
+    let first = first.artifact.unwrap();
+    let second = second.artifact.unwrap();
+    assert_eq!(first.fingerprint(), second.fingerprint());
+    assert_eq!(first.canonical_bytes(), second.canonical_bytes());
+    assert_eq!(first.run_i64().unwrap(), 42);
+    assert_eq!(second.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_materializes_nested_hrtb_callable_aliases_with_type_const_and_effect_gats() {
     // The public callable alias nests a selected type GAT and selected effect
     // GAT under `for<'a>`. Their item arguments combine the caller's row,
