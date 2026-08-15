@@ -12282,6 +12282,128 @@ fn service_rolls_back_private_alias_exports_through_public_package_module_cycles
 }
 
 #[test]
+fn service_recovers_versioned_public_cycle_aliases_after_private_incompatible_revision() {
+    let root = "use cycle_facade::*; pub struct Packet { value: <i64 as Capability<i64>>::Item<i64> } pub fn call(callback: Relay<i64>) -> i64 / { <i64 as Capability<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Audit<i64> { let packet = Packet { value: call(Capability<i64>::relay) }; Audit<i64>::note(packet.value) } pub fn effect_value() -> i64 { handle worker() { Audit<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let public_provider = |fixity: &str| {
+        format!(
+            "pub {fixity} 30 **; pub trait Combine<T> {{ **(left: T, right: T) -> T; }} impl Combine<i64> for i64 {{ **(left: i64, right: i64) -> i64 {{ left - right }} }} pub effect Trace<T> {{ [1,1] note(value: T) -> i64; }} pub trait Parent<T> {{ type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / {{ <Self as Parent<T>>::Effects<U> }}; }} pub trait Child<T>: Parent<T> {{}} impl Parent<i64> for i64 {{ type Item<U> = i64; type Effects<U> = {{Trace<U>}}; fn relay<U>(receiver: i64, value: U) -> i64 / {{Trace<U>}} {{ Trace<U>::note(value) }} }} impl Child<i64> for i64 {{}} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / {{ <i64 as Child<i64>>::Effects<U> }};"
+        )
+    };
+    let private_incompatible = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = Bool; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> Bool / {Trace<U>} { true } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let world = |package: &str, provider: String| {
+        let mut input = request(root);
+        for (package, path, source) in [
+            (package, "src/lib.glorious", provider),
+            (
+                "cycle-facade@0.1.0",
+                "src/lib.glorious",
+                "pub mod api; pub mod bridge; pub use crate::api::*; pub use crate::bridge::*;".into(),
+            ),
+            (
+                "cycle-facade@0.1.0",
+                "src/api/api.glorious",
+                "pub use crate::bridge::*; pub use semantic_core::{Child as Capability, Trace as Audit};".into(),
+            ),
+            (
+                "cycle-facade@0.1.0",
+                "src/bridge/bridge.glorious",
+                "pub use crate::api::*; pub use semantic_core::{Callback as Relay, Combine as Operator}; pub use semantic_core::*;".into(),
+            ),
+        ] {
+            input.sources.push(SourceInput::new(
+                PackageKey(package.into()),
+                LogicalPath::parse(path).unwrap(),
+                source.into_bytes(),
+            ));
+        }
+        input
+    };
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(world("semantic-core@0.1.0", public_provider("infixl")), None)
+        .unwrap();
+    let first = compiler
+        .compile_revision(parent)
+        .expect("the initial public cyclic alias world must compile")
+        .artifact
+        .unwrap();
+    assert_eq!(first.run_i64().unwrap(), 48);
+    let cached_parent = compiler.interface_cache_stats();
+    let facade_node = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("cycle-facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let published_parent = compiler
+        .dependency_trace(parent, &facade_node)
+        .expect("the initial cyclic facade interface must publish");
+
+    let rejected_world = world("semantic-core@0.2.0", private_incompatible.into());
+    let rejected = compiler
+        .import_revision(rejected_world.clone(), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(rejected).unwrap())
+        .expect_err("a private incompatible provider revision cannot cross cyclic aliases");
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3317"),
+        "private provider aliases must fail in their own revision: {:#?}",
+        error.diagnostics()
+    );
+    assert!(
+        error
+            .diagnostics()
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G4111"),
+        "the rejected revision must not leak an operator ambiguity: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached_parent);
+    assert!(compiler.dependency_traces(rejected).is_empty());
+    assert_eq!(
+        compiler.dependency_trace(parent, &facade_node),
+        Some(published_parent.clone()),
+        "the rejected revision must not overwrite its public cyclic facade parent"
+    );
+    let mut reordered_rejected = rejected_world;
+    reordered_rejected.sources.reverse();
+    assert_eq!(
+        error.diagnostics(),
+        StageZeroCompiler::new()
+            .compile(reordered_rejected)
+            .expect_err("source reordering cannot authorize the private cyclic revision")
+            .diagnostics(),
+        "private incompatible cyclic diagnostics must be canonical"
+    );
+
+    let repaired = compiler
+        .import_revision(
+            world("semantic-core@0.2.0", public_provider("infixr")),
+            Some(parent),
+        )
+        .unwrap();
+    let second = compiler
+        .compile_revision(repaired)
+        .expect("a repaired public provider revision must not retain private diagnostics")
+        .artifact
+        .unwrap();
+    assert_eq!(second.run_i64().unwrap(), 52);
+    assert_ne!(first.fingerprint(), second.fingerprint());
+    assert_ne!(first.canonical_bytes(), second.canonical_bytes());
+    let repaired_facade = compiler
+        .dependency_trace(repaired, &facade_node)
+        .expect("the repaired cyclic facade must publish a new interface");
+    assert_ne!(published_parent.fingerprint, repaired_facade.fingerprint);
+    assert!(
+        compiler.interface_cache_stats().misses > cached_parent.misses,
+        "the repaired provider revision must collect fresh cyclic facade interfaces"
+    );
+}
+
+#[test]
 fn service_distinguishes_provider_identities_through_parallel_package_module_cycles() {
     let root = "use left_facade::{Capability as LeftCapability, Trace as LeftTrace}; use right_facade::{Capability as RightCapability, Trace as RightTrace}; pub struct LeftPacket { value: <i64 as LeftCapability<i64>>::Item<i64> } pub struct RightPacket { value: <i64 as RightCapability<i64>>::Item<i64> } pub fn left_worker() -> i64 / LeftTrace<i64> { let packet = LeftPacket { value: LeftCapability<i64>::relay(0, 41) }; LeftTrace<i64>::note(packet.value) } pub fn right_worker() -> i64 / RightTrace<i64> { let packet = RightPacket { value: RightCapability<i64>::relay(0, 41) }; RightTrace<i64>::note(packet.value) } pub fn left_value() -> i64 { handle left_worker() { LeftTrace<i64>::note(value) with k => k(value + 1) } } pub fn right_value() -> i64 { handle right_worker() { RightTrace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { left_value() + right_value() }";
     let public_provider = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";

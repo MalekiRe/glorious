@@ -258,6 +258,12 @@ coarse. The composite fixtures cover:
   traces and cache state, and reports canonical diagnostics under source
   reordering
   (`service_rolls_back_private_alias_exports_through_public_package_module_cycles`).
+- a versioned provider behind those cyclic aliases may move from a legal
+  public revision to a private and incompatible revision, then to a repaired
+  public revision. The rejected revision publishes no cache/traces or stale
+  diagnostics; the repaired revision freezes fresh facade metadata and a new
+  canonical VM artifact under the updated fixity
+  (`service_recovers_versioned_public_cycle_aliases_after_private_incompatible_revision`).
 - two package facades may each contain a public module re-export cycle. When
   both ultimately expose one provider, aliases deduplicate to that identity;
   when they expose same-spelled distinct providers, both generic callback/GAT
