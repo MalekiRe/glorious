@@ -1467,7 +1467,7 @@ impl VmStorageErasureWitness {
             };
             match *action {
                 VmStorageErasureAction::EndBorrow { .. } => {
-                    if !matches!(*state, Progress::Start | Progress::BorrowEnded) {
+                    if !matches!(*state, Progress::Start) {
                         return false;
                     }
                     *state = Progress::BorrowEnded;
