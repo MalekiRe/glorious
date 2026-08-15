@@ -4,9 +4,10 @@ use grandiose_stage0::{
     BootstrapStage, Budget, CancellationToken, CompilationMode, CompilationRequest,
     CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus, DiagnosticClass,
     Digest, FileKey, HostImportSelector, InstanceLimits, LogicalPath, ModuleKey, PackageKey,
-    PrimitiveRole, PrimitiveSelector, RetentionReport, RuntimeManifestInput, Severity, SourceInput,
-    StageZeroCompiler, VmArtifactError, VmContinuationPolicy, VmExecutionLimits, VmGenericArgument,
-    VmInstruction, VmType, decode_and_verify_program, decode_program, encode_program,
+    PackageSessionStatus, PrimitiveRole, PrimitiveSelector, RetentionReport, RuntimeManifestInput,
+    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmContinuationPolicy,
+    VmExecutionLimits, VmGenericArgument, VmInstruction, VmType, decode_and_verify_program,
+    decode_program, encode_program,
     query::{Query, QueryCompleteness, QueryContext, QueryEngine, QueryFailure, QueryValue},
 };
 use std::{collections::BTreeMap, sync::Arc};
@@ -2746,6 +2747,41 @@ fn failed_and_resource_limited_sessions_do_not_publish_staged_interfaces() {
     assert_eq!(compiler.interface_cache_stats().hits, 0);
     assert_eq!(compiler.interface_cache_stats().misses, 0);
     assert!(compiler.dependency_traces(limited_revision).is_empty());
+}
+
+#[test]
+fn service_request_package_registry_commits_or_rolls_back_atomically() {
+    let compiler = StageZeroCompiler::new();
+    let good_revision = compiler
+        .import_revision(request("pub fn main() -> i64 { 42 }"), None)
+        .unwrap();
+    let good = compiler.open_session(good_revision).unwrap();
+    assert!(good.package_sessions().is_empty());
+    compiler.compile_session(&good).unwrap();
+    assert_eq!(
+        good.package_sessions()
+            .iter()
+            .map(|entry| entry.status)
+            .collect::<Vec<_>>(),
+        vec![PackageSessionStatus::Committed]
+    );
+
+    // A failure after body-session admission must abandon every request-local
+    // package product rather than leaving a partially staged package that a
+    // later request could mistake for a completed interface/body/MIR result.
+    let failed_revision = compiler
+        .import_revision(request("pub fn main() -> i64 { missing_name }"), None)
+        .unwrap();
+    let failed = compiler.open_session(failed_revision).unwrap();
+    assert!(compiler.compile_session(&failed).is_err());
+    assert_eq!(
+        failed
+            .package_sessions()
+            .iter()
+            .map(|entry| entry.status)
+            .collect::<Vec<_>>(),
+        vec![PackageSessionStatus::RolledBack]
+    );
 }
 
 #[test]

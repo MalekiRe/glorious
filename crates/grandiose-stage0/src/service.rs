@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::revision::RequestControlError;
+use crate::revision::{PackageSessionError, PackageSessionLease, RequestControlError};
 use crate::{
     BodySyntax, BootstrapManifest, Budget, BudgetError, CancellationToken, CoherenceSet,
     CompilationMode, CompilationRequest, CompilerDatabase, DatabaseSnapshot, DefKey,
@@ -489,19 +489,25 @@ struct PublishedBody {
 #[derive(Debug)]
 struct PackageSession<'request> {
     request: &'request RequestSession,
+    lease: PackageSessionLease<'request>,
     package: PackageKey,
     demanded_bodies: BTreeSet<DefKey>,
     staged_bodies: Vec<PublishedBody>,
 }
 
 impl<'request> PackageSession<'request> {
-    fn new(request: &'request RequestSession, package: PackageKey) -> Self {
-        Self {
+    fn new(
+        request: &'request RequestSession,
+        package: PackageKey,
+    ) -> Result<Self, PackageSessionError> {
+        let lease = request.open_package_session(package.clone())?;
+        Ok(Self {
             request,
+            lease,
             package,
             demanded_bodies: BTreeSet::new(),
             staged_bodies: Vec::new(),
-        }
+        })
     }
 
     /// Open the sole mutable owner for a body.  The `&mut self` borrow makes
@@ -528,12 +534,16 @@ impl<'request> PackageSession<'request> {
         }
     }
 
-    fn finish(mut self) -> Vec<PublishedBody> {
+    fn finish(mut self) -> Result<Vec<PublishedBody>, PackageSessionError> {
         // The worklist is a deterministic set.  Sort the staged result too,
         // so later instance discovery never acquires source traversal order
         // as an accidental semantic input.
         self.staged_bodies.sort_by_key(|body| body.definition);
-        self.staged_bodies
+        // This consumes the affine request-owned lease.  If staging failed,
+        // normal destruction rolls back this package before any mutable
+        // product can escape the request transaction.
+        self.lease.stage()?;
+        Ok(self.staged_bodies)
     }
 }
 
@@ -676,6 +686,7 @@ impl EmissionSession {
 #[derive(Debug)]
 pub enum ServiceError {
     Revision(RevisionError),
+    PackageSession(PackageSessionError),
     SessionConsumed(RevisionId),
     Cancelled,
     Resource(BudgetError),
@@ -712,6 +723,10 @@ impl ServiceError {
                     "requested compilation revision has been retired",
                 )]
             }
+            Self::PackageSession(error) => vec![CompileDiagnostic::invariant(
+                "G7035",
+                format!("request package-session lifecycle violation: {error:?}"),
+            )],
             Self::SessionConsumed(_) => vec![CompileDiagnostic::request(
                 "G7034",
                 "compilation request session has already finished",
@@ -760,6 +775,12 @@ impl From<RequestControlError> for ServiceError {
             RequestControlError::Cancelled => Self::Cancelled,
             RequestControlError::Resource(error) => Self::Resource(error),
         }
+    }
+}
+
+impl From<PackageSessionError> for ServiceError {
+    fn from(value: PackageSessionError) -> Self {
+        Self::PackageSession(value)
     }
 }
 
@@ -903,18 +924,38 @@ impl StageZeroCompiler {
             .database
             .dependency_ledger()
             .transaction(session.revision(), session.snapshot().parent());
-        let outcome = self.compile_snapshot(
+        let outcome = match self.compile_snapshot(
             session.snapshot(),
             session,
             &mut interfaces,
             &mut dependencies,
-        )?;
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                // Package staging is deliberately request-owned.  A body,
+                // elaboration, or lowering failure abandons every package
+                // product before the interface/dependency transactions drop.
+                session.rollback_package_sessions();
+                return Err(error);
+            }
+        };
         // One final cancellation check linearizes request publication. Before
         // it succeeds, dropping the outcome and transaction publishes neither
         // an artifact nor newly collected frozen interfaces.
-        let outcome = PublicationGuard::stage(outcome)
-            .commit(session.cancellation())
-            .map_err(|_| ServiceError::Cancelled)?;
+        let outcome = match PublicationGuard::stage(outcome).commit(session.cancellation()) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                session.rollback_package_sessions();
+                return Err(ServiceError::Cancelled);
+            }
+        };
+        // All package sessions must have reached staging before any
+        // request-visible cache transaction becomes durable.  `commit_all`
+        // validates first and then changes every package atomically.
+        if let Err(error) = session.commit_package_sessions() {
+            session.rollback_package_sessions();
+            return Err(error.into());
+        }
         interfaces.commit();
         dependencies.commit();
         Ok(outcome)
@@ -1383,10 +1424,10 @@ impl StageZeroCompiler {
             .keys()
             .cloned()
             .map(|package| {
-                let session = PackageSession::new(session, package.clone());
-                (package, session)
+                let package_session = PackageSession::new(session, package.clone())?;
+                Ok((package, package_session))
             })
-            .collect::<BTreeMap<_, _>>();
+            .collect::<Result<BTreeMap<_, _>, PackageSessionError>>()?;
         for node in graphs.values().flat_map(|graph| graph.modules.values()) {
             session.checkpoint(1)?;
             let Some(source) = snapshot
@@ -1861,7 +1902,10 @@ impl StageZeroCompiler {
         }
         let body_products = package_sessions
             .into_values()
-            .flat_map(PackageSession::finish)
+            .map(PackageSession::finish)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
             .collect::<Vec<_>>();
         let typed_bodies = body_products
             .iter()

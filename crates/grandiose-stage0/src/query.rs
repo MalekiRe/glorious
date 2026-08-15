@@ -53,53 +53,121 @@ pub struct Dependency {
     pub fingerprint: Digest,
 }
 
-/// The in-progress owner of one query evaluation. It records exact typed
-/// dependencies in demand order. Publication sorts/deduplicates those records
-/// so inspection and invalidation explanations are deterministic even when
-/// query execution later gains parallel scheduling.
+/// The in-progress affine owner of one query evaluation. It records exact typed
+/// dependencies in demand order. A frame has one terminal transition: it is
+/// either consumed by a [`QueryPublicationGuard`] or explicitly aborted. An
+/// abandoned frame rolls its staging back on drop, so an error, cancellation,
+/// or unwind cannot leave query-local dependency state available for a later
+/// publication.
 #[derive(Debug)]
 pub struct QueryFrame {
     revision: RevisionId,
-    dependencies: Vec<Dependency>,
-    recovered_dependency: bool,
+    state: QueryFrameState,
+}
+
+#[derive(Debug)]
+enum QueryFrameState {
+    Open {
+        dependencies: Vec<Dependency>,
+        recovered_dependency: bool,
+    },
+    /// A frame is only marked committed after its canonical dependency journal
+    /// has been transferred to the publication guard.
+    Committed,
+    /// Abort is idempotent, which makes destruction safe on every failure path.
+    Aborted,
 }
 
 impl QueryFrame {
     pub fn new(snapshot: &DatabaseSnapshot) -> Self {
         Self {
             revision: snapshot.id(),
-            dependencies: vec![],
-            recovered_dependency: false,
+            state: QueryFrameState::Open {
+                dependencies: vec![],
+                recovered_dependency: false,
+            },
         }
     }
 
     pub fn depend(&mut self, query: &'static str, fingerprint: Digest) {
-        self.dependencies.push(Dependency {
-            revision: self.revision,
-            query,
-            fingerprint,
-        });
+        if let QueryFrameState::Open { dependencies, .. } = &mut self.state {
+            dependencies.push(Dependency {
+                revision: self.revision,
+                query,
+                fingerprint,
+            });
+        } else {
+            panic!("cannot record a dependency after a query frame has closed");
+        }
     }
 
     fn depend_on_recovered_product(&mut self) {
-        self.recovered_dependency = true;
+        if let QueryFrameState::Open {
+            recovered_dependency,
+            ..
+        } = &mut self.state
+        {
+            *recovered_dependency = true;
+        } else {
+            panic!("cannot record recovery after a query frame has closed");
+        }
     }
 
     fn contains_recovered_dependency(&self) -> bool {
-        self.recovered_dependency
+        match &self.state {
+            QueryFrameState::Open {
+                recovered_dependency,
+                ..
+            } => *recovered_dependency,
+            QueryFrameState::Committed | QueryFrameState::Aborted => false,
+        }
     }
 
-    pub fn finish(mut self) -> Vec<Dependency> {
-        self.dependencies.sort_by(|left, right| {
-            (left.revision, left.query, left.fingerprint).cmp(&(
-                right.revision,
-                right.query,
-                right.fingerprint,
-            ))
-        });
-        self.dependencies.dedup();
-        self.dependencies
+    /// Explicitly abandon the frame's provisional journal. This is normally
+    /// performed by `Drop`, but keeping it explicit is useful at a boundary
+    /// that wants to release potentially large staged dependency sets early.
+    pub fn abort(&mut self) {
+        let previous = std::mem::replace(&mut self.state, QueryFrameState::Aborted);
+        drop(previous);
     }
+
+    fn commit(mut self) -> Vec<Dependency> {
+        let state = std::mem::replace(&mut self.state, QueryFrameState::Committed);
+        let QueryFrameState::Open {
+            mut dependencies, ..
+        } = state
+        else {
+            panic!("query frame must be open when it is committed");
+        };
+        canonicalize_dependencies(&mut dependencies);
+        dependencies
+    }
+
+    /// Finish a standalone frame. Query execution uses
+    /// [`QueryPublicationGuard`] instead, so its dependency journal and value
+    /// become visible atomically in one terminal operation.
+    pub fn finish(self) -> Vec<Dependency> {
+        self.commit()
+    }
+}
+
+impl Drop for QueryFrame {
+    fn drop(&mut self) {
+        if matches!(&self.state, QueryFrameState::Open { .. }) {
+            self.abort();
+        }
+    }
+}
+
+fn canonicalize_dependencies(dependencies: &mut Vec<Dependency>) {
+    dependencies.sort_by(|left, right| {
+        (left.revision, left.query, left.fingerprint).cmp(&(
+            right.revision,
+            right.query,
+            right.fingerprint,
+        ))
+    });
+    dependencies.dedup();
 }
 
 #[derive(Clone, Debug)]
@@ -132,6 +200,61 @@ pub enum QueryExecutionKind {
 #[derive(Debug)]
 pub struct MemoTable<K, V> {
     entries: Mutex<HashMap<(RevisionId, K), MemoEntry<V>>>,
+}
+
+/// The sole publication capability for a completed query frame. It owns the
+/// typed key and the provisional frame until `commit` atomically transfers the
+/// canonical dependency journal with the value. Dropping it aborts the frame.
+#[must_use = "a query publication guard must be committed or will abort on drop"]
+pub struct QueryPublicationGuard<'a, K, V> {
+    memo: &'a MemoTable<K, V>,
+    snapshot: &'a DatabaseSnapshot,
+    key: Option<K>,
+    frame: Option<QueryFrame>,
+}
+
+impl<K, V> QueryPublicationGuard<'_, K, V>
+where
+    K: Clone + Eq + Hash,
+    V: Clone,
+{
+    /// Atomically make a value and this frame's canonical dependency journal
+    /// visible. The consuming transition makes double-publication impossible.
+    pub fn commit(mut self, result: QueryValue<V>) {
+        let key = self
+            .key
+            .take()
+            .expect("query publication guard must own a key until commit");
+        let frame = self
+            .frame
+            .take()
+            .expect("query publication guard must own an open frame until commit");
+        assert_eq!(
+            self.snapshot.id(),
+            frame.revision,
+            "query frame crossed revisions"
+        );
+        let dependencies = frame.commit();
+        self.memo
+            .entries
+            .lock()
+            .expect("query memo mutex poisoned")
+            .insert(
+                (self.snapshot.id(), key),
+                MemoEntry {
+                    result,
+                    dependencies,
+                },
+            );
+    }
+}
+
+impl<K, V> Drop for QueryPublicationGuard<'_, K, V> {
+    fn drop(&mut self) {
+        if let Some(mut frame) = self.frame.take() {
+            frame.abort();
+        }
+    }
 }
 
 impl<K, V> Default for MemoTable<K, V>
@@ -189,9 +312,30 @@ where
         .expect("query memo entry count exceeds u64")
     }
 
-    /// A caller publishes only a complete or explicitly recovered value. A
-    /// cancellation/failure cannot manufacture an entry because it has no
-    /// `QueryValue` to pass to this method.
+    /// Begin the sole publication path for a completed frame. Until its guard
+    /// is committed, the key and dependency journal remain private staging.
+    pub fn begin_publication<'a>(
+        &'a self,
+        snapshot: &'a DatabaseSnapshot,
+        key: K,
+        frame: QueryFrame,
+    ) -> QueryPublicationGuard<'a, K, V> {
+        assert_eq!(
+            snapshot.id(),
+            frame.revision,
+            "query frame crossed revisions"
+        );
+        QueryPublicationGuard {
+            memo: self,
+            snapshot,
+            key: Some(key),
+            frame: Some(frame),
+        }
+    }
+
+    /// Convenience for callers that already have a complete product. Engine
+    /// execution prefers `begin_publication` so cancellation is checked while
+    /// the guard still owns all provisional state.
     pub fn publish(
         &self,
         snapshot: &DatabaseSnapshot,
@@ -199,21 +343,7 @@ where
         result: QueryValue<V>,
         frame: QueryFrame,
     ) {
-        assert_eq!(
-            snapshot.id(),
-            frame.revision,
-            "query frame crossed revisions"
-        );
-        self.entries
-            .lock()
-            .expect("query memo mutex poisoned")
-            .insert(
-                (snapshot.id(), key),
-                MemoEntry {
-                    result,
-                    dependencies: frame.finish(),
-                },
-            );
+        self.begin_publication(snapshot, key, frame).commit(result);
     }
 
     /// Re-publish a query-family-validated parent result under a child
@@ -221,7 +351,7 @@ where
     /// rewritten to the child revision because validation has established that
     /// these are the child world's observed facts too.
     fn publish_reused(&self, snapshot: &DatabaseSnapshot, key: K, parent: MemoEntry<V>) {
-        let dependencies = parent
+        let mut dependencies = parent
             .dependencies
             .into_iter()
             .map(|dependency| Dependency {
@@ -229,7 +359,11 @@ where
                 query: dependency.query,
                 fingerprint: dependency.fingerprint,
             })
-            .collect();
+            .collect::<Vec<_>>();
+        // Parent entries are already canonical, but validate reuse through the
+        // same deterministic publication boundary rather than relying on that
+        // implementation detail forever.
+        canonicalize_dependencies(&mut dependencies);
         self.entries
             .lock()
             .expect("query memo mutex poisoned")
@@ -483,7 +617,6 @@ impl<Q: Query> QueryEngine<Q> {
         let result = context
             .charge(1)
             .and_then(|_| self.query.execute(&mut context, key.clone()));
-        drop(running);
         let mut result = result?;
         let frame = context.finish();
         if frame.contains_recovered_dependency() {
@@ -494,9 +627,15 @@ impl<Q: Query> QueryEngine<Q> {
         {
             return Err(QueryFailure::RecoveredProduct { query: Q::NAME });
         }
+        // From here until commit the guard affinely owns the key and complete
+        // dependency journal. A late cancellation takes the error path below,
+        // drops the guard, and cannot expose either as a memo entry.
+        let publication = self.memo.begin_publication(snapshot, key.clone(), frame);
         cancellation.check().map_err(|_| QueryFailure::Cancelled)?;
-        self.memo
-            .publish(snapshot, key.clone(), result.clone(), frame);
+        publication.commit(result.clone());
+        // A re-entrant demand may only observe a completed memo entry. Keep
+        // the cycle marker live through the atomic publication boundary.
+        drop(running);
         self.record_execution(
             snapshot,
             &key,

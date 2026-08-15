@@ -107,8 +107,9 @@ pub use resolution::{
     ResolutionDiagnostic, ResolutionState, ScopeMap,
 };
 pub use revision::{
-    CompilerDatabase, DatabaseSnapshot, RequestSession, RetentionReport, RevisionCache,
-    RevisionError, RevisionMetadata,
+    CompilerDatabase, DatabaseSnapshot, PackageSessionError, PackageSessionMetadata,
+    PackageSessionStatus, RequestSession, RetentionReport, RevisionCache, RevisionError,
+    RevisionMetadata,
 };
 pub use runtime_manifest::{
     HostImportSelector, ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput,

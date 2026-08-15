@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     dependency::DependencyLedger,
-    identity::{Digest, RevisionId, fresh_database_id},
+    identity::{Digest, PackageKey, RevisionId, fresh_database_id},
     interface::{InterfaceCache, InterfaceCacheStats},
     operation::{Budget, BudgetError, CancellationToken},
     request::{CompilationRequest, InputError, NormalizedInputWorld},
@@ -106,6 +106,166 @@ pub struct RevisionMetadata {
     pub revision: RevisionId,
     pub parent: Option<RevisionId>,
     pub input_fingerprint: Digest,
+}
+
+/// The request-visible lifecycle of one demanded package.  These states own
+/// only request-local publication authority; package source bytes, frozen
+/// interfaces, and database services remain borrowed through the immutable
+/// request snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PackageSessionStatus {
+    /// A package session owns mutable body/interface staging.
+    Open,
+    /// Its local products are complete, but the enclosing request has not
+    /// crossed its single publication boundary yet.
+    Staged,
+    /// The request published successfully, so the staged package participates
+    /// in its immutable outcome.
+    Committed,
+    /// The package's mutable staging was abandoned.  It cannot be reopened
+    /// under this request, which prevents a failed transaction from being
+    /// retried with partially retained state.
+    RolledBack,
+}
+
+/// Inspection-safe state for an entry in a request-owned package registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageSessionMetadata {
+    pub package: PackageKey,
+    pub status: PackageSessionStatus,
+}
+
+/// Failure to admit or publish package-local work through a request session.
+/// These are lifecycle failures rather than source diagnostics: all package
+/// identities are validated against the already-pinned immutable world.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PackageSessionError {
+    PackageNotInRequest(PackageKey),
+    PackageAlreadyActive(PackageKey),
+    PackageNotOpen(PackageKey),
+    RequestRolledBack,
+    UnstagedPackages(Vec<PackageKey>),
+}
+
+#[derive(Debug)]
+struct PackageSessionRegistry {
+    /// The request may open only packages named by its immutable input world.
+    /// This guards against a mutable service worklist becoming a backdoor for
+    /// ambient packages or source blobs.
+    permitted: BTreeSet<PackageKey>,
+    states: Mutex<BTreeMap<PackageKey, PackageSessionStatus>>,
+}
+
+impl PackageSessionRegistry {
+    fn for_snapshot(snapshot: &DatabaseSnapshot) -> Self {
+        let mut permitted = snapshot
+            .world()
+            .sources
+            .iter()
+            .map(|source| source.package.clone())
+            .collect::<BTreeSet<_>>();
+        permitted.insert(snapshot.world().root_package.clone());
+        Self {
+            permitted,
+            states: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn open(&self, package: &PackageKey) -> Result<(), PackageSessionError> {
+        if !self.permitted.contains(package) {
+            return Err(PackageSessionError::PackageNotInRequest(package.clone()));
+        }
+        let mut states = self
+            .states
+            .lock()
+            .expect("package session registry mutex poisoned");
+        if states
+            .values()
+            .any(|status| *status == PackageSessionStatus::RolledBack)
+        {
+            return Err(PackageSessionError::RequestRolledBack);
+        }
+        if states.contains_key(package) {
+            return Err(PackageSessionError::PackageAlreadyActive(package.clone()));
+        }
+        states.insert(package.clone(), PackageSessionStatus::Open);
+        Ok(())
+    }
+
+    fn stage(&self, package: &PackageKey) -> Result<(), PackageSessionError> {
+        let mut states = self
+            .states
+            .lock()
+            .expect("package session registry mutex poisoned");
+        match states.get_mut(package) {
+            Some(status @ PackageSessionStatus::Open) => {
+                *status = PackageSessionStatus::Staged;
+                Ok(())
+            }
+            _ => Err(PackageSessionError::PackageNotOpen(package.clone())),
+        }
+    }
+
+    fn commit_all(&self) -> Result<(), PackageSessionError> {
+        let mut states = self
+            .states
+            .lock()
+            .expect("package session registry mutex poisoned");
+        let unstaged = states
+            .iter()
+            .filter_map(|(package, status)| {
+                (*status != PackageSessionStatus::Staged).then(|| package.clone())
+            })
+            .collect::<Vec<_>>();
+        if !unstaged.is_empty() {
+            return Err(PackageSessionError::UnstagedPackages(unstaged));
+        }
+        // Validate before changing any entry: publication is all-or-nothing
+        // across the request's demanded package set.
+        for status in states.values_mut() {
+            *status = PackageSessionStatus::Committed;
+        }
+        Ok(())
+    }
+
+    fn rollback(&self, package: &PackageKey) {
+        let mut states = self
+            .states
+            .lock()
+            .expect("package session registry mutex poisoned");
+        if let Some(status @ (PackageSessionStatus::Open | PackageSessionStatus::Staged)) =
+            states.get_mut(package)
+        {
+            *status = PackageSessionStatus::RolledBack;
+        }
+    }
+
+    fn rollback_all(&self) {
+        let mut states = self
+            .states
+            .lock()
+            .expect("package session registry mutex poisoned");
+        for status in states.values_mut() {
+            if matches!(
+                status,
+                PackageSessionStatus::Open | PackageSessionStatus::Staged
+            ) {
+                *status = PackageSessionStatus::RolledBack;
+            }
+        }
+    }
+
+    fn metadata(&self) -> Vec<PackageSessionMetadata> {
+        self.states
+            .lock()
+            .expect("package session registry mutex poisoned")
+            .iter()
+            .map(|(package, status)| PackageSessionMetadata {
+                package: package.clone(),
+                status: *status,
+            })
+            .collect()
+    }
 }
 
 impl From<InputError> for RevisionError {
@@ -437,6 +597,10 @@ pub struct RequestSession {
     snapshot: DatabaseSnapshot,
     cancellation: CancellationToken,
     budget: Arc<Budget>,
+    /// Request-owned registry of package-local mutable lifetimes.  It tracks
+    /// authority and publication state only; all semantic inputs continue to
+    /// come from `snapshot` and are never copied into a package session.
+    package_sessions: PackageSessionRegistry,
     /// A request session owns one cancellation/budget/publication lifetime.
     /// It may be inspected while live, but exactly one compiler execution may
     /// claim it; retries must admit a fresh session against an explicit
@@ -451,6 +615,7 @@ impl RequestSession {
         budget: Arc<Budget>,
     ) -> Self {
         Self {
+            package_sessions: PackageSessionRegistry::for_snapshot(&snapshot),
             snapshot,
             cancellation,
             budget,
@@ -478,6 +643,43 @@ impl RequestSession {
         &self.budget
     }
 
+    /// Return the package-session lifecycle observed by this request.  This
+    /// is an inspection API: it grants neither mutable package authority nor
+    /// access to source inputs beyond the request's immutable snapshot.
+    pub fn package_sessions(&self) -> Vec<PackageSessionMetadata> {
+        self.package_sessions.metadata()
+    }
+
+    /// Admit the one mutable staging owner for `package`.  Service code holds
+    /// the returned lease while it performs package work; dropping an
+    /// un-staged lease rolls that package back automatically.
+    pub(crate) fn open_package_session(
+        &self,
+        package: PackageKey,
+    ) -> Result<PackageSessionLease<'_>, PackageSessionError> {
+        self.package_sessions.open(&package)?;
+        Ok(PackageSessionLease {
+            registry: &self.package_sessions,
+            package,
+            staged: false,
+        })
+    }
+
+    /// Atomically commit every staged package after the request's final
+    /// cancellation check has succeeded.  This is deliberately separate from
+    /// package staging so an error in any later phase can still abandon all
+    /// request-local products together.
+    pub(crate) fn commit_package_sessions(&self) -> Result<(), PackageSessionError> {
+        self.package_sessions.commit_all()
+    }
+
+    /// Abandon every mutable package product in the request.  The registry
+    /// retains only terminal lifecycle metadata; it never retains the staged
+    /// bodies, interfaces, or source bytes themselves.
+    pub(crate) fn rollback_package_sessions(&self) {
+        self.package_sessions.rollback_all();
+    }
+
     /// Atomically claim this affine session's sole execution slot. A failed,
     /// cancelled, or resource-limited execution remains consumed: its staged
     /// request products have been abandoned and cannot be replayed under a
@@ -497,6 +699,32 @@ impl RequestSession {
         self.budget
             .charge(cost)
             .map_err(RequestControlError::Resource)
+    }
+}
+
+/// Affine authority to stage one package through its owning request.  This is
+/// intentionally crate-private: a public host can inspect request state, but
+/// only the compiler service may mutate package-local semantic staging.
+#[derive(Debug)]
+pub(crate) struct PackageSessionLease<'request> {
+    registry: &'request PackageSessionRegistry,
+    package: PackageKey,
+    staged: bool,
+}
+
+impl PackageSessionLease<'_> {
+    pub(crate) fn stage(mut self) -> Result<(), PackageSessionError> {
+        self.registry.stage(&self.package)?;
+        self.staged = true;
+        Ok(())
+    }
+}
+
+impl Drop for PackageSessionLease<'_> {
+    fn drop(&mut self) {
+        if !self.staged {
+            self.registry.rollback(&self.package);
+        }
     }
 }
 
