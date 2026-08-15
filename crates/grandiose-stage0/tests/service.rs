@@ -13926,6 +13926,26 @@ fn service_enforces_move_captured_callable_use_through_dependency_handlers() {
 }
 
 #[test]
+fn service_preserves_move_capture_authority_through_public_hrtb_gat_callable_facades() {
+    let provider = "pub effect Trace<T> { [0,1] note(value: T) -> i64; } pub trait Capability<T> { type Effects<U>: EffectRow; } impl Capability<i64> for i64 { type Effects<U> = {Trace<U>}; } pub type HrtbCallback<U> = for<'a> (&'a i64) -> &'a i64 / { <i64 as Capability<i64>>::Effects<U> }; pub fn invoke(callback: () -> i64) -> i64 { callback() }";
+    let root = |twice: bool| format!("use top_facade::invoke; effect Tick {{ [0,1] tick() -> i64; }} pub fn next(value: i64) -> i64 {{ value + 1 }} pub fn run(function: (i64) -> i64) -> i64 {{ let callback = () -> i64 {{ move function(41) }}; handle Tick::tick() {{ Tick::tick() with _ => {} }} }} pub fn main() -> i64 {{ run(next) }}", if twice { "invoke(callback) + invoke(callback)" } else { "invoke(callback)" });
+    let world = |twice| {
+        let mut input = request(&root(twice));
+        for (package, source) in [("semantic-core@0.1.0", provider), ("middle-facade@0.1.0", "pub use semantic_core::{HrtbCallback, Capability, Trace, invoke};"), ("top-facade@0.1.0", "pub use middle_facade::*;")] {
+            input.sources.push(SourceInput::new(PackageKey(package.into()), LogicalPath::parse("src/lib.glorious").unwrap(), source.as_bytes()));
+        }
+        input
+    };
+    let accepted = StageZeroCompiler::new().compile(world(false)).expect("one move capture must cross public HRTB/GAT callable facades");
+    assert_eq!(accepted.artifact.unwrap().run_i64().unwrap(), 42);
+    let mut reordered = world(true); reordered.sources.reverse();
+    let first = StageZeroCompiler::new().compile(world(true)).expect_err("two facade transfers must not duplicate a move capture");
+    let second = StageZeroCompiler::new().compile(reordered).expect_err("source order cannot duplicate capture authority");
+    assert!(first.diagnostics().iter().any(|d| d.code == "G5011"));
+    assert_eq!(first.diagnostics(), second.diagnostics());
+}
+
+#[test]
 fn service_preserves_generic_dependency_effect_identity_through_replay() {
     // The imported generic effect must be instantiated once as `Ask<i64>`
     // across the dependency callable, the caller's handler frame, and both
