@@ -9710,6 +9710,80 @@ fn service_materializes_reachable_generic_dependency_callables() {
 }
 
 #[test]
+fn service_preserves_imported_reference_lifetimes_through_closures_and_handlers() {
+    // The dependency signature carries the exact input/output lifetime
+    // relation.  It must remain valid when the result is captured by a local
+    // closure and invoked from a handler clause, while the same relation must
+    // still reject a returned closure that would outlive its body-local loan.
+    let dependency = "pub fn relay<'a>(value: &'a i64) -> &'a i64 { value }";
+    let accepted = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::relay; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let value = 41; let callback = () -> i64 { *relay(&value) + 1 }; handle Tick::tick() { Tick::tick() with _ => callback() } }",
+            "math@0.1.0",
+            dependency,
+        ))
+        .expect("an imported reference may stay live inside a local handler closure");
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:#?}",
+        accepted.diagnostics
+    );
+    assert_eq!(accepted.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let rejected = StageZeroCompiler::new().compile(request_with_dependency(
+        "use math::relay; pub fn bad() -> () -> &i64 { let value = 1; let borrowed = relay(&value); () -> &i64 { borrowed } } pub fn main() -> i64 { 0 }",
+        "math@0.1.0",
+        dependency,
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = rejected else {
+        panic!("an imported body-local borrow unexpectedly escaped through a closure");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5014"),
+        "missing imported closure-lifetime escape diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn service_enforces_move_captured_callable_use_through_dependency_handlers() {
+    // The callback capture is owned by the handler arm, then transferred to a
+    // dependency callable.  A single transfer is valid; invoking that same
+    // captured closure twice must not be hidden by the package boundary or
+    // handler environment.
+    let dependency = "pub fn invoke(callback: () -> i64) -> i64 { callback() }";
+    let accepted = StageZeroCompiler::new()
+        .compile(request_with_dependency(
+            "use math::invoke; effect Tick { [0,1] tick() -> i64; } pub fn next(value: i64) -> i64 { value + 1 } pub fn run(function: (i64) -> i64) -> i64 { let callback = () -> i64 { move function(41) }; handle Tick::tick() { Tick::tick() with _ => invoke(callback) } } pub fn main() -> i64 { run(next) }",
+            "math@0.1.0",
+            dependency,
+        ))
+        .expect("one move-captured callback transfer through a dependency handler must work");
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:#?}",
+        accepted.diagnostics
+    );
+    assert_eq!(accepted.artifact.unwrap().run_i64().unwrap(), 42);
+
+    let rejected = StageZeroCompiler::new().compile(request_with_dependency(
+        "use math::invoke; effect Tick { [0,1] tick() -> i64; } pub fn next(value: i64) -> i64 { value + 1 } pub fn run(function: (i64) -> i64) -> i64 { let callback = () -> i64 { move function(41) }; handle Tick::tick() { Tick::tick() with _ => invoke(callback) + invoke(callback) } } pub fn main() -> i64 { run(next) }",
+        "math@0.1.0",
+        dependency,
+    ));
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = rejected else {
+        panic!("a move-captured callback was unexpectedly consumed twice through a dependency");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G5011"),
+        "missing cross-package move-capture use diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_preserves_generic_dependency_effect_identity_through_replay() {
     // The imported generic effect must be instantiated once as `Ask<i64>`
     // across the dependency callable, the caller's handler frame, and both

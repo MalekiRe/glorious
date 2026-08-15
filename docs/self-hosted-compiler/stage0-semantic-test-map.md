@@ -93,6 +93,8 @@ coarse. The composite fixtures cover:
 - generic dependency effect identity through exact replay and optional
   cancellation, including rejection when the imported handler's concrete
   effect instance does not match the performed one.
+- imported reference lifetime relations through a local closure and handler,
+  including rejection of a closure escape after the imported call.
 
 ## Previously enabled red semantic cases
 
@@ -111,6 +113,7 @@ The established service suite also keeps these implementation gaps enabled:
 | Finite replay followed by label transfer | `service_replayed_resumption_result_may_transfer_to_an_enclosing_label` |
 | Completion after resumption transfers to an enclosing label | `service_completion_after_a_resumption_may_transfer_to_an_enclosing_label` |
 | G1 source boundary rejects deferred non-exact and unbounded resumption quantities such as `[1,2]`, `[0,2]`, and `[1,infinity]` | `service_rejects_deferred_resumption_quantities_at_the_g1_source_boundary` |
+| A move-captured exact callable may be consumed twice when both handler-arm uses pass through an imported callable | `service_enforces_move_captured_callable_use_through_dependency_handlers` |
 
 ## Acceptance condition
 
