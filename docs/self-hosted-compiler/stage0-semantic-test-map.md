@@ -523,6 +523,13 @@ coarse. The composite fixtures cover:
   (`projected_terminal_contract_rejoins_nested_completion_through_a_label`,
   `service_rejoins_a_terminal_generic_callee_through_nested_completion_and_label`,
   `service_intercepts_a_nontransparent_projected_terminal_callee_through_a_vm_frame`).
+- a selected concrete associated row also survives a statement-scoped handler
+  around both a direct and opaque interprocedural callable: the one-shot
+  resumption keeps the dynamic frame installed through the callee return,
+  then normal cleanup precedes the enclosing lexical suffix
+  (`projected_trait_effect_handler_statements_rejoin_their_lexical_suffix_in_mir`,
+  `service_rejoins_a_projected_trait_effect_handler_statement_before_its_suffix`,
+  `service_rejoins_an_opaque_projected_trait_effect_handler_statement_before_its_suffix`).
 
 ## Previously enabled red semantic cases
 

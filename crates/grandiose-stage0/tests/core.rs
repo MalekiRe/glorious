@@ -514,6 +514,75 @@ fn typed_core_normalizes_concrete_associated_effect_rows_on_method_values() {
 }
 
 #[test]
+fn projected_trait_effect_handler_statements_rejoin_their_lexical_suffix_in_mir() {
+    let source = "effect Trace { [1,1] note() -> i64; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Trace}; } trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { Trace::note() } } pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { let invoke = apply; handle invoke(Relay::relay) { Trace::note() with k => k(41) }; let suffix = (value: i64) -> i64 { value + 1 }; suffix(41) }";
+    let package = PackageKey("core-projected-statement-handler@0.1.0".into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/main.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, source);
+    let scan = DeclarationScan::scan(&lexed, source);
+    assert!(scan.diagnostics.is_empty(), "{scan:#?}");
+    let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+    let signatures = ElaboratedInterface::elaborate(&interface);
+    let index = DefinitionIndex::from_interface(&interface);
+    let definition = interface
+        .definitions
+        .iter()
+        .find(|definition| definition.name.as_deref() == Some("main"))
+        .expect("main definition");
+    let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
+    let core = TypedBody::elaborate(definition, &body, &index, &signatures);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    assert!(core.expressions.iter().any(|expression| matches!(
+        &expression.kind,
+        CoreKind::Call { callee, .. }
+            if matches!(
+                &core.expression(*callee).ty,
+                Type::Callable { effects, .. }
+                    if effects.projections.is_empty() && effects.effects.len() == 1
+            )
+    )), "the selected associated row must be concrete before statement MIR lowering: {:#?}", core.expressions);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        definition.key,
+        &core,
+        &flow,
+        &BTreeMap::new(),
+        Some(&signatures),
+    );
+    let mir = lowered.function.unwrap_or_else(|| {
+        panic!(
+            "projected statement handler must lower: {:#?}",
+            lowered.diagnostics
+        )
+    });
+    mir.validate().unwrap_or_else(|error| {
+        panic!("projected statement handler MIR validates: {error}\n{mir:#?}")
+    });
+    let entry = &mir.blocks[mir.entry.0 as usize].instructions;
+    let install = entry
+        .iter()
+        .position(|instruction| matches!(instruction, MirInstruction::InstallHandler { .. }))
+        .expect("statement handler frame");
+    let call = entry
+        .iter()
+        .position(|instruction| matches!(instruction, MirInstruction::CallIndirect { .. }))
+        .expect("opaque projected callable call");
+    let uninstall = entry
+        .iter()
+        .position(|instruction| matches!(instruction, MirInstruction::UninstallHandler))
+        .expect("statement handler normal cleanup");
+    assert!(install < call && call < uninstall, "the handler must remain active through the opaque call: {mir:#?}");
+    assert!(entry[uninstall + 1..]
+        .iter()
+        .any(|instruction| matches!(instruction, MirInstruction::CallIndirect { .. })),
+        "the lexical suffix call must begin only after handler cleanup: {mir:#?}");
+}
+
+#[test]
 fn typed_core_freezes_open_hrtb_effect_rows_selected_by_a_positive_trait_impl() {
     let core = core_for(
         "core-positive-hrtb-effect-row-selection@0.1.0",

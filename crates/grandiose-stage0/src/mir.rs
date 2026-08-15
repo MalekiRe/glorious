@@ -7773,16 +7773,22 @@ fn validate_lowered_handler_contracts(
                 }
             }
             CoreHandlerResumption::Tail { .. } | CoreHandlerResumption::Explicit { .. } => {
-                let replay_return =
-                    exits.resume_return && declared_quantity.upper.is_some_and(|upper| upper >= 2);
-                if (!declared_quantity.contains(crate::quantity::Quantity::ONCE) && !replay_return)
-                    || (!exits.resume && !exits.forward && !replay_return)
+                // `ResumeReturn` is a real resumption transfer.  It is used
+                // both by finite replay and by an exact-one clause that must
+                // wait for an interprocedural callee before evaluating the
+                // enclosing statement suffix.
+                let return_resumption = exits.resume_return
+                    && (declared_quantity.contains(crate::quantity::Quantity::ONCE)
+                        || declared_quantity.upper.is_some_and(|upper| upper >= 2));
+                if (!declared_quantity.contains(crate::quantity::Quantity::ONCE)
+                    && !return_resumption)
+                    || (!exits.resume && !exits.forward && !return_resumption)
                 {
                     return Err(
                         "MIR handler exit does not implement the frozen resumption contract".into(),
                     );
                 }
-                if exits.cancel && !replay_return {
+                if exits.cancel && !return_resumption {
                     return Err(
                         "MIR cancellation is not permitted for a resumptive handler contract"
                             .into(),
@@ -21934,27 +21940,44 @@ impl Lowerer<'_> {
     }
 
     /// and function values as genuine VM calls while allowing a caller's
-    /// handler to intercept a callee performance dynamically.
+    /// handler to intercept a callee performance dynamically.  The protected
+    /// call may also be a statement in an enclosing block: its frame remains
+    /// installed through the callee's return and is then closed before the
+    /// enclosing lexical suffix runs.
     fn lower_root_interprocedural_one_shot_handler(
         &mut self,
         root: CoreId,
         parameters: Vec<MirLocal>,
     ) -> Option<MirFunction> {
-        let (computation, clauses, root_prefix) = match self.body.expression(root).kind.clone() {
+        let (computation, clauses, root_prefix, suffix) = match self.body.expression(root).kind.clone() {
             CoreKind::Handle {
                 computation,
                 clauses,
-            } => (computation, clauses, Vec::new()),
+            } => (computation, clauses, Vec::new(), Vec::new()),
             CoreKind::Block(values) => {
-                let (handler, prefix) = values.split_last()?;
+                let handler_index = values
+                    .iter()
+                    .position(|id| matches!(self.body.expression(*id).kind, CoreKind::Handle { .. }))?;
+                if values[handler_index + 1..]
+                    .iter()
+                    .any(|id| matches!(self.body.expression(*id).kind, CoreKind::Handle { .. }))
+                {
+                    return None;
+                }
+                let handler = values[handler_index];
                 let CoreKind::Handle {
                     computation,
                     clauses,
-                } = self.body.expression(*handler).kind.clone()
+                } = self.body.expression(handler).kind.clone()
                 else {
                     return None;
                 };
-                (computation, clauses, prefix.to_vec())
+                (
+                    computation,
+                    clauses,
+                    values[..handler_index].to_vec(),
+                    values[handler_index + 1..].to_vec(),
+                )
             }
             _ => return None,
         };
@@ -22019,7 +22042,7 @@ impl Lowerer<'_> {
             CoreKind::Function { .. } | CoreKind::TraitMethod { .. } => None,
             _ => Some(self.value(callee)?),
         };
-        let result = self.alloc(self.body.expression(computation).ty.clone(), computation);
+        let call_result = self.alloc(self.body.expression(computation).ty.clone(), computation);
         let payloads = active
             .iter()
             .map(|clause| {
@@ -22054,7 +22077,7 @@ impl Lowerer<'_> {
                 arguments: generic_arguments,
                 ..
             } => entry.push(MirInstruction::Call {
-                dst: result,
+                dst: call_result,
                 callee,
                 generic_arguments,
                 trait_instance: None,
@@ -22066,7 +22089,7 @@ impl Lowerer<'_> {
                 trait_arguments,
                 method_arguments,
             } => entry.push(MirInstruction::Call {
-                dst: result,
+                dst: call_result,
                 callee,
                 generic_arguments: vec![],
                 trait_instance: Some(MirTraitMethodInstance {
@@ -22077,7 +22100,7 @@ impl Lowerer<'_> {
                 arguments,
             }),
             _ => entry.push(MirInstruction::CallIndirect {
-                dst: result,
+                dst: call_result,
                 callee: indirect.expect("indirect callee was materialized"),
                 arguments,
             }),
@@ -22085,6 +22108,23 @@ impl Lowerer<'_> {
         for _ in &active {
             entry.push(MirInstruction::UninstallHandler);
         }
+
+        // The handler's lexical environment ends at the protected call, not
+        // at the end of the enclosing block.  Snapshot it before lowering a
+        // later suffix so same-spelled locals cannot be captured by an arm.
+        let previous_named = self.named.clone();
+        let result = if suffix.is_empty() {
+            call_result
+        } else {
+            self.instructions = Vec::new();
+            let (last, statements) = suffix.split_last()?;
+            for statement in statements {
+                self.statement(*statement)?;
+            }
+            let result = self.value(*last)?;
+            entry.extend(std::mem::take(&mut self.instructions));
+            result
+        };
 
         let mut blocks = vec![MirBlock {
             scope: MirScopeId::ROOT,
@@ -22100,7 +22140,6 @@ impl Lowerer<'_> {
                     ..
                 }
             );
-        let previous_named = self.named.clone();
         for (clause, payloads) in active.iter().zip(payloads) {
             self.instructions = Vec::new();
             self.named = previous_named.clone();

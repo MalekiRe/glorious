@@ -8107,6 +8107,30 @@ fn service_forwards_nested_statement_handler_before_outer_suffix() {
 }
 
 #[test]
+fn service_rejoins_a_projected_trait_effect_handler_statement_before_its_suffix() {
+    // The operation crosses both a trait method value and an ordinary
+    // callable before reaching the statement-scoped handler.  The associated
+    // row is concrete here, so lowering must preserve the selected `Trace`
+    // identity while the handler frame remains live through its resumption
+    // and is uninstalled before the following lexical suffix.
+    let source = "effect Trace { [1,1] note() -> i64; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Trace}; } trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { Trace::note() } } pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { handle apply(Relay::relay) { Trace::note() with k => k(41) }; let suffix = (value: i64) -> i64 { value + 1 }; suffix(41) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rejoins_an_opaque_projected_trait_effect_handler_statement_before_its_suffix() {
+    // Keep the outward callable opaque at the statement boundary.  Its
+    // concrete associated row still has to select the same dynamic `Trace`
+    // frame as the trait method value passed through it.
+    let source = "effect Trace { [1,1] note() -> i64; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Trace}; } trait Relay { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects }; } impl Relay for i64 { fn relay(receiver: i64) -> i64 / { <i64 as Capability>::Effects } { Trace::note() } } pub fn apply(callable: (i64) -> i64 / Trace) -> i64 / Trace { callable(0) } pub fn main() -> i64 { let invoke = apply; handle invoke(Relay::relay) { Trace::note() with k => k(41) }; let suffix = (value: i64) -> i64 { value + 1 }; suffix(41) }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_composes_a_direct_operation_arm_with_a_normal_completion_arm() {
     let source = "effect Ask { [1,1] ask() -> i64; } pub fn main() -> i64 { handle Ask::ask() { value => value + 1, Ask::ask() => 41 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
