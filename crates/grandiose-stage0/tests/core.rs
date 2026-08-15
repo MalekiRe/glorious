@@ -36,7 +36,7 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
     PlaceFlow::analyze(&core)
 }
 
-fn core_for(package_name: &str, source: &str) -> TypedBody {
+fn core_and_signatures_for(package_name: &str, source: &str) -> (TypedBody, ElaboratedInterface) {
     let package = PackageKey(package_name.into());
     let file = FileKey::new(
         &package,
@@ -52,12 +52,19 @@ fn core_for(package_name: &str, source: &str) -> TypedBody {
         .find(|definition| definition.name.as_deref() == Some("main"))
         .expect("main definition");
     let body = BodySyntax::parse(&lexed, source, definition.body.expect("main body"));
-    TypedBody::elaborate(
-        definition,
-        &body,
-        &DefinitionIndex::from_interface(&interface),
-        &signatures,
+    (
+        TypedBody::elaborate(
+            definition,
+            &body,
+            &DefinitionIndex::from_interface(&interface),
+            &signatures,
+        ),
+        signatures,
     )
+}
+
+fn core_for(package_name: &str, source: &str) -> TypedBody {
+    core_and_signatures_for(package_name, source).0
 }
 
 #[test]
@@ -7411,7 +7418,8 @@ fn handler_clause_label_transfer_preserves_brand_cleanup_and_vm_frame_exit() {
 #[test]
 fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
     let source = "pub struct Pair { left: i64, right: i64 } pub fn main() -> i64 { let value = Pair { left: 1, right: 2 }; { let value = Pair { left: 3, right: 4 }; move value.left; 0 }; label done { move value.left; transfer done 42; 0 } }";
-    let core = core_for("core-frozen-mir-shadowed-move-paths@0.1.0", source);
+    let (core, signatures) =
+        core_and_signatures_for("core-frozen-mir-shadowed-move-paths@0.1.0", source);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
     assert_eq!(
@@ -7450,7 +7458,13 @@ fn frozen_mir_move_paths_preserve_shadowed_bindings_and_cleanup_identity() {
             _ => None,
         })
         .expect("label owner");
-    let mut mir = MirLowering::lower(owner, &core, &flow)
+    let mut mir = MirLowering::lower_with_bodies_and_signatures(
+        owner,
+        &core,
+        &flow,
+        &BTreeMap::new(),
+        Some(&signatures),
+    )
         .function
         .expect("shadowed cleanup lowers");
     let grandiose_stage0::MirTerminator::Leave { cleanup, .. } = &mir.blocks[0].terminator else {
@@ -7570,7 +7584,8 @@ fn source_lowering_executes_handler_partial_move_and_label_leave() {
             }
         }
     "#;
-    let core = core_for("core-source-storage-handler-capture-label@0.1.0", source);
+    let (core, signatures) =
+        core_and_signatures_for("core-source-storage-handler-capture-label@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
@@ -7590,7 +7605,13 @@ fn source_lowering_executes_handler_partial_move_and_label_leave() {
             _ => None,
         })
         .expect("source label owner");
-    let lowered = MirLowering::lower(owner, &core, &flow);
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        owner,
+        &core,
+        &flow,
+        &BTreeMap::new(),
+        Some(&signatures),
+    );
     let mir = lowered
         .function
         .unwrap_or_else(|| panic!("source body must lower: {:#?}", lowered.diagnostics));
@@ -7643,7 +7664,8 @@ fn source_lowering_preserves_branch_correlated_drop_flags_across_handler_label_c
             }
         }
     "#;
-    let core = core_for("core-handler-label-branch-drop-flags@0.1.0", source);
+    let (core, signatures) =
+        core_and_signatures_for("core-handler-label-branch-drop-flags@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     let flow = PlaceFlow::analyze(&core);
     assert!(flow.diagnostics.is_empty(), "{flow:#?}");
@@ -7655,7 +7677,13 @@ fn source_lowering_preserves_branch_correlated_drop_flags_across_handler_label_c
             _ => None,
         })
         .expect("source label owner");
-    let lowered = MirLowering::lower(owner, &core, &flow);
+    let lowered = MirLowering::lower_with_bodies_and_signatures(
+        owner,
+        &core,
+        &flow,
+        &BTreeMap::new(),
+        Some(&signatures),
+    );
     let mir = lowered
         .function
         .unwrap_or_else(|| panic!("combined cleanup source must lower: {:#?}", lowered.diagnostics));
