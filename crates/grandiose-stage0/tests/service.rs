@@ -8596,6 +8596,69 @@ fn service_round_trips_nested_replay_forwarding_and_cancellation() {
 }
 
 #[test]
+fn service_drops_a_custom_aggregate_once_across_forward_and_cancellation() {
+    // The inner partial handler forwards `ask(1)` to the outer cancellation
+    // arm. Cancelling that continuation must destroy Probe exactly once while
+    // both abandoned handler frames are unwound.
+    let source = r#"
+        effect Ask { [0, 1] ask(value: i64) -> i64; }
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0, 1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> {
+            drop(&mut self) -> { *self.target = *self.target + 1; }
+        }
+        pub fn main() -> i64 {
+            let count = 41;
+            let result = handle {
+                let probe = Probe { target: &mut count };
+                handle Ask::ask(1) {
+                    Ask::ask(0) => 0,
+                }
+            } {
+                Ask::ask(_) => 0,
+            };
+            count + result
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_round_trips_custom_drop_on_a_nonlocal_label_exit() {
+    // The label exits the lexical storage scope which owns `nonlocal`.
+    // Publishing and decoding the artifact must preserve the one-and-only-one
+    // destructor call, just as the direct executor does.
+    let source = r#"
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0, 1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> {
+            drop(&mut self) -> { *self.target = *self.target + 1; }
+        }
+        pub fn main() -> i64 {
+            let count = 40;
+            let escaped = @done: i64 {
+                let nonlocal = Probe { target: &mut count };
+                @done(1);
+                0
+            };
+            count + escaped
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_dynamic_label_rejoins_through_outer_completion_after_three_handler_frames() {
     // The label is captured after the outer completion boundary but before
     // the two operation handlers. The inner partial handler forwards to the

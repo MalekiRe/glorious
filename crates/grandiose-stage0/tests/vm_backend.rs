@@ -7862,8 +7862,7 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
         artifact.fingerprint = artifact.computed_fingerprint();
         artifact
     };
-    assert!(matches!(
-        verify_vm(candidate(VmCleanupProof {
+    let overlapping = candidate(VmCleanupProof {
             moved_places: vec![
                 VmCleanupPlace {
                     path: 0,
@@ -7880,7 +7879,15 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
             ],
             active_loans: vec![],
             storage_erasure: VmStorageErasureWitness::without_source_storage(),
-        })),
+        });
+    let encoded_overlapping = encode_artifact(&overlapping);
+    assert_eq!(decode_artifact(&encoded_overlapping).unwrap(), overlapping);
+    assert!(matches!(
+        verify_vm(overlapping),
+        Err(VmArtifactError::MalformedEncoding { .. })
+    ));
+    assert!(matches!(
+        decode_and_verify_artifact(&encoded_overlapping),
         Err(VmArtifactError::MalformedEncoding { .. })
     ));
     assert!(matches!(
