@@ -7,6 +7,7 @@
 //! authority.
 
 pub mod body;
+pub mod artifact_cache;
 pub mod bootstrap;
 pub mod coherence;
 pub mod core;
@@ -59,6 +60,10 @@ pub use core::{
 pub use dependency::{DependencyLedger, DependencyNode, DependencyStatus, DependencyTrace};
 pub use diagnostic::{Diagnostic, DiagnosticClass, DiagnosticCode, Severity, SourceSpan};
 pub use escape::{EscapeDiagnostic, EscapeFlow};
+pub use artifact_cache::{
+    ArtifactCacheStats, ArtifactCacheStoreError, PersistentArtifactCache,
+    DEFAULT_MAX_ARTIFACT_CACHE_ENTRY_BYTES, STAGE0_ARTIFACT_CACHE_SCHEMA,
+};
 pub use fixity::{Fixity, FixityPosition, FixityTable};
 pub use header::{
     AssociatedTypeDefinitionHeader, AssociatedTypeHeader, CallableHeader, EffectHeader,

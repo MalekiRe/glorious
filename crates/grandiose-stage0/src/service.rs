@@ -21,7 +21,7 @@ use crate::{
     MirLowering, MirProgram, ModuleGraph, PackageKey, ParsedHeader, PlaceFlow, PrimitiveRole,
     PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId, Severity,
     SourceSpan, Span, TraitConstProjectionAnswer, TraitGoal, TraitSolver, TrustedRuntimeManifest,
-    Type, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key,
+    PersistentArtifactCache, Type, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key,
     verify_vm_program,
 };
 
@@ -879,6 +879,39 @@ impl StageZeroCompiler {
     }
     pub fn compile(&self, request: CompilationRequest) -> Result<CompilationOutcome, ServiceError> {
         self.compile_with_parent(request, None)
+    }
+
+    /// Produce an executable program through a host-supplied persistent cache.
+    ///
+    /// This artifact-only convenience path is intentionally separate from
+    /// [`Self::compile`]: a cache hit has already crossed the decoder and VM
+    /// verifier boundary, but does not reconstruct body diagnostics, instance
+    /// discovery evidence, bootstrap manifests, or revision traces. Hosts
+    /// requiring those inspection products must use the ordinary service path.
+    /// Cache I/O failures are optimization misses, never source-compilation
+    /// failures; a freshly verified program still reaches the caller.
+    pub fn compile_artifact_with_cache(
+        &self,
+        request: CompilationRequest,
+        cache: &PersistentArtifactCache,
+    ) -> Result<Option<VerifiedVmProgram>, ServiceError> {
+        let world = request
+            .clone()
+            .normalize()
+            .map_err(RevisionError::Input)?;
+        if let Some(program) = cache.load(&world) {
+            return Ok(Some(program));
+        }
+        let outcome = self.compile(request)?;
+        if let Some(program) = outcome.artifact {
+            // A persistent cache is untrusted and optional by design. Do not
+            // convert a successfully verified fresh program into a failed
+            // user build merely because the host cache is unavailable.
+            let _ = cache.store(&world, &program);
+            Ok(Some(program))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Import one immutable request world into this compiler's database. The
