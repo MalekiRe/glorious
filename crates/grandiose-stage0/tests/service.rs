@@ -11069,6 +11069,30 @@ fn recursive_public_facade_globs_deduplicate_the_same_callable_alias_identity() 
 }
 
 #[test]
+fn service_rejects_row_generic_recursive_public_callable_alias_cycles() {
+    let root = "pub mod left; pub mod right; use left::{Callback, Trace}; pub fn apply(callback: Callback<{Trace<i64>}, i64>) -> i64 { 0 } pub fn main() -> i64 { 0 }";
+    let left = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub type Callback<E: EffectRow, U> = crate::right::Inner<E, U>;";
+    let right = "pub type Inner<E: EffectRow, U> = crate::left::Callback<E, U>;";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            root,
+            &[
+                ("src/left/left.glorious", left),
+                ("src/right/right.glorious", right),
+            ],
+        ))
+    else {
+        panic!("a row-generic public callable alias cycle entered an artifact");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3307"),
+        "missing bounded row-generic callable-alias-cycle diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_aliased_reexported_generic_trait_gats_without_an_impl() {
     // The implementation-contract normalizer is allowed to reduce only after
     // selection.  A facade alias does not manufacture the missing parent

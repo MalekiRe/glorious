@@ -128,7 +128,9 @@ coarse. The composite fixtures cover:
 - row-generic public aliases keep their braced tail rows intact while they cross
   a reciprocal module SCC and normalize into an HRTB callback. Reversing
   logical-source enumeration preserves the emitted VM fingerprint and canonical
-  bytes as well as execution (`recursive_row_generic_hrtb_callable_aliases_are_order_independent_and_execute`).
+  bytes as well as execution; a genuinely recursive generic instantiation still
+  terminates as `G3307` (`recursive_row_generic_hrtb_callable_aliases_are_order_independent_and_execute`,
+  `service_rejects_row_generic_recursive_public_callable_alias_cycles`).
 - multiple public glob paths through a recursive facade graph may denote the
   same provider callable alias and function. They deduplicate by declaration
   identity instead of becoming a false ambiguity, independent of logical-source
