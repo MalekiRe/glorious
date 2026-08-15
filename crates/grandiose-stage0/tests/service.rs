@@ -18764,6 +18764,23 @@ fn service_lowers_opaque_projected_callee_with_resumptive_then_terminal_operatio
 }
 
 #[test]
+fn service_lowers_opaque_projected_terminal_control_through_a_helper_call() {
+    // `apply` cannot inspect the callback body, so the nonreturn summary and
+    // both handler frames have to remain valid across two ordinary call
+    // boundaries before `relay` reaches its terminal operation.
+    let source = "effect Signal { [1,1] ping(value: i64) -> i64; halt(value: i64) -> !; } trait Capability { type Effects: EffectRow; } impl Capability for i64 { type Effects = {Signal}; } pub fn relay(value: i64) -> i64 / { <i64 as Capability>::Effects } { let ping = Signal::ping(value); Signal::halt(ping) } pub fn apply(callback: (i64) -> i64 / Signal, value: i64) -> i64 / Signal { callback(value) } pub fn main() -> i64 { let callback = relay; handle apply(callback, 40) { Signal::ping(value) with k => k(value + 2); Signal::halt(value) => value } }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let candidate = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(candidate.functions.values().any(|function| function
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, VmInstruction::CallIndirect { .. }))));
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_rolls_back_defaulted_supertrait_callback_contract_revisions() {
     // The public callback is opaque at the root, while its parameter, result,
     // effect row, and layout-bearing const all select Base defaults through
