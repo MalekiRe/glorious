@@ -3988,6 +3988,38 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // Two nested refutable replay frames can forward an imported
+        // performance to an outer replay frame, whose resumed path may reach
+        // the innermost cancellation arm.
+        if let Some(function) = lowerer
+            .lower_root_deep_interprocedural_partial_replay_cancellation_handler(
+                body.root,
+                parameters.clone(),
+            )
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         // A refutable inner replay frame can forward an imported performance
         // to an outer replay frame, while a sibling inner operation cancels
         // the resumed call's later performance.
@@ -18380,6 +18412,345 @@ impl Lowerer<'_> {
             control: MirControlTables::default(),
             entry: MirBlockId(0),
             blocks,
+        })
+    }
+
+    /// Lower a three-deep interprocedural replay graph with an innermost
+    /// discarded sibling operation. Both partial replay rows retain their
+    /// suspended performance through `Forward`; the outer replay then restores
+    /// the complete frame suffix before the ordinary callee reaches cancel.
+    fn lower_root_deep_interprocedural_partial_replay_cancellation_handler(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (middle, outer, root_prefix) = self.lexical_handle(root)?;
+        let (inner, middle_clauses, middle_prefix) = self.lexical_handle(middle)?;
+        let (computation, inner_clauses, inner_prefix) = self.lexical_handle(inner)?;
+        if outer.len() != 1 || middle_clauses.len() != 1 || inner_clauses.len() != 2 {
+            return None;
+        }
+        // Prefix expressions between the first and second handler require a
+        // broader graph: they run after outer installation but before the
+        // middle frame exists. Keep this first deep slice structural.
+        if !middle_prefix.is_empty() {
+            return None;
+        }
+        let outer_replay = &outer[0];
+        let middle_replay = &middle_clauses[0];
+        let inner_replay = inner_clauses
+            .iter()
+            .find(|clause| clause.operation == outer_replay.operation)?;
+        let inner_cancellation = inner_clauses
+            .iter()
+            .find(|clause| clause.operation != outer_replay.operation)?;
+        let CoreKind::Call {
+            callee, arguments, ..
+        } = self.body.expression(computation).kind.clone()
+        else {
+            return None;
+        };
+        let Type::Callable { effects, .. } = self.body.expression(callee).ty.clone() else {
+            return None;
+        };
+        let replay = |clause: &CoreHandlerClause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Explicit { quantity, .. }
+                    if quantity.upper == Some(quantity.lower) && quantity.lower >= 2
+            )
+        };
+        let cancellation = |clause: &CoreHandlerClause| {
+            matches!(
+                clause.resumption,
+                CoreHandlerResumption::Discard { quantity }
+                    if !quantity.requires_positive_use()
+            )
+        };
+        if effects.effects.len() != 1
+            || effects.tail.is_some()
+            || !effects.projections.is_empty()
+            || !effects.effects.contains(&outer_replay.effect)
+            || outer_replay.effect != middle_replay.effect
+            || outer_replay.effect != inner_replay.effect
+            || outer_replay.effect != inner_cancellation.effect
+            || outer_replay.terminal
+            || middle_replay.terminal
+            || inner_replay.terminal
+            || inner_cancellation.terminal
+            || outer_replay.patterns.len() != outer_replay.payload_types.len()
+            || middle_replay.patterns.len() != 1
+            || middle_replay.patterns.len() != middle_replay.payload_types.len()
+            || inner_replay.patterns.len() != 1
+            || inner_replay.patterns.len() != inner_replay.payload_types.len()
+            || inner_cancellation.patterns.len() != inner_cancellation.payload_types.len()
+            || !outer_replay.patterns.iter().all(pattern_is_irrefutable)
+            || middle_replay.patterns.iter().all(pattern_is_irrefutable)
+            || inner_replay.patterns.iter().all(pattern_is_irrefutable)
+            || !inner_cancellation.patterns.iter().all(pattern_is_irrefutable)
+            || outer_replay.continuation.is_none()
+            || middle_replay.continuation.is_none()
+            || inner_replay.continuation.is_none()
+            || inner_cancellation.continuation.is_none()
+            || !replay(outer_replay)
+            || !replay(middle_replay)
+            || !replay(inner_replay)
+            || !cancellation(inner_cancellation)
+            || self.handler_body_uses_snapshot_alias(outer_replay.body)
+            || self.handler_body_uses_snapshot_alias(middle_replay.body)
+            || self.handler_body_uses_snapshot_alias(inner_replay.body)
+            || self.handler_body_uses_snapshot_alias(inner_cancellation.body)
+        {
+            return None;
+        }
+        for expression in root_prefix {
+            self.statement(expression)?;
+        }
+        let arguments = arguments
+            .into_iter()
+            .map(|argument| self.value(argument))
+            .collect::<Option<Vec<_>>>()?;
+        let result = self.alloc(self.body.expression(root).ty.clone(), root);
+        let outer_payloads = outer_replay
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), root))
+            .collect::<Vec<_>>();
+        let middle_payloads = middle_replay
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), root))
+            .collect::<Vec<_>>();
+        let inner_replay_payloads = inner_replay
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), root))
+            .collect::<Vec<_>>();
+        let inner_cancellation_payloads = inner_cancellation
+            .payload_types
+            .iter()
+            .map(|ty| self.alloc(ty.clone(), root))
+            .collect::<Vec<_>>();
+        let mut entry = std::mem::take(&mut self.instructions);
+        for (clause, payloads, target, continuation) in [
+            (
+                outer_replay,
+                outer_payloads.clone(),
+                MirBlockId(1),
+                MirContinuationPolicy::Replay {
+                    uses: exact_replay_uses(&outer_replay.resumption)?,
+                },
+            ),
+            (
+                middle_replay,
+                middle_payloads.clone(),
+                MirBlockId(2),
+                MirContinuationPolicy::Replay {
+                    uses: exact_replay_uses(&middle_replay.resumption)?,
+                },
+            ),
+            (
+                inner_replay,
+                inner_replay_payloads.clone(),
+                MirBlockId(3),
+                MirContinuationPolicy::Replay {
+                    uses: exact_replay_uses(&inner_replay.resumption)?,
+                },
+            ),
+            (
+                inner_cancellation,
+                inner_cancellation_payloads.clone(),
+                MirBlockId(4),
+                MirContinuationPolicy::Consume,
+            ),
+        ] {
+            entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: payloads,
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation,
+                target,
+            });
+        }
+        for expression in inner_prefix {
+            self.statement(expression)?;
+        }
+        entry.extend(std::mem::take(&mut self.instructions));
+        match self.body.expression(callee).kind.clone() {
+            CoreKind::Function {
+                definition,
+                arguments: generic_arguments,
+                ..
+            } => entry.push(MirInstruction::Call {
+                dst: result,
+                callee: definition,
+                generic_arguments,
+                trait_instance: None,
+                arguments,
+            }),
+            _ => return None,
+        }
+        for _ in 0..4 {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+
+        let boundary_named = self.named.clone();
+        let boundary_values = self.values.clone();
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(&outer_replay.patterns, &outer_payloads)?;
+        let outer_value = self.direct_handler_clause_value(outer_replay)?;
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
+        let outer_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(
+            &inner_cancellation.patterns,
+            &inner_cancellation_payloads,
+        )?;
+        let cancellation_value = self.value(inner_cancellation.body)?;
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
+        // Cancellation enters below the three replay frames. A prior replay
+        // can leave every one inactive, so lexical closure needs all three
+        // cleanup pops before returning over a ResumeReturn boundary.
+        for _ in 0..3 {
+            self.instructions.push(MirInstruction::UninstallHandler);
+        }
+        let cancellation_instructions = std::mem::take(&mut self.instructions);
+
+        let middle_pattern = lower_pattern(middle_replay.patterns.first()?.clone())?;
+        let middle_condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+        let middle_test_instructions = vec![MirInstruction::PatternTest {
+            dst: middle_condition,
+            subject: *middle_payloads.first()?,
+            pattern: middle_pattern,
+        }];
+        let inner_pattern = lower_pattern(inner_replay.patterns.first()?.clone())?;
+        let inner_condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), root);
+        let inner_test_instructions = vec![MirInstruction::PatternTest {
+            dst: inner_condition,
+            subject: *inner_replay_payloads.first()?,
+            pattern: inner_pattern,
+        }];
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(&middle_replay.patterns, &middle_payloads)?;
+        let middle_value = self.direct_handler_clause_value(middle_replay)?;
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
+        self.instructions.push(MirInstruction::UninstallHandler);
+        let middle_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        self.named = boundary_named.clone();
+        self.values = boundary_values.clone();
+        self.bind_handler_patterns(&inner_replay.patterns, &inner_replay_payloads)?;
+        let inner_value = self.direct_handler_clause_value(inner_replay)?;
+        self.instructions.push(MirInstruction::Cancel {
+            site: MirResumptionSiteId::UNASSIGNED,
+        });
+        self.instructions.push(MirInstruction::UninstallHandler);
+        self.instructions.push(MirInstruction::UninstallHandler);
+        let inner_instructions = std::mem::take(&mut self.instructions);
+        self.named = boundary_named;
+        self.values = boundary_values;
+
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: self.body.expression(root).ty.clone(),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry,
+                    terminator: MirTerminator::Return { value: result },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: outer_instructions,
+                    terminator: MirTerminator::Return { value: outer_value },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: middle_test_instructions,
+                    terminator: MirTerminator::SwitchBool {
+                        condition: middle_condition,
+                        then_target: MirBlockId(5),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(6),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: inner_test_instructions,
+                    terminator: MirTerminator::SwitchBool {
+                        condition: inner_condition,
+                        then_target: MirBlockId(7),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(8),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: cancellation_instructions,
+                    terminator: MirTerminator::Return {
+                        value: cancellation_value,
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: middle_instructions,
+                    terminator: MirTerminator::Return { value: middle_value },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
+                    terminator: MirTerminator::Unreachable,
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: inner_instructions,
+                    terminator: MirTerminator::Return { value: inner_value },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![MirInstruction::Forward {
+                        site: MirResumptionSiteId::UNASSIGNED,
+                    }],
+                    terminator: MirTerminator::Unreachable,
+                },
+            ],
         })
     }
 

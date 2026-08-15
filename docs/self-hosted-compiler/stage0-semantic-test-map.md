@@ -237,6 +237,11 @@ coarse. The composite fixtures cover:
   replay frame; each resumed dependency path then cancels its inner write and
   closes the inactive nested frames before returning to the outer clause
   (`service_replays_a_forwarded_imported_read_then_cancels_its_nested_write`).
+- two nested partial replay handlers can forward an effect through a public
+  re-export facade and its ordinary caller frame to an outer replay handler;
+  each replayed path cancels the inner operation only after closing the three
+  inactive lower frames
+  (`service_replays_through_two_partial_facade_handlers_before_nested_cancellation`).
 
 ## Previously enabled red semantic cases
 
