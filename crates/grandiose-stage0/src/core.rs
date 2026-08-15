@@ -9473,6 +9473,7 @@ impl Elaborator<'_> {
             .cloned()
             .map(|parameter| self.normalize_selectable_type_projections(parameter))
             .collect::<Vec<_>>();
+        let result = self.normalize_selectable_type_projections(operation.result.clone());
         let values = arguments
             .into_iter()
             .zip(&parameters)
@@ -9501,10 +9502,10 @@ impl Elaborator<'_> {
         let reference_contract = callable_reference_origin_from_contract(
             self.signatures,
             &parameters,
-            &operation.result,
+            &result,
         );
         let reference_shape =
-            call_reference_shape(self.signatures, &operation.result, &reference_contract);
+            call_reference_shape(self.signatures, &result, &reference_contract);
         Some(self.alloc(
             CoreKind::Perform {
                 effect: instance,
@@ -9516,7 +9517,7 @@ impl Elaborator<'_> {
                 reference_contract,
                 reference_shape,
             },
-            operation.result.clone(),
+            result,
             span,
         ))
     }
@@ -9674,6 +9675,20 @@ impl Elaborator<'_> {
             // point: a declined partial arm forwards outward instead of
             // silently erasing a whole protocol from a callable boundary.
             let continuation_effects = self.residual_effects();
+            // Handler clauses consume the same frozen operation ABI as a
+            // `Perform`. Normalize concrete selected associated items through
+            // package facades before creating continuation binders or checking
+            // tail-arm results, so the clause cannot observe a less concrete
+            // contract than its dispatcher.
+            let operation_parameters = clause
+                .operation
+                .parameters
+                .iter()
+                .cloned()
+                .map(|parameter| self.normalize_selectable_type_projections(parameter))
+                .collect::<Vec<_>>();
+            let operation_result =
+                self.normalize_selectable_type_projections(clause.operation.result.clone());
             let resumption = if clause.operation.terminal {
                 if let Some(name) = &clause.source.resumption {
                     self.error(
@@ -9712,7 +9727,7 @@ impl Elaborator<'_> {
                     name.clone(),
                     Type::Callable {
                         lifetime_binders: 0,
-                        parameters: vec![clause.operation.result.clone()],
+                        parameters: vec![operation_result.clone()],
                         result: Box::new(result.clone()),
                         // A deep resumption reinstalls this handler, so its
                         // callable contract exposes only the residual outward
@@ -9778,7 +9793,7 @@ impl Elaborator<'_> {
             let clause_operations =
                 std::mem::replace(&mut self.handled_operations, previous_operations.clone());
             let body_expected = match &resumption {
-                CoreHandlerResumption::Tail { .. } => Some(clause.operation.result.clone()),
+                CoreHandlerResumption::Tail { .. } => Some(operation_result.clone()),
                 CoreHandlerResumption::Explicit { .. }
                 | CoreHandlerResumption::Discard { .. }
                 | CoreHandlerResumption::Terminal => Some(result.clone()),
@@ -9838,7 +9853,7 @@ impl Elaborator<'_> {
             self.locals.leave();
             let body_ty = self.expressions[body.0 as usize].ty.clone();
             let expected = match resumption {
-                CoreHandlerResumption::Tail { .. } => clause.operation.result.clone(),
+                CoreHandlerResumption::Tail { .. } => operation_result.clone(),
                 CoreHandlerResumption::Explicit { .. }
                 | CoreHandlerResumption::Discard { .. }
                 | CoreHandlerResumption::Terminal => result.clone(),
@@ -9857,7 +9872,7 @@ impl Elaborator<'_> {
                         owner: self.definition,
                         clause: clause_index as u32,
                     },
-                    parameter: clause.operation.result.clone(),
+                    parameter: operation_result.clone(),
                     result: result.clone(),
                     effects: continuation_effects.clone(),
                     invocation: clause.operation.resumption,
@@ -9872,7 +9887,7 @@ impl Elaborator<'_> {
             self.validate_handler_continuation_contract(
                 &resumption,
                 continuation.as_ref(),
-                &clause.operation.result,
+                &operation_result,
                 &result,
                 &continuation_effects,
                 clause.source.span,
@@ -9884,7 +9899,7 @@ impl Elaborator<'_> {
                 },
                 effect: clause.effect,
                 operation: clause.operation_index,
-                payload_types: clause.operation.parameters.clone(),
+                payload_types: operation_parameters,
                 patterns,
                 bindings,
                 resumption,

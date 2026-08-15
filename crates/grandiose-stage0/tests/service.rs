@@ -7686,7 +7686,7 @@ fn service_dispatches_facaded_associated_nominal_array_patterns_with_moved_paylo
     // unrelated move-only payload before returning the bound scalar.  It must
     // retain every pattern proof from package import through Core, MIR, and VM
     // handler dispatch rather than treating the facade projection as opaque.
-    let root = "use facade::{Boxed, Element, Packet, Ticket}; effect Ask { [0,1] ask(value: Packet<<i64 as Element>::Item>) -> i64; } pub fn main() -> i64 { handle Ask::ask(Packet::Data([Boxed { value: 42 }], Ticket { marker: 0 })) { Ask::ask(Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket)) => { move ticket; found }, Ask::ask(_) => 0 } }";
+    let root = "use facade::{Boxed, Element, Packet, Ticket}; effect Ask { [0,1] ask(value: Packet<<i64 as Element>::Item>) -> <i64 as Element>::Item; } pub fn main() -> i64 { handle Ask::ask(Packet::Data([Boxed { value: 42 }], Ticket { marker: 0 })) { Ask::ask(Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket)) => { move ticket; found }, Ask::ask(_) => 0 } }";
     let provider = "pub trait Element { type Item; } pub struct Boxed<T> { value: T } pub struct Ticket { marker: i64 } impl Use<[1, 1]> for Ticket {} pub enum Packet<T> { Data(Array<Boxed<T>>, Ticket), Empty } impl Element for i64 { type Item = i64; }";
     let mut input = request(root);
     input.sources.push(SourceInput::new(
