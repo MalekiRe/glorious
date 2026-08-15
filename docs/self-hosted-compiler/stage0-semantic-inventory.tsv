@@ -37,8 +37,8 @@ S17-10	17 safety	Safe code cannot partially move or ownership-deconstruct a cust
 S17-11	17 safety	Drop::drop cannot expose effects, suspension, or label transfer.	semantic_conformance/ownership.rs::semantic_drop_is_zero_use_only_and_cannot_expose_control	red
 S17-12	17 safety	A one-shot continuation cannot be resumed twice.	semantic_conformance/backend.rs::semantic_one_shot_resumptions_cannot_resume_twice	anchor
 S17-13	17 safety	Cancellation and cleanup cannot discard a captured must-move obligation.	core.rs::mir_lowering_rejects_cancellation_that_violates_a_frozen_required_resume_contract	anchor
-S17-14	17 safety	A multi-shot continuation cannot duplicate a nonduplicable or uniquely borrowed capture.	semantic_conformance/backend.rs::semantic_multishot_resumptions_reject_unique_and_label_captures	red
-S17-15	17 safety	An active label cannot cross a multi-shot continuation capture.	semantic_conformance/backend.rs::semantic_multishot_resumptions_reject_unique_and_label_captures	red
+S17-14	17 safety	A multi-shot continuation cannot duplicate a nonduplicable or uniquely borrowed capture.	semantic_conformance/backend.rs::semantic_multishot_resumptions_reject_unique_and_label_captures	anchor
+S17-15	17 safety	An active label cannot cross a multi-shot continuation capture.	semantic_conformance/backend.rs::semantic_multishot_resumptions_reject_unique_and_label_captures	anchor
 S17-16	17 safety	A label-generic effect cannot be intercepted using the wrong label brand.	semantic_conformance/surface.rs::semantic_label_generic_effects_route_only_with_their_brand	red
 S17-17	17 safety	A static label brand is never accepted as a forgeable runtime address or contradictory destination.	mir.rs::mir_rejects_one_label_brand_with_contradictory_destinations	anchor
 S17-18	17 safety	A closed executable cannot finish with an unhandled outward effect.	service.rs::service_checks_effect_operation_identity_and_declared_rows	anchor
@@ -49,4 +49,4 @@ R18-04	18 required rejection	An effectful destructor is rejected.	semantic_confo
 R18-05	18 required rejection	A closure or handler depending on an expired label is rejected.	service.rs::service_compact_label_cannot_escape_through_a_closure	anchor
 R18-06	18 required rejection	A positive pattern binder used in a negative context is rejected.	core.rs::negative_is_completion_arm_cannot_observe_positive_refinement_bindings	anchor
 R18-07	18 required rejection	Ordinary construction of an Available<E> witness is rejected.	semantic_conformance/ownership.rs::semantic_available_and_compiler_evidence_cannot_be_forged	red
-R18-08	18 required rejection	A multi-shot resumption capturing a unique borrow is rejected.	semantic_conformance/backend.rs::semantic_multishot_resumptions_reject_unique_and_label_captures	red
+R18-08	18 required rejection	A multi-shot resumption capturing a unique borrow is rejected.	semantic_conformance/backend.rs::semantic_multishot_resumptions_reject_unique_and_label_captures	anchor

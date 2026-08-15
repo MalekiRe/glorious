@@ -6741,6 +6741,51 @@ impl Elaborator<'_> {
             }
         }
     }
+    /// Find a unique-reference use in the residual source region of the
+    /// exact operation a handler is about to replay. Core is scope-resolved
+    /// here, so this observes the real loan capability rather than a source
+    /// spelling that happens to resemble a borrow.
+    fn replay_residual_captures_unique_borrow(
+        &self,
+        root: CoreId,
+        effect: &EffectInstance,
+        operation: u32,
+    ) -> bool {
+        let mut pending = vec![root];
+        let mut visited = std::collections::BTreeSet::new();
+        let mut performances = vec![];
+        let mut reachable = vec![];
+        while let Some(id) = pending.pop() {
+            if !visited.insert(id) {
+                continue;
+            }
+            let expression = &self.expressions[id.0 as usize];
+            if matches!(
+                &expression.kind,
+                CoreKind::Perform {
+                    effect: performed_effect,
+                    operation: performed_operation,
+                    ..
+                } if performed_effect == effect && *performed_operation == operation
+            ) {
+                performances.push(expression.span);
+            }
+            pending.extend(core_children(&expression.kind));
+            reachable.push(id);
+        }
+        reachable.into_iter().any(|id| {
+            let expression = &self.expressions[id.0 as usize];
+            matches!(
+                expression.ty,
+                Type::Reference {
+                    mutability: Mutability::Unique,
+                    ..
+                }
+            ) && performances
+                .iter()
+                .any(|performance| expression.span.start >= performance.end)
+        })
+    }
     fn assignment_place(&mut self, id: ExprId, span: Span) -> CorePlace {
         let expression = self.body.expression(id);
         match &expression.kind {
@@ -8490,6 +8535,32 @@ impl Elaborator<'_> {
                 self.active_resumptions
                     .pop()
                     .expect("active handler resumption must outlive its clause body");
+            }
+            // A replayed continuation reinstates its protected residual once
+            // per direct invocation. That residual must not carry a unique
+            // loan or a live lexical leave target: either capability would be
+            // duplicated by the second activation.
+            if direct_uses >= 2 {
+                if !self.active_labels.is_empty() {
+                    self.error(
+                        clause.source.span,
+                        "G4188",
+                        "multi-shot resumption cannot capture an active label",
+                    );
+                    self.recovered = true;
+                }
+                if self.replay_residual_captures_unique_borrow(
+                    computation,
+                    &clause.effect,
+                    clause.operation_index,
+                ) {
+                    self.error(
+                        clause.source.span,
+                        "G4188",
+                        "multi-shot resumption cannot capture a unique borrow",
+                    );
+                    self.recovered = true;
+                }
             }
             self.locals.leave();
             let body_ty = self.expressions[body.0 as usize].ty.clone();
