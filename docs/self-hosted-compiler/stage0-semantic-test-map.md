@@ -264,6 +264,12 @@ coarse. The composite fixtures cover:
   diagnostics; the repaired revision freezes fresh facade metadata and a new
   canonical VM artifact under the updated fixity
   (`service_recovers_versioned_public_cycle_aliases_after_private_incompatible_revision`).
+- two independent cyclic facades may share the same normalized provider alias
+  across sequential provider versions. Both facades retain their original
+  generic interfaces and fixity result while a private/incompatible revision
+  is rejected, then independently freeze the repaired provider identity and
+  updated VM result without cache or diagnostic leakage
+  (`service_isolates_parallel_cyclic_facades_across_versioned_provider_worlds`).
 - two package facades may each contain a public module re-export cycle. When
   both ultimately expose one provider, aliases deduplicate to that identity;
   when they expose same-spelled distinct providers, both generic callback/GAT
