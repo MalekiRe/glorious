@@ -7699,6 +7699,75 @@ fn nested_generic_label_forward_rejoins_completion_after_refutable_handler() {
 }
 
 #[test]
+fn nested_generic_label_forward_checks_each_refutable_payload_before_rejoin() {
+    let source = r#"
+        escape<L>(destination: L, value: i64) -> !
+        where L: Label<i64>
+        {
+            destination(value)
+        }
+        effect Ask { [1, 1] ask(flag: Bool, value: i64) -> i64; }
+        pub main() -> i64 {
+            handle {
+                @outer: i64 {
+                    @inner: i64 {
+                        handle {
+                            handle Ask::ask(true, 1) {
+                                Ask::ask(true, 0) with k => k(0),
+                            }
+                        } {
+                            Ask::ask(flag, value) => escape(@inner, value + 41),
+                        }
+                    }
+                }
+            } {
+                value => value + 100,
+            }
+        }
+    "#;
+    let core = core_for("core-nested-generic-label-multi-payload@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze(&core);
+    assert!(flow.diagnostics.is_empty(), "{flow:#?}");
+    let owner = core
+        .expressions
+        .iter()
+        .find_map(|expression| match expression.kind {
+            CoreKind::Label { brand, .. } if brand.label == 0 => Some(brand.owner),
+            _ => None,
+        })
+        .expect("outer label owner");
+    let lowered = MirLowering::lower(owner, &core, &flow);
+    let mir = lowered
+        .function
+        .unwrap_or_else(|| panic!("multi-payload forwarding lowers: {:#?}", lowered.diagnostics));
+    mir.validate()
+        .unwrap_or_else(|error| panic!("multi-payload forwarding MIR validates: {error}\n{mir:#?}"));
+    let pattern_blocks = mir
+        .blocks
+        .iter()
+        .filter(|block| block
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MirInstruction::PatternTest { .. })))
+        .count();
+    assert_eq!(pattern_blocks, 2, "both payload positions need ordered CFG tests: {mir:#?}");
+    assert!(mir.blocks.iter().any(|block| block
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction, MirInstruction::Forward { .. }))));
+    let artifact = grandiose_stage0::emit_vm(&mir).expect("MIR emits VM");
+    let verified = grandiose_stage0::decode_and_verify_artifact(
+        &grandiose_stage0::encode_artifact(&artifact),
+    )
+    .expect("multi-payload forwarding bytecode verifies");
+    assert!(matches!(
+        verified.run_i64(),
+        Err(grandiose_stage0::VmArtifactError::CallRequiresProgram)
+    ));
+}
+
+#[test]
 fn direct_completion_clause_label_transfer_runs_after_handler_uninstall() {
     let core = core_for(
         "core-completion-label-transfer@0.1.0",

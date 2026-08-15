@@ -66,6 +66,8 @@ coarse. The composite fixtures cover:
 - labels as generic diverging callables and label-indexed protocol identity;
 - nested lexical label brands through refutable handler forwarding, a generic
   facade transfer, and the enclosing normal-completion rejoin;
+- ordered multi-payload refutable forwarding preserves every successful
+  prefix test before a later mismatch reaches the generic-label rejoin;
 - source-defined control names and contextual delayed blocks selected by `Fn`
   constraints rather than compiler-known names;
 - fresh callable/environment brands, sealed `RunsIn` evidence, the canonical

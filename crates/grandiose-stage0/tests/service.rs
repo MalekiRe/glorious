@@ -2065,6 +2065,55 @@ fn service_generic_facade_label_rejoins_after_refutable_forwarding_through_compl
 }
 
 #[test]
+fn service_generic_facade_label_rejoins_after_multi_payload_forwarding() {
+    // The first payload matches and the second refutable position fails. The
+    // inner row must therefore forward only after both ordered tests have
+    // been evaluated; the outer arm then transfers through the generic
+    // facade and the completion receives 42.
+    let root = r#"
+        use facade::escape;
+        effect Ask { [1, 1] ask(flag: Bool, value: i64) -> i64; }
+        pub fn main() -> i64 {
+            handle {
+                @outer: i64 {
+                    @inner: i64 {
+                        handle {
+                            handle Ask::ask(true, 1) {
+                                Ask::ask(true, 0) with k => k(0),
+                            }
+                        } {
+                            Ask::ask(flag, value) => escape(@inner, value + 41),
+                        }
+                    }
+                }
+            } {
+                value => value + 100,
+            }
+        }
+    "#;
+    let mut input = request(root);
+    input.sources.push(SourceInput::new(
+        PackageKey("facade@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::escape;".as_slice(),
+    ));
+    input.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn escape<L>(destination: L, value: i64) -> ! where L: Label<i64> { destination(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new()
+        .compile(input)
+        .expect("a later refutable payload mismatch must forward to the generic label arm");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 142);
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.fingerprint(), artifact.fingerprint());
+    assert_eq!(decoded.run_i64().unwrap(), 142);
+}
+
+#[test]
 fn service_accepts_symbolic_structural_const_layout_contracts() {
     let source = "pub struct Tag<n: u32> {} pub fn identity<n: u32>(value: Tag<n + 1>) -> Tag<1 + n> { value } pub fn main() -> i64 { 42 }";
     let outcome = StageZeroCompiler::new()

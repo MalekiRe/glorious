@@ -12215,8 +12215,7 @@ impl Lowerer<'_> {
         let ([outer], [inner]) = (outer.as_slice(), inner.as_slice()) else {
             return None;
         };
-        if argument_ids.len() != 1
-            || outer.patterns.len() != argument_ids.len()
+        if outer.patterns.len() != argument_ids.len()
             || inner.patterns.len() != argument_ids.len()
             || !outer.patterns.iter().all(pattern_is_irrefutable)
             || inner.patterns.iter().all(pattern_is_irrefutable)
@@ -12339,9 +12338,84 @@ impl Lowerer<'_> {
             value: resumed,
         });
         let inner_instructions = std::mem::take(&mut self.instructions);
-        let condition = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), inner_computation);
-        let pattern = lower_pattern(inner.patterns[0].clone())?;
+        let tests = inner
+            .patterns
+            .iter()
+            .cloned()
+            .zip(inner_payloads.iter().copied())
+            .map(|(pattern, subject)| {
+                Some((
+                    self.alloc(Type::Scalar(crate::types::ScalarType::Bool), inner_computation),
+                    subject,
+                    lower_pattern(pattern)?,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        // At least one position is refutable (checked above). Keeping every
+        // payload test in source order makes a mismatch at a later position
+        // forward through the same dynamic handler suffix as an early one.
+        let test_start = 3_u32;
+        let body_block = MirBlockId(test_start + tests.len() as u32);
+        let forward_block = MirBlockId(body_block.0 + 1);
         self.label_values.remove(&brand);
+        let mut blocks = vec![
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: entry,
+                terminator: MirTerminator::Unreachable,
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![join],
+                instructions: completion_instructions,
+                terminator: MirTerminator::Return { value: completed },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: outer_instructions,
+                terminator: MirTerminator::Unreachable,
+            },
+        ];
+        for (index, (condition, subject, pattern)) in tests.into_iter().enumerate() {
+            let id = MirBlockId(test_start + index as u32);
+            let next = if index + 1 == inner.patterns.len() {
+                body_block
+            } else {
+                MirBlockId(id.0 + 1)
+            };
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::PatternTest {
+                    dst: condition,
+                    subject,
+                    pattern,
+                }],
+                terminator: MirTerminator::SwitchBool {
+                    condition,
+                    then_target: next,
+                    then_arguments: vec![],
+                    else_target: forward_block,
+                    else_arguments: vec![],
+                },
+            });
+        }
+        blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: inner_instructions,
+            terminator: MirTerminator::Unreachable,
+        });
+        blocks.push(MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: vec![MirInstruction::Forward {
+                site: MirResumptionSiteId::UNASSIGNED,
+            }],
+            terminator: MirTerminator::Unreachable,
+        });
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
@@ -12351,56 +12425,7 @@ impl Lowerer<'_> {
             result: self.body.expression(root).ty.clone(),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
-            blocks: vec![
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: entry,
-                    terminator: MirTerminator::Unreachable,
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![join],
-                    instructions: completion_instructions,
-                    terminator: MirTerminator::Return { value: completed },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: outer_instructions,
-                    terminator: MirTerminator::Unreachable,
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: vec![MirInstruction::PatternTest {
-                        dst: condition,
-                        subject: inner_payloads[0],
-                        pattern,
-                    }],
-                    terminator: MirTerminator::SwitchBool {
-                        condition,
-                        then_target: MirBlockId(4),
-                        then_arguments: vec![],
-                        else_target: MirBlockId(5),
-                        else_arguments: vec![],
-                    },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: inner_instructions,
-                    terminator: MirTerminator::Unreachable,
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: vec![MirInstruction::Forward {
-                        site: MirResumptionSiteId::UNASSIGNED,
-                    }],
-                    terminator: MirTerminator::Unreachable,
-                },
-            ],
+            blocks,
         })
     }
 
