@@ -2337,6 +2337,149 @@ fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
 }
 
 #[test]
+fn verifier_rejects_unspecialized_generic_effect_abis_at_direct_and_callable_boundaries() {
+    let effect = DefKey(Digest::of_bytes(b"generic-effect-specialization-effect"));
+    let caller = DefKey(Digest::of_bytes(b"generic-effect-specialization-caller"));
+    let callee = DefKey(Digest::of_bytes(b"generic-effect-specialization-callee"));
+
+    // The call ABI proves `T = i64`, but the target operation still names
+    // `Ask<T>`. Before the specialization check, this passed verification:
+    // the global ABI table treated Ask<T> and Ask<i64> as separate keys, then
+    // runtime handler lookup failed to find the caller's Ask<i64> frame.
+    let generic_callee = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: callee,
+        captures: 0,
+        parameters: 1,
+        registers: vec![VmType::Generic(0), VmType::Generic(0)],
+        instructions: vec![
+            VmInstruction::Perform {
+                dst: 1,
+                effect,
+                effect_arguments: vec![VmGenericArgument::Type(VmType::Generic(0))],
+                operation: 0,
+                arguments: vec![0],
+            },
+            VmInstruction::Return { value: 1 },
+        ],
+    };
+    let direct_caller = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: caller,
+        captures: 0,
+        parameters: 1,
+        registers: vec![VmType::I64, VmType::I64],
+        instructions: vec![
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments: vec![VmGenericArgument::Type(VmType::I64)],
+                operation: 0,
+                payload_destinations: vec![0],
+                resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume,
+                target: 5,
+            },
+            VmInstruction::Call {
+                dst: 1,
+                callee,
+                arguments: vec![0],
+            },
+            VmInstruction::UninstallHandler,
+            VmInstruction::Return { value: 1 },
+            VmInstruction::Trap,
+            VmInstruction::Resume { value: 0 },
+        ],
+    };
+    let mut direct = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: Some(Digest::of_bytes(b"generic-effect-specialization-manifest")),
+        host_capabilities: vec![],
+        entry: caller,
+        functions: BTreeMap::from([(caller, direct_caller), (callee, generic_callee.clone())]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"generic-effect-specialization-direct-stale"),
+    };
+    direct.fingerprint = direct.computed_fingerprint();
+    let direct_bytes = encode_program(&direct);
+    for result in [
+        verify_vm_program(direct),
+        decode_and_verify_program(&direct_bytes),
+    ] {
+        assert!(matches!(
+            result,
+            Err(VmArtifactError::MalformedEncoding {
+                message: "generic effect operation ABI was not specialized for call"
+            })
+        ));
+    }
+
+    let indirect_caller = VmFunction {
+        nominal_copy_descriptors: vec![],
+        definition: caller,
+        captures: 0,
+        parameters: 0,
+        registers: vec![
+            VmType::I64,
+            VmType::Callable {
+                parameters: vec![VmType::I64],
+                result: Box::new(VmType::I64),
+                effects: Box::<VmEffectRow>::default(),
+            },
+            VmType::I64,
+        ],
+        instructions: vec![
+            VmInstruction::ConstI64 { dst: 0, value: 41 },
+            VmInstruction::MakeCallable {
+                dst: 1,
+                callee,
+                captures: vec![],
+                environment: None,
+            },
+            VmInstruction::InstallHandler {
+                effect,
+                effect_arguments: vec![VmGenericArgument::Type(VmType::I64)],
+                operation: 0,
+                payload_destinations: vec![0],
+                resume_type: VmType::I64,
+                continuation: VmContinuationPolicy::Consume,
+                target: 7,
+            },
+            VmInstruction::CallIndirect {
+                dst: 2,
+                callee: 1,
+                arguments: vec![0],
+            },
+            VmInstruction::UninstallHandler,
+            VmInstruction::Return { value: 2 },
+            VmInstruction::Trap,
+            VmInstruction::Resume { value: 0 },
+        ],
+    };
+    let mut indirect = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: Some(Digest::of_bytes(b"generic-effect-specialization-manifest")),
+        host_capabilities: vec![],
+        entry: caller,
+        functions: BTreeMap::from([(caller, indirect_caller), (callee, generic_callee)]),
+        callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"generic-effect-specialization-indirect-stale"),
+    };
+    indirect.fingerprint = indirect.computed_fingerprint();
+    let indirect_bytes = encode_program(&indirect);
+    for result in [
+        verify_vm_program(indirect),
+        decode_and_verify_program(&indirect_bytes),
+    ] {
+        assert!(matches!(
+            result,
+            Err(VmArtifactError::MalformedEncoding {
+                message: "generic effect operation ABI was not specialized for call"
+            })
+        ));
+    }
+}
+
+#[test]
 fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
     let effect = DefKey(Digest::of_bytes(b"cross-frame-ask"));
     let caller = DefKey(Digest::of_bytes(b"cross-frame-caller"));
