@@ -228,6 +228,13 @@ coarse. The composite fixtures cover:
   while the already-open parent session retains its original trait/effect/
   fixity identity and executable result
   (`service_pins_same_alias_generic_dependency_worlds_without_interface_or_diagnostic_leaks`).
+- public and private dependency worlds may reuse the same package identity
+  while exposing incompatible generic GAT interfaces. A private authority
+  failure emits its private lookup/projection diagnostics, while a separate
+  all-public world emits the competing-fixity ambiguity; neither rejected
+  world publishes cache/interface facts or contaminates the repaired public
+  world that follows
+  (`service_isolates_private_authority_and_public_fixity_diagnostics_across_generic_dependency_worlds`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and

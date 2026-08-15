@@ -11666,6 +11666,137 @@ fn service_pins_same_alias_generic_dependency_worlds_without_interface_or_diagno
 }
 
 #[test]
+fn service_isolates_private_authority_and_public_fixity_diagnostics_across_generic_dependency_worlds() {
+    let root = "use semantic_lib::*; pub struct Packet { value: <i64 as Child<i64>>::Item<i64> } pub fn call(callback: Callback<i64>) -> i64 / { <i64 as Child<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: call(Child<i64>::relay) }; Trace<i64>::note(packet.value) } pub fn effect_value() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let public_provider = |fixity: &str| {
+        format!(
+            "pub {fixity} 30 **; pub trait Combine<T> {{ **(left: T, right: T) -> T; }} impl Combine<i64> for i64 {{ **(left: i64, right: i64) -> i64 {{ left - right }} }} pub effect Trace<T> {{ [1,1] note(value: T) -> i64; }} pub trait Parent<T> {{ type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / {{ <Self as Parent<T>>::Effects<U> }}; }} pub trait Child<T>: Parent<T> {{}} impl Parent<i64> for i64 {{ type Item<U> = i64; type Effects<U> = {{Trace<U>}}; fn relay<U>(receiver: i64, value: U) -> i64 / {{Trace<U>}} {{ Trace<U>::note(value) }} }} impl Child<i64> for i64 {{}} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / {{ <i64 as Child<i64>>::Effects<U> }};"
+        )
+    };
+    let private_provider = "pub infixl 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
+    let world = |root: &str, provider: &str| {
+        request_with_dependency(root, "semantic-lib@0.1.0", provider)
+    };
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(world(root, &public_provider("infixl")), None)
+        .unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .expect("the public generic parent world must compile")
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        48
+    );
+    let cached_parent = compiler.interface_cache_stats();
+    let provider_interface = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("semantic-lib@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let published_parent = compiler
+        .dependency_trace(parent, &provider_interface)
+        .expect("the public parent interface must publish");
+
+    let private_world = world(root, private_provider);
+    let private_child = compiler
+        .import_revision(private_world.clone(), Some(parent))
+        .unwrap();
+    let private_session = compiler.open_session(private_child).unwrap();
+    let Err(grandiose_stage0::ServiceError::Failed(private_diagnostics)) =
+        compiler.compile_session(&private_session)
+    else {
+        panic!("private generic authority unexpectedly inherited the public parent interface");
+    };
+    assert!(
+        private_diagnostics
+            .iter()
+            .any(|diagnostic| matches!(diagnostic.code, "G3304" | "G3310" | "G3315")),
+        "private child must report its own private generic declarations: {private_diagnostics:#?}"
+    );
+    assert!(
+        private_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G4111"),
+        "private child must not inherit public-fixity ambiguity: {private_diagnostics:#?}"
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached_parent);
+    assert!(compiler.dependency_traces(private_child).is_empty());
+    assert_eq!(
+        compiler.dependency_trace(parent, &provider_interface),
+        Some(published_parent.clone())
+    );
+    let mut reordered_private = private_world;
+    reordered_private.sources.reverse();
+    assert_eq!(
+        private_diagnostics,
+        StageZeroCompiler::new()
+            .compile(reordered_private)
+            .expect_err("reordered private authority must still fail")
+            .diagnostics()
+            .to_vec()
+    );
+
+    let fixity_root = "use semantic_lib::*; use alternate_lib::*; pub fn main() -> i64 { 10 ** 3 ** 2 }";
+    let mut fixity_world = world(fixity_root, &public_provider("infixl"));
+    fixity_world.sources.push(SourceInput::new(
+        PackageKey("alternate-lib@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        public_provider("infixr").as_bytes(),
+    ));
+    let fixity_child = compiler
+        .import_revision(fixity_world.clone(), Some(parent))
+        .unwrap();
+    let fixity_session = compiler.open_session(fixity_child).unwrap();
+    let Err(grandiose_stage0::ServiceError::Failed(fixity_diagnostics)) =
+        compiler.compile_session(&fixity_session)
+    else {
+        panic!("two public same-spelled fixities unexpectedly inherited private authority failure");
+    };
+    assert!(
+        fixity_diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G4111"),
+        "public competing fixities must report their own grouping ambiguity: {fixity_diagnostics:#?}"
+    );
+    assert!(
+        fixity_diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code != "G3317"),
+        "public fixity world must not inherit private authority diagnostics: {fixity_diagnostics:#?}"
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached_parent);
+    assert!(compiler.dependency_traces(fixity_child).is_empty());
+    let mut reordered_fixity = fixity_world;
+    reordered_fixity.sources.reverse();
+    assert_eq!(
+        fixity_diagnostics,
+        StageZeroCompiler::new()
+            .compile(reordered_fixity)
+            .expect_err("reordered public fixities must remain ambiguous")
+            .diagnostics()
+            .to_vec()
+    );
+
+    let repaired = compiler
+        .import_revision(world(root, &public_provider("infixr")), Some(parent))
+        .unwrap();
+    let repaired_artifact = compiler
+        .compile_revision(repaired)
+        .expect("a repaired public world must not retain either rejected diagnostic set")
+        .artifact
+        .unwrap();
+    assert_eq!(repaired_artifact.run_i64().unwrap(), 52);
+    assert!(
+        compiler.interface_cache_stats().misses > cached_parent.misses,
+        "the repaired public generic interface must be collected after rejected worlds"
+    );
+}
+
+#[test]
 fn service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping() {
     let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
     let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
