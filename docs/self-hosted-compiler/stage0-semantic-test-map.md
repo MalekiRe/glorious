@@ -235,6 +235,14 @@ coarse. The composite fixtures cover:
   world publishes cache/interface facts or contaminates the repaired public
   world that follows
   (`service_isolates_private_authority_and_public_fixity_diagnostics_across_generic_dependency_worlds`).
+- a versioned provider world may combine a private effect, a public
+  GAT-selected callable alias whose result no longer meets the caller
+  contract, and a second public fixity identity. The exact mixed diagnostic
+  sequence is the single private-effect authority error—the interface barrier
+  deliberately precedes the later body mismatch/fixity errors—under source
+  reordering, publishes no cache/interface products, and cannot contaminate a
+  later repaired provider version
+  (`service_canonicalizes_mixed_invalid_versioned_provider_diagnostics_without_cache_leaks`).
 - an exact replay may perform an outer effect from inside its inner handler
   clause, then return across ordinary call frames to continue the next replay
   use. The VM restores the clause's program location as well as registers and

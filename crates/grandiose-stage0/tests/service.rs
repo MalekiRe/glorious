@@ -11827,6 +11827,115 @@ fn service_isolates_private_authority_and_public_fixity_diagnostics_across_gener
 }
 
 #[test]
+fn service_canonicalizes_mixed_invalid_versioned_provider_diagnostics_without_cache_leaks() {
+    let valid_root = "use semantic_lib::*; pub struct Packet { value: <i64 as Child<i64>>::Item<i64> } pub fn call(callback: Callback<i64>) -> i64 / { <i64 as Child<i64>>::Effects<i64> } { callback(0, 41) } pub fn worker() -> i64 / Trace<i64> { let packet = Packet { value: call(Child<i64>::relay) }; Trace<i64>::note(packet.value) } pub fn effect_value() -> i64 { handle worker() { Trace<i64>::note(value) with k => k(value + 1) } } pub fn main() -> i64 { 10 ** 3 ** 2 + effect_value() }";
+    let mixed_root = "use semantic_lib::*; use alternate_lib::*; pub fn call(callback: Callback<i64>) -> i64 { callback(0, 41) } pub fn hidden() -> i64 / Trace<i64> { Trace<i64>::note(41) } pub fn main() -> i64 { 10 ** 3 ** 2 }";
+    let valid_provider = |fixity: &str| {
+        format!(
+            "pub {fixity} 30 **; pub trait Combine<T> {{ **(left: T, right: T) -> T; }} impl Combine<i64> for i64 {{ **(left: i64, right: i64) -> i64 {{ left - right }} }} pub effect Trace<T> {{ [1,1] note(value: T) -> i64; }} pub trait Parent<T> {{ type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / {{ <Self as Parent<T>>::Effects<U> }}; }} pub trait Child<T>: Parent<T> {{}} impl Parent<i64> for i64 {{ type Item<U> = i64; type Effects<U> = {{Trace<U>}}; fn relay<U>(receiver: i64, value: U) -> i64 / {{Trace<U>}} {{ Trace<U>::note(value) }} }} impl Child<i64> for i64 {{}} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / {{ <i64 as Child<i64>>::Effects<U> }};"
+        )
+    };
+    let mixed_provider = "pub infixl 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Item<U>; } pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = Bool; } impl Child<i64> for i64 {} pub type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U>;";
+    let alternate = "pub infixr 30 **; pub trait Combine { **(left: i64, right: i64) -> i64; } impl Combine for i64 { **(left: i64, right: i64) -> i64 { left - right } }";
+    let world = |root: &str, package: &str, provider: &str, include_alternate: bool| {
+        let mut input = request_with_dependency(root, package, provider);
+        if include_alternate {
+            input.sources.push(SourceInput::new(
+                PackageKey("alternate-lib@0.1.0".into()),
+                LogicalPath::parse("src/lib.glorious").unwrap(),
+                alternate.as_bytes(),
+            ));
+        }
+        input
+    };
+
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler
+        .import_revision(
+            world(valid_root, "semantic-lib@0.1.0", &valid_provider("infixl"), false),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .expect("the public provider parent must compile")
+            .artifact
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        48
+    );
+    let cached_parent = compiler.interface_cache_stats();
+    let parent_provider = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("semantic-lib@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let published_parent = compiler
+        .dependency_trace(parent, &parent_provider)
+        .expect("the parent provider interface must be published");
+
+    let mixed_world = world(mixed_root, "semantic-lib@0.2.0", mixed_provider, true);
+    let child = compiler
+        .import_revision(mixed_world.clone(), Some(parent))
+        .unwrap();
+    let session = compiler.open_session(child).unwrap();
+    let Err(grandiose_stage0::ServiceError::Failed(first_diagnostics)) =
+        compiler.compile_session(&session)
+    else {
+        panic!("mixed private/GAT/fixity provider world unexpectedly compiled");
+    };
+    let codes = first_diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        codes,
+        vec!["G3315"],
+        "private interface authority must stop the later GAT-call and fixity body errors: {first_diagnostics:#?}"
+    );
+    assert_eq!(
+        compiler.interface_cache_stats(),
+        cached_parent,
+        "mixed failure must not publish cache state"
+    );
+    assert!(
+        compiler.dependency_traces(child).is_empty(),
+        "mixed failure must not publish interfaces or artifacts"
+    );
+    assert_eq!(
+        compiler.dependency_trace(parent, &parent_provider),
+        Some(published_parent),
+        "mixed version diagnostics must not overwrite the parent provider interface"
+    );
+    let mut reordered_mixed = mixed_world;
+    reordered_mixed.sources.reverse();
+    let Err(grandiose_stage0::ServiceError::Failed(second_diagnostics)) =
+        StageZeroCompiler::new().compile(reordered_mixed)
+    else {
+        panic!("source reordering changed mixed diagnostics into success");
+    };
+    assert_eq!(
+        first_diagnostics, second_diagnostics,
+        "mixed version diagnostics, including their canonical order, must be exact"
+    );
+
+    let repaired = compiler
+        .import_revision(
+            world(valid_root, "semantic-lib@0.2.0", &valid_provider("infixr"), false),
+            Some(parent),
+        )
+        .unwrap();
+    let artifact = compiler
+        .compile_revision(repaired)
+        .expect("a repaired provider version must not retain mixed diagnostics")
+        .artifact
+        .unwrap();
+    assert_eq!(artifact.run_i64().unwrap(), 52);
+    assert!(compiler.interface_cache_stats().misses > cached_parent.misses);
+}
+
+#[test]
 fn service_rejects_private_associated_item_and_callable_alias_reexports_before_grouping() {
     let mut request = request("use top_facade::*; pub fn main() -> i64 { 10 ** 3 ** 2 }");
     let provider = "pub infixr 30 **; pub trait Combine<T> { **(left: T, right: T) -> T; } impl Combine<i64> for i64 { **(left: i64, right: i64) -> i64 { left - right } } effect Trace<T> { [1,1] note(value: T) -> i64; } trait Parent<T> { type Item<U>; type Effects<U>: EffectRow; fn relay<U>(receiver: T, value: U) -> <Self as Parent<T>>::Item<U> / { <Self as Parent<T>>::Effects<U> }; } trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Item<U> = i64; type Effects<U> = {Trace<U>}; fn relay<U>(receiver: i64, value: U) -> i64 / {Trace<U>} { Trace<U>::note(value) } } impl Child<i64> for i64 {} type Callback<U> = (i64, U) -> <i64 as Child<i64>>::Item<U> / { <i64 as Child<i64>>::Effects<U> };";
