@@ -18063,4 +18063,36 @@ mod tests {
         );
         assert_eq!(verify(artifact).unwrap().run_u32().unwrap(), 1);
     }
+
+    #[test]
+    fn execution_budget_fails_closed_when_accounting_counters_overflow() {
+        let limits = VmExecutionLimits {
+            max_instructions: u64::MAX,
+            max_allocation_elements: u64::MAX,
+            ..VmExecutionLimits::default()
+        };
+        let mut instructions = ExecutionBudget {
+            limits,
+            instructions: u64::MAX,
+            allocated_elements: 0,
+        };
+        assert_eq!(
+            instructions.tick(),
+            Err(VmArtifactError::InstructionLimit {
+                limit: u64::MAX,
+            })
+        );
+
+        let mut allocations = ExecutionBudget {
+            limits,
+            instructions: 0,
+            allocated_elements: u64::MAX,
+        };
+        assert_eq!(
+            allocations.reserve_allocation(1),
+            Err(VmArtifactError::AllocationLimit {
+                limit: u64::MAX,
+            })
+        );
+    }
 }
