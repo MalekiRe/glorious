@@ -1714,6 +1714,17 @@ impl TraitSolver {
         name: &str,
         arguments: &[GenericArgument],
     ) -> TraitMethodAnswer {
+        // Supertrait lookup identifies the declaration that owns `name`, but
+        // it must not turn evidence for that parent into evidence for the
+        // originally requested child relation.  Establish the requested
+        // relation first, then select its inherited declaration.
+        match self.solve(goal.clone()) {
+            TraitAnswer::Proven { .. } => {}
+            TraitAnswer::Refuted { evidence } => return TraitMethodAnswer::Refuted { evidence },
+            TraitAnswer::NoSolution => return TraitMethodAnswer::NoSolution,
+            TraitAnswer::Ambiguous => return TraitMethodAnswer::Ambiguous,
+            TraitAnswer::Overflow => return TraitMethodAnswer::Overflow,
+        }
         let goal = match self.method_goal(goal, name) {
             Ok(goal) => goal,
             Err(answer) => return answer,
@@ -1732,6 +1743,15 @@ impl TraitSolver {
         arguments: &[GenericArgument],
         assumptions: &[TraitGoal],
     ) -> TraitMethodAnswer {
+        // Lexical evidence can establish the requested child relation, but
+        // evidence for only an inherited parent cannot.
+        match self.solve_with_assumptions(goal.clone(), assumptions) {
+            TraitAnswer::Proven { .. } => {}
+            TraitAnswer::Refuted { evidence } => return TraitMethodAnswer::Refuted { evidence },
+            TraitAnswer::NoSolution => return TraitMethodAnswer::NoSolution,
+            TraitAnswer::Ambiguous => return TraitMethodAnswer::Ambiguous,
+            TraitAnswer::Overflow => return TraitMethodAnswer::Overflow,
+        }
         let goal = match self.method_goal(goal, name) {
             Ok(goal) => goal,
             Err(answer) => return answer,
