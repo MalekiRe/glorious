@@ -119,6 +119,12 @@ coarse. The composite fixtures cover:
   inherited trait method as its indirect value, and execute the handler path
   in the VM (`scanner_keeps_braced_callable_effect_rows_inside_type_alias_headers`,
   `service_executes_recursive_facade_gat_callback_aliases_through_vm`).
+- a public callable alias may cross a reciprocal module SCC before reaching a
+  higher-ranked callback with a selected associated effect-GAT row. The alias
+  executes as an indirect VM value; if the public aliases truly recurse, alias
+  normalization terminates with `G3307` rather than publishing a provisional
+  interface (`service_executes_recursive_public_hrtb_callable_aliases_through_vm`,
+  `service_rejects_recursive_public_hrtb_callable_alias_cycles`).
 - effect declaration visibility across dependency-package boundaries, including
   direct public perform/handler execution and rejection of a private effect;
 - qualified nominal identity for same-named public declarations in separate

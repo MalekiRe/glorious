@@ -10964,6 +10964,46 @@ fn service_executes_recursive_facade_gat_callback_aliases_through_vm() {
 }
 
 #[test]
+fn service_executes_recursive_public_hrtb_callable_aliases_through_vm() {
+    // `Callback` crosses the left/right module SCC before reaching the
+    // right-side HRTB callable alias. Its row is an inherited GAT projection,
+    // so parsing, alias normalization, trait selection, indirect invocation,
+    // and handler dispatch all need the same public identities.
+    let root = "pub mod left; pub mod right; use left::Callback; use left::Trace; pub fn relay<'a>(value: &'a i64) -> &'a i64 / Trace<i64> { Trace<i64>::note(*value); value } pub fn apply(callback: Callback<i64>) -> i64 / Trace<i64> { let value = 41; let result = callback(&value); *result } pub fn main() -> i64 { handle apply(relay) { Trace<i64>::note(value) with k => k(value + 1) } }";
+    let left = "pub effect Trace<T> { [1,1] note(value: T) -> i64; } pub trait Parent<T> { type Effects<U>: EffectRow; } pub use crate::right::Child; pub type Callback<U> = crate::right::Inner<U>;";
+    let right = "pub use crate::left::{Parent, Trace}; pub trait Child<T>: Parent<T> {} impl Parent<i64> for i64 { type Effects<U> = {Trace<U>}; } impl Child<i64> for i64 {} pub type Inner<U> = for<'a> (&'a i64) -> &'a i64 / { <i64 as Child<i64>>::Effects<U> };";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            root,
+            &[("src/left/left.glorious", left), ("src/right/right.glorious", right)],
+        ))
+        .expect("a recursive public HRTB callback alias must reach the VM");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+}
+
+#[test]
+fn service_rejects_recursive_public_hrtb_callable_alias_cycles() {
+    let root = "pub mod left; pub mod right; use left::Callback; pub fn apply(callback: Callback<i64>) -> i64 { 0 } pub fn main() -> i64 { 0 }";
+    let left = "pub type Callback<U> = crate::right::Inner<U>;";
+    let right = "pub type Inner<U> = crate::left::Callback<U>;";
+    let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
+        .compile(request_with_logical_sources(
+            root,
+            &[("src/left/left.glorious", left), ("src/right/right.glorious", right)],
+        ))
+    else {
+        panic!("a mutually recursive public callable alias cycle entered an artifact");
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "G3307"),
+        "missing bounded callable-alias-cycle diagnostic: {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn service_rejects_aliased_reexported_generic_trait_gats_without_an_impl() {
     // The implementation-contract normalizer is allowed to reduce only after
     // selection.  A facade alias does not manufacture the missing parent
