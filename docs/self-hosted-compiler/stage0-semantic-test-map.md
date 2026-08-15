@@ -235,6 +235,9 @@ coarse. The composite fixtures cover:
   partial-handler forwards and an imported cancellation: each outer replay
   closes the inactive inner frames before selecting the completion arm
   (`service_replays_nested_facade_cancellation_through_outer_normal_completion`).
+  An effectful completion can then cross public facade and provider caller
+  frames to an enclosing one-shot handler independently for every replay
+  (`service_replays_effectful_completion_after_facade_cancellation_through_outer_resume`).
   Existing service cases separately cover closure/handler captures
   (`service_move_captures_aggregate_roots_for_partial_closure_moves` and
   `service_joins_partial_aggregate_move_captures_across_handler_arms`), while

@@ -10676,6 +10676,30 @@ fn service_replays_nested_facade_cancellation_through_outer_normal_completion() 
 }
 
 #[test]
+fn service_replays_effectful_completion_after_facade_cancellation_through_outer_resume() {
+    // The completion arm is executed on each replayed residual after the
+    // inner write cancellation. It crosses bridge::record -> provider::audit
+    // before an outer Audit handler resumes that ordinary call stack.
+    let mut request = request(
+        "use bridge::Audit; use bridge::Console; use bridge::invoke; use bridge::record; pub fn main() -> i64 { handle { handle { handle { handle invoke(false) { Console::read(true) with k => k(1) + k(2); Console::write(_) with _ => 40 } } { Console::read(true) with k => k(3) + k(4) } } { value => { let audited = record(value); audited + 1 }; Console::read(_) with k => k(20) + k(21) } } { Audit::note(value) with k => k(value + 1) } }",
+    );
+    request.sources.push(SourceInput::new(
+        PackageKey("bridge@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub use provider::{Audit, Console, audit, relay}; pub fn invoke(value: Bool) -> i64 / Console { relay(value) } pub fn record(value: i64) -> i64 / Audit { audit(value) }".as_slice(),
+    ));
+    request.sources.push(SourceInput::new(
+        PackageKey("provider@0.1.0".into()),
+        LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub effect Console { [2,2] read(value: Bool) -> i64; [0,1] write(value: i64) -> i64; } pub effect Audit { [1,1] note(value: i64) -> i64; } pub fn relay(value: Bool) -> i64 / Console { let read = Console::read(value); Console::write(read) } pub fn audit(value: i64) -> i64 / Audit { Audit::note(value) }".as_slice(),
+    ));
+    let outcome = StageZeroCompiler::new().compile(request);
+    let outcome = outcome.expect("effectful completion must resume through the facade caller frames");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 84);
+}
+
+#[test]
 fn service_links_private_helpers_reached_from_specialized_dependency_generics() {
     let outcome = StageZeroCompiler::new()
         .compile(request_with_dependency(

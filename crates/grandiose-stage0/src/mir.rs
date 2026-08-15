@@ -18428,12 +18428,66 @@ impl Lowerer<'_> {
         // replayed residual path.  Peel it before recognizing the deep frame
         // graph, then re-enter it after the inner cancellation has removed
         // the inactive replay frames below it.
-        let (completion_root, leading_prefix) = match self.body.expression(root).kind.clone() {
+        let (top_root, leading_prefix) = match self.body.expression(root).kind.clone() {
             CoreKind::Block(values) => {
                 let (tail, prefix) = values.split_last()?;
                 (*tail, prefix.to_vec())
             }
             _ => (root, Vec::new()),
+        };
+        // An effectful completion may call outward through an ordinary facade
+        // before the replayed residual returns. Keep its enclosing one-shot
+        // handler installed while recognizing the inner Console stack.
+        let (completion_root, completion_effect) = match self.body.expression(top_root).kind.clone() {
+            CoreKind::Handle {
+                computation,
+                clauses,
+            } => {
+                let completion = match self.body.expression(computation).kind.clone() {
+                    CoreKind::Completion { .. } => Some(computation),
+                    CoreKind::Block(values) => {
+                        let Some(tail) = values.last().copied() else {
+                            return None;
+                        };
+                        matches!(self.body.expression(tail).kind, CoreKind::Completion { .. })
+                            .then_some(tail)
+                    }
+                    _ => None,
+                };
+                match completion {
+                    Some(completion) => (completion, Some(clauses)),
+                    None => (top_root, None),
+                }
+            }
+            _ => (top_root, None),
+        };
+        let completion_effect = match completion_effect {
+            Some(clauses) => {
+                let [clause] = clauses.as_slice() else {
+                    return None;
+                };
+                let exact_one_shot = matches!(
+                    clause.resumption,
+                    CoreHandlerResumption::Explicit {
+                        quantity: crate::quantity::Quantity {
+                            lower: 1,
+                            upper: Some(1),
+                        },
+                        ..
+                    }
+                );
+                if clause.terminal
+                    || clause.continuation.is_none()
+                    || clause.patterns.len() != clause.payload_types.len()
+                    || !clause.patterns.iter().all(pattern_is_irrefutable)
+                    || !exact_one_shot
+                    || self.handler_body_uses_snapshot_alias(clause.body)
+                {
+                    return None;
+                }
+                Some(clause.clone())
+            }
+            None => None,
         };
         let (handled, completion) = match self.body.expression(completion_root).kind.clone() {
             CoreKind::Completion {
@@ -18526,6 +18580,9 @@ impl Lowerer<'_> {
             || !replay(middle_replay)
             || !replay(inner_replay)
             || !cancellation(inner_cancellation)
+            || completion_effect
+                .as_ref()
+                .is_some_and(|clause| clause.effect == outer_replay.effect)
             || self.handler_body_uses_snapshot_alias(outer_replay.body)
             || self.handler_body_uses_snapshot_alias(middle_replay.body)
             || self.handler_body_uses_snapshot_alias(inner_replay.body)
@@ -18545,6 +18602,16 @@ impl Lowerer<'_> {
         // handler frames have been removed, both on the ordinary call edge
         // and on a cancellation returned to an outer replay.
         let result = self.alloc(self.body.expression(computation).ty.clone(), root);
+        let completion_effect_payloads = completion_effect
+            .as_ref()
+            .map(|clause| {
+                clause
+                    .payload_types
+                    .iter()
+                    .map(|ty| self.alloc(ty.clone(), root))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let outer_payloads = outer_replay
             .payload_types
             .iter()
@@ -18566,11 +18633,25 @@ impl Lowerer<'_> {
             .map(|ty| self.alloc(ty.clone(), root))
             .collect::<Vec<_>>();
         let mut entry = std::mem::take(&mut self.instructions);
+        let frame_offset = u32::from(completion_effect.is_some());
+        let frame_block = |base| MirBlockId(base + frame_offset);
+        if let Some(clause) = &completion_effect {
+            entry.push(MirInstruction::InstallHandler {
+                site: MirHandlerSiteId::UNASSIGNED,
+                effect: clause.effect.definition,
+                effect_arguments: clause.effect.arguments.clone(),
+                operation: clause.operation,
+                payload_destinations: completion_effect_payloads.clone(),
+                resume_type: clause.continuation.as_ref()?.parameter.clone(),
+                continuation: MirContinuationPolicy::Consume,
+                target: MirBlockId(1),
+            });
+        }
         for (clause, payloads, target, continuation) in [
             (
                 outer_replay,
                 outer_payloads.clone(),
-                MirBlockId(1),
+                frame_block(1),
                 MirContinuationPolicy::Replay {
                     uses: exact_replay_uses(&outer_replay.resumption)?,
                 },
@@ -18578,7 +18659,7 @@ impl Lowerer<'_> {
             (
                 middle_replay,
                 middle_payloads.clone(),
-                MirBlockId(2),
+                frame_block(2),
                 MirContinuationPolicy::Replay {
                     uses: exact_replay_uses(&middle_replay.resumption)?,
                 },
@@ -18586,7 +18667,7 @@ impl Lowerer<'_> {
             (
                 inner_replay,
                 inner_replay_payloads.clone(),
-                MirBlockId(3),
+                frame_block(3),
                 MirContinuationPolicy::Replay {
                     uses: exact_replay_uses(&inner_replay.resumption)?,
                 },
@@ -18594,7 +18675,7 @@ impl Lowerer<'_> {
             (
                 inner_cancellation,
                 inner_cancellation_payloads.clone(),
-                MirBlockId(4),
+                frame_block(4),
                 MirContinuationPolicy::Consume,
             ),
         ] {
@@ -18644,6 +18725,23 @@ impl Lowerer<'_> {
         } else {
             result
         };
+        if completion_effect.is_some() {
+            entry.push(MirInstruction::UninstallHandler);
+        }
+        let completion_effect_arm = if let Some(clause) = &completion_effect {
+            self.instructions = Vec::new();
+            self.named = boundary_named.clone();
+            self.values = boundary_values.clone();
+            self.bind_handler_patterns(&clause.patterns, &completion_effect_payloads)?;
+            let value = self.direct_handler_clause_value(clause)?;
+            self.instructions.push(MirInstruction::Resume {
+                site: MirResumptionSiteId::UNASSIGNED,
+                value,
+            });
+            Some(std::mem::take(&mut self.instructions))
+        } else {
+            None
+        };
         self.instructions = Vec::new();
         self.named = boundary_named.clone();
         self.values = boundary_values.clone();
@@ -18652,6 +18750,11 @@ impl Lowerer<'_> {
         self.instructions.push(MirInstruction::Cancel {
             site: MirResumptionSiteId::UNASSIGNED,
         });
+        if completion_effect.is_some() {
+            // All Console frames have completed before the outer replay arm
+            // returns. The surrounding effect frame is now the lexical top.
+            self.instructions.push(MirInstruction::UninstallHandler);
+        }
         let outer_instructions = std::mem::take(&mut self.instructions);
 
         self.instructions = Vec::new();
@@ -18719,6 +18822,91 @@ impl Lowerer<'_> {
         self.named = boundary_named;
         self.values = boundary_values;
 
+        let mut blocks = vec![MirBlock {
+            scope: MirScopeId::ROOT,
+            parameters: vec![],
+            instructions: entry,
+            terminator: MirTerminator::Return {
+                value: normal_result,
+            },
+        }];
+        if let Some(instructions) = completion_effect_arm {
+            blocks.push(MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions,
+                terminator: MirTerminator::Unreachable,
+            });
+        }
+        blocks.extend([
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: outer_instructions,
+                terminator: MirTerminator::Return { value: outer_value },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: middle_test_instructions,
+                terminator: MirTerminator::SwitchBool {
+                    condition: middle_condition,
+                    then_target: frame_block(5),
+                    then_arguments: vec![],
+                    else_target: frame_block(6),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: inner_test_instructions,
+                terminator: MirTerminator::SwitchBool {
+                    condition: inner_condition,
+                    then_target: frame_block(7),
+                    then_arguments: vec![],
+                    else_target: frame_block(8),
+                    else_arguments: vec![],
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: cancellation_instructions,
+                terminator: MirTerminator::Return {
+                    value: cancellation_result,
+                },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: middle_instructions,
+                terminator: MirTerminator::Return { value: middle_value },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
+                terminator: MirTerminator::Unreachable,
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: inner_instructions,
+                terminator: MirTerminator::Return { value: inner_value },
+            },
+            MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::Forward {
+                    site: MirResumptionSiteId::UNASSIGNED,
+                }],
+                terminator: MirTerminator::Unreachable,
+            },
+        ]);
+
         Some(MirFunction {
             nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
             definition: self.definition,
@@ -18728,82 +18916,7 @@ impl Lowerer<'_> {
             result: self.body.expression(root).ty.clone(),
             control: MirControlTables::default(),
             entry: MirBlockId(0),
-            blocks: vec![
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: entry,
-                    terminator: MirTerminator::Return {
-                        value: normal_result,
-                    },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: outer_instructions,
-                    terminator: MirTerminator::Return { value: outer_value },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: middle_test_instructions,
-                    terminator: MirTerminator::SwitchBool {
-                        condition: middle_condition,
-                        then_target: MirBlockId(5),
-                        then_arguments: vec![],
-                        else_target: MirBlockId(6),
-                        else_arguments: vec![],
-                    },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: inner_test_instructions,
-                    terminator: MirTerminator::SwitchBool {
-                        condition: inner_condition,
-                        then_target: MirBlockId(7),
-                        then_arguments: vec![],
-                        else_target: MirBlockId(8),
-                        else_arguments: vec![],
-                    },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: cancellation_instructions,
-                    terminator: MirTerminator::Return {
-                        value: cancellation_result,
-                    },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: middle_instructions,
-                    terminator: MirTerminator::Return { value: middle_value },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: vec![MirInstruction::Forward {
-                        site: MirResumptionSiteId::UNASSIGNED,
-                    }],
-                    terminator: MirTerminator::Unreachable,
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: inner_instructions,
-                    terminator: MirTerminator::Return { value: inner_value },
-                },
-                MirBlock {
-                    scope: MirScopeId::ROOT,
-                    parameters: vec![],
-                    instructions: vec![MirInstruction::Forward {
-                        site: MirResumptionSiteId::UNASSIGNED,
-                    }],
-                    terminator: MirTerminator::Unreachable,
-                },
-            ],
+            blocks,
         })
     }
 
