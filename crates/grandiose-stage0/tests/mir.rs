@@ -1778,6 +1778,17 @@ fn checked_mir_editor_retires_unreachable_blocks_and_operation_ids() {
 }
 
 #[test]
+fn checked_mir_editor_keeps_dynamic_handler_destinations_out_of_cfg_retirement() {
+    let mut function = externally_visible_handler_merge_function();
+    // The protected path now returns directly. Block two has no ordinary CFG
+    // predecessor, but it is still the handler's dynamic clause target.
+    function.blocks[1].terminator = MirTerminator::Return { value: MirLocal(0) };
+    let mut editor = MirEditor::open(function).unwrap();
+    assert!(editor.remove_unreachable_blocks().unwrap().is_empty());
+    assert!(editor.finish().validate().is_ok());
+}
+
+#[test]
 fn checked_mir_editor_replaces_typed_terminator_operands_transactionally() {
     let mut original = graph();
     original.locals.push(local(Type::Scalar(ScalarType::Bool)));

@@ -30,10 +30,11 @@ retained below but scheduled after the core language and tooling tranche.
   frontend-emitted drop flags; frozen bodies now publish typed move-path/
   binding and source-storage scope/lifecycle tables, the full lexical
   label/handler scope tree, and scope-aware handler candidates;
-- migrate the remaining edge redirection, block splitting/merging, operand,
-  and terminator replacement paths through the checked editor (NormalizeCfg
-  unreachable deletion and same-block scalar-`Move` removal are checked and
-  invalidate only the analyses they affect);
+- the checked editor now covers edge redirection, block and typed-edge
+  splitting, scope-compatible merging, individual terminator operands,
+  terminator replacement, and ordinary unreachable-block retirement with
+  persistent block/operation tombstones. Remaining work is general
+  instruction-operand rewriting and control/storage-aware CFG normalization;
 - extend the implemented deterministic checked predecessor, reachability/RPO,
   dominator, natural-loop/preheader, irreducible-SCC, and edge-liveness bundles
   with place versions, alias sets, integer ranges, aggregate facts, shared
