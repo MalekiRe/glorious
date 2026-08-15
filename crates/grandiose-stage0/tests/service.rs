@@ -8265,6 +8265,112 @@ fn service_composes_facaded_associated_refinements_moves_closures_and_handlers()
 }
 
 #[test]
+fn service_forwards_facaded_associated_refinements_through_completion_and_label_cleanup() {
+    // The inner operation row refutes its ordered payload pattern, so the
+    // original suspended operation must reach the outer row through a real
+    // `Forward`. The matching outer row calls a facaded associated nominal
+    // normal-completion helper, which moves its disjoint affine ticket and
+    // invokes a closure over its refinement binder. Keeping that completion
+    // in a direct helper call avoids nesting an additional handler payload in
+    // the active resumption frame while retaining the cross-feature flow.
+    let root = "use facade::{make, Boxed, Element, Packet}; effect Ask { [1,1] ask(value: i64) -> i64; } pub fn offset() -> i64 { let packet = make(42); handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { let read = () -> i64 { found }; move ticket; read() }, _ => 0 } } pub fn main() -> i64 { handle { handle Ask::ask(42) { Ask::ask(0) with k => k(0) } } { Ask::ask(value) with k => k(value + offset()) } }";
+    let provider = "pub trait Element { type Item; } pub struct Boxed<T> { value: T } pub struct Ticket { marker: i64 } impl Use<[1, 1]> for Ticket {} pub enum Packet<T> { Data(Array<Boxed<T>>, Ticket) } impl Element for i64 { type Item = i64; } pub fn make(value: i64) -> Packet<<i64 as Element>::Item> { Packet::Data([Boxed { value: value }], Ticket { marker: 0 }) }";
+    let world = |source: &str| {
+        let mut input = request(source);
+        input.sources.push(SourceInput::new(
+            PackageKey("facade@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            b"pub use provider::{make, Boxed, Element, Packet};".as_slice(),
+        ));
+        input.sources.push(SourceInput::new(
+            PackageKey("provider@1.0.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(),
+            provider.as_bytes(),
+        ));
+        input
+    };
+
+    let outcome = StageZeroCompiler::new()
+        .compile(world(root))
+        .expect("facaded refutable operation must forward through completion and label cleanup");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let program = decode_program(&artifact.canonical_bytes()).unwrap();
+    let instructions = program
+        .functions
+        .values()
+        .flat_map(|function| function.instructions.iter())
+        .collect::<Vec<_>>();
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::PatternTest { .. })),
+        "the selected associated nominal row must retain structural pattern tests: {program:#?}"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::Forward)),
+        "the inner refutable associated nominal row must retain Forward: {program:#?}"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, VmInstruction::UninstallHandler)),
+        "normal completion must clean up its handler frame: {program:#?}"
+    );
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes())
+        .expect("forwarded associated nominal matrix must decode and verify");
+    assert_eq!(artifact.run_i64().unwrap(), 84);
+    assert_eq!(decoded.run_i64().unwrap(), 84);
+
+    // The selected refinement binder is local to `offset`. A returned closure
+    // cannot keep a reference to it after the normal-completion arm has ended.
+    // Rejection of that child revision must leave its successful parent fully
+    // intact, including the re-exported facade trace and VM artifact.
+    let escaping = "use facade::{make, Boxed, Element, Packet}; pub fn bad() -> () -> &i64 { let packet = make(42); handle packet { Packet::Data([Boxed<<i64 as Element>::Item> { value: found }], ticket) => { move ticket; () -> &i64 { &found } }, _ => { let zero = 0; () -> &i64 { &zero } } } } pub fn main() -> i64 { 0 }";
+    let compiler = StageZeroCompiler::new();
+    let parent = compiler.import_revision(world(root), None).unwrap();
+    let parent_artifact = compiler
+        .compile_revision(parent)
+        .expect("the successful forwarded facade revision must publish")
+        .artifact
+        .unwrap();
+    let cached = compiler.interface_cache_stats();
+    let facade = DependencyNode::Interface(ModuleKey {
+        package: PackageKey("facade@0.1.0".into()),
+        path: "crate".into(),
+    });
+    let trace = compiler
+        .dependency_trace(parent, &facade)
+        .expect("successful facade revision must freeze its interface trace");
+    let child = compiler
+        .import_revision(world(escaping), Some(parent))
+        .unwrap();
+    let error = compiler
+        .compile_session(&compiler.open_session(child).unwrap())
+        .expect_err("a refinement-local reference must not escape in a returned closure");
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5014"),
+        "missing refinement closure escape rejection: {:#?}",
+        error.diagnostics()
+    );
+    assert_eq!(compiler.interface_cache_stats(), cached);
+    assert!(compiler.dependency_traces(child).is_empty());
+    assert_eq!(compiler.dependency_trace(parent, &facade), Some(trace));
+    assert_eq!(
+        compiler
+            .compile_revision(parent)
+            .unwrap()
+            .artifact
+            .unwrap()
+            .canonical_bytes(),
+        parent_artifact.canonical_bytes(),
+        "rejected refinement revision disturbed the successful VM artifact"
+    );
+}
+
+#[test]
 fn service_normalizes_hrtb_associated_effect_operation_payloads_and_results_through_aliases() {
     // The generic effect operation's concrete payload/result is an associated
     // type carrying the selected const. The outward row is an
