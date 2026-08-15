@@ -752,6 +752,30 @@ pub enum VmInstruction {
         dst: u32,
         src: u32,
     },
+    /// Start an addressable source-storage slot. `binding` is the dense
+    /// frozen MIR provenance identity retained for independently decoded
+    /// artifacts; it is not a register-derived lookup.
+    StorageLive {
+        binding: u32,
+        local: u32,
+    },
+    /// End an already-disarmed addressable source-storage slot.
+    StorageDead {
+        binding: u32,
+        local: u32,
+    },
+    /// Runtime representation of a compiler-created conditional-init flag.
+    SetDropFlag {
+        flag: u32,
+        value: bool,
+    },
+    /// Conditional zero-destruction. The VM's empty register state is the
+    /// executable drop-flag outcome; this opcode makes that transition
+    /// independently checkable before artifact execution.
+    DestroyIf {
+        local: u32,
+        flag: u32,
+    },
     /// A checked mutable-register store. The verifier accepts this as the
     /// only instruction that may overwrite a live register.
     Store {
@@ -1484,7 +1508,17 @@ impl VmStorageErasureWitness {
                     *state = Progress::FlagCleared;
                 }
                 VmStorageErasureAction::StorageDead { .. } => {
-                    if *state != Progress::FlagCleared {
+                    let Some(data) = storage_by_id.get(&storage) else {
+                        return false;
+                    };
+                    // A conditional owner whose flag is known false has no
+                    // resident value to destroy and no flag transition to
+                    // emit. Its exact erasure path is directly
+                    // `StorageDead` (after any borrow-ending action).
+                    if *state != Progress::FlagCleared
+                        && (data.initialized
+                            || !matches!(*state, Progress::Start | Progress::BorrowEnded))
+                    {
                         return false;
                     }
                     *state = Progress::Dead;
@@ -1496,6 +1530,7 @@ impl VmStorageErasureWitness {
                 == storages
                     .iter()
                     .rev()
+                    .filter(|storage| storage.initialized)
                     .map(|storage| storage.storage)
                     .collect::<Vec<_>>()
     }
@@ -4125,6 +4160,31 @@ impl<'a> Decoder<'a> {
                 let (dst, src) = self.register_pair()?;
                 Ok(VmInstruction::Move { dst, src })
             }
+            167 => Ok(VmInstruction::StorageLive {
+                binding: self.u32()?,
+                local: self.u32()?,
+            }),
+            168 => Ok(VmInstruction::StorageDead {
+                binding: self.u32()?,
+                local: self.u32()?,
+            }),
+            169 => {
+                let flag = self.u32()?;
+                let value = match self.byte()? {
+                    0 => false,
+                    1 => true,
+                    _ => {
+                        return Err(VmArtifactError::MalformedEncoding {
+                            message: "invalid source-storage drop flag value",
+                        });
+                    }
+                };
+                Ok(VmInstruction::SetDropFlag { flag, value })
+            }
+            170 => Ok(VmInstruction::DestroyIf {
+                local: self.u32()?,
+                flag: self.u32()?,
+            }),
             38 => {
                 let (dst, src) = self.register_pair()?;
                 Ok(VmInstruction::Store { dst, src })
@@ -6182,6 +6242,22 @@ fn lower_instruction(
             dst: dst.0,
             src: src.0,
         },
+        MirInstruction::StorageLive { binding, local } => VmInstruction::StorageLive {
+            binding: binding.0,
+            local: local.0,
+        },
+        MirInstruction::StorageDead { binding, local } => VmInstruction::StorageDead {
+            binding: binding.0,
+            local: local.0,
+        },
+        MirInstruction::SetDropFlag { flag, value } => VmInstruction::SetDropFlag {
+            flag: flag.0,
+            value: *value,
+        },
+        MirInstruction::DestroyIf { local, flag } => VmInstruction::DestroyIf {
+            local: local.0,
+            flag: flag.0,
+        },
         MirInstruction::Store { dst, src } => VmInstruction::Store {
             dst: dst.0,
             src: src.0,
@@ -8188,6 +8264,42 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 same_type(function, *dst, *src)?;
                 write(&mut states, *dst)?;
                 states.snapshots[*dst as usize] = states.snapshots[*src as usize];
+            }
+            VmInstruction::StorageLive { local, .. } => {
+                let slot = states
+                    .get_mut(*local as usize)
+                    .ok_or(VmArtifactError::InvalidRegister { register: *local })?;
+                if slot.is_some() {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: *local });
+                }
+                *slot = Some(false);
+                states.snapshots[*local as usize] = None;
+            }
+            VmInstruction::StorageDead { local, .. } => {
+                let slot = states
+                    .get_mut(*local as usize)
+                    .ok_or(VmArtifactError::InvalidRegister { register: *local })?;
+                if *slot != Some(false) {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: *local });
+                }
+                *slot = None;
+                states.snapshots[*local as usize] = None;
+            }
+            VmInstruction::SetDropFlag { flag, .. } => {
+                expect_type(function, *flag, VmType::Bool)?;
+                write(&mut states, *flag)?;
+            }
+            VmInstruction::DestroyIf { local, flag } => {
+                read(&states, *flag)?;
+                expect_type(function, *flag, VmType::Bool)?;
+                let slot = states
+                    .get_mut(*local as usize)
+                    .ok_or(VmArtifactError::InvalidRegister { register: *local })?;
+                if slot.is_none() {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: *local });
+                }
+                *slot = Some(false);
+                states.snapshots[*local as usize] = None;
             }
             VmInstruction::Store { dst, src } => {
                 read(&states, *src)?;
@@ -12517,6 +12629,29 @@ fn execute(
             VmInstruction::Copy { dst, src } => {
                 registers[dst as usize] = registers[src as usize].clone()
             }
+            VmInstruction::StorageLive { local, .. } => {
+                if registers[local as usize].is_some() {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: local });
+                }
+                // `None` is the runtime representation of a live but
+                // uninitialized addressable slot; verification carries the
+                // distinction from dead storage.
+            }
+            VmInstruction::StorageDead { local, .. } => {
+                if registers[local as usize].is_some() {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: local });
+                }
+            }
+            VmInstruction::SetDropFlag { flag, value } => {
+                registers[flag as usize] = Some(VmValue::Bool(value))
+            }
+            VmInstruction::DestroyIf { local, flag } => {
+                match registers[flag as usize].as_ref() {
+                    Some(VmValue::Bool(_)) => {}
+                    _ => return Err(VmArtifactError::ReadBeforeWrite { register: flag }),
+                }
+                registers[local as usize] = None;
+            }
             VmInstruction::Store { dst, src } => {
                 registers[dst as usize] = registers[src as usize].clone()
             }
@@ -13590,6 +13725,26 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 output.extend_from_slice(&field.to_le_bytes());
                 encode_type(field_type, output);
             }
+        }
+        VmInstruction::StorageLive { binding, local } => {
+            output.push(167);
+            output.extend_from_slice(&binding.to_le_bytes());
+            output.extend_from_slice(&local.to_le_bytes());
+        }
+        VmInstruction::StorageDead { binding, local } => {
+            output.push(168);
+            output.extend_from_slice(&binding.to_le_bytes());
+            output.extend_from_slice(&local.to_le_bytes());
+        }
+        VmInstruction::SetDropFlag { flag, value } => {
+            output.push(169);
+            output.extend_from_slice(&flag.to_le_bytes());
+            output.push(*value as u8);
+        }
+        VmInstruction::DestroyIf { local, flag } => {
+            output.push(170);
+            output.extend_from_slice(&local.to_le_bytes());
+            output.extend_from_slice(&flag.to_le_bytes());
         }
         VmInstruction::Copy { dst, src }
         | VmInstruction::Store { dst, src }
@@ -15578,6 +15733,26 @@ fn execute_with_arguments(
             }
             VmInstruction::Copy { dst, src } => {
                 registers[*dst as usize] = registers[*src as usize].clone()
+            }
+            VmInstruction::StorageLive { local, .. } => {
+                if registers[*local as usize].is_some() {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: *local });
+                }
+            }
+            VmInstruction::StorageDead { local, .. } => {
+                if registers[*local as usize].is_some() {
+                    return Err(VmArtifactError::ReadBeforeWrite { register: *local });
+                }
+            }
+            VmInstruction::SetDropFlag { flag, value } => {
+                registers[*flag as usize] = Some(VmValue::Bool(*value))
+            }
+            VmInstruction::DestroyIf { local, flag } => {
+                match registers[*flag as usize].as_ref() {
+                    Some(VmValue::Bool(_)) => {}
+                    _ => return Err(VmArtifactError::ReadBeforeWrite { register: *flag }),
+                }
+                registers[*local as usize] = None;
             }
             VmInstruction::Store { dst, src } => {
                 registers[*dst as usize] = registers[*src as usize].clone()

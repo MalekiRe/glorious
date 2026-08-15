@@ -1108,6 +1108,36 @@ pub enum MirInstruction {
     Cancel {
         site: MirResumptionSiteId,
     },
+    /// Begin the addressable lifetime of one source binding.  The binding is
+    /// the frozen PlaceFlow provenance; `local` is its exact executable slot.
+    /// Keeping both prevents a later pass from recovering storage from a
+    /// spelling or an incidental register number.
+    StorageLive {
+        binding: MirPlaceBindingId,
+        local: MirLocal,
+    },
+    /// End an addressable lifetime after its value has been moved or
+    /// destroyed.  This is an executable counterpart to the source-storage
+    /// arena event, not a diagnostic-only witness.
+    StorageDead {
+        binding: MirPlaceBindingId,
+        local: MirLocal,
+    },
+    /// Materialize a conditional-initialization fact in an ordinary typed
+    /// local.  Drop flags are compiler-created `Bool` locals and never have a
+    /// source spelling.
+    SetDropFlag {
+        flag: MirLocal,
+        value: bool,
+    },
+    /// Conditionally zero-destroy a source owner and disarm its slot.  The
+    /// MIR validator establishes that the flag is live and associated with
+    /// the exact source-storage local before VM lowering may erase this to a
+    /// runtime empty-slot transition.
+    DestroyIf {
+        local: MirLocal,
+        flag: MirLocal,
+    },
     Copy {
         dst: MirLocal,
         src: MirLocal,
@@ -1762,18 +1792,25 @@ impl MirCleanupPlan {
     /// never has to rediscover storage, drops, or protected values from raw
     /// registers.
     pub fn validate_storage_actions(&self, storage: &MirSourceStorageTables) -> Result<(), String> {
-        let expected = storage.exited_bindings(
-            self.source_storage_scope,
-            self.target_storage_scope,
-        )?;
+        let expected =
+            storage.exited_bindings(self.source_storage_scope, self.target_storage_scope)?;
         if expected.is_empty() {
-            if !self.drop_flags.is_empty() || !self.actions.is_empty() || !self.protected_values.is_empty() {
-                return Err("MIR cleanup has a storage witness without exited source storage".into());
+            if !self.drop_flags.is_empty()
+                || !self.actions.is_empty()
+                || !self.protected_values.is_empty()
+            {
+                return Err(
+                    "MIR cleanup has a storage witness without exited source storage".into(),
+                );
             }
             return Ok(());
         }
 
-        if self.protected_values.windows(2).any(|pair| pair[0] >= pair[1]) {
+        if self
+            .protected_values
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        {
             return Err("MIR cleanup protected values are not canonically sorted".into());
         }
         let expected_set = expected.iter().copied().collect::<BTreeSet<_>>();
@@ -1782,8 +1819,13 @@ impl MirCleanupPlan {
             if flag.id.0 as usize != index {
                 return Err("MIR cleanup drop-flag IDs are not dense and stable".into());
             }
-            if !expected_set.contains(&flag.binding) || flags.insert(flag.binding, flag.id).is_some() {
-                return Err("MIR cleanup drop flags do not account for each exited owner exactly once".into());
+            if !expected_set.contains(&flag.binding)
+                || flags.insert(flag.binding, flag.id).is_some()
+            {
+                return Err(
+                    "MIR cleanup drop flags do not account for each exited owner exactly once"
+                        .into(),
+                );
             }
         }
         if flags.len() != expected.len() {
@@ -1791,7 +1833,13 @@ impl MirCleanupPlan {
         }
 
         #[derive(Clone, Copy, Eq, PartialEq)]
-        enum Progress { Start, EndedBorrow, Terminal, Cleared, Dead }
+        enum Progress {
+            Start,
+            EndedBorrow,
+            Terminal,
+            Cleared,
+            Dead,
+        }
         let mut progress = expected
             .iter()
             .copied()
@@ -1809,21 +1857,30 @@ impl MirCleanupPlan {
                     .find_map(|(&binding, &candidate)| (candidate == flag).then_some(binding))
                     .ok_or_else(|| "MIR cleanup clears an unknown drop flag".to_owned())?,
             };
-            let state = progress
-                .get_mut(&binding)
-                .ok_or_else(|| "MIR cleanup action targets retained or absent source storage".to_owned())?;
+            let state = progress.get_mut(&binding).ok_or_else(|| {
+                "MIR cleanup action targets retained or absent source storage".to_owned()
+            })?;
             match *action {
                 MirCleanupAction::EndBorrow { .. } => {
                     if !matches!(*state, Progress::Start | Progress::EndedBorrow) {
-                        return Err("MIR cleanup ends a borrow after terminal storage cleanup".into());
+                        return Err(
+                            "MIR cleanup ends a borrow after terminal storage cleanup".into()
+                        );
                     }
                     *state = Progress::EndedBorrow;
                 }
                 MirCleanupAction::Drop { flag, .. } => {
-                    if !matches!(*state, Progress::Start | Progress::EndedBorrow) || flags[&binding] != flag {
-                        return Err("MIR cleanup drop is out of order or uses the wrong flag".into());
+                    if !matches!(*state, Progress::Start | Progress::EndedBorrow)
+                        || flags[&binding] != flag
+                    {
+                        return Err(
+                            "MIR cleanup drop is out of order or uses the wrong flag".into()
+                        );
                     }
-                    if storage.binding_local(binding) .is_some_and(|local| self.protected_values.binary_search(&local).is_ok()) {
+                    if storage
+                        .binding_local(binding)
+                        .is_some_and(|local| self.protected_values.binary_search(&local).is_ok())
+                    {
                         return Err("MIR cleanup drops a protected leave value".into());
                     }
                     *state = Progress::Terminal;
@@ -1834,7 +1891,10 @@ impl MirCleanupPlan {
                         || storage.binding_local(binding) != Some(local)
                         || self.protected_values.binary_search(&local).is_err()
                     {
-                        return Err("MIR cleanup protection is not an explicit protected source owner".into());
+                        return Err(
+                            "MIR cleanup protection is not an explicit protected source owner"
+                                .into(),
+                        );
                     }
                     *state = Progress::Terminal;
                     terminal_order.push(binding);
@@ -1847,7 +1907,9 @@ impl MirCleanupPlan {
                 }
                 MirCleanupAction::StorageDead { .. } => {
                     if *state != Progress::Cleared {
-                        return Err("MIR cleanup ends source storage before clearing its drop flag".into());
+                        return Err(
+                            "MIR cleanup ends source storage before clearing its drop flag".into(),
+                        );
                     }
                     *state = Progress::Dead;
                 }
@@ -1857,7 +1919,10 @@ impl MirCleanupPlan {
             return Err("MIR cleanup exit omits an ordered source-storage action".into());
         }
         if terminal_order != expected {
-            return Err("MIR cleanup does not process source-storage owners in reverse lexical order".into());
+            return Err(
+                "MIR cleanup does not process source-storage owners in reverse lexical order"
+                    .into(),
+            );
         }
         Ok(())
     }
@@ -3212,7 +3277,8 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::MakeCallable { dst, .. }
         | MirInstruction::MakeLabel { dst, .. }
         | MirInstruction::CallIndirect { dst, .. }
-        | MirInstruction::CaptureResumption { dst, .. } => Some(*dst),
+        | MirInstruction::CaptureResumption { dst, .. }
+        | MirInstruction::SetDropFlag { flag: dst, .. } => Some(*dst),
         MirInstruction::Abort
         | MirInstruction::InstallHandler { .. }
         | MirInstruction::UninstallHandler
@@ -3221,7 +3287,10 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::ResumeSnapshot { .. }
         | MirInstruction::Forward { .. }
         | MirInstruction::Cancel { .. }
-        | MirInstruction::DerefStore { .. } => None,
+        | MirInstruction::DerefStore { .. }
+        | MirInstruction::StorageLive { .. }
+        | MirInstruction::StorageDead { .. }
+        | MirInstruction::DestroyIf { .. } => None,
         MirInstruction::ArraySetMove { .. }
         | MirInstruction::ArrayPushMove { .. }
         | MirInstruction::ArrayReserve { .. }
@@ -3409,9 +3478,9 @@ impl MirLowering {
                 moved_paths: vec![],
                 moved_places: flow.moved_places.clone(),
                 active_loans: flow.active_loans.clone(),
-            drop_flags: vec![],
-            actions: vec![],
-            protected_values: vec![],
+                drop_flags: vec![],
+                actions: vec![],
+                protected_values: vec![],
             },
             resumption_snapshots: BTreeMap::new(),
             label_rejoins: BTreeMap::new(),
@@ -4583,6 +4652,49 @@ impl MirFunction {
             };
             storage.binding_locals[index] = local;
         }
+        // Handler payloads, continuation binders, and completion binders do
+        // not have a pre-freeze `named` entry in compact Stage-0 MIR. They
+        // must nevertheless receive a concrete, body-local slot: leaving a
+        // `None` here would turn their lexical lifetime back into implicit
+        // register state. Their payload transport remains represented by the
+        // existing handler/block parameter instructions; this companion slot
+        // is the exact lifecycle owner consumed by cleanup and VM checking.
+        for local in &mut storage.binding_locals {
+            if local.is_some() {
+                continue;
+            }
+            let id = MirLocal(u32::try_from(self.locals.len()).expect("MIR local arena overflow"));
+            self.locals.push(MirLocalDecl {
+                ty: Type::Unit,
+                source: CoreId(u32::MAX),
+            });
+            *local = Some(id);
+        }
+        // Materialize the existing frozen lifecycle contract at the first
+        // executable program point. Parameters are already initialized by
+        // the call ABI; every mapped non-parameter source slot begins dead
+        // and therefore receives an explicit `StorageLive` before any direct
+        // definition or `Store` can make it readable.
+        let parameter_locals = self.parameters.iter().copied().collect::<BTreeSet<_>>();
+        let lives = storage
+            .binding_locals
+            .iter()
+            .enumerate()
+            .filter_map(|(binding, local)| {
+                local
+                    .filter(|local| !parameter_locals.contains(local))
+                    .map(|local| MirInstruction::StorageLive {
+                        binding: MirPlaceBindingId(binding as u32),
+                        local,
+                    })
+            })
+            .collect::<Vec<_>>();
+        if !lives.is_empty() {
+            let entry = self.entry.0 as usize;
+            if let Some(block) = self.blocks.get_mut(entry) {
+                block.instructions.splice(0..0, lives);
+            }
+        }
         self.control.source_storage = storage;
         self
     }
@@ -4803,10 +4915,15 @@ impl MirFunction {
     /// reads even when no PlaceFlow sidecar was supplied.
     fn validate_local_storage_liveness(&self) -> Result<(), String> {
         let mut entries = vec![None::<BTreeSet<MirLocal>>; self.blocks.len()];
+        let mut storage_entries = vec![None::<BTreeSet<MirPlaceBindingId>>; self.blocks.len()];
         entries[self.entry.0 as usize] = Some(self.parameters.iter().copied().collect());
+        storage_entries[self.entry.0 as usize] = Some(BTreeSet::new());
         let mut worklist = VecDeque::from([self.entry.0 as usize]);
         while let Some(index) = worklist.pop_front() {
             let Some(mut live) = entries[index].clone() else {
+                continue;
+            };
+            let Some(mut storage_live) = storage_entries[index].clone() else {
                 continue;
             };
             let block = &self.blocks[index];
@@ -4826,6 +4943,10 @@ impl MirFunction {
                         inputs.retain(|local| local != destination);
                     }
                     MirInstruction::InstallHandler { .. } => inputs.clear(),
+                    MirInstruction::StorageLive { .. } => inputs.clear(),
+                    MirInstruction::SetDropFlag { flag, .. } => {
+                        inputs.retain(|local| local != flag);
+                    }
                     _ => {}
                 }
                 for local in inputs {
@@ -4836,13 +4957,35 @@ impl MirFunction {
                         ));
                     }
                 }
-                if let MirInstruction::Store { dst, .. } = instruction
-                    && unique_loans.values().any(|borrowed| borrowed == dst)
-                {
-                    return Err(
-                        "MIR replaces addressable source storage while a unique loan is live"
-                            .into(),
-                    );
+                if let MirInstruction::Store { dst, .. } = instruction {
+                    let binding = self
+                        .control
+                        .source_storage
+                        .binding_locals
+                        .iter()
+                        .enumerate()
+                        .find_map(|(binding, local)| {
+                            (*local == Some(*dst)).then_some(MirPlaceBindingId(binding as u32))
+                        })
+                        .ok_or_else(|| {
+                            "MIR Store targets a local without frozen addressable source storage"
+                                .to_owned()
+                        })?;
+                    if !storage_live.contains(&binding) {
+                        return Err("MIR Store targets source storage before StorageLive".into());
+                    }
+                    if live.contains(dst) {
+                        return Err(
+                            "MIR Store replaces initialized source storage without prior zero-use destroy"
+                                .into(),
+                        );
+                    }
+                    if unique_loans.values().any(|borrowed| borrowed == dst) {
+                        return Err(
+                            "MIR replaces addressable source storage while a unique loan is live"
+                                .into(),
+                        );
+                    }
                 }
                 if let MirInstruction::Borrow {
                     dst,
@@ -4852,6 +4995,50 @@ impl MirFunction {
                 } = instruction
                 {
                     unique_loans.insert(*dst, *src);
+                }
+                match instruction {
+                    MirInstruction::StorageLive { binding, local } => {
+                        if storage_live.contains(binding) {
+                            return Err(format!(
+                                "MIR starts source storage for binding {} more than once on one path",
+                                binding.0
+                            ));
+                        }
+                        if live.contains(local) {
+                            return Err(format!(
+                                "MIR StorageLive local {} is already initialized",
+                                local.0
+                            ));
+                        }
+                        storage_live.insert(*binding);
+                    }
+                    MirInstruction::StorageDead { binding, local } => {
+                        if !storage_live.remove(binding) {
+                            return Err(format!(
+                                "MIR ends source storage for inactive binding {}",
+                                binding.0
+                            ));
+                        }
+                        if live.contains(local) {
+                            return Err(format!(
+                                "MIR StorageDead local {} is still initialized",
+                                local.0
+                            ));
+                        }
+                        if unique_loans.values().any(|borrowed| borrowed == local) {
+                            return Err(
+                                "MIR ends addressable source storage while a unique loan is live"
+                                    .into(),
+                            );
+                        }
+                    }
+                    MirInstruction::DestroyIf { local, .. } => {
+                        live.remove(local);
+                    }
+                    MirInstruction::Move { src, .. } => {
+                        live.remove(src);
+                    }
+                    _ => {}
                 }
                 if let Some(destination) = destination {
                     live.insert(destination);
@@ -4885,7 +5072,7 @@ impl MirFunction {
                 if target_index >= entries.len() {
                     return Err(format!("MIR edge targets absent block {}", target.0));
                 }
-                let changed = match &mut entries[target_index] {
+                let changed_locals = match &mut entries[target_index] {
                     Some(current) => {
                         let next = current
                             .intersection(&live)
@@ -4903,7 +5090,25 @@ impl MirFunction {
                         true
                     }
                 };
-                if changed {
+                let changed_storage = match &mut storage_entries[target_index] {
+                    Some(current) => {
+                        let next = current
+                            .intersection(&storage_live)
+                            .copied()
+                            .collect::<BTreeSet<_>>();
+                        if *current == next {
+                            false
+                        } else {
+                            *current = next;
+                            true
+                        }
+                    }
+                    slot => {
+                        *slot = Some(storage_live.clone());
+                        true
+                    }
+                };
+                if changed_locals || changed_storage {
                     worklist.push_back(target_index);
                 }
                 Ok(())
@@ -5400,6 +5605,44 @@ impl MirFunction {
             .ok_or_else(|| format!("MIR references invalid local {}", local.0))
     }
     fn validate_instruction(&self, instruction: &MirInstruction) -> Result<(), String> {
+        match instruction {
+            MirInstruction::StorageLive { binding, local }
+            | MirInstruction::StorageDead { binding, local } => {
+                if self.control.source_storage.binding_local(*binding) != Some(*local) {
+                    return Err(
+                        "MIR storage statement does not use its frozen binding-local mapping"
+                            .into(),
+                    );
+                }
+                return Ok(());
+            }
+            MirInstruction::SetDropFlag { flag, .. } => {
+                if self.local_type(*flag)? != &Type::Scalar(crate::types::ScalarType::Bool) {
+                    return Err("MIR drop flag local is not Bool".into());
+                }
+                return Ok(());
+            }
+            MirInstruction::DestroyIf { local, flag } => {
+                if self.local_type(*flag)? != &Type::Scalar(crate::types::ScalarType::Bool) {
+                    return Err("MIR conditional destroy flag is not Bool".into());
+                }
+                // A conditional destroy is a source-storage operation, not a
+                // general register-clear instruction.  Its owner must have
+                // exact frozen binding provenance.
+                if !self
+                    .control
+                    .source_storage
+                    .binding_locals
+                    .iter()
+                    .flatten()
+                    .any(|candidate| candidate == local)
+                {
+                    return Err("MIR conditional destroy targets non-source storage".into());
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
         if let MirInstruction::Copy { src, .. } = instruction {
             if !mir_type_is_duplicable(self.local_type(*src)?, &self.nominal_copy_descriptors) {
                 return Err(format!(
@@ -5765,10 +6008,7 @@ impl MirFunction {
         if !self
             .control
             .source_storage
-            .exited_bindings(
-                cleanup.source_storage_scope,
-                cleanup.target_storage_scope,
-            )?
+            .exited_bindings(cleanup.source_storage_scope, cleanup.target_storage_scope)?
             .is_empty()
             && cleanup.protected_values != arguments
         {
@@ -6639,6 +6879,10 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::ResumeSnapshot { .. }
         | MirInstruction::Forward { .. }
         | MirInstruction::Cancel { .. }
+        | MirInstruction::StorageLive { .. }
+        | MirInstruction::StorageDead { .. }
+        | MirInstruction::SetDropFlag { .. }
+        | MirInstruction::DestroyIf { .. }
         | MirInstruction::Copy { .. }
         | MirInstruction::Store { .. }
         | MirInstruction::Move { .. }
@@ -7461,6 +7705,11 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         } => vec![*snapshot, *value],
         MirInstruction::Forward { .. } => Vec::new(),
         MirInstruction::Cancel { .. } => Vec::new(),
+        MirInstruction::StorageLive { local, .. } | MirInstruction::StorageDead { local, .. } => {
+            vec![*local]
+        }
+        MirInstruction::SetDropFlag { flag, .. } => vec![*flag],
+        MirInstruction::DestroyIf { local, flag } => vec![*local, *flag],
         MirInstruction::Copy { dst, src }
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
@@ -7907,9 +8156,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
-                        drop_flags: vec![],
-                        actions: vec![],
-                        protected_values: vec![],
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                         },
                     },
                 ),
@@ -7942,9 +8191,9 @@ impl Lowerer<'_> {
                         moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
-                    drop_flags: vec![],
-                    actions: vec![],
-                    protected_values: vec![],
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                     },
                 },
             ),
@@ -8188,9 +8437,9 @@ impl Lowerer<'_> {
                                 moved_paths: vec![],
                                 moved_places: self.leave_cleanup.moved_places.clone(),
                                 active_loans: self.leave_cleanup.active_loans.clone(),
-                            drop_flags: vec![],
-                            actions: vec![],
-                            protected_values: vec![],
+                                drop_flags: vec![],
+                                actions: vec![],
+                                protected_values: vec![],
                             },
                         },
                     },
@@ -8241,9 +8490,9 @@ impl Lowerer<'_> {
                                 moved_paths: vec![],
                                 moved_places: self.leave_cleanup.moved_places.clone(),
                                 active_loans: self.leave_cleanup.active_loans.clone(),
-                            drop_flags: vec![],
-                            actions: vec![],
-                            protected_values: vec![],
+                                drop_flags: vec![],
+                                actions: vec![],
+                                protected_values: vec![],
                             },
                         },
                     },
@@ -8505,9 +8754,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
-                        drop_flags: vec![],
-                        actions: vec![],
-                        protected_values: vec![],
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                         },
                     }
                 } else {
@@ -8672,9 +8921,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
-                        drop_flags: vec![],
-                        actions: vec![],
-                        protected_values: vec![],
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                         },
                     },
                 },
@@ -8883,9 +9132,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
-                        drop_flags: vec![],
-                        actions: vec![],
-                        protected_values: vec![],
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                         },
                     },
                 },
@@ -9096,9 +9345,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
-                        drop_flags: vec![],
-                        actions: vec![],
-                        protected_values: vec![],
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                         },
                     }
                 }),
@@ -9350,9 +9599,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
-                        drop_flags: vec![],
-                        actions: vec![],
-                        protected_values: vec![],
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                         },
                     },
                 },
@@ -9523,9 +9772,9 @@ impl Lowerer<'_> {
                         moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
-                    drop_flags: vec![],
-                    actions: vec![],
-                    protected_values: vec![],
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                     },
                 }
             } else if matches!(self.body.expression(clause.body).ty, Type::Never) {
@@ -9787,9 +10036,9 @@ impl Lowerer<'_> {
                         moved_paths: vec![],
                         moved_places: self.leave_cleanup.moved_places.clone(),
                         active_loans: self.leave_cleanup.active_loans.clone(),
-                    drop_flags: vec![],
-                    actions: vec![],
-                    protected_values: vec![],
+                        drop_flags: vec![],
+                        actions: vec![],
+                        protected_values: vec![],
                     },
                 }
             } else if matches!(self.body.expression(clause.body).ty, Type::Never) {
@@ -10194,9 +10443,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
-                        drop_flags: vec![],
-                        actions: vec![],
-                        protected_values: vec![],
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                         },
                     },
                 },
@@ -10445,9 +10694,9 @@ impl Lowerer<'_> {
                             moved_paths: vec![],
                             moved_places: self.leave_cleanup.moved_places.clone(),
                             active_loans: self.leave_cleanup.active_loans.clone(),
-                        drop_flags: vec![],
-                        actions: vec![],
-                        protected_values: vec![],
+                            drop_flags: vec![],
+                            actions: vec![],
+                            protected_values: vec![],
                         },
                     },
                 },
@@ -22432,9 +22681,9 @@ impl Lowerer<'_> {
                 moved_paths: vec![],
                 moved_places: vec![],
                 active_loans: vec![],
-            drop_flags: vec![],
-            actions: vec![],
-            protected_values: vec![],
+                drop_flags: vec![],
+                actions: vec![],
+                protected_values: vec![],
             },
             resumption_snapshots: BTreeMap::new(),
             label_rejoins: BTreeMap::new(),
