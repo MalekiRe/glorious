@@ -4219,6 +4219,17 @@ fn service_executes_hrtb_closures_with_concrete_associated_effect_projections() 
 }
 
 #[test]
+fn service_imports_hrtb_associated_effect_gat_callback_contracts_through_vm() {
+    let dependency = "pub trait Capability { type Effects<'a>: EffectRow; } pub struct Value {} impl Capability for Value { type Effects<'a> = {}; } pub fn apply(callback: for<'a> (&'a i64) -> &'a i64 / { <Value as Capability>::Effects<'a> }) -> i64 { let value = 41; let result = callback(&value); *result + 1 }";
+    let root = "use dependency::apply; pub fn identity<'a>(value: &'a i64) -> &'a i64 { value } pub fn main() -> i64 { apply(identity) }";
+    let outcome = StageZeroCompiler::new()
+        .compile(request_with_dependency(root, "dependency@0.1.0", dependency))
+        .expect("an imported HRTB associated-effect contract must materialize");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_executes_hrtb_closures_with_lifetime_gat_projections() {
     let source = "trait Family { type Item<'a>; } struct Value {} impl Family for Value { type Item<'a> = &'a i64; } pub fn apply(callback: for<'a> (<Value as Family>::Item<'a>) -> <Value as Family>::Item<'a>) -> i64 { let value = 41; let result = callback(&value); *result + 1 } pub fn main() -> i64 { apply({ value => value }) }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();

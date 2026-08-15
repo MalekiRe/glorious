@@ -834,6 +834,18 @@ impl TraitSolver {
         self.normalize_effect_row_projections(value, &mut vec![])
     }
 
+    /// Normalize selected associated effect rows nested directly beneath an
+    /// HRTB callable. Bound lifetime item arguments are rigid evidence only
+    /// while this caller-owned binder is live; the public unscoped entry point
+    /// above continues to reject them as escaping placeholders.
+    pub fn normalize_effect_row_in_hrtb(
+        &mut self,
+        value: EffectRow,
+        lifetime_binders: u32,
+    ) -> Result<EffectRow, Box<TraitEffectRowProjectionAnswer>> {
+        self.normalize_effect_row_projections_in_hrtb(value, &mut vec![], &[lifetime_binders])
+    }
+
     /// Normalize an associated type application through selected trait
     /// evidence. Item arguments occupy generic slots after the implementation
     /// binders, preserving a stable substitution layout for GAT-like items.
@@ -1300,7 +1312,7 @@ impl TraitSolver {
             subject,
         };
         let root_key = associated_effect_row_projection_key(&goal, name, &arguments);
-        let answer = self.select_associated_effect_row_application(goal, name, &arguments);
+        let answer = self.select_associated_effect_row_application(goal, name, &arguments, false);
         let TraitEffectRowProjectionAnswer::Normalized { evidence, row } = answer else {
             return answer;
         };
@@ -1319,11 +1331,13 @@ impl TraitSolver {
         goal: TraitGoal,
         name: &str,
         arguments: &[GenericArgument],
+        scoped_hrtb_item_arguments: bool,
     ) -> TraitEffectRowProjectionAnswer {
         if trait_goal_contains_escaping_hrtb(&goal)
-            || arguments
-                .iter()
-                .any(generic_argument_contains_escaping_hrtb)
+            || (!scoped_hrtb_item_arguments
+                && arguments
+                    .iter()
+                    .any(generic_argument_contains_escaping_hrtb))
         {
             return TraitEffectRowProjectionAnswer::NoSolution;
         }
@@ -1439,6 +1453,15 @@ impl TraitSolver {
         value: EffectRow,
         active: &mut Vec<Digest>,
     ) -> Result<EffectRow, Box<TraitEffectRowProjectionAnswer>> {
+        self.normalize_effect_row_projections_in_hrtb(value, active, &[])
+    }
+
+    fn normalize_effect_row_projections_in_hrtb(
+        &mut self,
+        value: EffectRow,
+        active: &mut Vec<Digest>,
+        hrtb_binders: &[u32],
+    ) -> Result<EffectRow, Box<TraitEffectRowProjectionAnswer>> {
         let effects = value
             .effects
             .into_iter()
@@ -1446,7 +1469,9 @@ impl TraitSolver {
                 let arguments = effect
                     .arguments
                     .into_iter()
-                    .map(|argument| self.normalize_trait_argument(argument, &mut vec![]))
+                    .map(|argument| {
+                        self.normalize_trait_argument_in_hrtb(argument, &mut vec![], hrtb_binders)
+                    })
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|answer| {
                         Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
@@ -1464,14 +1489,16 @@ impl TraitSolver {
         };
         for projection in value.projections {
             let subject = self
-                .normalize_type_projections(*projection.subject, &mut vec![])
+                .normalize_type_projections_in_hrtb(*projection.subject, &mut vec![], hrtb_binders)
                 .map_err(|answer| {
                     Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
                 })?;
             let trait_arguments = projection
                 .trait_arguments
                 .into_iter()
-                .map(|argument| self.normalize_trait_argument(argument, &mut vec![]))
+                .map(|argument| {
+                    self.normalize_trait_argument_in_hrtb(argument, &mut vec![], hrtb_binders)
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|answer| {
                     Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
@@ -1479,7 +1506,9 @@ impl TraitSolver {
             let item_arguments = projection
                 .item_arguments
                 .into_iter()
-                .map(|argument| self.normalize_trait_argument(argument, &mut vec![]))
+                .map(|argument| {
+                    self.normalize_trait_argument_in_hrtb(argument, &mut vec![], hrtb_binders)
+                })
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|answer| {
                     Box::new(TraitEffectRowProjectionAnswer::NestedTypeProjection { answer })
@@ -1492,15 +1521,13 @@ impl TraitSolver {
                 item_generic_kinds: projection.item_generic_kinds,
                 item_arguments,
             };
-            if !projection_is_concrete(&projection.subject)
-                || !projection
-                    .trait_arguments
-                    .iter()
-                    .all(generic_argument_is_concrete)
-                || !projection
-                    .item_arguments
-                    .iter()
-                    .all(generic_argument_is_concrete)
+            if !projection_is_concrete_in_hrtb_scope(&projection.subject, hrtb_binders)
+                || !projection.trait_arguments.iter().all(|argument| {
+                    generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)
+                })
+                || !projection.item_arguments.iter().all(|argument| {
+                    generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)
+                })
             {
                 result.projections.push(projection);
                 continue;
@@ -1531,10 +1558,11 @@ impl TraitSolver {
                 goal,
                 &projection.name,
                 &item_arguments,
+                !hrtb_binders.is_empty(),
             );
             let nested = match nested {
                 TraitEffectRowProjectionAnswer::Normalized { row, .. } => {
-                    self.normalize_effect_row_projections(row, active)
+                    self.normalize_effect_row_projections_in_hrtb(row, active, hrtb_binders)
                 }
                 answer => Err(Box::new(answer)),
             };

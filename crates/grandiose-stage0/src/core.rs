@@ -4784,9 +4784,122 @@ impl Elaborator<'_> {
     /// selected associated definition must reduce recursively before ordinary
     /// type unification compares the declared result with the body value.
     fn normalize_concrete_type_projections(&mut self, value: Type) -> Type {
-        match self.trait_query().normalize_type(value) {
+        let value = match self.trait_query().normalize_type(value) {
             Ok(value) => value,
             Err(answer) => self.projection_normalization_error(*answer),
+        };
+        self.normalize_nested_callable_effect_rows(value)
+    }
+
+    /// Type projection normalization deliberately leaves effect rows opaque
+    /// because they have their own solver entry point. A callable parameter
+    /// is still an executable contract, though: normalize its nested row
+    /// before it becomes a direct-call expectation. This is especially
+    /// important for an imported `for<'a>` callback whose selected effect GAT
+    /// otherwise reaches argument checking as an opaque projection.
+    fn normalize_nested_callable_effect_rows(&mut self, value: Type) -> Type {
+        match value {
+            Type::Nominal {
+                definition,
+                arguments,
+            } => Type::Nominal {
+                definition,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_nested_callable_effect_argument(argument))
+                    .collect(),
+            },
+            Type::Projection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                item_generic_kinds,
+                item_arguments,
+            } => Type::Projection {
+                subject: Box::new(self.normalize_nested_callable_effect_rows(*subject)),
+                trait_definition,
+                trait_arguments: trait_arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_nested_callable_effect_argument(argument))
+                    .collect(),
+                name,
+                item_generic_kinds,
+                item_arguments: item_arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_nested_callable_effect_argument(argument))
+                    .collect(),
+            },
+            Type::Tuple(values) => Type::Tuple(
+                values
+                    .into_iter()
+                    .map(|value| self.normalize_nested_callable_effect_rows(value))
+                    .collect(),
+            ),
+            Type::Array(value) => {
+                Type::Array(Box::new(self.normalize_nested_callable_effect_rows(*value)))
+            }
+            Type::Reference {
+                mutability,
+                lifetime,
+                referent,
+            } => Type::Reference {
+                mutability,
+                lifetime,
+                referent: Box::new(self.normalize_nested_callable_effect_rows(*referent)),
+            },
+            Type::Callable {
+                lifetime_binders,
+                parameters,
+                result,
+                effects,
+                invocation,
+            } => Type::Callable {
+                lifetime_binders,
+                parameters: parameters
+                    .into_iter()
+                    .map(|parameter| self.normalize_nested_callable_effect_rows(parameter))
+                    .collect(),
+                result: Box::new(self.normalize_nested_callable_effect_rows(*result)),
+                effects: if lifetime_binders == 0 {
+                    self.normalize_concrete_effect_row(effects)
+                } else {
+                    self.normalize_concrete_hrtb_effect_row(effects, lifetime_binders)
+                },
+                invocation,
+            },
+            value => value,
+        }
+    }
+
+    fn normalize_nested_callable_effect_argument(
+        &mut self,
+        argument: GenericArgument,
+    ) -> GenericArgument {
+        match argument {
+            GenericArgument::Type(value) => {
+                GenericArgument::Type(self.normalize_nested_callable_effect_rows(value))
+            }
+            GenericArgument::EffectRow(value) => {
+                GenericArgument::EffectRow(self.normalize_concrete_effect_row(value))
+            }
+            GenericArgument::ConstProjection {
+                subject,
+                trait_definition,
+                trait_arguments,
+                name,
+                kind,
+            } => GenericArgument::ConstProjection {
+                subject: Box::new(self.normalize_nested_callable_effect_rows(*subject)),
+                trait_definition,
+                trait_arguments: trait_arguments
+                    .into_iter()
+                    .map(|argument| self.normalize_nested_callable_effect_argument(argument))
+                    .collect(),
+                name,
+                kind,
+            },
+            argument => argument,
         }
     }
 
@@ -4798,6 +4911,20 @@ impl Elaborator<'_> {
     fn normalize_concrete_effect_row(&mut self, value: EffectRow) -> EffectRow {
         self.trait_query()
             .normalize_effect_row(value.clone())
+            .unwrap_or(value)
+    }
+
+    /// The HRTB counterpart retains the callable's binder while opening a
+    /// selected associated effect GAT. A plain normalization query correctly
+    /// rejects a raw `Bound` lifetime as escaped; a named higher-ranked
+    /// function value has already established the owning callable scope.
+    fn normalize_concrete_hrtb_effect_row(
+        &mut self,
+        value: EffectRow,
+        lifetime_binders: u32,
+    ) -> EffectRow {
+        self.trait_query()
+            .normalize_effect_row_in_hrtb(value.clone(), lifetime_binders)
             .unwrap_or(value)
     }
 
@@ -7020,11 +7147,15 @@ impl Elaborator<'_> {
             .signatures
             .instantiate_callable_generic(definition, &bound_arguments)
             .ok()?;
+        let bound_effects =
+            self.normalize_concrete_hrtb_effect_row(bound_signature.effects, lifetime_binders);
+        let expected_effects =
+            self.normalize_concrete_hrtb_effect_row(expected_effects, lifetime_binders);
         let bound_callable = Type::Callable {
             lifetime_binders,
             parameters: bound_signature.parameters,
             result: Box::new(bound_signature.result),
-            effects: bound_signature.effects,
+            effects: bound_effects,
             invocation: bound_signature.invocation,
         };
         let expected = Type::Callable {

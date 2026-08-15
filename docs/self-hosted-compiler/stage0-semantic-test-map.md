@@ -169,6 +169,11 @@ coarse. The composite fixtures cover:
   contract; the concrete projection is exercised through an indirect callback
   call and verified VM execution
   (`service_executes_hrtb_closures_with_concrete_associated_effect_projections`).
+- imported callable contracts also normalize a concrete associated effect GAT
+  beneath their HRTB binder before named-function value compatibility is
+  checked, so the selected callback row reaches direct calls and the verified
+  VM rather than remaining an opaque interface projection
+  (`service_imports_hrtb_associated_effect_gat_callback_contracts_through_vm`).
 - concrete lifetime-GAT projections can be selected beneath an HRTB callback
   binder without treating that rigid item argument as an escaped solver goal;
   the normalized borrowed item flows through a compact closure, dereference,
