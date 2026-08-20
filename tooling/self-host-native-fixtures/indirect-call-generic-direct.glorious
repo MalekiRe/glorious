@@ -1,5 +1,0 @@
-// A `$generic` value invoked immediately must specialize first, then lower
-// through the same captureless MakeCallable + CallIndirect ABI as `$name`.
-generic_identity_fixture<T>(value: T) -> T { value }
-
-main() -> { $generic_identity_fixture(7); () }

@@ -1,2 +1,0 @@
-// Bootstrap corpus rejection: `$` requires a callable name immediately after it.
-main() -> { $ separated }

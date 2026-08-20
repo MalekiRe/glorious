@@ -1,9 +1,0 @@
-// Bootstrap corpus: generic enum construction and match lowering.
-make() -> Result<i64, ()> { Result::Ok(42) }
-answer() -> i64 {
-    match make() {
-        Result::Ok(value) => value,
-        Result::Err(_) => 0,
-    }
-}
-main() -> { answer(); () }

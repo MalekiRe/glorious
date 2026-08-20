@@ -1,5 +1,0 @@
-indirect_identity(value: u32) -> u32 { value }
-
-// `$` makes the Unit-receiver ABI explicit: the generated callable has no
-// captures, so CallIndirect must enter the target with Unit in register zero.
-main() -> { $indirect_identity(7); () }

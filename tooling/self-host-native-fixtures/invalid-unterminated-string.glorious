@@ -1,2 +1,0 @@
-// Bootstrap corpus rejection: string literals must terminate.
-main() -> { "unterminated }

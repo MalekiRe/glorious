@@ -1,6 +1,0 @@
-pub mod network;
-mod syntax {
-    pub mod tokens;
-    parse() -> i64 { 1 }
-}
-main() -> { () }

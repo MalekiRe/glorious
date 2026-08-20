@@ -1,5 +1,0 @@
-// Bootstrap corpus: character, byte, and byte-string literal lowering.
-letter() -> u8 { b'A' }
-unicode() -> Char { '\u{1F600}' }
-payload() -> Bytes { b"ab\x00\xff\n" }
-main() -> { letter(); unicode(); payload(); () }

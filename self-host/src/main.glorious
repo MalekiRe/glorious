@@ -1,6 +1,0 @@
-mod frontend;
-mod backend;
-mod compiler;
-mod diagnostics;
-
-main() { run_compiler_host(diagnostics::application) }

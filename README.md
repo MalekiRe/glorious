@@ -5,9 +5,10 @@ ownership, algebraic effects, source-defined control flow, and portable verified
 bytecode. It aims to make resource usage and non-local control explicit without
 giving up higher-order functions, Rust-style borrowing, traits, or generics.
 
-The project is pre-alpha. Source and artifact compatibility are not stable yet,
-but the Rust compiler, verifier, VM, package tool, formatter, language server,
-and editor extension are usable today.
+The project is pre-alpha. Source and artifact compatibility are not stable yet.
+The independently implemented Stage0 compiler and verified VM are the active
+Rust toolchain. The former package tool, formatter, and language server are
+retained only as explicitly disabled legacy code while they are redesigned.
 
 ## What makes the language different?
 
@@ -103,14 +104,10 @@ cleanup, and control-flow invariants independently of the source compiler.
 
 ## Toolchain overview
 
-- `grc` compiles `.glorious` source into verified G1 bytecode.
+- `grc-stage0` compiles `.glorious` source into verified G1 bytecode.
 - `grvm` verifies and executes `.grbc` artifacts.
-- `grand` manages packages, dependencies, builds, tests, formatting, docs, and
-  the language server.
-- `grandfmt` is the formatter library used by `grand fmt` and the LSP. It does
-  not install a separate command.
-- `grand-lsp` provides diagnostics, formatting, symbols, completion, hover,
-  definitions, references, and rename over standard input/output.
+- `grand`, `grandfmt`, and `grand-lsp` are disabled legacy implementations;
+  they will be restructured against the Stage0 architecture.
 - `editors/vscode` contains the VS Code extension and TextMate grammar.
 
 The source suffix is `.glorious`.
@@ -120,10 +117,8 @@ The source suffix is `.glorious`.
 Install a stable Rust toolchain with Cargo first. Then run:
 
 ```sh
-cargo install --path crates/grandiose --bin grc
+cargo install --path crates/grandiose-stage0 --bin grc-stage0
 cargo install --path crates/grandiose-vm --bin grvm
-cargo install --path tooling/grand --bin grand
-cargo install --path tooling/lsp --bin grand-lsp
 ```
 
 Cargo normally installs these commands into `~/.cargo/bin`; ensure that
@@ -133,19 +128,13 @@ To build without installing:
 
 ```sh
 cargo build --release --workspace --bins
-cargo build --release --manifest-path tooling/grand/Cargo.toml --bin grand
-cargo build --release --locked --manifest-path tooling/lsp/Cargo.toml --bin grand-lsp
 
-export GRAND_COMPILER="$PWD/target/release/grc"
+export GRAND_COMPILER="$PWD/target/release/grc-stage0"
 export GRAND_VM="$PWD/target/release/grvm"
-export PATH="$PWD/tooling/grand/target/release:$PWD/tooling/lsp/target/release:$PATH"
+export PATH="$PWD/target/release:$PATH"
 ```
 
-`grand` prefers this checkout's release-mode `grc` and `grvm`, then discovers
-installed tools on `PATH`. It intentionally does not select binaries from
-`target/debug`; compiler debug builds are dramatically slower on real source.
-`GRAND_COMPILER` and `GRAND_VM` remain useful when explicitly testing a
-particular toolchain build.
+`GRAND_COMPILER` and `GRAND_VM` select explicit Stage0 compiler and VM builds.
 
 System `git` is required for Git dependencies.
 

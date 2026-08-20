@@ -1,3 +1,0 @@
-// Bootstrap corpus rejection: an unresolved value name is an error.
-answer() -> i64 { missing_value }
-main() -> { () }

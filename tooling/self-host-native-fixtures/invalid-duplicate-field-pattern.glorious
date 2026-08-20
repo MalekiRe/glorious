@@ -1,7 +1,0 @@
-// Bootstrap corpus rejection: a field cannot bind twice in one pattern.
-struct Pair { left: i64, right: i64 }
-bad(value: Pair) -> i64 {
-    let Pair { left, left: again, right } = value;
-    left + again + right
-}
-main() -> { () }

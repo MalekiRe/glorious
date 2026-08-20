@@ -855,18 +855,3 @@ fn implemented_generic_integer_roles_have_stable_selector_round_trips() {
         );
     }
 }
-
-#[test]
-fn self_host_harness_runtime_leaf_selectors_are_recognized() {
-    let harness = include_str!("../../../tooling/self-host-stage0.sh");
-    for line in harness.lines() {
-        let fields = line.split_whitespace().collect::<Vec<_>>();
-        if fields.first() == Some(&"--runtime-leaf") {
-            let role = fields[1];
-            assert!(
-                PrimitiveRole::parse_selector_name(role).is_some(),
-                "harness names an unknown runtime leaf role `{role}`"
-            );
-        }
-    }
-}

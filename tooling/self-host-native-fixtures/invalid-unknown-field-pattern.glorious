@@ -1,7 +1,0 @@
-// Bootstrap corpus rejection: patterns cannot name absent fields.
-struct Pair { left: i64, right: i64 }
-bad(value: Pair) -> i64 {
-    let Pair { left, right, third } = value;
-    left + right + third
-}
-main() -> { () }

@@ -1,2 +1,0 @@
-// Bootstrap corpus rejection: `let` needs a binding name.
-main() -> { let = 1; () }

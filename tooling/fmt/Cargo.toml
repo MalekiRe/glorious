@@ -2,10 +2,8 @@
 name = "grandfmt"
 version = "0.1.0"
 edition = "2021"
-description = "Auto-formatter for the Grandiose language"
+description = "Disabled legacy formatter; pending Stage0 redesign"
+build = "build.rs"
 
 # Standalone like its siblings: the root workspace belongs to the compiler.
 [workspace]
-
-[dependencies]
-grandiose = { path = "../../crates/grandiose" }

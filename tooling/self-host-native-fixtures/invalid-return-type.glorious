@@ -1,3 +1,0 @@
-// Bootstrap corpus rejection: the function result must match its annotation.
-answer() -> i64 { true }
-main() -> { () }
