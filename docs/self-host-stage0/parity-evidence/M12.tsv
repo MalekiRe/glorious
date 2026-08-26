@@ -1,0 +1,3 @@
+crates/grandiose-stage0/tests/fixity.rs::fixity_headers_are_typed_interface_facts	pass	tooling/self-host-stage0-fixity-check.sh executes Grandiose declared fixity lookup and typed reduction decisions.
+crates/grandiose-stage0/tests/fixity.rs::source_fixity_changes_semantic_grouping_and_vm_result	pass	tooling/self-host-stage0-fixity-check.sh executes precedence and associativity classification.
+crates/grandiose-stage0/tests/fixity.rs::non_associative_chains_are_rejected_before_mir	pass	tooling/self-host-stage0-fixity-check.sh executes non-associative reduction rejection.

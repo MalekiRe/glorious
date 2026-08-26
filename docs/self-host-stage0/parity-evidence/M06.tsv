@@ -1,0 +1,3 @@
+crates/grandiose-stage0/src/output.rs::atomic_write_replaces_an_existing_output_without_leaving_staging_files	pass	tooling/self-host-stage0-output-check.sh and tooling/self-host-stage0-output-write-check.sh execute the Grandiose staged-publication and successful host-write boundary.
+crates/grandiose-stage0/src/output.rs::atomic_write_failure_preserves_the_existing_target_and_removes_staging	pass	tooling/self-host-stage0-output-write-check.sh executes the Grandiose rejected-write path.
+crates/grandiose-stage0/src/output.rs::atomic_write_does_not_create_missing_output_parents	pass	tooling/self-host-stage0-output-write-check.sh executes the Grandiose missing-parent rejection path.

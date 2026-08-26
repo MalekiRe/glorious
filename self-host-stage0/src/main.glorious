@@ -691,7 +691,14 @@ fn boundary_bootstrap_smoke() -> i64 {
 // successor must prove its predecessor/artifact linkage and commitments.
 fn bootstrap_codec_smoke() -> i64 {
     score_manifest_decode(bootstrap::decode_manifest(bootstrap_seed_manifest()))
-        + score(bootstrap::compare_manifest_bytes(bootstrap_seed_manifest(), bootstrap_successor_manifest()) == bootstrap::Convergence::Compatible)
+        + score_manifest_convergence(bootstrap::compare_manifest_bytes(bootstrap_seed_manifest(), bootstrap_successor_manifest()))
+}
+
+fn score_manifest_convergence(value: bootstrap::Convergence) -> i64 {
+    handle value {
+        bootstrap::Convergence::Compatible => 1,
+        _ => 0,
+    }
 }
 
 fn score_manifest_decode(value: bootstrap::ManifestDecode) -> i64 {

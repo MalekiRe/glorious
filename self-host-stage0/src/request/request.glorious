@@ -241,10 +241,14 @@ fn source_bundle_sequence_identity(input: SourceInput, has_tail: Bool, tail: Arr
     }
 }
 fn source_bundle_sequence_identity_checked(matches: Bool, input: SourceInput, has_tail: Bool, tail: Array<SourceSequence>, limits: BootstrapLimits, seen: SourceSequence, count: u64, total_bytes: u64) -> SourceBundleAdmission {
-    branch_bool(matches,
-        () -> SourceBundleAdmission { SourceBundleAdmission::DuplicateFileIdentity },
-        () -> SourceBundleAdmission { source_bundle_sequence_size(input, has_tail, tail, limits, seen, count, total_bytes) },
-    )
+    // This is a direct sum-dispatch, not a callback boundary.  Keeping it as
+    // `handle` preserves the recovered affine sequence on the non-duplicate
+    // edge without making both branch closures candidates to capture it.
+    handle matches {
+        true => SourceBundleAdmission::DuplicateFileIdentity,
+        false => source_bundle_sequence_size(input, has_tail, tail, limits, seen, count, total_bytes),
+        _ => SourceBundleAdmission::DuplicateFileIdentity,
+    }
 }
 fn source_bundle_sequence_size(input: SourceInput, has_tail: Bool, tail: Array<SourceSequence>, limits: BootstrapLimits, seen: SourceSequence, count: u64, total_bytes: u64) -> SourceBundleAdmission {
     let next_count = __g1_int_wrapping_add<u64>(count, 1);
@@ -267,10 +271,14 @@ fn source_bundle_sequence_limit(input: SourceInput, has_tail: Bool, tail: Array<
     )
 }
 fn source_bundle_sequence_tail(has_tail: Bool, tail: Array<SourceSequence>, limits: BootstrapLimits, seen: SourceSequence, count: u64, total_bytes: u64) -> SourceBundleAdmission {
-    branch_bool(has_tail,
-        () -> SourceBundleAdmission { source_bundle_sequence(__g1_array_pop_move<SourceSequence>(&mut tail), limits, seen, count, total_bytes) },
-        () -> SourceBundleAdmission { SourceBundleAdmission::Value(SourceBundle { sources: seen }) },
-    )
+    // Both alternatives consume the same affine accumulator, so this must be
+    // a lexical branch rather than construction of two independently owned
+    // callback environments.
+    handle has_tail {
+        true => source_bundle_sequence(__g1_array_pop_move<SourceSequence>(&mut tail), limits, seen, count, total_bytes),
+        false => SourceBundleAdmission::Value(SourceBundle { sources: seen }),
+        _ => SourceBundleAdmission::TooManySources,
+    }
 }
 pub fn source_bundle_count(bundle: SourceBundle) -> u64 { source_sequence_count_live(bundle.sources) }
 pub fn source_bundle_sources(bundle: SourceBundle) -> SourceSequence { bundle.sources }

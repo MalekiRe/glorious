@@ -26,7 +26,10 @@ crates/grandiose-stage0/tests/source_and_query.rs	M07,M32
 crates/grandiose-stage0/tests/source_assignment_lowering.rs	M24,M26
 crates/grandiose-stage0/tests/source_storage_cleanup.rs	M24,M26
 crates/grandiose-stage0/tests/source_storage_lowering.rs	M24,M26
+crates/grandiose-stage0/tests/standard_library.rs	M14,M15,M19,M20,M21,M22,M23,M27,M28,M34
+crates/grandiose-stage0/tests/static_data_boundary.rs	M07,M09,M14,M19,M20,M26,M27,M28,M34
 crates/grandiose-stage0/tests/storage_statement_contract.rs	M24,M26,M28
+crates/grandiose-stage0/src/output.rs	M06
 crates/grandiose-stage0/tests/trait_solver.rs	M17
 crates/grandiose-stage0/tests/types.rs	M14
 crates/grandiose-stage0/tests/vm_backend.rs	M28

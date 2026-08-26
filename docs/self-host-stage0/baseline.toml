@@ -1,5 +1,5 @@
 # Frozen behavioral source for the first complete self-hosted compiler.
-stage0_baseline = "02ced7ed1894acfd54b0766e2d718b699fc31a8c"
+stage0_baseline = "cfeab4b58d60754a70c819fdda25a1f1024907af"
 translation_plan = "docs/glorious-stage0-self-hosting-plan.md"
 
 # The self-host compiler must not use the Stage0 implementation as a semantic
@@ -7,5 +7,5 @@ translation_plan = "docs/glorious-stage0-self-hosting-plan.md"
 semantic_fallback = "forbidden"
 public_api_inventory_records = 68
 public_api_inventory_sha256 = "fa0d6677a8a101af552be3fd034c9de89257d587e3297465b2d923c654cc829c"
-test_inventory_records = 1726
-test_inventory_sha256 = "57c3ecb6a78118d67721350f764127c347c3ffd2dc6243ad1132ef6c5d3899d1"
+test_inventory_records = 1869
+test_inventory_sha256 = "2c0a74a79d0a0c922ea876c86094190aa1d6ffd912ae1da282019463dcb324c3"

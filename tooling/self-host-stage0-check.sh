@@ -44,7 +44,7 @@ done < "$manifest"
 
 [[ -n "$root_source" ]] || { echo "self-host check: source manifest has no root" >&2; exit 1; }
 [[ -n "$runtime_package" ]] || { echo "self-host check: missing runtime library" >&2; exit 1; }
-output="$("$compiler" --root-package "$root_package" "${arguments[@]}" \
+if ! output="$("$compiler" --root-package "$root_package" "${arguments[@]}" \
     --runtime-standard-library "$runtime_package" \
     --runtime-leaf branch-bool crate branch_bool \
     --runtime-leaf blake3 crate __g1_blake3 \
@@ -56,7 +56,10 @@ output="$("$compiler" --root-package "$root_package" "${arguments[@]}" \
     --runtime-leaf text-eq crate __g1_text_eq \
     --runtime-leaf array-empty crate __g1_array_empty --runtime-leaf array-len crate __g1_array_len --runtime-leaf array-get-move crate __g1_array_get_move \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
-    run "$root_source")"
+    run "$root_source" 2>&1)"; then
+    printf 'self-host check: compiler rejected the canonical source world:\n%s\n' "$output" >&2
+    exit 1
+fi
 [[ "$output" == "149" ]] || {
     echo "self-host check: expected canonical bootstrap, verifier-backed source artifacts including literal branch selection, bound i64/Bool parameter execution/conditionals, body-to-VM pipeline, cache-and-keyed service, guarded publication, CLI options, diagnostic provenance, source identity, checked scanner and header admission, invocation, and cross-module result 149, got $output" >&2
     exit 1

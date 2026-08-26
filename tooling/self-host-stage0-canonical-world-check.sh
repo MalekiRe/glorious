@@ -25,7 +25,7 @@ while IFS=$'\t' read -r package logical physical _; do
     args+=(--source "$package" "$logical" "$root/$physical")
 done < "$sources"
 
-output="$(timeout --kill-after=5s --preserve-status "${maximum_seconds}s" "$compiler" --root-package self-host-stage0@0.1.0 "${args[@]}" \
+if ! output="$(timeout --kill-after=5s --preserve-status "${maximum_seconds}s" "$compiler" --root-package self-host-stage0@0.1.0 "${args[@]}" \
     --runtime-standard-library compiler_support@0.1.0 \
     --runtime-leaf branch-bool crate branch_bool \
     --runtime-leaf blake3 crate __g1_blake3 \
@@ -37,7 +37,10 @@ output="$(timeout --kill-after=5s --preserve-status "${maximum_seconds}s" "$comp
     --runtime-leaf int-wrapping-add crate __g1_int_wrapping_add --runtime-leaf int-wrapping-sub crate __g1_int_wrapping_sub --runtime-leaf int-wrapping-mul crate __g1_int_wrapping_mul --runtime-leaf int-checked-div crate __g1_int_checked_div \
     --runtime-leaf array-empty crate __g1_array_empty --runtime-leaf array-len crate __g1_array_len --runtime-leaf array-get-move crate __g1_array_get_move \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
-    run "$root_source")"
+    run "$root_source" 2>&1)"; then
+    printf 'self-host canonical world check: compiler rejected the canonical source world:\n%s\n' "$output" >&2
+    exit 1
+fi
 [[ "$output" == "149" ]] || {
     echo "self-host canonical world check: expected bootstrap, verifier-backed source artifacts including literal branch selection, bound i64/Bool parameter execution/conditionals, body-to-VM pipeline, cache-and-keyed query-service, guarded publication, CLI options, diagnostic provenance, source identity, checked scanner and header admission, invocation, and cross-module result 149, got $output" >&2
     exit 1

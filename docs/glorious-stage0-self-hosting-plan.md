@@ -1,7 +1,8 @@
 # Grandiose Stage0 → Feature-Complete Self-Hosted Compiler Translation Plan
 
 **Repository:** [`MalekiRe/glorious`](https://github.com/MalekiRe/glorious)
-**Stage0 baseline analyzed:** [`02ced7ed1894acfd54b0766e2d718b699fc31a8c`](https://github.com/MalekiRe/glorious/commit/02ced7ed1894acfd54b0766e2d718b699fc31a8c)
+**Current required Stage0 baseline:** [`cfeab4b58d60754a70c819fdda25a1f1024907af`](https://github.com/MalekiRe/glorious/commit/cfeab4b58d60754a70c819fdda25a1f1024907af)
+**Historical analysis baseline:** [`02ced7ed1894acfd54b0766e2d718b699fc31a8c`](https://github.com/MalekiRe/glorious/commit/02ced7ed1894acfd54b0766e2d718b699fc31a8c)
 **Historical self-host prototype used as a postmortem:** [`a62a08316f5b0c81f74c2a975fe7bd9826157a90`](https://github.com/MalekiRe/glorious/commit/a62a08316f5b0c81f74c2a975fe7bd9826157a90)
 **Analysis date:** 2026-08-20
 **Status:** Revised implementation plan. This version supersedes the earlier reduced-scope proposal.
@@ -179,7 +180,10 @@ The primary size wins now come from **implementation unification**, not feature 
 
 ## 2.1 Frozen baseline
 
-The port must begin by freezing one exact stage0 baseline. This document uses commit `02ced7ed1894acfd54b0766e2d718b699fc31a8c`.
+The port must begin by freezing one exact stage0 baseline. The active parity
+baseline is commit `cfeab4b58d60754a70c819fdda25a1f1024907af`; the original
+`02ced7ed1894acfd54b0766e2d718b699fc31a8c` analysis remains retained as
+historical design evidence.
 
 After the baseline is frozen:
 
@@ -3778,7 +3782,7 @@ No PR may reduce the baseline by deleting a test, changing a row to “not appli
 # 19. Immediate next actions
 
 1. Rename the existing plan as superseded and check in this revised full-port plan.
-2. Freeze commit `02ced7ed1894acfd54b0766e2d718b699fc31a8c` as the initial behavioral baseline.
+2. Record baseline rolls in `docs/self-host-stage0/baseline.toml`; the active behavioral baseline is `cfeab4b58d60754a70c819fdda25a1f1024907af`.
 3. Generate the 36-module inventory and `lib.rs` public export inventory.
 4. Inventory all `main.rs` commands/options and all schema/generation constants.
 5. Assign every `grandiose-stage0` test to module owners; import historical exact parity cases.
