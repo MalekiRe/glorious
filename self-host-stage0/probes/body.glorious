@@ -3,6 +3,7 @@ use body_library::types;
 use body_library::signature;
 use body_library::pattern;
 use body_library::placeflow;
+use body_library::scanner;
 use compiler_support::__g1_text_as_bytes;
 pub fn score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
 pub fn score_admission(value: body::BodyAdmission) -> i64 { handle value { body::BodyAdmission::Value(body::BodyKind::Call) => 1, body::BodyAdmission::Value(body::BodyKind::Literal) => 0, body::BodyAdmission::TypeError => 0, _ => 0 } }
@@ -12,6 +13,23 @@ pub fn score_move_capture_syntax(value: body::MoveCaptureClosureSyntax) -> i64 {
 pub fn score_nested_move_capture_syntax(value: body::MoveCaptureClosureSyntax) -> i64 { handle value { body::MoveCaptureClosureSyntax::Captures(1) => 1, _ => 0 } }
 pub fn score_not_move_capture(value: body::MoveCaptureClosureSyntax) -> i64 { handle value { body::MoveCaptureClosureSyntax::NotMoveClosure => 1, _ => 0 } }
 pub fn score_rejected_move_capture(value: body::MoveCaptureClosureSyntax) -> i64 { handle value { body::MoveCaptureClosureSyntax::Rejected => 1, _ => 0 } }
+pub fn score_compact_closure(value: body::CompactClosureSyntax) -> i64 { handle value { body::CompactClosureSyntax::Parameters(2) => 1, _ => 0 } }
+pub fn score_empty_compact_closure(value: body::CompactClosureSyntax) -> i64 { handle value { body::CompactClosureSyntax::Parameters(0) => 1, _ => 0 } }
+pub fn score_not_compact_closure(value: body::CompactClosureSyntax) -> i64 { handle value { body::CompactClosureSyntax::NotCompactClosure => 1, _ => 0 } }
+pub fn score_rejected_compact_closure(value: body::CompactClosureSyntax) -> i64 { handle value { body::CompactClosureSyntax::Rejected => 1, _ => 0 } }
+pub fn score_typed_closure(value: body::TypedClosureSyntax) -> i64 { handle value { body::TypedClosureSyntax::Parameters(1) => 1, _ => 0 } }
+pub fn score_empty_typed_closure(value: body::TypedClosureSyntax) -> i64 { handle value { body::TypedClosureSyntax::Parameters(0) => 1, _ => 0 } }
+pub fn score_not_typed_closure(value: body::TypedClosureSyntax) -> i64 { handle value { body::TypedClosureSyntax::NotTypedClosure => 1, _ => 0 } }
+pub fn score_rejected_typed_closure(value: body::TypedClosureSyntax) -> i64 { handle value { body::TypedClosureSyntax::Rejected => 1, _ => 0 } }
+pub fn score_label_binder(value: body::LabelSyntax) -> i64 { handle value { body::LabelSyntax::Binder => 1, _ => 0 } }
+pub fn score_label_transfer(value: body::LabelSyntax) -> i64 { handle value { body::LabelSyntax::Transfer => 1, _ => 0 } }
+pub fn score_label_value(value: body::LabelSyntax) -> i64 { handle value { body::LabelSyntax::Value => 1, _ => 0 } }
+pub fn score_rejected_label(value: body::LabelSyntax) -> i64 { handle value { body::LabelSyntax::Rejected => 1, _ => 0 } }
+pub fn score_label_i64_transfer(value: body::LabelI64TransferAdmission) -> i64 { handle value { body::LabelI64TransferAdmission::Value(42, _) => 1, _ => 0 } }
+pub fn score_rejected_label_i64_transfer(value: body::LabelI64TransferAdmission) -> i64 { handle value { body::LabelI64TransferAdmission::Rejected => 1, _ => 0 } }
+pub fn score_let_i64_assignment(value: body::LetI64AssignmentAdmission) -> i64 { handle value { body::LetI64AssignmentAdmission::Value(1, 42, _) => 1, _ => 0 } }
+pub fn score_let_i64_initializer(value: body::LetI64AssignmentAdmission) -> i64 { handle value { body::LetI64AssignmentAdmission::Value(41, 41, _) => 1, _ => 0 } }
+pub fn score_rejected_let_i64_assignment(value: body::LetI64AssignmentAdmission) -> i64 { handle value { body::LetI64AssignmentAdmission::Rejected => 1, _ => 0 } }
 pub fn main() -> i64 {
     score(body::has_type(body::Expression::I64(7), types::Type::I64))
         + score(body::has_type(body::Expression::ParameterI64(7), types::Type::I64))
@@ -42,4 +60,21 @@ pub fn main() -> i64 {
         + score_rejected_move_capture(body::move_capture_closure_syntax(__g1_text_as_bytes("move (config, config) { config }")))
         + score_not_move_capture(body::move_capture_closure_syntax(__g1_text_as_bytes("move (value)")))
         + score_not_move_capture(body::move_capture_closure_syntax(__g1_text_as_bytes("value")))
+        + score_compact_closure(body::compact_closure_syntax(__g1_text_as_bytes("{left, right => { left + right }}")))
+        + score_empty_compact_closure(body::compact_closure_syntax(__g1_text_as_bytes("{ => value}")))
+        + score_not_compact_closure(body::compact_closure_syntax(__g1_text_as_bytes("{ value }")))
+        + score_rejected_compact_closure(body::compact_closure_syntax(__g1_text_as_bytes("{left, right}")))
+        + score_typed_closure(body::typed_closure_syntax(__g1_text_as_bytes("(value: for<'a> (&'a i64, &'a i64) -> &'a i64) -> i64 / {Trace} { value }")))
+        + score_empty_typed_closure(body::typed_closure_syntax(__g1_text_as_bytes("() -> i64 { 0 }")))
+        + score_not_typed_closure(body::typed_closure_syntax(__g1_text_as_bytes("(value)")))
+        + score_rejected_typed_closure(body::typed_closure_syntax(__g1_text_as_bytes("(value) -> i64 { value }")))
+        + score_label_binder(body::label_syntax(__g1_text_as_bytes("@done: i64 { @done(42) }")))
+        + score_label_transfer(body::label_syntax(__g1_text_as_bytes("@done(call(42))")))
+        + score_label_value(body::label_syntax(__g1_text_as_bytes("@done")))
+        + score_rejected_label(body::label_syntax(__g1_text_as_bytes("@done: { value }")))
+        + score_label_i64_transfer(body::label_i64_transfer_at(__g1_text_as_bytes("@done: i64 { @done(42) }"), scanner::first_token(__g1_text_as_bytes("@done: i64 { @done(42) }"))))
+        + score_rejected_label_i64_transfer(body::label_i64_transfer_at(__g1_text_as_bytes("@done: i64 { @other(42) }"), scanner::first_token(__g1_text_as_bytes("@done: i64 { @other(42) }"))))
+        + score_let_i64_assignment(body::let_i64_assignment_at(__g1_text_as_bytes("let value = 1; value = 42; value"), scanner::first_token(__g1_text_as_bytes("let value = 1; value = 42; value"))))
+        + score_let_i64_initializer(body::let_i64_assignment_at(__g1_text_as_bytes("let value = 41; value"), scanner::first_token(__g1_text_as_bytes("let value = 41; value"))))
+        + score_rejected_let_i64_assignment(body::let_i64_assignment_at(__g1_text_as_bytes("let value = 1; other = 42; value"), scanner::first_token(__g1_text_as_bytes("let value = 1; other = 42; value"))))
 }

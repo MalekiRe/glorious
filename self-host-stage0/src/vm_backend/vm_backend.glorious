@@ -3,6 +3,7 @@
 // source-owned return/trap boundary.
 use mir::Terminator;
 use mir::I64ArithmeticLowering;
+use mir::I64AssignmentLowering;
 use mir::I64ComparisonLowering;
 use mir::I64SelectLowering;
 use mir::I64LiteralLowering;
@@ -105,6 +106,25 @@ pub fn execute_i64_comparison_lowering(lowering: I64ComparisonLowering) -> Execu
         I64ComparisonLowering::Return(body::Comparison::Greater, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::GreaterI64(left, right))),
         _ => Execution::Faulted,
     }
+}
+
+// Both writes have already been preserved in Body/Core/MIR. The current
+// terminal backend observes the replacement value; source-slot cleanup is
+// deliberately left to the storage-instruction lowering rather than erased
+// before MIR.
+pub fn execute_i64_assignment_lowering(lowering: I64AssignmentLowering) -> Execution {
+    handle lowering {
+        I64AssignmentLowering::Return(_, replacement) => execute_candidate(CandidateProgram::Terminal(Terminator::Return, replacement)),
+        _ => Execution::Faulted,
+    }
+}
+
+// Assignment storage is verified as a storage program, which accepts a
+// normal return only after the source owner has been consumed to `Moved`.
+// That makes the executable boundary observe the same post-state carried by
+// MIR rather than accepting a bare replacement literal.
+pub fn execute_i64_assignment_storage_lowering(lowering: StorageLowering) -> Execution {
+    execute_candidate(CandidateProgram::Storage(lowering))
 }
 
 pub fn execute_u64_comparison_lowering(lowering: U64ComparisonLowering) -> Execution {

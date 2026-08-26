@@ -148,6 +148,8 @@ pub fn main() -> i64 {
         + score(service::compile_source_i64_function(source::input("service", "forged", __g1_text_as_bytes("fn answer { 7 }"), identity::digest_of_text("fn answer { 8 }"))))
         + score(service::compile_source_i64_function(source::input("service", "sum", __g1_text_as_bytes("fn sum { 2 + 5 }"), identity::digest_of_text("fn sum { 2 + 5 }"))))
         + score(service::compile_source_i64_function(source::input("service", "division", __g1_text_as_bytes("fn half { 8 / 2 }"), identity::digest_of_text("fn half { 8 / 2 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "label-transfer", __g1_text_as_bytes("fn answer() -> i64 { @done: i64 { @done(42) } }"), identity::digest_of_text("fn answer() -> i64 { @done: i64 { @done(42) } }"))))
+        + score(service::compile_source_i64_function(source::input("service", "let-assignment", __g1_text_as_bytes("fn answer() -> i64 { let value = 1; value = 42; value }"), identity::digest_of_text("fn answer() -> i64 { let value = 1; value = 42; value }"))))
         + score(service::compile_source_i64_function(source::input("service", "missing-right", __g1_text_as_bytes("fn bad { 2 + }"), identity::digest_of_text("fn bad { 2 + }"))))
         + score(service::compile_source_i64_function(source::input("service", "annotated", __g1_text_as_bytes("fn answer() -> i64 { 40 + 2 }"), identity::digest_of_text("fn answer() -> i64 { 40 + 2 }"))))
         + score(service::compile_source_i64_function(source::input("service", "public-annotated", __g1_text_as_bytes("pub fn public_answer() -> i64 { 9 * 9 }"), identity::digest_of_text("pub fn public_answer() -> i64 { 9 * 9 }"))))

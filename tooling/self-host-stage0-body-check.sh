@@ -57,8 +57,8 @@ output="$("$compiler" \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "23" ]] || {
-    echo "self-host body check: expected scalar, bound parameter forms, default-move and borrowed closure-capture, delimiter-sensitive optional move-capture syntax, callable, and structural pattern-test admission, got $output" >&2
+[[ "$output" == "40" ]] || {
+    echo "self-host body check: expected scalar, bound parameter forms, default-move and borrowed closure-capture, delimiter-sensitive optional move-capture, compact and typed closure syntax, scoped label transfer, binder-preserving i64 let/assignment syntax, callable, and structural pattern-test admission, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"

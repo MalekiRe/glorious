@@ -11,6 +11,8 @@ use core::is_boolean;
 use core::is_pattern_test;
 use core::i64_arithmetic;
 use core::I64ArithmeticValue;
+use core::i64_assignment;
+use core::I64AssignmentValue;
 use core::u32_arithmetic;
 use core::U32ArithmeticValue;
 use core::usize_arithmetic;
@@ -46,6 +48,10 @@ use types::Type;
 use mir_storage::Slot;
 use mir_storage::MoveResult;
 use mir_storage::move_out;
+use mir_storage::empty;
+use mir_storage::write;
+use mir_storage::replace;
+use mir_storage::ReplaceResult;
 use mir_storage::FieldSlots;
 use mir_storage::FieldMoveResult;
 use mir_storage::move_field;
@@ -88,6 +94,10 @@ pub fn validate_branch_return_liveness(left_initialized: Bool, right_initialized
 // admission.  This companion form retains the operands required by the first
 // executable MIR instruction family.
 pub enum I64ArithmeticLowering { Return(Arithmetic, i64, i64), Trap }
+// The payload retains both source writes. A later executable-storage lowering
+// replaces this compact form with StorageLive/Store/DestroyIf/StorageDead
+// statements without forcing the parser or Core to rediscover either value.
+pub enum I64AssignmentLowering { Return(i64, i64), Trap }
 pub enum U32ArithmeticLowering { Return(Arithmetic, u32, u32), Trap }
 pub enum UsizeArithmeticLowering { Return(Arithmetic, usize, usize), Trap }
 pub enum U64ComparisonLowering { Return(Comparison, u64, u64), Trap }
@@ -116,6 +126,44 @@ fn lower_i64_arithmetic_value(value: I64ArithmeticValue) -> I64ArithmeticLowerin
         I64ArithmeticValue::Value(operation, left, right) => I64ArithmeticLowering::Return(operation, left, right),
         I64ArithmeticValue::NotArithmetic => I64ArithmeticLowering::Trap,
         _ => I64ArithmeticLowering::Trap,
+    }
+}
+
+pub fn lower_i64_assignment(value: CoreResult) -> I64AssignmentLowering {
+    handle value {
+        CoreResult::Value(core) => lower_i64_assignment_value(i64_assignment(core)),
+        _ => I64AssignmentLowering::Trap,
+    }
+}
+
+fn lower_i64_assignment_value(value: I64AssignmentValue) -> I64AssignmentLowering {
+    handle value {
+        I64AssignmentValue::Value(initial, replacement) => I64AssignmentLowering::Return(initial, replacement),
+        _ => I64AssignmentLowering::Trap,
+    }
+}
+
+// This is the first source assignment bridge that reaches the actual slot
+// model: initialize an empty lexical owner, replace its live resident, then
+// consume the final source read. The resulting `Moved` post-state is accepted
+// by the existing verified storage backend, keeping replacement distinct from
+// an invented terminal constant.
+pub fn lower_i64_assignment_storage(value: CoreResult) -> StorageLowering {
+    handle lower_i64_assignment(value) {
+        I64AssignmentLowering::Return(initial, replacement) => lower_i64_assignment_storage_values(initial, replacement),
+        _ => StorageLowering::Trap(Slot::Uninitialized),
+    }
+}
+
+fn lower_i64_assignment_storage_values(initial: i64, replacement: i64) -> StorageLowering {
+    lower_i64_assignment_replacement(replace(write(empty(), initial), replacement))
+}
+
+fn lower_i64_assignment_replacement(result: ReplaceResult) -> StorageLowering {
+    handle result {
+        ReplaceResult::Replaced(_, slot) => lower_move(slot),
+        ReplaceResult::Written(slot) => lower_move(slot),
+        _ => StorageLowering::Trap(Slot::Uninitialized),
     }
 }
 

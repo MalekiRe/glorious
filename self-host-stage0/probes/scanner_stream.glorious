@@ -21,6 +21,6 @@ pub fn main() -> i64 {
         + score(scanner::token_stream_checked(source::input("scanner", "valid-unicode-escape", __g1_text_as_bytes("\"\\u{1f600}\""), identity::digest_of_text("\"\\u{1f600}\""))))
         + score(scanner::token_stream_checked(source::input("scanner", "surrogate-unicode-escape", __g1_text_as_bytes("\"\\u{d800}\""), identity::digest_of_text("\"\\u{d800}\""))))
         + score(scanner::token_stream_checked(source::input("scanner", "oversized-unicode-escape", __g1_text_as_bytes("\"\\u{110000}\""), identity::digest_of_text("\"\\u{110000}\""))))
-        + score(scanner::token_stream_checked(source::input("scanner", "invalid-character", __g1_text_as_bytes("@"), identity::digest_of_text("@"))))
+        + score(scanner::token_stream_checked(source::input("scanner", "invalid-character", __g1_text_as_bytes("$"), identity::digest_of_text("$"))))
         + score(scanner::token_stream_checked(source::input("scanner", "forged", __g1_text_as_bytes("answer"), identity::digest_of_text("wrong"))))
 }

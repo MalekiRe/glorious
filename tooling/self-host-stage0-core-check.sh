@@ -59,7 +59,7 @@ output="$("$compiler" \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "23" ]] || {
+[[ "$output" == "24" ]] || {
     echo "self-host core check: expected scalar, bound parameter forms, closure-capture kind, typed unsigned literal/arithmetic payloads, call, pattern-test kind, scalar operands, and callable contracts, got $output" >&2
     exit 1
 }

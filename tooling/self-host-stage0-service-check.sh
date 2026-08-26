@@ -17,7 +17,7 @@ source_args=(
 )
 for module in \
     request runtime_manifest bootstrap_indirection revision dependency query output operation \
-    types signature pattern body core mir_storage mir vm_backend bootstrap artifact_cache \
+    types signature pattern placeflow body core mir_storage mir vm_backend bootstrap artifact_cache \
     identity diagnostic source scanner header interface module_graph main_cli service; do
     source_args+=(
         --source service-library@0.1.0 "src/$module/$module.glorious"

@@ -1126,7 +1126,34 @@ fn is_operator_and(value: u8) -> Bool {
 fn is_operator_or(value: u8) -> Bool {
     handle value == 124 {
         true => true,
-        false => value == 94,
+        false => is_operator_caret(value),
+        _ => false,
+    }
+}
+
+// Keep the full frozen prefix/operator vocabulary together. `@` is not an
+// arbitrary extension: Body's compact label binder and transfer syntax depend
+// on it being a standalone operator token before the following identifier.
+fn is_operator_caret(value: u8) -> Bool {
+    handle value == 94 {
+        true => true,
+        false => is_operator_tilde(value),
+        _ => false,
+    }
+}
+
+fn is_operator_tilde(value: u8) -> Bool {
+    handle value == 126 {
+        true => true,
+        false => is_operator_question(value),
+        _ => false,
+    }
+}
+
+fn is_operator_question(value: u8) -> Bool {
+    handle value == 63 {
+        true => true,
+        false => value == 64,
         _ => false,
     }
 }

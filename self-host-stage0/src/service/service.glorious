@@ -26,6 +26,10 @@ use body::Arithmetic;
 use body::Comparison;
 use body::ScalarBinaryAdmission;
 use body::scalar_binary_arithmetic;
+use body::LabelI64TransferAdmission;
+use body::label_i64_transfer_at;
+use body::LetI64AssignmentAdmission;
+use body::let_i64_assignment_at;
 use pattern::Pattern;
 use pattern::Value;
 use types::Type;
@@ -46,6 +50,7 @@ use vm_backend::execute_u8_comparison_lowering;
 use vm_backend::execute_usize_comparison_lowering;
 use vm_backend::execute_i64_select_lowering;
 use vm_backend::execute_i64_literal_lowering;
+use vm_backend::execute_i64_assignment_storage_lowering;
 use vm_backend::execute_u32_literal_lowering;
 use vm_backend::execute_u32_arithmetic_lowering;
 use vm_backend::execute_usize_arithmetic_lowering;
@@ -2639,8 +2644,45 @@ fn compile_i64_function_body(input: SourceInput, input_bytes: Bytes, open: Token
     let literal = next_token(input_bytes, open);
     handle token_matches(input_bytes, literal, "return") {
         true => compile_i64_function_return_literal(input, input_bytes, next_token(input_bytes, literal)),
-        false => handle signed_i64_literal_at_checked(input, literal) {
-            SignedI64LiteralAdmission::Value(value, last) => compile_i64_function_after_left(input, input_bytes, last, value),
+        false => handle label_i64_transfer_at(input_bytes, literal) {
+            LabelI64TransferAdmission::Value(value, label_close) => compile_i64_function_label_close(input_bytes, label_close, value),
+            LabelI64TransferAdmission::NotLabel => handle let_i64_assignment_at(input_bytes, literal) {
+                LetI64AssignmentAdmission::Value(initial, replacement, last) => compile_i64_function_let_close(input_bytes, last, initial, replacement),
+                LetI64AssignmentAdmission::NotLet => handle signed_i64_literal_at_checked(input, literal) {
+                    SignedI64LiteralAdmission::Value(value, last) => compile_i64_function_after_left(input, input_bytes, last, value),
+                    _ => Execution::Faulted,
+                },
+                LetI64AssignmentAdmission::Rejected => Execution::Faulted,
+                _ => Execution::Faulted,
+            },
+            LabelI64TransferAdmission::Rejected => Execution::Faulted,
+            _ => Execution::Faulted,
+        },
+        _ => Execution::Faulted,
+    }
+}
+
+// The body parser owns the label's scoped binder/target identity. Service
+// retains only its enclosing function delimiter, then routes the selected
+// payload through the ordinary typed scalar lowering instead of treating a
+// label as a launcher-side shortcut.
+fn compile_i64_function_label_close(input_bytes: Bytes, label_close: TokenStart, value: i64) -> Execution {
+    let function_close = next_token(input_bytes, label_close);
+    handle token_matches(input_bytes, function_close, "}") {
+        true => compile_i64_function_end(input_bytes, function_close, value),
+        _ => Execution::Faulted,
+    }
+}
+
+// Body returns the final source read token, after proving all initializer,
+// assignment, and final-read spellings refer to one lexical binding. Service
+// contributes only the enclosing function boundary before lowering the
+// selected value through the normal scalar IR pipeline.
+fn compile_i64_function_let_close(input_bytes: Bytes, read: TokenStart, initial: i64, replacement: i64) -> Execution {
+    let function_close = next_token(input_bytes, read);
+    handle token_matches(input_bytes, function_close, "}") {
+        true => handle token_kind(next_token(input_bytes, function_close)) {
+            TokenKind::End => compile_i64_assignment(initial, replacement, Type::I64),
             _ => Execution::Faulted,
         },
         _ => Execution::Faulted,
@@ -3121,6 +3163,10 @@ fn finish_source_header(prefix: header::HeaderPrefix) -> ServiceOutcome {
 
 pub fn compile_i64_literal(value: i64, expected: Type) -> Execution {
     execute_i64_literal_lowering(mir::lower_i64_literal(lower(Expression::I64(value), expected)))
+}
+
+pub fn compile_i64_assignment(initial: i64, replacement: i64, expected: Type) -> Execution {
+    execute_i64_assignment_storage_lowering(mir::lower_i64_assignment_storage(lower(Expression::I64Assignment(initial, replacement), expected)))
 }
 
 pub fn compile_u32_literal(value: u32, expected: Type) -> Execution {

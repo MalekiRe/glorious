@@ -15,6 +15,8 @@ use scanner::next_token;
 use scanner::token_equals;
 use scanner::token_kind;
 use scanner::token_matches;
+use scanner::SignedI64LiteralAdmission;
+use scanner::signed_i64_literal_at;
 use placeflow::PlaceState;
 use placeflow::ClosureCaptureMode;
 use placeflow::ClosureCaptureAdmission;
@@ -32,6 +34,10 @@ pub enum Expression {
     I64(i64),
     ParameterI64(i64),
     I64Arithmetic(Arithmetic, i64, i64),
+    // A source-addressable scalar place initialized and then replaced. The
+    // complete MIR form grows explicit StorageLive/Store/DestroyIf actions;
+    // this value keeps both writes visible through the current terminal path.
+    I64Assignment(i64, i64),
     ParameterI64Arithmetic(Arithmetic, i64, i64),
     I64Comparison(Comparison, i64, i64),
     I64Select(Bool, i64, i64),
@@ -53,7 +59,7 @@ pub enum Expression {
     PatternTest(Pattern, Value),
 }
 
-pub enum BodyKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
+pub enum BodyKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, Assignment, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
 pub enum BodyAdmission { Value(BodyKind), TypeError }
 // A reusable, source-owned declaration parser for the first scalar function
 // family.  Service used to duplicate this state machine for every scalar
@@ -61,8 +67,489 @@ pub enum BodyAdmission { Value(BodyKind), TypeError }
 // type-directed choice rather than another handwritten parser.
 pub enum ScalarBinaryAdmission { Value(Arithmetic), Rejected }
 pub enum MoveCaptureClosureSyntax { Captures(i64), NotMoveClosure, Rejected }
+// A compact closure begins with a block delimiter, so its first two tokens
+// decide whether it owns the closure grammar or remains an ordinary block.
+// The value is the arity retained by the source AST boundary.
+pub enum CompactClosureSyntax { Parameters(i64), NotCompactClosure, Rejected }
+// Typed closures are selected by a balanced parameter list followed by `->`.
+// Their type payload belongs to the header/type parser, but Body must retain
+// this syntactic choice before a parenthesized value is lowered as grouping.
+pub enum TypedClosureSyntax { Parameters(i64), NotTypedClosure, Rejected }
+// `@name` is a first-class label value; adding `:` creates a label binder,
+// while adding `(` transfers to an already active label.
+pub enum LabelSyntax { Binder, Transfer, Value, NotLabel, Rejected }
+// A narrow value-carrying label form is sufficient to connect compact label
+// syntax to the existing scalar Body/Core/MIR route while the complete body
+// arena and arbitrary label result elaboration are ported.
+pub enum LabelI64TransferAdmission { Value(i64, TokenStart), NotLabel, Rejected }
+// The first executable mutable-place slice retains source binder identity for
+// `let value = initial; value = replacement; value` before full general
+// place/MIR statement lowering lands.
+pub enum LetI64AssignmentAdmission { Value(i64, i64, TokenStart), NotLet, Rejected }
 enum MoveCaptureNames { Empty, Node(TokenStart, Bool, Array<MoveCaptureNames>) }
 enum MoveCaptureNameInsert { Added(MoveCaptureNames), Duplicate }
+
+// Mirror the frozen parser's deliberately narrow lookahead: `{ => body }`,
+// `{ name => body }`, and `{ name, ... => body }` are compact closures;
+// `{ expression }` is an ordinary contextual block. Once a comma makes the
+// closure form unambiguous, malformed parameter syntax is rejected instead
+// of being silently reclassified as a block.
+pub fn compact_closure_syntax(input: Bytes) -> CompactClosureSyntax {
+    compact_closure_open(input, first_token(input))
+}
+
+fn compact_closure_open(input: Bytes, token: TokenStart) -> CompactClosureSyntax {
+    handle token_matches(input, token, "{") {
+        true => compact_closure_first(input, next_token(input, token)),
+        false => CompactClosureSyntax::NotCompactClosure,
+        _ => CompactClosureSyntax::Rejected,
+    }
+}
+
+fn compact_closure_first(input: Bytes, token: TokenStart) -> CompactClosureSyntax {
+    handle token_matches(input, token, "=>") {
+        true => compact_closure_body_open(input, next_token(input, token), 0),
+        false => handle token_kind(token) {
+            TokenKind::Identifier => compact_closure_after_name(input, next_token(input, token), 1),
+            _ => CompactClosureSyntax::NotCompactClosure,
+        },
+        _ => CompactClosureSyntax::Rejected,
+    }
+}
+
+fn compact_closure_after_name(input: Bytes, token: TokenStart, count: i64) -> CompactClosureSyntax {
+    handle token_matches(input, token, "=>") {
+        true => compact_closure_body_open(input, next_token(input, token), count),
+        false => handle token_matches(input, token, ",") {
+            true => compact_closure_next_name(input, next_token(input, token), count),
+            false => CompactClosureSyntax::NotCompactClosure,
+            _ => CompactClosureSyntax::Rejected,
+        },
+        _ => CompactClosureSyntax::Rejected,
+    }
+}
+
+fn compact_closure_next_name(input: Bytes, token: TokenStart, count: i64) -> CompactClosureSyntax {
+    handle token_kind(token) {
+        TokenKind::Identifier => compact_closure_after_name_required(input, next_token(input, token), count + 1),
+        _ => CompactClosureSyntax::Rejected,
+    }
+}
+
+// Reaching this state means an earlier comma selected compact-closure syntax;
+// unlike the first parameter, a missing arrow is therefore malformed closure
+// syntax, not a late fallback to a contextual block.
+fn compact_closure_after_name_required(input: Bytes, token: TokenStart, count: i64) -> CompactClosureSyntax {
+    handle token_matches(input, token, "=>") {
+        true => compact_closure_body_open(input, next_token(input, token), count),
+        false => handle token_matches(input, token, ",") {
+            true => compact_closure_next_name(input, next_token(input, token), count),
+            false => CompactClosureSyntax::Rejected,
+            _ => CompactClosureSyntax::Rejected,
+        },
+        _ => CompactClosureSyntax::Rejected,
+    }
+}
+
+fn compact_closure_body_open(input: Bytes, token: TokenStart, count: i64) -> CompactClosureSyntax {
+    handle token_kind(token) {
+        TokenKind::End => CompactClosureSyntax::Rejected,
+        TokenKind::Punctuation => handle token_matches(input, token, "}") {
+            true => CompactClosureSyntax::Rejected,
+            false => compact_closure_body(input, token, count, 1),
+            _ => CompactClosureSyntax::Rejected,
+        },
+        _ => compact_closure_body(input, token, count, 1),
+    }
+}
+
+fn compact_closure_body(input: Bytes, token: TokenStart, count: i64, depth: i64) -> CompactClosureSyntax {
+    handle token_matches(input, token, "{") {
+        true => compact_closure_body(input, next_token(input, token), count, depth + 1),
+        false => compact_closure_body_non_open(input, token, count, depth),
+        _ => CompactClosureSyntax::Rejected,
+    }
+}
+
+fn compact_closure_body_non_open(input: Bytes, token: TokenStart, count: i64, depth: i64) -> CompactClosureSyntax {
+    handle token_matches(input, token, "}") {
+        true => handle depth == 1 {
+            true => handle token_kind(next_token(input, token)) {
+                TokenKind::End => CompactClosureSyntax::Parameters(count),
+                _ => CompactClosureSyntax::Rejected,
+            },
+            false => compact_closure_body(input, next_token(input, token), count, depth - 1),
+            _ => CompactClosureSyntax::Rejected,
+        },
+        false => handle token_kind(token) {
+            TokenKind::End => CompactClosureSyntax::Rejected,
+            _ => compact_closure_body(input, next_token(input, token), count, depth),
+        },
+        _ => CompactClosureSyntax::Rejected,
+    }
+}
+
+// Preserve the frozen `typed_closure_ahead` boundary. A `)` only closes the
+// candidate list when all nested tuple/callable parentheses have closed; only
+// then may an immediately following arrow claim the closure grammar.
+pub fn typed_closure_syntax(input: Bytes) -> TypedClosureSyntax {
+    typed_closure_open(input, first_token(input))
+}
+
+fn typed_closure_open(input: Bytes, token: TokenStart) -> TypedClosureSyntax {
+    handle token_matches(input, token, "(") {
+        true => typed_closure_parameters(input, next_token(input, token), 1, 0, false),
+        false => TypedClosureSyntax::NotTypedClosure,
+        _ => TypedClosureSyntax::Rejected,
+    }
+}
+
+fn typed_closure_parameters(input: Bytes, token: TokenStart, depth: i64, count: i64, has_content: Bool) -> TypedClosureSyntax {
+    handle token_matches(input, token, "(") {
+        true => typed_closure_parameters(input, next_token(input, token), depth + 1, count, has_content),
+        false => typed_closure_parameters_non_open(input, token, depth, count, has_content),
+        _ => TypedClosureSyntax::Rejected,
+    }
+}
+
+fn typed_closure_parameters_non_open(input: Bytes, token: TokenStart, depth: i64, count: i64, has_content: Bool) -> TypedClosureSyntax {
+    handle token_matches(input, token, ")") {
+        true => handle depth == 1 {
+            true => typed_closure_after_parameters(input, next_token(input, token), count, has_content),
+            false => typed_closure_parameters(input, next_token(input, token), depth - 1, count, has_content),
+            _ => TypedClosureSyntax::Rejected,
+        },
+        false => typed_closure_parameters_not_paren(input, token, depth, count, has_content),
+        _ => TypedClosureSyntax::Rejected,
+    }
+}
+
+fn typed_closure_parameters_not_paren(input: Bytes, token: TokenStart, depth: i64, count: i64, has_content: Bool) -> TypedClosureSyntax {
+    handle token_kind(token) {
+        TokenKind::End => TypedClosureSyntax::Rejected,
+        _ => handle depth == 1 {
+            true => handle token_matches(input, token, ":") {
+                true => typed_closure_parameters(input, next_token(input, token), depth, count + 1, true),
+                false => typed_closure_parameters(input, next_token(input, token), depth, count, true),
+                _ => TypedClosureSyntax::Rejected,
+            },
+            false => typed_closure_parameters(input, next_token(input, token), depth, count, has_content),
+            _ => TypedClosureSyntax::Rejected,
+        },
+    }
+}
+
+fn typed_closure_after_parameters(input: Bytes, token: TokenStart, count: i64, has_content: Bool) -> TypedClosureSyntax {
+    handle token_matches(input, token, "->") {
+        true => typed_closure_parameter_shape(count, has_content),
+        false => TypedClosureSyntax::NotTypedClosure,
+        _ => TypedClosureSyntax::Rejected,
+    }
+}
+
+fn typed_closure_parameter_shape(count: i64, has_content: Bool) -> TypedClosureSyntax {
+    handle has_content {
+        true => handle count > 0 {
+            true => TypedClosureSyntax::Parameters(count),
+            false => TypedClosureSyntax::Rejected,
+            _ => TypedClosureSyntax::Rejected,
+        },
+        false => TypedClosureSyntax::Parameters(0),
+        _ => TypedClosureSyntax::Rejected,
+    }
+}
+
+// The compact label spelling is deliberately recognized before generic
+// prefix-expression parsing. Its result type is opaque here because Header
+// owns the full type grammar; this gate only retains the lexical construct
+// that Core later brands and validates.
+pub fn label_syntax(input: Bytes) -> LabelSyntax {
+    label_start(input, first_token(input))
+}
+
+fn label_start(input: Bytes, token: TokenStart) -> LabelSyntax {
+    handle token_matches(input, token, "@") {
+        true => label_name(input, next_token(input, token)),
+        false => LabelSyntax::NotLabel,
+        _ => LabelSyntax::Rejected,
+    }
+}
+
+fn label_name(input: Bytes, token: TokenStart) -> LabelSyntax {
+    handle token_kind(token) {
+        TokenKind::Identifier => label_suffix(input, next_token(input, token)),
+        _ => LabelSyntax::Rejected,
+    }
+}
+
+fn label_suffix(input: Bytes, token: TokenStart) -> LabelSyntax {
+    handle token_matches(input, token, ":") {
+        true => label_binder_type_start(input, next_token(input, token)),
+        false => handle token_matches(input, token, "(") {
+            true => label_transfer(input, next_token(input, token), 1),
+            false => handle token_kind(token) {
+                TokenKind::End => LabelSyntax::Value,
+                _ => LabelSyntax::Rejected,
+            },
+            _ => LabelSyntax::Rejected,
+        },
+        _ => LabelSyntax::Rejected,
+    }
+}
+
+fn label_binder_type_start(input: Bytes, token: TokenStart) -> LabelSyntax {
+    handle token_kind(token) {
+        TokenKind::End => LabelSyntax::Rejected,
+        TokenKind::Punctuation => handle token_matches(input, token, "{") {
+            true => LabelSyntax::Rejected,
+            false => label_binder_type(input, next_token(input, token)),
+            _ => LabelSyntax::Rejected,
+        },
+        _ => label_binder_type(input, next_token(input, token)),
+    }
+}
+
+fn label_binder_type(input: Bytes, token: TokenStart) -> LabelSyntax {
+    handle token_matches(input, token, "{") {
+        true => label_binder_body(input, next_token(input, token), 1),
+        false => handle token_kind(token) {
+            TokenKind::End => LabelSyntax::Rejected,
+            _ => label_binder_type(input, next_token(input, token)),
+        },
+        _ => LabelSyntax::Rejected,
+    }
+}
+
+fn label_binder_body(input: Bytes, token: TokenStart, depth: i64) -> LabelSyntax {
+    handle token_matches(input, token, "{") {
+        true => label_binder_body(input, next_token(input, token), depth + 1),
+        false => label_binder_body_non_open(input, token, depth),
+        _ => LabelSyntax::Rejected,
+    }
+}
+
+fn label_binder_body_non_open(input: Bytes, token: TokenStart, depth: i64) -> LabelSyntax {
+    handle token_matches(input, token, "}") {
+        true => handle depth == 1 {
+            true => handle token_kind(next_token(input, token)) {
+                TokenKind::End => LabelSyntax::Binder,
+                _ => LabelSyntax::Rejected,
+            },
+            false => label_binder_body(input, next_token(input, token), depth - 1),
+            _ => LabelSyntax::Rejected,
+        },
+        false => handle token_kind(token) {
+            TokenKind::End => LabelSyntax::Rejected,
+            _ => label_binder_body(input, next_token(input, token), depth),
+        },
+        _ => LabelSyntax::Rejected,
+    }
+}
+
+fn label_transfer(input: Bytes, token: TokenStart, depth: i64) -> LabelSyntax {
+    handle token_matches(input, token, "(") {
+        true => label_transfer(input, next_token(input, token), depth + 1),
+        false => label_transfer_non_open(input, token, depth),
+        _ => LabelSyntax::Rejected,
+    }
+}
+
+fn label_transfer_non_open(input: Bytes, token: TokenStart, depth: i64) -> LabelSyntax {
+    handle token_matches(input, token, ")") {
+        true => handle depth == 1 {
+            true => handle token_kind(next_token(input, token)) {
+                TokenKind::End => LabelSyntax::Transfer,
+                _ => LabelSyntax::Rejected,
+            },
+            false => label_transfer(input, next_token(input, token), depth - 1),
+            _ => LabelSyntax::Rejected,
+        },
+        false => handle token_kind(token) {
+            TokenKind::End => LabelSyntax::Rejected,
+            _ => label_transfer(input, next_token(input, token), depth),
+        },
+        _ => LabelSyntax::Rejected,
+    }
+}
+
+// Parse `@name: i64 { @name(<i64>) }` from an already-positioned body
+// cursor. The returned close token belongs to the label body so the enclosing
+// declaration parser still owns its own final delimiter. Matching the source
+// binder tokens (rather than accepting the same spelling loosely) is the
+// first executable label-scope invariant in the source route.
+pub fn label_i64_transfer_at(input: Bytes, token: TokenStart) -> LabelI64TransferAdmission {
+    label_i64_start(input, token)
+}
+
+fn label_i64_start(input: Bytes, token: TokenStart) -> LabelI64TransferAdmission {
+    handle token_matches(input, token, "@") {
+        true => label_i64_name(input, next_token(input, token)),
+        false => LabelI64TransferAdmission::NotLabel,
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_name(input: Bytes, name: TokenStart) -> LabelI64TransferAdmission {
+    handle token_kind(name) {
+        TokenKind::Identifier => label_i64_colon(input, name, next_token(input, name)),
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_colon(input: Bytes, name: TokenStart, token: TokenStart) -> LabelI64TransferAdmission {
+    handle token_matches(input, token, ":") {
+        true => label_i64_type(input, name, next_token(input, token)),
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_type(input: Bytes, name: TokenStart, token: TokenStart) -> LabelI64TransferAdmission {
+    handle token_matches(input, token, "i64") {
+        true => label_i64_open(input, name, next_token(input, token)),
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_open(input: Bytes, name: TokenStart, token: TokenStart) -> LabelI64TransferAdmission {
+    handle token_matches(input, token, "{") {
+        true => label_i64_inner_sigil(input, name, next_token(input, token)),
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_inner_sigil(input: Bytes, name: TokenStart, token: TokenStart) -> LabelI64TransferAdmission {
+    handle token_matches(input, token, "@") {
+        true => label_i64_target(input, name, next_token(input, token)),
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_target(input: Bytes, name: TokenStart, target: TokenStart) -> LabelI64TransferAdmission {
+    handle token_kind(target) {
+        TokenKind::Identifier => handle token_equals(input, name, target) {
+            true => label_i64_value_open(input, next_token(input, target)),
+            false => LabelI64TransferAdmission::Rejected,
+            _ => LabelI64TransferAdmission::Rejected,
+        },
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_value_open(input: Bytes, token: TokenStart) -> LabelI64TransferAdmission {
+    handle token_matches(input, token, "(") {
+        true => label_i64_value(input, next_token(input, token)),
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_value(input: Bytes, token: TokenStart) -> LabelI64TransferAdmission {
+    handle signed_i64_literal_at(input, token) {
+        SignedI64LiteralAdmission::Value(value, last) => label_i64_value_close(input, value, next_token(input, last)),
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_value_close(input: Bytes, value: i64, token: TokenStart) -> LabelI64TransferAdmission {
+    handle token_matches(input, token, ")") {
+        true => label_i64_body_close(input, value, next_token(input, token)),
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+fn label_i64_body_close(input: Bytes, value: i64, token: TokenStart) -> LabelI64TransferAdmission {
+    handle token_matches(input, token, "}") {
+        true => LabelI64TransferAdmission::Value(value, token),
+        _ => LabelI64TransferAdmission::Rejected,
+    }
+}
+
+// Parse the scalar source-place forms exercised by the frozen assignment
+// contract. The initializer-only form and the replacement form share the
+// exact binder token; a same-shaped but different spelling cannot become a
+// synthetic local read or write.
+pub fn let_i64_assignment_at(input: Bytes, token: TokenStart) -> LetI64AssignmentAdmission {
+    let_i64_start(input, token)
+}
+
+fn let_i64_start(input: Bytes, token: TokenStart) -> LetI64AssignmentAdmission {
+    handle token_matches(input, token, "let") {
+        true => let_i64_name(input, next_token(input, token)),
+        false => LetI64AssignmentAdmission::NotLet,
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
+
+fn let_i64_name(input: Bytes, name: TokenStart) -> LetI64AssignmentAdmission {
+    handle token_kind(name) {
+        TokenKind::Identifier => let_i64_initializer_equals(input, name, next_token(input, name)),
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
+
+fn let_i64_initializer_equals(input: Bytes, name: TokenStart, token: TokenStart) -> LetI64AssignmentAdmission {
+    handle token_matches(input, token, "=") {
+        true => let_i64_initializer(input, name, next_token(input, token)),
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
+
+fn let_i64_initializer(input: Bytes, name: TokenStart, token: TokenStart) -> LetI64AssignmentAdmission {
+    handle signed_i64_literal_at(input, token) {
+        SignedI64LiteralAdmission::Value(value, last) => let_i64_initializer_semicolon(input, name, value, next_token(input, last)),
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
+
+fn let_i64_initializer_semicolon(input: Bytes, name: TokenStart, initial: i64, token: TokenStart) -> LetI64AssignmentAdmission {
+    handle token_matches(input, token, ";") {
+        true => let_i64_read_or_write(input, name, initial, next_token(input, token)),
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
+
+fn let_i64_read_or_write(input: Bytes, name: TokenStart, initial: i64, token: TokenStart) -> LetI64AssignmentAdmission {
+    handle token_kind(token) {
+        TokenKind::Identifier => handle token_equals(input, name, token) {
+            true => let_i64_after_first_read(input, name, initial, next_token(input, token), token),
+            false => LetI64AssignmentAdmission::Rejected,
+            _ => LetI64AssignmentAdmission::Rejected,
+        },
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
+
+fn let_i64_after_first_read(input: Bytes, name: TokenStart, initial: i64, token: TokenStart, read: TokenStart) -> LetI64AssignmentAdmission {
+    handle token_matches(input, token, "=") {
+        true => let_i64_replacement(input, name, initial, next_token(input, token)),
+        false => LetI64AssignmentAdmission::Value(initial, initial, read),
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
+
+fn let_i64_replacement(input: Bytes, name: TokenStart, initial: i64, token: TokenStart) -> LetI64AssignmentAdmission {
+    handle signed_i64_literal_at(input, token) {
+        SignedI64LiteralAdmission::Value(value, last) => let_i64_replacement_semicolon(input, name, initial, value, next_token(input, last)),
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
+
+fn let_i64_replacement_semicolon(input: Bytes, name: TokenStart, initial: i64, replacement: i64, token: TokenStart) -> LetI64AssignmentAdmission {
+    handle token_matches(input, token, ";") {
+        true => let_i64_final_read(input, name, initial, replacement, next_token(input, token)),
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
+
+fn let_i64_final_read(input: Bytes, name: TokenStart, initial: i64, replacement: i64, token: TokenStart) -> LetI64AssignmentAdmission {
+    handle token_kind(token) {
+        TokenKind::Identifier => handle token_equals(input, name, token) {
+            true => LetI64AssignmentAdmission::Value(initial, replacement, token),
+            false => LetI64AssignmentAdmission::Rejected,
+            _ => LetI64AssignmentAdmission::Rejected,
+        },
+        _ => LetI64AssignmentAdmission::Rejected,
+    }
+}
 
 // Recognize the real optional-capture surface without confusing it with the
 // ordinary expression-level `move (value)`: only a capture list immediately
@@ -293,6 +780,7 @@ pub fn admit(expression: Expression, expected: Type) -> BodyAdmission {
         (Expression::I64(_), Type::I64) => BodyAdmission::Value(BodyKind::Literal),
         (Expression::ParameterI64(_), Type::I64) => BodyAdmission::Value(BodyKind::Parameter),
         (Expression::I64Arithmetic(_, _, _), Type::I64) => BodyAdmission::Value(BodyKind::Arithmetic),
+        (Expression::I64Assignment(_, _), Type::I64) => BodyAdmission::Value(BodyKind::Assignment),
         (Expression::ParameterI64Arithmetic(_, _, _), Type::I64) => BodyAdmission::Value(BodyKind::ParameterArithmetic),
         (Expression::I64Comparison(_, _, _), Type::Bool) => BodyAdmission::Value(BodyKind::Comparison),
         (Expression::I64Select(_, _, _), Type::I64) => BodyAdmission::Value(BodyKind::Conditional),

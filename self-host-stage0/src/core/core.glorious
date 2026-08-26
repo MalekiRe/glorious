@@ -10,7 +10,7 @@ use body::BodyAdmission;
 use body::admit;
 use types::Type;
 
-pub enum CoreKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
+pub enum CoreKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, Assignment, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
 
 pub struct CoreValue {
     result: Type,
@@ -42,6 +42,7 @@ fn if_matches(expression: Expression, expected: Type) -> CoreResult {
 // prevents the bootstrap arithmetic path from reconstructing operands from a
 // scanner side channel after Core has accepted it.
 pub enum I64ArithmeticValue { Value(Arithmetic, i64, i64), NotArithmetic }
+pub enum I64AssignmentValue { Value(i64, i64), NotAssignment }
 pub enum U32ArithmeticValue { Value(Arithmetic, u32, u32), NotU32Arithmetic }
 pub enum UsizeArithmeticValue { Value(Arithmetic, usize, usize), NotUsizeArithmetic }
 pub enum U64ComparisonValue { Value(Comparison, u64, u64), NotU64Comparison }
@@ -62,6 +63,13 @@ pub fn i64_arithmetic(value: CoreValue) -> I64ArithmeticValue {
         Expression::I64Arithmetic(operation, left, right) => I64ArithmeticValue::Value(operation, left, right),
         Expression::ParameterI64Arithmetic(operation, left, right) => I64ArithmeticValue::Value(operation, left, right),
         _ => I64ArithmeticValue::NotArithmetic,
+    }
+}
+
+pub fn i64_assignment(value: CoreValue) -> I64AssignmentValue {
+    handle value.body_value {
+        Expression::I64Assignment(initial, replacement) => I64AssignmentValue::Value(initial, replacement),
+        _ => I64AssignmentValue::NotAssignment,
     }
 }
 
@@ -148,6 +156,7 @@ fn core_kind(kind: BodyKind) -> CoreKind {
         BodyKind::Boolean => CoreKind::Boolean,
         BodyKind::ParameterBoolean => CoreKind::ParameterBoolean,
         BodyKind::Arithmetic => CoreKind::Arithmetic,
+        BodyKind::Assignment => CoreKind::Assignment,
         BodyKind::ParameterArithmetic => CoreKind::ParameterArithmetic,
         BodyKind::Comparison => CoreKind::Comparison,
         BodyKind::Conditional => CoreKind::Conditional,

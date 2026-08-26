@@ -19,6 +19,7 @@ pub fn score_u32_arithmetic(result: core::CoreResult) -> i64 { handle result { c
 pub fn score_unary_call_contract(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::call(value) { core::CallValue::Unary(signature::Callable::Unary(0, types::Type::I64, types::Type::I64, types::EffectRowIdentity::Empty, signature::Invocation::Once), types::Type::I64) => 1, _ => 0 }, _ => 0 } }
 pub fn score_binary_call_contract(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::call(value) { core::CallValue::Binary(signature::Callable::Binary(0, types::Type::I64, types::Type::I64, types::Type::I64, types::EffectRowIdentity::Empty, signature::Invocation::Once), types::Type::I64, types::Type::I64) => 1, _ => 0 }, _ => 0 } }
 pub fn score_capture(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_closure_capture(value) { true => 1, false => 0, _ => 0 }, _ => 0 } }
+pub fn score_assignment(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::i64_assignment(value) { core::I64AssignmentValue::Value(1, 42) => 1, _ => 0 }, _ => 0 } }
 pub fn main() -> i64 {
     score(core::lower(body::Expression::I64(1), types::Type::I64))
         + score_parameter(core::lower(body::Expression::ParameterI64(1), types::Type::I64))
@@ -45,4 +46,5 @@ pub fn main() -> i64 {
         + score_unary_call_contract(core::lower(body::Expression::Call1(signature::callable(types::Type::I64, types::Type::I64), types::Type::I64), types::Type::I64))
         + score_binary_call_contract(core::lower(body::Expression::Call2(signature::binary(types::Type::I64, types::Type::I64, types::Type::I64), types::Type::I64, types::Type::I64), types::Type::I64))
         + score_capture(core::lower(body::Expression::ClosureCapture(placeflow::available(), placeflow::ClosureCaptureMode::ExplicitMove, types::Type::I64), types::Type::I64))
+        + score_assignment(core::lower(body::Expression::I64Assignment(1, 42), types::Type::I64))
 }
