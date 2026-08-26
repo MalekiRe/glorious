@@ -241,6 +241,7 @@ Type tags and exact payloads:
 | `0x28` | `RESUMPTION` | descriptor below |
 | `0x29` | `BINDING_PACK` | `u32 payload_type; u32 identity_name` |
 | `0x2a` | `AVAILABLE` | `u32 identity_name` |
+| `0x2b` | `STATIC_DATA` | `u32 element_type; u128 tag; u32 alignment` |
 
 An enum `Variant` is:
 
@@ -268,6 +269,13 @@ copy-verifiable captured state. `AVAILABLE` is always zero-sized, opaque, and
 nonconstructible. `BINDING_PACK` is opaque but has the runtime layout and drop
 behavior of its payload tuple.
 
+`STATIC_DATA` is compiler-owned, immutable artifact data. Its `tag` is a stable
+type identity, not a source spelling or MIME-like label; `alignment` is nonzero
+and a power of two. It is always `DUPLICABLE|ZERO_USE_ALLOWED` and has no
+user-source constructor. A static-data constant may be loaded only into the one
+declared `STATIC_DATA` type with the same `(tag, alignment)` pair. The `element`
+type controls the sealed shared-reference result of `static.get_shared`.
+
 The predefined scalar records MUST appear first, exactly once, in tag order from
 `UNIT` through `BYTES`. Recursive nominal references are allowed. Ignoring
 references through `REF_*`, `CALLABLE`, `HANDLER`, and `RESUMPTION`, owned type
@@ -282,16 +290,20 @@ invalid.
 ### 4.4 `CONSTANTS`
 
 Constant flags are zero. Tags are the scalar type tags `UNIT`, integer tags,
-`F32`, `F64`, `CHAR`, `TEXT`, and `BYTES`. Payloads are:
+`F32`, `F64`, `CHAR`, `TEXT`, `BYTES`, and `STATIC_DATA` (`0x13`). Payloads are:
 
 - unit: empty;
 - integer: exactly its fixed-width two's-complement/raw bytes;
 - `F32`/`F64`: 4/8 canonical IEEE bytes;
 - `CHAR`: one `u32` Unicode scalar;
 - `TEXT`: one `u32` string index;
-- `BYTES`: `u32 length; u8 bytes[length]`.
+- `BYTES`: `u32 length; u8 bytes[length]`;
+- `STATIC_DATA`: `u128 tag; u32 alignment; u32 length; u8 bytes[length]`.
 
 Constants MUST be deduplicated. They are ordered by `(tag, payload bytes)`.
+`STATIC_DATA` alignment is nonzero and a power of two. A static segment's
+constant-table index is its artifact-local segment identity; runtime subviews
+retain that identity while changing only their checked byte offset and length.
 
 ### 4.5 `SIGNATURES`
 
@@ -763,6 +775,9 @@ Arguments and result types are checked from the primitive ID.
 | `0x006a` | `array.capacity` |
 | `0x006b` | `array.reserve` |
 | `0x006c` | `array.finish_drained` |
+| `0x0070` | `static.len` |
+| `0x0071` | `static.subslice` |
+| `0x0072` | `static.get_shared` |
 
 `bytes.utf8_valid_up_to(Bytes) -> usize` returns the byte length when the input
 is valid UTF-8. Otherwise it returns the byte offset of the invalid sequence's
@@ -807,6 +822,22 @@ copy or reallocate its backing sequence. Operations that produce new text or
 bytes allocate fresh immutable backing. `to_array` is deliberately the opposite
 boundary: it creates independent mutable element storage with logical capacity
 exactly equal to the byte length.
+
+The three static-data primitives are sealed support for trusted standard-library
+leaves, not public source-level slice types:
+
+```text
+static.len(__StaticData<T>) -> usize
+static.subslice(__StaticData<T>, usize start, usize length) -> __StaticData<T>
+static.get_shared(__StaticData<T>, usize index) -> &T
+```
+
+`subslice` checks `start + length <= current_length` without changing segment,
+tag, alignment, or element type. `get_shared` checks `index < current_length`
+and returns a shared reference to immutable static storage; it cannot be used
+for a unique borrow or mutation. Standard-library `Str` and `Slice` wrappers may
+use these leaves while remaining ordinary library types rather than compiler
+intrinsics.
 
 Array operations are:
 

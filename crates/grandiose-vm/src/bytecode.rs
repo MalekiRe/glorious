@@ -6227,6 +6227,34 @@ fn infer_primitive_types(
         ArrayFinishDrained => {
             set(inferred, dst, UNIT)?;
         }
+        StaticLen => {
+            // A sealed segment has a declaration-owned input type, but its
+            // length result is unambiguous.  Without this assignment a
+            // terminal `static.len` result is left uninferred by ordinary G1
+            // decoding and incorrectly requires a development-only hint.
+            set(inferred, dst, USIZE)?;
+        }
+        StaticSubslice => {
+            set_arg(1, USIZE, inferred)?;
+            set_arg(2, USIZE, inferred)?;
+            // The primitive preserves the complete sealed static-data type:
+            // element, tag, and alignment cannot be changed by a subview.
+            if let Some(value) = args.first().and_then(|register| known(*register, inferred)) {
+                set(inferred, dst, value)?;
+            } else if let Some(result) = known(dst, inferred) {
+                set_arg(0, result, inferred)?;
+            }
+        }
+        StaticGetShared => {
+            set_arg(1, USIZE, inferred)?;
+            if let Some(value) = args.first().and_then(|register| known(*register, inferred))
+                && let Some(Type::StaticData { element, .. }) =
+                    types.get(value as usize).map(Type::representation)
+                && let Some(shared) = reference(*element, false)
+            {
+                set(inferred, dst, shared)?;
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -6251,10 +6279,9 @@ fn const_type(c: &Constant) -> u32 {
         Constant::Char(_) => CHAR,
         Constant::Text(_) => TEXT,
         Constant::Bytes(_) => BYTES,
-        // Static-data constants require their artifact-declared hidden
-        // `Type::StaticData` identity, so format-only register inference
-        // cannot choose one without the type table. Artifacts containing one
-        // must carry frozen register type hints.
+        // Static-data constants have no scalar fallback. `infer_register_types`
+        // resolves them from their unique matching `Type::StaticData` entry
+        // (tag plus alignment) in the artifact type table.
         Constant::StaticData { .. } => u32::MAX,
     }
 }

@@ -8412,6 +8412,147 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_g1_decode_infers_static_len_result_without_type_hints() {
+        let mut types = Type::predefined();
+        let static_bytes = types.len() as TypeId;
+        types.push(Type::StaticData {
+            element: U8,
+            tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+            alignment: 1,
+        });
+        let artifact = Artifact {
+            types,
+            constants: vec![Constant::StaticData {
+                tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                alignment: 1,
+                bytes: b"xy".to_vec(),
+            }],
+            functions: vec![Function {
+                flags: 0,
+                name: "main".into(),
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, static_bytes, USIZE],
+                code_start: 0,
+                code_len: 3,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Primitive {
+                    dst: 2,
+                    op: Primitive::StaticLen,
+                    args: vec![1],
+                },
+                Instruction::Return { src: None },
+            ],
+            cleanups: vec![
+                CleanupPlan {
+                    function: 0,
+                    first_instruction: 0,
+                    end_instruction: 1,
+                    registers: vec![],
+                },
+                CleanupPlan {
+                    function: 0,
+                    first_instruction: 1,
+                    end_instruction: 2,
+                    registers: vec![1],
+                },
+                CleanupPlan {
+                    function: 0,
+                    first_instruction: 2,
+                    end_instruction: 3,
+                    registers: vec![2, 1],
+                },
+            ],
+            required_features: 1,
+            entry_function: Some(0),
+            ..Artifact::default()
+        };
+        let decoded = Artifact::decode(&artifact.encode())
+            .expect("ordinary G1 static.len artifact must infer register types");
+        assert_eq!(decoded.functions[0].register_types, vec![UNIT, static_bytes, USIZE]);
+        assert_eq!(
+            Vm::from_artifact(decoded).unwrap().run(0, vec![]).unwrap(),
+            Value::Unit
+        );
+    }
+
+    #[test]
+    fn ordinary_g1_decode_infers_static_subslice_result_without_type_hints() {
+        let mut types = Type::predefined();
+        let static_bytes = types.len() as TypeId;
+        types.push(Type::StaticData {
+            element: U8,
+            tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+            alignment: 1,
+        });
+        let artifact = Artifact {
+            types,
+            constants: vec![
+                Constant::Usize(1),
+                Constant::StaticData {
+                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                    alignment: 1,
+                    bytes: b"xyz".to_vec(),
+                },
+            ],
+            functions: vec![Function {
+                flags: 0,
+                name: "main".into(),
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, static_bytes, USIZE, USIZE, static_bytes],
+                code_start: 0,
+                code_len: 5,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 1,
+                },
+                Instruction::Const {
+                    dst: 2,
+                    constant: 0,
+                },
+                Instruction::Const {
+                    dst: 3,
+                    constant: 0,
+                },
+                Instruction::Primitive {
+                    dst: 4,
+                    op: Primitive::StaticSubslice,
+                    args: vec![1, 2, 3],
+                },
+                Instruction::Return { src: None },
+            ],
+            required_features: 1,
+            entry_function: Some(0),
+            ..Artifact::default()
+        };
+        let artifact = crate::verify::with_generated_cleanup_plans(artifact).unwrap();
+        let decoded = Artifact::decode(&artifact.encode())
+            .expect("ordinary G1 static.subslice artifact must infer register types");
+        assert_eq!(
+            decoded.functions[0].register_types,
+            vec![UNIT, static_bytes, USIZE, USIZE, static_bytes]
+        );
+        assert_eq!(
+            Vm::from_artifact(decoded).unwrap().run(0, vec![]).unwrap(),
+            Value::Unit
+        );
+    }
+
+    #[test]
     fn array_push_uses_frozen_geometric_capacity() {
         let mut types = Type::predefined();
         types.push(Type::Array { element: U64 }.restricted(false, true));

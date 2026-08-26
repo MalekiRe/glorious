@@ -73,6 +73,11 @@ pub enum HostExecution {
 }
 pub enum ArtifactEmission { Artifact(Bytes), Rejected }
 pub enum G1I64Arithmetic { Add, Subtract, Multiply, Divide }
+// The VM's hidden static-data tag is a stable 128-bit identity.  This source
+// representation keeps tag selection sealed: ordinary source cannot construct
+// either byte sequence, and an embedded-asset tag needs a later declaration
+// identity encoder rather than a made-up numeric fallback.
+pub enum G1StaticDataEncoding { Value(Bytes), UnsupportedTag, UnsupportedAlignment }
 // These are checked source-language operations. A wrapping primitive is used
 // only internally to compute a candidate result before verification rejects
 // its overflow witness.
@@ -893,6 +898,123 @@ pub fn g1_i64_constant_table_is_canonical() -> Bool {
     }
 }
 
+// G1 constant tag 19 carries a type identity, alignment, and immutable segment
+// bytes.  It is deliberately distinct from the legacy `Bytes` constant tag:
+// only a matching `STATIC_DATA` type-table entry may receive it through CONST.
+fn g1_static_data_tag_bytes(tag: types::StaticDataTag) -> G1StaticDataEncoding {
+    handle tag {
+        types::StaticDataTag::Utf8Bytes => G1StaticDataEncoding::Value(__g1_bytes_from_array_move([67, 73, 84, 65, 84, 83, 95, 69, 83, 79, 73, 68, 78, 65, 82, 71])),
+        types::StaticDataTag::RawU8 => G1StaticDataEncoding::Value(__g1_bytes_from_array_move([95, 56, 85, 87, 65, 82, 95, 69, 83, 79, 73, 68, 78, 65, 82, 71])),
+        types::StaticDataTag::Embedded(_) => G1StaticDataEncoding::UnsupportedTag,
+        _ => G1StaticDataEncoding::UnsupportedTag,
+    }
+}
+
+fn g1_static_data_payload(tag_bytes: Bytes, alignment: u32, bytes: Bytes) -> Bytes {
+    g1_append_field(
+        tag_bytes,
+        g1_append_field(u32_le_bytes(alignment), g1_append_field(u32_le_bytes(__g1_int_convert_wrapping_to_u32<usize>(__g1_bytes_len(bytes))), bytes)),
+    )
+}
+
+pub fn g1_static_data_constant_table(tag: types::StaticDataTag, alignment: u32, bytes: Bytes) -> G1StaticDataEncoding {
+    // Literal lowering currently creates byte-addressed segments only. Reject
+    // other alignments until the source type/layout encoder owns them too.
+    handle alignment == 1 {
+        true => handle g1_static_data_tag_bytes(tag) {
+            G1StaticDataEncoding::Value(tag_bytes) => G1StaticDataEncoding::Value(g1_single_variable_record_section(19, 0, g1_static_data_payload(tag_bytes, alignment, bytes))),
+            G1StaticDataEncoding::UnsupportedTag => G1StaticDataEncoding::UnsupportedTag,
+            _ => G1StaticDataEncoding::UnsupportedTag,
+        },
+        false => G1StaticDataEncoding::UnsupportedAlignment,
+        _ => G1StaticDataEncoding::UnsupportedAlignment,
+    }
+}
+
+pub fn g1_static_utf8_constant_table_is_canonical() -> Bool {
+    handle g1_static_data_constant_table(types::StaticDataTag::Utf8Bytes, 1, __g1_bytes_from_array_move([120, 121])) {
+        G1StaticDataEncoding::Value(table) => handle __g1_bytes_len(table) == 46 {
+            true => handle __g1_bytes_get(table, 0) == 1 {
+                true => handle __g1_bytes_get(table, 12) == 19 {
+                    true => handle __g1_bytes_get(table, 16) == 26 {
+                        true => handle __g1_bytes_get(table, 20) == 67 {
+                            true => handle __g1_bytes_get(table, 35) == 71 {
+                                true => handle __g1_bytes_get(table, 36) == 1 {
+                                    true => handle __g1_bytes_get(table, 40) == 2 {
+                                        true => handle __g1_bytes_get(table, 44) == 120 {
+                                            true => __g1_bytes_get(table, 45) == 121,
+                                            false => false,
+                                            _ => false,
+                                        },
+                                        false => false,
+                                        _ => false,
+                                    },
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn g1_static_raw_constant_table_is_canonical() -> Bool {
+    handle g1_static_data_constant_table(types::StaticDataTag::RawU8, 1, __g1_bytes_from_array_move([])) {
+        G1StaticDataEncoding::Value(table) => handle __g1_bytes_len(table) == 44 {
+            true => handle __g1_bytes_get(table, 12) == 19 {
+                true => handle __g1_bytes_get(table, 16) == 24 {
+                    true => handle __g1_bytes_get(table, 20) == 95 {
+                        true => handle __g1_bytes_get(table, 35) == 71 {
+                            true => handle __g1_bytes_get(table, 36) == 1 {
+                                true => __g1_bytes_get(table, 40) == 0,
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn g1_static_data_encoder_rejects_unrepresentable_identity() -> Bool {
+    handle g1_static_data_constant_table(types::StaticDataTag::Embedded(7), 1, __g1_bytes_from_array_move([])) {
+        G1StaticDataEncoding::UnsupportedTag => handle g1_static_data_type_table(types::StaticDataTag::Utf8Bytes, 2) {
+            G1StaticDataEncoding::UnsupportedAlignment => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
 // The first 19 G1 type IDs are the mandatory scalar prelude.  They carry no
 // payload, but their tags, use-capability flags, and record offsets are part
 // of canonical artifact identity.  Generate the full table rather than
@@ -985,6 +1107,78 @@ pub fn g1_predefined_type_table_is_canonical() -> Bool {
             _ => false,
         },
         false => false,
+        _ => false,
+    }
+}
+
+// `STATIC_DATA` is an ordinary G1 type-table extension after the mandatory
+// scalar prelude.  Its record's fixed payload is `u32 element; u128 tag; u32
+// alignment`, and its immutable VM representation is both duplicable and
+// zero-use-allowed (flags 0x11).
+fn g1_static_data_type_record(tag_bytes: Bytes, alignment: u32) -> Bytes {
+    g1_variable_record(43, 17, g1_append_field(u32_le_bytes(2), g1_append_field(tag_bytes, u32_le_bytes(alignment))))
+}
+
+pub fn g1_static_data_type_table(tag: types::StaticDataTag, alignment: u32) -> G1StaticDataEncoding {
+    handle alignment == 1 {
+        true => handle g1_static_data_tag_bytes(tag) {
+            G1StaticDataEncoding::Value(tag_bytes) => {
+                let record = g1_static_data_type_record(tag_bytes, alignment);
+                G1StaticDataEncoding::Value(g1_append_field(
+                    u32_le_bytes(20),
+                    g1_append_field(
+                        g1_append_field(g1_predefined_type_offsets(), u32_le_bytes(184)),
+                        g1_append_field(g1_predefined_type_records(), record),
+                    ),
+                ))
+            },
+            G1StaticDataEncoding::UnsupportedTag => G1StaticDataEncoding::UnsupportedTag,
+            _ => G1StaticDataEncoding::UnsupportedTag,
+        },
+        false => G1StaticDataEncoding::UnsupportedAlignment,
+        _ => G1StaticDataEncoding::UnsupportedAlignment,
+    }
+}
+
+pub fn g1_static_utf8_type_table_is_canonical() -> Bool {
+    handle g1_static_data_type_table(types::StaticDataTag::Utf8Bytes, 1) {
+        G1StaticDataEncoding::Value(table) => handle __g1_bytes_len(table) == 272 {
+            true => handle __g1_bytes_get(table, 0) == 20 {
+                true => handle __g1_bytes_get(table, 84) == 184 {
+                    true => handle __g1_bytes_get(table, 240) == 43 {
+                        true => handle __g1_bytes_get(table, 241) == 17 {
+                            true => handle __g1_bytes_get(table, 244) == 24 {
+                                true => handle __g1_bytes_get(table, 248) == 2 {
+                                    true => handle __g1_bytes_get(table, 252) == 67 {
+                                        true => handle __g1_bytes_get(table, 267) == 71 {
+                                            true => __g1_bytes_get(table, 268) == 1,
+                                            false => false,
+                                            _ => false,
+                                        },
+                                        false => false,
+                                        _ => false,
+                                    },
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -1170,6 +1364,833 @@ pub fn g1_minimal_library_candidate() -> Bytes {
 
 pub fn g1_minimal_library_candidate_has_expected_length() -> Bool {
     __g1_bytes_len(g1_minimal_library_candidate()) == 808
+}
+
+// A static-data library is the smallest complete G1 artifact that carries a
+// real sealed segment.  Keeping it library-shaped avoids inventing a dummy
+// source-visible wrapper solely to exercise a hidden compiler representation.
+// The section extents are derived from the two source-owned tables above:
+// strings 12 (+4 padding), types 272, constants 46 (+2 padding), then the
+// three required empty variable sections and the final reference table.
+fn g1_static_library_directory() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_header(4294967295, 0, 1, 880), g1_directory_entry(1, 512, 12, 0, 0)),
+                            g1_directory_entry(2, 528, 272, 20, 0),
+                        ),
+                        g1_directory_entry(3, 800, 46, 1, 0),
+                    ),
+                    g1_directory_entry(4, 848, 8, 0, 0),
+                ),
+                g1_directory_entry(5, 856, 0, 0, 24),
+            ),
+            g1_static_library_directory_tail(),
+        ),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_library_directory_tail() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_directory_entry(6, 856, 8, 0, 0), g1_directory_entry(7, 864, 8, 0, 0)),
+                            g1_directory_entry(8, 872, 0, 0, 64),
+                        ),
+                        g1_directory_entry(9, 872, 0, 0, 4),
+                    ),
+                    g1_directory_entry(10, 872, 0, 0, 4),
+                ),
+                g1_directory_entry(11, 872, 0, 0, 24),
+            ),
+            g1_append_field(g1_directory_entry(12, 872, 0, 0, 16), g1_append_field(g1_directory_entry(13, 872, 0, 0, 16), g1_directory_entry(14, 872, 8, 0, 0))),
+        ),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+pub fn g1_static_utf8_library_candidate(bytes: Bytes) -> G1StaticDataEncoding {
+    handle g1_static_data_type_table(types::StaticDataTag::Utf8Bytes, 1) {
+        G1StaticDataEncoding::Value(type_table) => handle g1_static_data_constant_table(types::StaticDataTag::Utf8Bytes, 1, bytes) {
+            G1StaticDataEncoding::Value(constants) => G1StaticDataEncoding::Value(g1_append_field(
+                g1_concat4(
+                    g1_static_library_directory(), g1_empty_string_table(),
+                    g1_four_zero_padding_bytes(), type_table,
+                ),
+                g1_concat4(
+                    g1_append_field(constants, byte_pair(0, 0)),
+                    g1_empty_variable_table(),
+                    g1_append_field(g1_empty_variable_table(), g1_empty_variable_table()),
+                    g1_empty_variable_table(),
+                ),
+            )),
+            G1StaticDataEncoding::UnsupportedTag => G1StaticDataEncoding::UnsupportedTag,
+            G1StaticDataEncoding::UnsupportedAlignment => G1StaticDataEncoding::UnsupportedAlignment,
+            _ => G1StaticDataEncoding::UnsupportedTag,
+        },
+        G1StaticDataEncoding::UnsupportedTag => G1StaticDataEncoding::UnsupportedTag,
+        G1StaticDataEncoding::UnsupportedAlignment => G1StaticDataEncoding::UnsupportedAlignment,
+        _ => G1StaticDataEncoding::UnsupportedTag,
+    }
+}
+
+pub fn g1_static_utf8_library_candidate_has_expected_layout() -> Bool {
+    handle g1_static_utf8_library_candidate(__g1_bytes_from_array_move([120, 121])) {
+        G1StaticDataEncoding::Value(candidate) => handle __g1_bytes_len(candidate) == 880 {
+            true => handle g1_declared_total_matches_bytes(candidate) {
+                true => handle g1_directory_is_readable(candidate) {
+                    true => handle __g1_bytes_get(candidate, 128) == 3 {
+                        true => handle __g1_bytes_get(candidate, 144) == 32 {
+                            true => handle __g1_bytes_get(candidate, 160) == 1 {
+                                true => __g1_bytes_get(candidate, 800) == 1,
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// The first executable static-data artifact runs the sealed `static.len`
+// primitive and then returns Unit.  Its result is deliberately cleaned up at
+// the ordinary return boundary, proving that static data participates in the
+// same ownership/cleanup tables as every other G1 value.
+fn g1_static_len_entry_signature_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(
+        __g1_int_wrapping_add<usize>(808, __g1_bytes_len(constants)),
+        g1_name_padding_length(__g1_bytes_len(constants)),
+    )
+}
+
+fn g1_static_len_entry_protocol_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_len_entry_signature_offset(constants), 32)
+}
+
+fn g1_static_len_entry_handler_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_len_entry_protocol_offset(constants), 8)
+}
+
+fn g1_static_len_entry_function_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_len_entry_handler_offset(constants), 8)
+}
+
+fn g1_static_len_entry_code_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_len_entry_function_offset(constants), 64)
+}
+
+fn g1_static_len_entry_operands_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_len_entry_code_offset(constants), 40)
+}
+
+fn g1_static_len_entry_cleanup_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_len_entry_operands_offset(constants), 16)
+}
+
+fn g1_static_len_entry_total(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_len_entry_cleanup_offset(constants), 80)
+}
+
+fn g1_static_len_entry_directory(constants: Bytes) -> Bytes {
+    let signature = g1_static_len_entry_signature_offset(constants);
+    let protocol = g1_static_len_entry_protocol_offset(constants);
+    let handler = g1_static_len_entry_handler_offset(constants);
+    let function = g1_static_len_entry_function_offset(constants);
+    let code = g1_static_len_entry_code_offset(constants);
+    let operands = g1_static_len_entry_operands_offset(constants);
+    let cleanup = g1_static_len_entry_cleanup_offset(constants);
+    let total = g1_static_len_entry_total(constants);
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_header(0, 1, 1, g1_usize_as_u64(total)), g1_directory_entry(1, 512, 20, 1, 0)),
+                            g1_directory_entry(2, 536, 272, 20, 0),
+                        ),
+                        g1_directory_entry(3, 808, g1_usize_as_u64(__g1_bytes_len(constants)), 1, 0),
+                    ),
+                    g1_directory_entry(4, g1_usize_as_u64(signature), 32, 1, 0),
+                ),
+                g1_directory_entry(5, g1_usize_as_u64(protocol), 0, 0, 24),
+            ),
+            g1_static_len_entry_directory_tail(protocol, handler, function, code, operands, cleanup, total),
+        ),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_len_entry_directory_tail(protocol: usize, handler: usize, function: usize, code: usize, operands: usize, cleanup: usize, total: usize) -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_directory_entry(6, g1_usize_as_u64(protocol), 8, 0, 0), g1_directory_entry(7, g1_usize_as_u64(handler), 8, 0, 0)),
+                            g1_directory_entry(8, g1_usize_as_u64(function), 64, 1, 64),
+                        ),
+                        g1_directory_entry(9, g1_usize_as_u64(code), 40, 10, 4),
+                    ),
+                    g1_directory_entry(10, g1_usize_as_u64(operands), 12, 3, 4),
+                ),
+                g1_directory_entry(11, g1_usize_as_u64(cleanup), 72, 3, 24),
+            ),
+            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(total), 8, 0, 0))),
+        ),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_len_entry_function_table() -> Bytes {
+    g1_concat4(
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(3)),
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(10), u32_le_bytes(3), u32_le_bytes(0)),
+        g1_concat4(u32_le_bytes(3), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)),
+        g1_append_field(u64_le_bytes(0), u64_le_bytes(0)),
+    )
+}
+
+fn g1_static_len_entry_code() -> Bytes {
+    g1_concat4(
+        g1_concat4(u32_le_bytes(8193), u32_le_bytes(1), u32_le_bytes(0), u32_le_bytes(16453)),
+        g1_concat4(u32_le_bytes(2), u32_le_bytes(112), u32_le_bytes(0), u32_le_bytes(1)),
+        g1_append_field(u32_le_bytes(4134), u32_le_bytes(4294967295)),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_len_entry_operands() -> Bytes {
+    g1_concat3(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(1))
+}
+
+fn g1_static_len_entry_cleanup_plan(first: u32, end: u32, operand_start: u32, operand_count: u32) -> Bytes {
+    g1_concat3(
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(first), u32_le_bytes(end), u32_le_bytes(operand_start)),
+        g1_append_field(u32_le_bytes(operand_count), u32_le_bytes(0)),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_len_entry_cleanup_table() -> Bytes {
+    g1_concat3(
+        g1_static_len_entry_cleanup_plan(0, 1, 0, 0),
+        g1_static_len_entry_cleanup_plan(1, 2, 0, 1),
+        g1_static_len_entry_cleanup_plan(2, 3, 1, 2),
+    )
+}
+
+pub fn g1_static_utf8_len_entry_candidate(bytes: Bytes) -> G1StaticDataEncoding {
+    handle g1_static_data_type_table(types::StaticDataTag::Utf8Bytes, 1) {
+        G1StaticDataEncoding::Value(type_table) => handle g1_static_data_constant_table(types::StaticDataTag::Utf8Bytes, 1, bytes) {
+            G1StaticDataEncoding::Value(constants) => G1StaticDataEncoding::Value(g1_append_field(
+                g1_static_len_entry_directory(constants),
+                g1_append_field(
+                    g1_append_field(g1_unit_entry_name_slot(__g1_bytes_from_array_move([109, 97, 105, 110])), type_table),
+                    g1_append_field(
+                        g1_append_field(constants, g1_zero_bytes(g1_name_padding_length(__g1_bytes_len(constants)))),
+                        g1_append_field(
+                            g1_append_field(g1_unit_entry_signature_table(), g1_append_field(g1_empty_variable_table(), g1_empty_variable_table())),
+                            g1_append_field(
+                                g1_append_field(g1_static_len_entry_function_table(), g1_static_len_entry_code()),
+                                g1_append_field(
+                                    g1_append_field(g1_static_len_entry_operands(), g1_four_zero_padding_bytes()),
+                                    g1_append_field(g1_static_len_entry_cleanup_table(), g1_empty_variable_table()),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            )),
+            G1StaticDataEncoding::UnsupportedTag => G1StaticDataEncoding::UnsupportedTag,
+            G1StaticDataEncoding::UnsupportedAlignment => G1StaticDataEncoding::UnsupportedAlignment,
+            _ => G1StaticDataEncoding::UnsupportedTag,
+        },
+        G1StaticDataEncoding::UnsupportedTag => G1StaticDataEncoding::UnsupportedTag,
+        G1StaticDataEncoding::UnsupportedAlignment => G1StaticDataEncoding::UnsupportedAlignment,
+        _ => G1StaticDataEncoding::UnsupportedTag,
+    }
+}
+
+pub fn g1_static_utf8_len_entry_candidate_has_expected_layout() -> Bool {
+    handle g1_static_utf8_len_entry_candidate(__g1_bytes_from_array_move([120, 121])) {
+        G1StaticDataEncoding::Value(candidate) => handle __g1_bytes_len(candidate) == 1104 {
+            true => handle g1_declared_total_matches_bytes(candidate) {
+                true => handle g1_directory_is_readable(candidate) {
+                    true => handle __g1_bytes_get(candidate, 968) == 1 {
+                        true => handle __g1_bytes_get(candidate, 980) == 69 {
+                            true => handle __g1_bytes_get(candidate, 984) == 2 {
+                                true => handle __g1_bytes_get(candidate, 988) == 112 {
+                                    true => handle __g1_bytes_get(candidate, 1008) == 1 {
+                                        true => handle __g1_bytes_get(candidate, 1012) == 2 {
+                                            true => __g1_bytes_get(candidate, 1016) == 1,
+                                            false => false,
+                                            _ => false,
+                                        },
+                                        false => false,
+                                        _ => false,
+                                    },
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// This BLAKE3 commitment is the canonical image independently emitted by the
+// Rust G1 writer for `"xy"; CONST static-data; static.len; return Unit` and
+// accepted by `grvm verify` and `grvm run`.  It turns the source probe into a
+// whole-artifact equality check without embedding another opaque artifact.
+fn g1_static_utf8_len_entry_vm_reference_digest() -> Bytes {
+    __g1_bytes_from_array_move([35, 251, 100, 97, 56, 228, 117, 250, 133, 194, 8, 236, 26, 228, 197, 48, 241, 162, 21, 125, 197, 229, 182, 181, 124, 11, 108, 144, 59, 233, 202, 196])
+}
+
+pub fn g1_static_utf8_len_entry_matches_vm_reference() -> Bool {
+    handle g1_static_utf8_len_entry_candidate(__g1_bytes_from_array_move([120, 121])) {
+        G1StaticDataEncoding::Value(candidate) => g1_bytes_equal(__g1_blake3(candidate), g1_static_utf8_len_entry_vm_reference_digest(), 0),
+        _ => false,
+    }
+}
+
+// `static.subslice` uses two `usize` operands.  The canonical constants table
+// therefore orders the `usize(1)` record (tag 12) before the sealed segment
+// record (tag 19), with offsets derived from both variable-size records.
+fn g1_static_subslice_constants(bytes: Bytes) -> Bytes {
+    let index = g1_variable_record(12, 0, u64_le_bytes(1));
+    let static_record = g1_variable_record(19, 0, g1_static_data_payload(
+        __g1_bytes_from_array_move([67, 73, 84, 65, 84, 83, 95, 69, 83, 79, 73, 68, 78, 65, 82, 71]),
+        1,
+        bytes,
+    ));
+    let index_length = __g1_int_convert_wrapping_to_u32<usize>(__g1_bytes_len(index));
+    let static_end = __g1_int_wrapping_add<u32>(index_length, __g1_int_convert_wrapping_to_u32<usize>(__g1_bytes_len(static_record)));
+    g1_append_field(
+        g1_append_field(
+            u32_le_bytes(2),
+            g1_concat3(u32_le_bytes(0), u32_le_bytes(index_length), u32_le_bytes(static_end)),
+        ),
+        g1_append_field(index, static_record),
+    )
+}
+
+fn g1_static_subslice_signature_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(
+        __g1_int_wrapping_add<usize>(808, __g1_bytes_len(constants)),
+        g1_name_padding_length(__g1_bytes_len(constants)),
+    )
+}
+
+fn g1_static_subslice_protocol_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_subslice_signature_offset(constants), 32)
+}
+
+fn g1_static_subslice_handler_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_subslice_protocol_offset(constants), 8)
+}
+
+fn g1_static_subslice_function_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_subslice_handler_offset(constants), 8)
+}
+
+fn g1_static_subslice_code_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_subslice_function_offset(constants), 64)
+}
+
+fn g1_static_subslice_operands_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_subslice_code_offset(constants), 64)
+}
+
+fn g1_static_subslice_cleanup_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_subslice_operands_offset(constants), 56)
+}
+
+fn g1_static_subslice_total(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_subslice_cleanup_offset(constants), 128)
+}
+
+fn g1_static_subslice_directory(constants: Bytes) -> Bytes {
+    let signature = g1_static_subslice_signature_offset(constants);
+    let protocol = g1_static_subslice_protocol_offset(constants);
+    let handler = g1_static_subslice_handler_offset(constants);
+    let function = g1_static_subslice_function_offset(constants);
+    let code = g1_static_subslice_code_offset(constants);
+    let operands = g1_static_subslice_operands_offset(constants);
+    let cleanup = g1_static_subslice_cleanup_offset(constants);
+    let total = g1_static_subslice_total(constants);
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_header(0, 1, 1, g1_usize_as_u64(total)), g1_directory_entry(1, 512, 20, 1, 0)),
+                            g1_directory_entry(2, 536, 272, 20, 0),
+                        ),
+                        g1_directory_entry(3, 808, g1_usize_as_u64(__g1_bytes_len(constants)), 2, 0),
+                    ),
+                    g1_directory_entry(4, g1_usize_as_u64(signature), 32, 1, 0),
+                ),
+                g1_directory_entry(5, g1_usize_as_u64(protocol), 0, 0, 24),
+            ),
+            g1_static_subslice_directory_tail(protocol, handler, function, code, operands, cleanup, total),
+        ),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_subslice_directory_tail(protocol: usize, handler: usize, function: usize, code: usize, operands: usize, cleanup: usize, total: usize) -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_directory_entry(6, g1_usize_as_u64(protocol), 8, 0, 0), g1_directory_entry(7, g1_usize_as_u64(handler), 8, 0, 0)),
+                            g1_directory_entry(8, g1_usize_as_u64(function), 64, 1, 64),
+                        ),
+                        g1_directory_entry(9, g1_usize_as_u64(code), 64, 16, 4),
+                    ),
+                    g1_directory_entry(10, g1_usize_as_u64(operands), 52, 13, 4),
+                ),
+                g1_directory_entry(11, g1_usize_as_u64(cleanup), 120, 5, 24),
+            ),
+            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(total), 8, 0, 0))),
+        ),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_subslice_function_table() -> Bytes {
+    g1_concat4(
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(5)),
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(16), u32_le_bytes(5), u32_le_bytes(0)),
+        g1_concat4(u32_le_bytes(5), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)),
+        g1_append_field(u64_le_bytes(0), u64_le_bytes(0)),
+    )
+}
+
+fn g1_static_subslice_code() -> Bytes {
+    g1_concat4(
+        g1_concat4(u32_le_bytes(8193), u32_le_bytes(1), u32_le_bytes(1), u32_le_bytes(8193)),
+        g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(8193), u32_le_bytes(3)),
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(16453), u32_le_bytes(4), u32_le_bytes(113)),
+        g1_append_field(g1_concat3(u32_le_bytes(0), u32_le_bytes(3), u32_le_bytes(4134)), u32_le_bytes(4294967295)),
+    )
+}
+
+fn g1_static_subslice_operands() -> Bytes {
+    g1_append_field(
+        g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(3), u32_le_bytes(1)),
+        g1_append_field(
+            g1_concat4(u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(3), u32_le_bytes(2)),
+            g1_concat4(u32_le_bytes(1), u32_le_bytes(4), u32_le_bytes(3), u32_le_bytes(2)),
+        ),
+    )
+}
+
+fn g1_static_subslice_cleanup_plan(first: u32, end: u32, operand_start: u32, operand_count: u32) -> Bytes {
+    g1_concat3(
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(first), u32_le_bytes(end), u32_le_bytes(operand_start)),
+        g1_append_field(u32_le_bytes(operand_count), u32_le_bytes(0)),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_subslice_cleanup_table() -> Bytes {
+    g1_concat4(
+        g1_static_subslice_cleanup_plan(0, 1, 0, 0),
+        g1_static_subslice_cleanup_plan(1, 2, 3, 1),
+        g1_static_subslice_cleanup_plan(2, 3, 4, 2),
+        g1_append_field(g1_static_subslice_cleanup_plan(3, 4, 6, 3), g1_static_subslice_cleanup_plan(4, 5, 9, 4)),
+    )
+}
+
+pub fn g1_static_utf8_subslice_entry_candidate(bytes: Bytes) -> G1StaticDataEncoding {
+    let constants = g1_static_subslice_constants(bytes);
+    handle g1_static_data_type_table(types::StaticDataTag::Utf8Bytes, 1) {
+        G1StaticDataEncoding::Value(type_table) => G1StaticDataEncoding::Value(g1_append_field(
+            g1_static_subslice_directory(constants),
+            g1_append_field(
+                g1_append_field(g1_unit_entry_name_slot(__g1_bytes_from_array_move([109, 97, 105, 110])), type_table),
+                g1_append_field(
+                    g1_append_field(constants, g1_zero_bytes(g1_name_padding_length(__g1_bytes_len(constants)))),
+                    g1_append_field(
+                        g1_append_field(g1_unit_entry_signature_table(), g1_append_field(g1_empty_variable_table(), g1_empty_variable_table())),
+                        g1_append_field(
+                            g1_append_field(g1_static_subslice_function_table(), g1_static_subslice_code()),
+                            g1_append_field(
+                                g1_append_field(g1_static_subslice_operands(), g1_four_zero_padding_bytes()),
+                                g1_append_field(g1_static_subslice_cleanup_table(), g1_empty_variable_table()),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )),
+        G1StaticDataEncoding::UnsupportedTag => G1StaticDataEncoding::UnsupportedTag,
+        G1StaticDataEncoding::UnsupportedAlignment => G1StaticDataEncoding::UnsupportedAlignment,
+        _ => G1StaticDataEncoding::UnsupportedTag,
+    }
+}
+
+pub fn g1_static_utf8_subslice_entry_candidate_has_expected_layout() -> Bool {
+    handle g1_static_utf8_subslice_entry_candidate(__g1_bytes_from_array_move([120, 121, 122])) {
+        G1StaticDataEncoding::Value(candidate) => handle __g1_bytes_len(candidate) == 1240 {
+            true => handle g1_declared_total_matches_bytes(candidate) {
+                true => handle g1_directory_is_readable(candidate) {
+                    true => handle __g1_bytes_get(candidate, 992) == 1 {
+                        true => handle __g1_bytes_get(candidate, 1028) == 69 {
+                            true => handle __g1_bytes_get(candidate, 1032) == 4 {
+                                true => handle __g1_bytes_get(candidate, 1036) == 113 {
+                                    true => handle __g1_bytes_get(candidate, 1056) == 1 {
+                                        true => handle __g1_bytes_get(candidate, 1064) == 3 {
+                                            true => __g1_bytes_get(candidate, 1092) == 1,
+                                            false => false,
+                                            _ => false,
+                                        },
+                                        false => false,
+                                        _ => false,
+                                    },
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_static_utf8_subslice_entry_vm_reference_digest() -> Bytes {
+    __g1_bytes_from_array_move([153, 4, 51, 148, 45, 145, 231, 1, 54, 231, 181, 74, 146, 20, 193, 101, 247, 103, 59, 72, 27, 98, 52, 62, 192, 135, 213, 82, 221, 145, 21, 30])
+}
+
+pub fn g1_static_utf8_subslice_entry_matches_vm_reference() -> Bool {
+    handle g1_static_utf8_subslice_entry_candidate(__g1_bytes_from_array_move([120, 121, 122])) {
+        G1StaticDataEncoding::Value(candidate) => g1_bytes_equal(__g1_blake3(candidate), g1_static_utf8_subslice_entry_vm_reference_digest(), 0),
+        _ => false,
+    }
+}
+
+// `static.get_shared` adds the only public VM-side view of a segment: a
+// `REF_SHARED<u8>` descriptor.  The descriptor is distinct from the static
+// segment type, so a forged byte slice can never be substituted for the
+// immutable compiler-owned storage.
+fn g1_static_get_type_table() -> Bytes {
+    let static_record = g1_static_data_type_record(
+        __g1_bytes_from_array_move([67, 73, 84, 65, 84, 83, 95, 69, 83, 79, 73, 68, 78, 65, 82, 71]),
+        1,
+    );
+    let shared_u8_record = g1_variable_record(36, 17, u32_le_bytes(2));
+    g1_append_field(
+        u32_le_bytes(21),
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(g1_predefined_type_offsets(), u32_le_bytes(184)),
+                u32_le_bytes(196),
+            ),
+            g1_append_field(g1_predefined_type_records(), g1_append_field(static_record, shared_u8_record)),
+        ),
+    )
+}
+
+pub fn g1_static_get_type_table_is_canonical() -> Bool {
+    let table = g1_static_get_type_table();
+    handle __g1_bytes_len(table) == 288 {
+        true => handle __g1_bytes_get(table, 0) == 21 {
+            true => handle __g1_bytes_get(table, 88) == 196 {
+                true => handle __g1_bytes_get(table, 244) == 43 {
+                    true => handle __g1_bytes_get(table, 276) == 36 {
+                        true => handle __g1_bytes_get(table, 277) == 17 {
+                            true => __g1_bytes_get(table, 280) == 4,
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_static_get_signature_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(
+        __g1_int_wrapping_add<usize>(824, __g1_bytes_len(constants)),
+        g1_name_padding_length(__g1_bytes_len(constants)),
+    )
+}
+
+fn g1_static_get_protocol_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_get_signature_offset(constants), 32)
+}
+
+fn g1_static_get_handler_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_get_protocol_offset(constants), 8)
+}
+
+fn g1_static_get_function_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_get_handler_offset(constants), 8)
+}
+
+fn g1_static_get_code_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_get_function_offset(constants), 64)
+}
+
+fn g1_static_get_operands_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_get_code_offset(constants), 72)
+}
+
+fn g1_static_get_cleanup_offset(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_get_operands_offset(constants), 64)
+}
+
+fn g1_static_get_total(constants: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(g1_static_get_cleanup_offset(constants), 152)
+}
+
+fn g1_static_get_directory(constants: Bytes) -> Bytes {
+    let signature = g1_static_get_signature_offset(constants);
+    let protocol = g1_static_get_protocol_offset(constants);
+    let handler = g1_static_get_handler_offset(constants);
+    let function = g1_static_get_function_offset(constants);
+    let code = g1_static_get_code_offset(constants);
+    let operands = g1_static_get_operands_offset(constants);
+    let cleanup = g1_static_get_cleanup_offset(constants);
+    let total = g1_static_get_total(constants);
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_header(0, 1, 3, g1_usize_as_u64(total)), g1_directory_entry(1, 512, 20, 1, 0)),
+                            g1_directory_entry(2, 536, 288, 21, 0),
+                        ),
+                        g1_directory_entry(3, 824, g1_usize_as_u64(__g1_bytes_len(constants)), 2, 0),
+                    ),
+                    g1_directory_entry(4, g1_usize_as_u64(signature), 32, 1, 0),
+                ),
+                g1_directory_entry(5, g1_usize_as_u64(protocol), 0, 0, 24),
+            ),
+            g1_static_get_directory_tail(protocol, handler, function, code, operands, cleanup, total),
+        ),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_get_directory_tail(protocol: usize, handler: usize, function: usize, code: usize, operands: usize, cleanup: usize, total: usize) -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_directory_entry(6, g1_usize_as_u64(protocol), 8, 0, 0), g1_directory_entry(7, g1_usize_as_u64(handler), 8, 0, 0)),
+                            g1_directory_entry(8, g1_usize_as_u64(function), 64, 1, 64),
+                        ),
+                        g1_directory_entry(9, g1_usize_as_u64(code), 72, 18, 4),
+                    ),
+                    g1_directory_entry(10, g1_usize_as_u64(operands), 60, 15, 4),
+                ),
+                g1_directory_entry(11, g1_usize_as_u64(cleanup), 144, 6, 24),
+            ),
+            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(total), 8, 0, 0))),
+        ),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_get_function_table() -> Bytes {
+    g1_concat4(
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(5)),
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(18), u32_le_bytes(6), u32_le_bytes(0)),
+        g1_concat4(u32_le_bytes(6), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)),
+        g1_append_field(u64_le_bytes(0), u64_le_bytes(0)),
+    )
+}
+
+fn g1_static_get_code() -> Bytes {
+    g1_concat4(
+        g1_concat4(u32_le_bytes(8193), u32_le_bytes(1), u32_le_bytes(1), u32_le_bytes(8193)),
+        g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(16453), u32_le_bytes(3)),
+        g1_concat4(u32_le_bytes(114), u32_le_bytes(0), u32_le_bytes(2), u32_le_bytes(8212)),
+        g1_concat4(u32_le_bytes(4), u32_le_bytes(3), u32_le_bytes(4104), u32_le_bytes(3)),
+    )
+}
+
+fn g1_static_get_code_tail() -> Bytes {
+    g1_append_field(u32_le_bytes(4134), u32_le_bytes(4294967295))
+}
+
+fn g1_static_get_full_code() -> Bytes {
+    g1_append_field(g1_static_get_code(), g1_static_get_code_tail())
+}
+
+fn g1_static_get_operands() -> Bytes {
+    g1_append_field(
+        g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(2)),
+        g1_append_field(
+            g1_concat4(u32_le_bytes(1), u32_le_bytes(3), u32_le_bytes(2), u32_le_bytes(1)),
+            g1_concat4(u32_le_bytes(4), u32_le_bytes(3), u32_le_bytes(2), u32_le_bytes(1)),
+        ),
+    )
+}
+
+fn g1_static_get_cleanup_plan(first: u32, end: u32, operand_start: u32, operand_count: u32) -> Bytes {
+    g1_concat3(
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(first), u32_le_bytes(end), u32_le_bytes(operand_start)),
+        g1_append_field(u32_le_bytes(operand_count), u32_le_bytes(0)),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_static_get_cleanup_table() -> Bytes {
+    g1_concat4(
+        g1_static_get_cleanup_plan(0, 1, 0, 0),
+        g1_static_get_cleanup_plan(1, 2, 2, 1),
+        g1_static_get_cleanup_plan(2, 3, 3, 2),
+        g1_append_field(
+            g1_static_get_cleanup_plan(3, 4, 5, 3),
+            g1_append_field(g1_static_get_cleanup_plan(4, 5, 8, 4), g1_static_get_cleanup_plan(5, 6, 12, 3)),
+        ),
+    )
+}
+
+pub fn g1_static_utf8_get_entry_candidate(bytes: Bytes) -> Bytes {
+    let constants = g1_static_subslice_constants(bytes);
+    g1_append_field(
+        g1_static_get_directory(constants),
+        g1_append_field(
+            g1_append_field(g1_unit_entry_name_slot(__g1_bytes_from_array_move([109, 97, 105, 110])), g1_static_get_type_table()),
+            g1_append_field(
+                g1_append_field(constants, g1_zero_bytes(g1_name_padding_length(__g1_bytes_len(constants)))),
+                g1_append_field(
+                    g1_append_field(g1_unit_entry_signature_table(), g1_append_field(g1_empty_variable_table(), g1_empty_variable_table())),
+                    g1_append_field(
+                        g1_append_field(g1_static_get_function_table(), g1_static_get_full_code()),
+                        g1_append_field(
+                            g1_append_field(g1_static_get_operands(), g1_four_zero_padding_bytes()),
+                            g1_append_field(g1_static_get_cleanup_table(), g1_empty_variable_table()),
+                        ),
+                    ),
+                ),
+            ),
+        ),
+    )
+}
+
+pub fn g1_static_utf8_get_entry_candidate_has_expected_layout() -> Bool {
+    let candidate = g1_static_utf8_get_entry_candidate(__g1_bytes_from_array_move([120, 121, 122]));
+    handle __g1_bytes_len(candidate) == 1296 {
+        true => handle g1_declared_total_matches_bytes(candidate) {
+            true => handle g1_directory_is_readable(candidate) {
+                true => handle __g1_bytes_get(candidate, 1008) == 1 {
+                    true => handle __g1_bytes_get(candidate, 1032) == 69 {
+                        true => handle __g1_bytes_get(candidate, 1036) == 3 {
+                            true => handle __g1_bytes_get(candidate, 1040) == 114 {
+                                true => handle __g1_bytes_get(candidate, 1052) == 20 {
+                                    true => handle __g1_bytes_get(candidate, 1064) == 8 {
+                                        true => __g1_bytes_get(candidate, 1080) == 1,
+                                        false => false,
+                                        _ => false,
+                                    },
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_static_utf8_get_entry_vm_reference_digest() -> Bytes {
+    __g1_bytes_from_array_move([56, 156, 17, 172, 16, 100, 93, 68, 112, 44, 215, 219, 4, 27, 204, 238, 249, 76, 29, 3, 112, 42, 244, 99, 66, 0, 197, 56, 234, 28, 68, 55])
+}
+
+pub fn g1_static_utf8_get_entry_matches_vm_reference() -> Bool {
+    let candidate = g1_static_utf8_get_entry_candidate(__g1_bytes_from_array_move([120, 121, 122]));
+    g1_bytes_equal(__g1_blake3(candidate), g1_static_utf8_get_entry_vm_reference_digest(), 0)
 }
 fn g1_unit_entry_directory(name: Bytes) -> Bytes {
     g1_append_field(

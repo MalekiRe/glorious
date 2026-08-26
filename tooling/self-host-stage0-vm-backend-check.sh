@@ -33,7 +33,7 @@ output="$(timeout --kill-after=5s --preserve-status 120s "$compiler" --root-pack
     --runtime-leaf array-get-move crate __g1_array_get_move --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "621" ]] || {
+[[ "$output" == "633" ]] || {
     echo "self-host vm backend check: expected canonical G1 schema admission, magic/header, manifest-bound imports, and verified execution paths, got $output" >&2
     exit 1
 }
