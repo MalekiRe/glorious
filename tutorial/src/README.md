@@ -1,37 +1,20 @@
-# A Brainfuck interpreter in Grandiose
+# Historical Grandiose tutorial
 
-This book builds a complete Brainfuck interpreter using only the language and
-tooling implemented in this repository. The finished package lives in the
-`tutorial/brainfuck` directory and is checked as part of the tutorial itself.
+**Status:** archived tutorial for the retired pre-Stage0 toolchain
 
-The implementation deliberately uses the language's interesting pieces rather
-than hiding them behind host code: packages and modules, private representation,
-enums, recursive parsing and execution, `Vec<T>`, `Bytes`, `String` iterators,
-checked `Result` and `Option` values, unique borrows, generic trait dispatch,
-custom fixity, library-defined control flow, and algebraic effects.
+The original tutorial taught a `grand` package, formatter, compiler, LSP, and
+VM workflow. Those commands are not part of the active Cargo workspace, so the
+chapters are no longer a runnable introduction to the repository.
 
-The result is recognizably Grandiose source rather than a host-language shim:
+The original chapters are preserved unchanged under
+[`../../docs/archive/tutorial/`](../../docs/archive/tutorial/) for language
+design examples and provenance.
 
-```glorious
-if(byte represents 93) {
-    Result::Ok(Sequence { instructions: Vec::new(), closed: true })
-} else {
-    parse_sequence(parser, nested)
-}
-```
+For current executable commands, start at
+[`../../README.md`](../../README.md) and
+[`../../crates/grandiose-stage0/README.md`](../../crates/grandiose-stage0/README.md).
+For current self-hosting status, see
+[`../../docs/self-hosting.md`](../../docs/self-hosting.md).
 
-Later chapters unpack the standard library's `if ... else` abstraction, the
-project's `represents` infix function, and the ownership rules behind this
-recursive call.
-
-From `tutorial/brainfuck`, the intended workflow is:
-
-```console
-grand check
-grand test
-grand fmt --check
-grand run -- samples/hello.bf
-```
-
-`grand run` executes compiled G1 bytecode through `grvm`; it does not invoke the
-compiler's internal recovery evaluator.
+A new tutorial should be written only after the Stage0 package/source model and
+user-facing command contract are stable enough to test end to end.
