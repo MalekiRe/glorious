@@ -1,0 +1,1937 @@
+// G1 standard-library prelude and source-defined control.
+//
+// This package deliberately contains no public `Text` alias. `Str` is an
+// ordinary source-defined UTF-8 view; its private byte window works equally
+// for compiler-emitted static data and for a future owned `String` buffer.
+
+// Trusted array leaves. Their exact declaration identities are bound only
+// when the compiler supplies this package; copied source spellings have no VM
+// authority. Public collections below provide all bounds and ownership policy.
+__g1_array_len<T>(value: &Array<T>) -> usize { () }
+__g1_array_utf8_valid_up_to(value: &Array<u8>) -> usize { () }
+__g1_array_push_utf8_char(value: &mut Array<u8>, character: char) -> () { () }
+__g1_array_extend_from_slice<T>(value: &mut Array<T>, source: &Array<T>, start: usize, length: usize) -> ()
+    where T: Use<[0, *]> { () }
+__g1_array_insert_move<T>(value: &mut Array<T>, index: usize, item: T) -> () { () }
+__g1_array_remove_move<T>(value: &mut Array<T>, index: usize) -> T { () }
+__g1_array_append_move<T>(value: &mut Array<T>, source: Array<T>) -> () { () }
+__g1_array_insert_from_slice<T>(value: &mut Array<T>, index: usize, source: &Array<T>, start: usize, length: usize) -> ()
+    where T: Use<[0, *]> { () }
+__g1_array_insert_utf8_from_slice(value: &mut Array<u8>, index: usize, source: &Array<u8>, start: usize, length: usize) -> usize { () }
+__g1_array_truncate_discard<T>(value: &mut Array<T>, length: usize) -> ()
+    where T: Use<[0, 1]> { () }
+__g1_array_reverse_move<T>(value: &mut Array<T>) -> () { () }
+__g1_array_split_off_move<T>(value: &mut Array<T>, index: usize) -> Array<T> { () }
+// This consumes one unique array window and returns two disjoint unique
+// windows.  It is a sealed runtime leaf: source code can only receive these
+// references through SliceMut::split_at, whose private fields retain the
+// checked start and length metadata.
+__g1_array_split_borrow_unique<'a, T>(value: &'a mut Array<T>, start: usize, length: usize, index: usize) -> (&'a mut Array<T>, &'a mut Array<T>) { () }
+__g1_array_pop_utf8_char(value: &mut Array<u8>) -> (char, usize) { () }
+__g1_array_utf8_char_at(value: &Array<u8>, start: usize, length: usize, index: usize) -> (char, usize) { () }
+__g1_array_get_borrow_shared<'a, T>(value: &'a Array<T>, index: usize) -> &'a T { () }
+__g1_array_get_borrow_unique<'a, T>(value: &'a mut Array<T>, index: usize) -> &'a mut T { () }
+__g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T { () }
+__g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) -> () { () }
+__g1_array_empty<T>() -> Array<T> { () }
+__g1_array_push_move<T>(value: &mut Array<T>, item: T) -> () { () }
+__g1_array_pop_move<T>(value: &mut Array<T>) -> T { () }
+__g1_array_capacity<T>(value: &Array<T>) -> usize { () }
+__g1_array_reserve<T>(value: &mut Array<T>, additional: usize) -> () { () }
+__g1_static_len(value: __StaticData<Utf8Bytes>) -> usize { () }
+__g1_static_subslice(value: __StaticData<Utf8Bytes>, start: usize, length: usize) -> __StaticData<Utf8Bytes> { () }
+__g1_static_get_shared(value: __StaticData<Utf8Bytes>, index: usize) -> &'static u8 { () }
+__g1_static_as_array(value: __StaticData<Utf8Bytes>) -> &'static Array<u8> { () }
+__g1_static_raw_as_array(value: __StaticData<u8>) -> &'static Array<u8> { () }
+// Scalar leaves are private manifest bindings.  The public character API
+// validates before calling the checked conversion, so invalid code points are
+// represented as `None` rather than as a VM execution failure.
+__g1_char_from_u32_checked(value: u32) -> char { () }
+__g1_char_to_u32(value: char) -> u32 { () }
+__g1_int_convert_wrapping_to_u32<T>(value: T) -> u32 { () }
+__g1_int_convert_wrapping_to_usize<T>(value: T) -> usize { () }
+__g1_int_convert_checked_to_u8<T>(value: T) -> u8 { () }
+__g1_int_convert_checked_to_u16<T>(value: T) -> u16 { () }
+__g1_int_convert_checked_to_u32<T>(value: T) -> u32 { () }
+__g1_int_convert_checked_to_u64<T>(value: T) -> u64 { () }
+__g1_int_convert_checked_to_usize<T>(value: T) -> usize { () }
+__g1_int_convert_checked_to_i8<T>(value: T) -> i8 { () }
+__g1_int_convert_checked_to_i16<T>(value: T) -> i16 { () }
+__g1_int_convert_checked_to_i32<T>(value: T) -> i32 { () }
+__g1_int_convert_checked_to_isize<T>(value: T) -> isize { () }
+__g1_int_convert_checked_to_u128<T>(value: T) -> u128 { () }
+__g1_int_convert_checked_to_i128<T>(value: T) -> i128 { () }
+__g1_int_convert_wrapping_to_i64<T>(value: T) -> i64 { () }
+__g1_int_convert_wrapping_to_u8<T>(value: T) -> u8 { () }
+__g1_int_convert_wrapping_to_u16<T>(value: T) -> u16 { () }
+__g1_int_convert_wrapping_to_i8<T>(value: T) -> i8 { () }
+__g1_int_convert_wrapping_to_i16<T>(value: T) -> i16 { () }
+__g1_int_convert_wrapping_to_i32<T>(value: T) -> i32 { () }
+__g1_int_convert_wrapping_to_u64<T>(value: T) -> u64 { () }
+__g1_int_convert_wrapping_to_isize<T>(value: T) -> isize { () }
+__g1_int_convert_wrapping_to_u128<T>(value: T) -> u128 { () }
+__g1_int_convert_wrapping_to_i128<T>(value: T) -> i128 { () }
+__g1_int_wrapping_add<T>(left: T, right: T) -> T { () }
+__g1_int_wrapping_sub<T>(left: T, right: T) -> T { () }
+__g1_int_wrapping_mul<T>(left: T, right: T) -> T { () }
+__g1_int_bit_and<T>(left: T, right: T) -> T { () }
+__g1_int_bit_or<T>(left: T, right: T) -> T { () }
+__g1_int_bit_xor<T>(left: T, right: T) -> T { () }
+__g1_int_bit_not<T>(value: T) -> T { () }
+__g1_int_shl<T>(value: T, count: u32) -> T { () }
+__g1_int_shr<T>(value: T, count: u32) -> T { () }
+__g1_f32_add(left: f32, right: f32) -> f32 { () }
+__g1_f32_sub(left: f32, right: f32) -> f32 { () }
+__g1_f32_mul(left: f32, right: f32) -> f32 { () }
+__g1_f32_div(left: f32, right: f32) -> f32 { () }
+__g1_f32_rem(left: f32, right: f32) -> f32 { () }
+__g1_f32_eq(left: f32, right: f32) -> u32 { () }
+__g1_f32_ne(left: f32, right: f32) -> u32 { () }
+__g1_f32_lt(left: f32, right: f32) -> u32 { () }
+__g1_f32_le(left: f32, right: f32) -> u32 { () }
+__g1_f32_gt(left: f32, right: f32) -> u32 { () }
+__g1_f32_ge(left: f32, right: f32) -> u32 { () }
+__g1_f32_from_bits(value: u32) -> f32 { () }
+__g1_i64_to_f32(value: i64) -> f32 { () }
+__g1_f32_to_i64_checked(value: f32) -> i64 { () }
+__g1_f64_add(left: f64, right: f64) -> f64 { () }
+__g1_f64_sub(left: f64, right: f64) -> f64 { () }
+__g1_f64_mul(left: f64, right: f64) -> f64 { () }
+__g1_f64_div(left: f64, right: f64) -> f64 { () }
+__g1_f64_rem(left: f64, right: f64) -> f64 { () }
+__g1_f64_eq(left: f64, right: f64) -> u32 { () }
+__g1_f64_ne(left: f64, right: f64) -> u32 { () }
+__g1_f64_lt(left: f64, right: f64) -> u32 { () }
+__g1_f64_le(left: f64, right: f64) -> u32 { () }
+__g1_f64_gt(left: f64, right: f64) -> u32 { () }
+__g1_f64_ge(left: f64, right: f64) -> u32 { () }
+__g1_f64_to_i64_checked(value: f64) -> i64 { () }
+
+
+pub enum Result<T, E> { Ok(T), Err(E) }
+
+// Option has Result's representation; it is the ordinary ownership-aware
+// temporary storage type rather than a separate Slot abstraction.
+pub type Option<T> = Result<T, ()>;
+pub let Option::Some = Result::Ok;
+pub let Some = Result::Ok;
+pub let None = Result::Err(());
+
+pub type Bool = Option<()>;
+pub let true = Result::Ok(());
+pub let false = Result::Err(());
+
+pub enum Ordering { Less, Equal, Greater }
+pub struct Range<T> { start: T, end: T }
+pub enum SliceRangeError { Reversed, OutOfBounds }
+
+// Public ranges can be constructed with either endpoint.  Keep their query
+// operations total: a reversed range is empty rather than relying on a
+// wrapping `usize` subtraction.
+pub fn range_len(value: &Range<usize>) -> usize {
+    handle value.end < value.start {
+        true => 0,
+        false => value.end - value.start,
+    }
+}
+pub fn range_is_empty(value: &Range<usize>) -> Bool {
+    handle value.end > value.start { true => false, false => true }
+}
+pub fn range_contains(value: &Range<usize>, index: usize) -> Bool {
+    handle index < value.start {
+        true => false,
+        false => handle index < value.end { true => true, false => false },
+    }
+}
+fn range_intersection_finish(start: usize, end: usize) -> Option<Range<usize>> {
+    handle start < end {
+        true => Result::Ok(Range { start: start, end: end }),
+        false => Result::Err(()),
+    }
+}
+fn range_intersection_with_start(start: usize, left_end: usize, right_end: usize) -> Option<Range<usize>> {
+    handle left_end < right_end {
+        true => range_intersection_finish(start, left_end),
+        false => range_intersection_finish(start, right_end),
+    }
+}
+pub fn range_intersection(left: &Range<usize>, right: &Range<usize>) -> Option<Range<usize>> {
+    handle left.start > right.start {
+        true => range_intersection_with_start(left.start, left.end, right.end),
+        false => range_intersection_with_start(right.start, left.end, right.end),
+    }
+}
+// Offset both endpoints without ever forming an overflowing ordinary sum.
+// The wrapping operation is a private-machine-policy wrapper; the comparison
+// turns its overflow signal back into the public checked `Option` result.
+pub fn range_checked_offset(value: &Range<usize>, offset: usize) -> Option<Range<usize>> {
+    let start = wrapping_add(value.start, offset);
+    let end = wrapping_add(value.end, offset);
+    handle start < value.start {
+        true => None,
+        false => handle end < value.end {
+            true => None,
+            false => Result::Ok(Range { start: start, end: end }),
+        },
+    }
+}
+pub let Range::len = range_len;
+pub let Range::is_empty = range_is_empty;
+pub let Range::contains = range_contains;
+pub let Range::intersection = range_intersection;
+pub let Range::checked_offset = range_checked_offset;
+
+// Slices are ordinary library views.  The VM may keep hidden provenance for
+// their backing allocation, but the public representation is one borrowed
+// data window rather than a static/dynamic sum type.
+pub struct Slice<'a, T> {
+    private storage: &'a Array<T>,
+    private start: usize,
+    private length: usize,
+}
+
+pub struct SliceMut<'a, T> {
+    private storage: &'a mut Array<T>,
+    private start: usize,
+    private length: usize,
+}
+
+// This is intentionally a very small iterator surface rather than a tower of
+// adapters. It is enough for indexed compiler passes and makes the ownership
+// boundary explicit: `SliceIter` lends elements, while `VecIntoIter` below
+// transfers them out.
+pub struct SliceIter<'a, T> {
+    private slice: Slice<'a, T>,
+    private position: usize,
+}
+
+
+// The UTF-8 invariant belongs to `Str`, not to the general byte slice. Its
+// sole field is private, so only standard-library constructors can establish
+// a `Str` value.
+pub struct Str<'a> { private bytes: Slice<'a, u8> }
+
+pub fn slice_len<'a, T>(value: &Slice<'a, T>) -> usize { value.length }
+pub fn slice_is_empty<'a, T>(value: &Slice<'a, T>) -> Bool {
+    handle value.length { 0 => true, _ => false }
+}
+pub fn slice_mut_len<'a, T>(value: &SliceMut<'a, T>) -> usize { value.length }
+pub fn slice_mut_is_empty<'a, T>(value: &SliceMut<'a, T>) -> Bool {
+    handle value.length { 0 => true, _ => false }
+}
+pub fn slice_get_unchecked<T>(value: Slice<'_, T>, index: usize) -> &T {
+    __g1_array_get_borrow_shared(value.storage, value.start + index)
+}
+pub fn slice_get<T>(value: Slice<'_, T>, index: usize) -> Option<&T> {
+    handle index < value.length {
+        true => Result::Ok(__g1_array_get_borrow_shared(value.storage, value.start + index)),
+        false => Result::Err(()),
+    }
+}
+pub fn slice_mut_get_unchecked<T>(value: SliceMut<'_, T>, index: usize) -> &mut T {
+    __g1_array_get_borrow_unique(value.storage, value.start + index)
+}
+pub fn slice_mut_get<T>(value: SliceMut<'_, T>, index: usize) -> Option<&mut T> {
+    handle index < value.length {
+        true => Result::Ok(__g1_array_get_borrow_unique(value.storage, value.start + index)),
+        false => Result::Err(()),
+    }
+}
+// A unique subview consumes its parent view. Its retained window is checked
+// at every private array access, so it cannot be used to reach outside the
+// original SliceMut range.
+pub fn slice_mut_slice<T>(value: SliceMut<'_, T>, range: Range<usize>) -> Result<SliceMut<'_, T>, SliceRangeError> {
+    handle range.start > range.end {
+        true => Result::Err(SliceRangeError::Reversed),
+        false => handle range.end > value.length {
+            true => Result::Err(SliceRangeError::OutOfBounds),
+            false => Result::Ok(SliceMut {
+                storage: value.storage,
+                start: value.start + range.start,
+                length: range.end - range.start,
+            }),
+        },
+    }
+}
+pub fn slice_mut_split_at<T>(value: SliceMut<'_, T>, index: usize) -> Result<(SliceMut<'_, T>, SliceMut<'_, T>), SliceRangeError> {
+    handle index > value.length {
+        true => Result::Err(SliceRangeError::OutOfBounds),
+        false => {
+            let windows = __g1_array_split_borrow_unique(
+                value.storage,
+                value.start,
+                value.length,
+                index,
+            );
+            handle windows {
+                (left_storage, right_storage) => Result::Ok((
+                    SliceMut { storage: left_storage, start: value.start, length: index },
+                    SliceMut {
+                        storage: right_storage,
+                        start: value.start + index,
+                        length: value.length - index,
+                    },
+                )),
+            }
+        },
+    }
+}
+pub fn slice_slice<T>(value: Slice<'_, T>, range: Range<usize>) -> Result<Slice<'_, T>, SliceRangeError> {
+    handle range.start > range.end {
+        true => Result::Err(SliceRangeError::Reversed),
+        false => handle range.end > value.length {
+            true => Result::Err(SliceRangeError::OutOfBounds),
+            false => Result::Ok(Slice {
+                storage: value.storage,
+                start: value.start + range.start,
+                length: range.end - range.start,
+            }),
+        },
+    }
+}
+pub fn slice_split_at<T>(value: Slice<'_, T>, index: usize) -> Result<(Slice<'_, T>, Slice<'_, T>), SliceRangeError> {
+    handle index > value.length {
+        true => Result::Err(SliceRangeError::OutOfBounds),
+        false => Result::Ok((
+            Slice { storage: value.storage, start: value.start, length: index },
+            Slice {
+                storage: value.storage,
+                start: value.start + index,
+                length: value.length - index,
+            },
+        )),
+    }
+}
+pub fn slice_iter<T>(value: Slice<'_, T>) -> SliceIter<'_, T> {
+    SliceIter { slice: value, position: 0 }
+}
+// Iterating a mutable window as shared references consumes the unique view.
+// This is an ordinary reborrow into the existing lending iterator: no element
+// is copied, and the caller cannot mutate through the original SliceMut while
+// any yielded reference may still be live.
+pub fn slice_mut_iter<T>(value: SliceMut<'_, T>) -> SliceIter<'_, T> {
+    SliceIter {
+        slice: Slice {
+            // Spell out the shared reborrow.  A `SliceMut` owns its unique
+            // view, and the iterator takes a shared view of precisely that
+            // backing storage for the duration of the iterator lifetime.
+            storage: &(*value.storage),
+            start: value.start,
+            length: value.length,
+        },
+        position: 0,
+    }
+}
+pub fn slice_iter_next<T>(value: &mut SliceIter<'_, T>) -> Option<&T> {
+    handle value.position < value.slice.length {
+        false => Result::Err(()),
+        true => {
+            let index = value.position;
+            (*value).position = index + 1;
+            Result::Ok(__g1_array_get_borrow_shared(
+                value.slice.storage,
+                value.slice.start + index,
+            ))
+        },
+    }
+}
+fn slice_lower_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usize) -> usize
+    where T: Ord {
+    handle start < end {
+        false => start,
+        true => {
+            let middle = start + ((end - start) / 2);
+            let item = __g1_array_get_borrow_shared(value.storage, value.start + middle);
+            handle Ord::compare(item, needle) {
+                Ordering::Less => slice_lower_bound_from(value, needle, middle + 1, end),
+                _ => slice_lower_bound_from(value, needle, start, middle),
+            }
+        },
+    }
+}
+pub fn slice_lower_bound<T>(value: Slice<T>, needle: &T) -> usize
+    where T: Ord {
+    slice_lower_bound_from(value, needle, 0, value.length)
+}
+fn slice_upper_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usize) -> usize
+    where T: Ord {
+    handle start < end {
+        false => start,
+        true => {
+            let middle = start + ((end - start) / 2);
+            let item = __g1_array_get_borrow_shared(value.storage, value.start + middle);
+            handle Ord::compare(item, needle) {
+                Ordering::Greater => slice_upper_bound_from(value, needle, start, middle),
+                _ => slice_upper_bound_from(value, needle, middle + 1, end),
+            }
+        },
+    }
+}
+pub fn slice_upper_bound<T>(value: Slice<T>, needle: &T) -> usize
+    where T: Ord {
+    slice_upper_bound_from(value, needle, 0, value.length)
+}
+pub fn slice_binary_search<T>(value: Slice<T>, needle: &T) -> Result<usize, usize>
+    where T: Ord {
+    let index = slice_lower_bound(value, needle);
+    handle index < value.length {
+        false => Result::Err(index),
+        true => handle Ord::compare(
+            __g1_array_get_borrow_shared(value.storage, value.start + index),
+            needle,
+        ) {
+            Ordering::Equal => Result::Ok(index),
+            _ => Result::Err(index),
+        },
+    }
+}
+fn slice_lex_compare_from<T>(left: Slice<T>, right: Slice<T>, index: usize) -> Ordering
+    where T: Ord {
+    handle index >= left.length {
+        true => handle index >= right.length {
+            true => Ordering::Equal,
+            false => Ordering::Less,
+        },
+        false => handle index >= right.length {
+            true => Ordering::Greater,
+            false => handle Ord::compare(
+                __g1_array_get_borrow_shared(left.storage, left.start + index),
+                __g1_array_get_borrow_shared(right.storage, right.start + index),
+            ) {
+                Ordering::Equal => slice_lex_compare_from(left, right, index + 1),
+                value => value,
+            },
+        },
+    }
+}
+pub fn slice_lex_compare<T>(left: Slice<T>, right: Slice<T>) -> Ordering
+    where T: Ord {
+    slice_lex_compare_from(left, right, 0)
+}
+
+pub let Slice::len = slice_len;
+pub let Slice::is_empty = slice_is_empty;
+pub let Slice::get = slice_get;
+pub let Slice::get_unchecked = slice_get_unchecked;
+pub let Slice::slice = slice_slice;
+pub let Slice::split_at = slice_split_at;
+pub let Slice::iter = slice_iter;
+pub let SliceMut::len = slice_mut_len;
+pub let SliceMut::is_empty = slice_mut_is_empty;
+pub let SliceMut::get = slice_mut_get;
+pub let SliceMut::get_unchecked = slice_mut_get_unchecked;
+pub let SliceMut::slice = slice_mut_slice;
+pub let SliceMut::split_at = slice_mut_split_at;
+pub let SliceMut::iter = slice_mut_iter;
+pub let SliceIter::next = slice_iter_next;
+pub let Slice::lower_bound = slice_lower_bound;
+pub let Slice::upper_bound = slice_upper_bound;
+pub let Slice::binary_search = slice_binary_search;
+pub let Slice::lex_compare = slice_lex_compare;
+
+// Literal elaboration calls this ordinary standard-library wrapper after the
+// compiler has emitted a sealed UTF-8 static-data handle. It is public only
+// so the compiler can address the distributed package by its stable name;
+// callers still cannot construct or name the handle type themselves.
+fn __g1_wrap_static_str(value: __StaticData<Utf8Bytes>) -> Str<'static> {
+    let storage = __g1_static_as_array(value);
+    Str<'static> {
+        bytes: Slice<'static, u8> {
+            storage: storage,
+            start: 0,
+            length: __g1_array_len(storage),
+        },
+    }
+}
+
+// Raw-byte literals use the same public Slice representation as dynamic
+// arrays.  The raw static tag is preserved by the private manifest leaf and
+// never confers permission to construct a Str.
+fn __g1_wrap_static_slice(value: __StaticData<u8>) -> Slice<'static, u8> {
+    let storage = __g1_static_raw_as_array(value);
+    Slice<'static, u8> {
+        storage: storage,
+        start: 0,
+        length: __g1_array_len(storage),
+    }
+}
+
+// `Str` is a library-facing borrowed UTF-8 view. Its hidden static backing is
+// never exposed outside this package; these helpers are ordinary operations
+// over the same private source-level slice used by dynamic strings.
+pub enum StringRangeError { Reversed, OutOfBounds, NotCharBoundary }
+pub struct Chars<'a> { private text: Str<'a>, private position: usize }
+
+pub fn str_len(value: Str) -> usize { value.bytes.length }
+pub fn str_is_empty(value: Str) -> Bool {
+    handle str_len(value) { 0 => true, _ => false }
+}
+// A UTF-8 continuation byte is never a character boundary. Index zero and
+// the exclusive end are boundaries by construction; an out-of-range offset
+// is not a boundary and is rejected by `str_slice` before its result escapes.
+pub fn str_is_char_boundary(value: Str, index: usize) -> Bool {
+    handle index > str_len(value) {
+        true => false,
+        false => handle index {
+            0 => true,
+            _ => handle index == str_len(value) {
+                true => true,
+                false => handle slice_get(value.bytes, index) {
+                    Result::Ok(byte) => handle *byte < 128 {
+                        true => true,
+                        false => handle *byte >= 192 {
+                            true => true,
+                            false => false,
+                        },
+                    },
+                    Result::Err(_) => false,
+                },
+            },
+        },
+    }
+}
+pub fn str_slice(value: Str, range: Range<usize>) -> Result<Str, StringRangeError> {
+    handle range.start > range.end {
+        true => Result::Err(StringRangeError::Reversed),
+        false => handle range.end > str_len(value) {
+            true => Result::Err(StringRangeError::OutOfBounds),
+            false => handle str_is_char_boundary(value, range.start) {
+                false => Result::Err(StringRangeError::NotCharBoundary),
+                true => handle str_is_char_boundary(value, range.end) {
+                    false => Result::Err(StringRangeError::NotCharBoundary),
+                    true => Result::Ok(Str {
+                        bytes: Slice {
+                            storage: value.bytes.storage,
+                            start: value.bytes.start + range.start,
+                            length: range.end - range.start,
+                        },
+                    }),
+                },
+            },
+        },
+    }
+}
+pub fn str_subslice(value: Str, start: usize, length: usize) -> Result<Str, StringRangeError> {
+    // Check before forming `start + length`: otherwise a caller-supplied
+    // oversized offset could overflow before the ordinary range validation
+    // has a chance to return OutOfBounds.
+    handle start > str_len(value) {
+        true => Result::Err(StringRangeError::OutOfBounds),
+        false => handle length > str_len(value) - start {
+            true => Result::Err(StringRangeError::OutOfBounds),
+            false => str_slice(value, Range { start: start, end: start + length }),
+        },
+    }
+}
+pub fn str_as_bytes(value: Str) -> Slice<u8> {
+    value.bytes
+}
+pub fn str_chars(value: Str) -> Chars { Chars { text: value, position: 0 } }
+pub fn chars_next(value: &mut Chars) -> Option<char> {
+    handle __g1_array_utf8_char_at(
+        value.text.bytes.storage,
+        value.text.bytes.start,
+        value.text.bytes.length,
+        value.position,
+    ) {
+        (character, 0) => Result::Err(()),
+        (character, width) => {
+            (*value).position = (*value).position + width;
+            Result::Ok(character)
+        },
+    }
+}
+pub let Str::len = str_len;
+pub let Str::len_bytes = str_len;
+pub let Str::is_empty = str_is_empty;
+pub let Str::is_char_boundary = str_is_char_boundary;
+pub let Str::slice = str_slice;
+pub let Str::subslice = str_subslice;
+pub let Str::as_bytes = str_as_bytes;
+pub let Str::chars = str_chars;
+pub let Chars::next = chars_next;
+
+
+// `Vec` is an ordinary opaque standard-library wrapper. It is intentionally
+// the public dense collection; `Array` and its leaves are implementation
+// details of this package.
+pub struct Vec<T> { private storage: Array<T> }
+
+pub struct VecIntoIter<T> { private remaining: Vec<T> }
+
+pub fn vec_new<T>() -> Vec<T> { Vec { storage: __g1_array_empty() } }
+pub fn vec_with_capacity<T>(capacity: usize) -> Vec<T> {
+    let value = vec_new();
+    __g1_array_reserve(&mut value.storage, capacity);
+    value
+}
+pub fn vec_len<T>(value: &Vec<T>) -> usize { __g1_array_len(&value.storage) }
+pub fn vec_capacity<T>(value: &Vec<T>) -> usize { __g1_array_capacity(&value.storage) }
+pub fn vec_reserve<T>(value: &mut Vec<T>, additional: usize) -> () {
+    __g1_array_reserve(&mut value.storage, additional)
+}
+pub fn vec_push<T>(value: &mut Vec<T>, item: T) -> () {
+    __g1_array_push_move(&mut value.storage, item)
+}
+pub fn vec_extend_from_slice<T>(value: &mut Vec<T>, source: Slice<T>) -> ()
+    where T: Use<[0, *]> {
+    __g1_array_extend_from_slice(
+        &mut value.storage,
+        source.storage,
+        source.start,
+        source.length,
+    )
+}
+// Growing duplicates the supplied fill value. Shrinking is also valid under
+// this stronger bound because duplicable values may be discarded.
+fn vec_resize_grow<T>(value: &mut Vec<T>, length: usize, fill: &T) -> ()
+    where T: Use<[0, *]> {
+    handle vec_len(& *value) < length {
+        false => (),
+        true => {
+            vec_push(&mut *value, *fill);
+            vec_resize_grow(&mut *value, length, fill)
+        },
+    }
+}
+pub fn vec_resize<T>(value: &mut Vec<T>, length: usize, fill: T) -> ()
+    where T: Use<[0, *]> {
+    handle length < vec_len(& *value) {
+        true => vec_truncate(&mut *value, length),
+        false => vec_resize_grow(&mut *value, length, &fill),
+    }
+}
+// This deliberately remains a private leaf: `String` owns the UTF-8 policy,
+// while `Vec<u8>` only supplies the backing storage.
+fn vec_push_utf8_char(value: &mut Vec<u8>, character: char) -> () {
+    __g1_array_push_utf8_char(&mut value.storage, character)
+}
+pub fn vec_is_empty<T>(value: &Vec<T>) -> Bool {
+    handle vec_len(value) { 0 => true, _ => false }
+}
+pub fn vec_pop<T>(value: &mut Vec<T>) -> Option<T> {
+    let length = __g1_array_len(&value.storage);
+    handle length {
+        0 => Result::Err(()),
+        _ => Result::Ok(__g1_array_pop_move(&mut value.storage)),
+    }
+}
+pub fn vec_get_unchecked<T>(value: &Vec<T>, index: usize) -> &T {
+    __g1_array_get_borrow_shared(&value.storage, index)
+}
+pub fn vec_get<T>(value: &Vec<T>, index: usize) -> Option<&T> {
+    handle index < vec_len(value) {
+        true => Result::Ok(__g1_array_get_borrow_shared(&value.storage, index)),
+        false => Result::Err(()),
+    }
+}
+pub fn vec_first<T>(value: &Vec<T>) -> Option<&T> { vec_get(value, 0) }
+pub fn vec_last<T>(value: &Vec<T>) -> Option<&T> {
+    let length = vec_len(value);
+    handle length {
+        0 => Result::Err(()),
+        _ => vec_get(value, length - 1),
+    }
+}
+pub fn vec_get_mut<T>(value: &mut Vec<T>, index: usize) -> Option<&mut T> {
+    let length = __g1_array_len(&value.storage);
+    handle index < length {
+        true => Result::Ok(__g1_array_get_borrow_unique(&mut value.storage, index)),
+        false => Result::Err(()),
+    }
+}
+pub fn vec_swap<T>(value: &mut Vec<T>, left: usize, right: usize) -> () {
+    let first = __g1_array_get_move(&mut value.storage, left);
+    let second = __g1_array_get_move(&mut value.storage, right);
+    __g1_array_set_move(&mut value.storage, left, second);
+    __g1_array_set_move(&mut value.storage, right, first)
+}
+pub fn vec_swap_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
+    let length = __g1_array_len(&value.storage);
+    handle index < length {
+        false => Result::Err(()),
+        true => {
+            let last = length - 1;
+            let removed = __g1_array_get_move(&mut value.storage, index);
+            handle index == last {
+                true => {
+                    __g1_array_pop_move(&mut value.storage);
+                    Result::Ok(removed)
+                },
+                false => {
+                    let tail = __g1_array_get_move(&mut value.storage, last);
+                    __g1_array_set_move(&mut value.storage, index, tail);
+                    __g1_array_pop_move(&mut value.storage);
+                    Result::Ok(removed)
+                },
+            }
+        },
+    }
+}
+pub fn vec_insert<T>(value: &mut Vec<T>, index: usize, item: T) -> Option<()> {
+    handle index <= __g1_array_len(&value.storage) {
+        true => {
+            __g1_array_insert_move(&mut value.storage, index, item);
+            Result::Ok(())
+        },
+        false => Result::Err(()),
+    }
+}
+pub fn vec_insert_from_slice<T>(value: &mut Vec<T>, index: usize, source: Slice<T>) -> Option<()>
+    where T: Use<[0, *]> {
+    handle index <= __g1_array_len(&value.storage) {
+        false => Result::Err(()),
+        true => {
+            __g1_array_insert_from_slice(
+                &mut value.storage,
+                index,
+                source.storage,
+                source.start,
+                source.length,
+            );
+            Result::Ok(())
+        },
+    }
+}
+pub fn vec_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
+    handle index < __g1_array_len(&value.storage) {
+        true => Result::Ok(__g1_array_remove_move(&mut value.storage, index)),
+        false => Result::Err(()),
+    }
+}
+pub fn vec_append<T>(value: &mut Vec<T>, source: Vec<T>) -> () {
+    __g1_array_append_move(&mut value.storage, source.storage)
+}
+pub fn vec_truncate<T>(value: &mut Vec<T>, length: usize) -> ()
+    where T: Use<[0, 1]> {
+    handle length < __g1_array_len(&value.storage) {
+        true => __g1_array_truncate_discard(&mut value.storage, length),
+        false => (),
+    }
+}
+pub fn vec_clear<T>(value: &mut Vec<T>) -> ()
+    where T: Use<[0, 1]> {
+    __g1_array_truncate_discard(&mut value.storage, 0)
+}
+pub fn vec_reverse<T>(value: &mut Vec<T>) -> () {
+    __g1_array_reverse_move(&mut value.storage)
+}
+pub fn vec_split_off<T>(value: &mut Vec<T>, index: usize) -> Option<Vec<T>> {
+    handle index <= __g1_array_len(&value.storage) {
+        false => Result::Err(()),
+        true => Result::Ok(Vec { storage: __g1_array_split_off_move(&mut value.storage, index) }),
+    }
+}
+// Draining transfers the selected residents into the existing owned iterator
+// representation. The suffix is moved out and restored, so no resident is
+// silently discarded and exact-linear elements remain valid.
+pub fn vec_drain<T>(value: &mut Vec<T>, range: Range<usize>) -> Option<VecIntoIter<T>> {
+    handle range.start > range.end {
+        true => Result::Err(()),
+        false => handle range.end > __g1_array_len(&value.storage) {
+            true => Result::Err(()),
+            false => {
+                let tail = Vec {
+                    storage: __g1_array_split_off_move(&mut value.storage, range.end),
+                };
+                let drained = Vec {
+                    storage: __g1_array_split_off_move(&mut value.storage, range.start),
+                };
+                vec_append(value, tail);
+                Result::Ok(VecIntoIter { remaining: drained })
+            },
+        },
+    }
+}
+fn vec_selection_min<T>(value: &Vec<T>, best: usize, index: usize) -> usize
+    where T: Ord {
+    handle index >= vec_len(value) {
+        true => best,
+        false => handle Ord::compare(vec_get_unchecked(value, index), vec_get_unchecked(value, best)) {
+            Ordering::Less => vec_selection_min(value, index, index + 1),
+            _ => vec_selection_min(value, best, index + 1),
+        },
+    }
+}
+fn vec_sort_unstable_from<T>(value: &mut Vec<T>, index: usize) -> ()
+    where T: Ord {
+    handle index >= vec_len(& *value) {
+        true => (),
+        false => {
+            let smallest = vec_selection_min(& *value, index, index + 1);
+            vec_swap(&mut *value, index, smallest);
+            vec_sort_unstable_from(&mut *value, index + 1)
+        },
+    }
+}
+pub fn vec_sort_unstable<T>(value: &mut Vec<T>) -> ()
+    where T: Ord {
+    vec_sort_unstable_from(&mut *value, 0)
+}
+// A stable sort owns one reusable scratch buffer. Removing the first minimum
+// shifts later equal elements left, so equal values enter `scratch` in their
+// original order. Every resident is moved exactly once into the buffer and
+// once back, which also admits exact-linear element types.
+fn vec_sort_stable_into_scratch<T>(value: &mut Vec<T>, scratch: &mut Vec<T>) -> ()
+    where T: Ord {
+    handle vec_len(& *value) {
+        0 => (),
+        _ => {
+            let smallest = vec_selection_min(& *value, 0, 1);
+            handle vec_remove(&mut *value, smallest) {
+                Result::Err(_) => (),
+                Result::Ok(item) => {
+                    vec_push(&mut *scratch, item);
+                    vec_sort_stable_into_scratch(&mut *value, &mut *scratch)
+                },
+            }
+        },
+    }
+}
+pub fn vec_sort_stable<T>(value: &mut Vec<T>) -> ()
+    where T: Ord {
+    let scratch = vec_with_capacity(vec_len(& *value));
+    vec_sort_stable_into_scratch(&mut *value, &mut scratch);
+    vec_append(&mut *value, scratch)
+}
+// `partition_by` is deliberately in-place and makes no stability promise.
+// The predicate is explicitly duplicable because it is evaluated once per
+// examined resident; capture-free named functions and closures with
+// duplicable captures satisfy that contract without a special VM callback
+// type.
+fn vec_partition_by_from<T, F>(value: &mut Vec<T>, predicate: F, left: usize, end: usize) -> usize
+    where F: Fn<(&T), Output = Bool>, F: Use<[0, *]> {
+    handle left >= end {
+        true => left,
+        false => handle predicate(vec_get_unchecked(& *value, left)) {
+            true => vec_partition_by_from(&mut *value, predicate, left + 1, end),
+            false => {
+                let last = end - 1;
+                vec_swap(&mut *value, left, last);
+                vec_partition_by_from(&mut *value, predicate, left, last)
+            },
+        },
+    }
+}
+pub fn vec_partition_by<T, F>(value: &mut Vec<T>, predicate: F) -> usize
+    where F: Fn<(&T), Output = Bool>, F: Use<[0, *]> {
+    vec_partition_by_from(&mut *value, predicate, 0, vec_len(& *value))
+}
+fn vec_dedup_from<T>(value: &mut Vec<T>, index: usize) -> ()
+    where T: Eq, T: Use<[0, 1]> {
+    handle index + 1 >= vec_len(& *value) {
+        true => (),
+        false => handle Eq::eq(
+            vec_get_unchecked(& *value, index),
+            vec_get_unchecked(& *value, index + 1),
+        ) {
+            true => handle vec_remove(&mut *value, index + 1) {
+                Result::Err(_) => (),
+                Result::Ok(_) => vec_dedup_from(&mut *value, index),
+            },
+            false => vec_dedup_from(&mut *value, index + 1),
+        },
+    }
+}
+pub fn vec_dedup<T>(value: &mut Vec<T>) -> ()
+    where T: Eq, T: Use<[0, 1]> {
+    vec_dedup_from(&mut *value, 0)
+}
+pub fn vec_as_slice<T>(value: &Vec<T>) -> Slice<'_, T> {
+    Slice<'_, T> {
+        storage: &value.storage,
+        start: 0,
+        length: __g1_array_len(&value.storage),
+    }
+}
+pub fn vec_as_mut_slice<T>(value: &mut Vec<T>) -> SliceMut<'_, T> {
+    SliceMut<'_, T> {
+        storage: &mut value.storage,
+        start: 0,
+        length: __g1_array_len(&value.storage),
+    }
+}
+pub fn vec_iter<T>(value: &Vec<T>) -> SliceIter<'_, T> { slice_iter(vec_as_slice(value)) }
+pub fn vec_into_iter<T>(value: Vec<T>) -> VecIntoIter<T> {
+    VecIntoIter { remaining: value }
+}
+pub fn vec_into_iter_next<T>(value: &mut VecIntoIter<T>) -> Option<T> {
+    vec_remove(&mut value.remaining, 0)
+}
+// An explicitly abandoned iterator has the same affine-erasure requirement
+// as `Vec::clear`; an exact-linear resident must be iterated to completion.
+pub fn vec_into_iter_discard<T>(value: VecIntoIter<T>) -> ()
+    where T: Use<[0, 1]> {
+    vec_clear(&mut value.remaining)
+}
+
+pub let Vec::new = vec_new;
+pub let Vec::with_capacity = vec_with_capacity;
+pub let Vec::len = vec_len;
+pub let Vec::capacity = vec_capacity;
+pub let Vec::reserve = vec_reserve;
+pub let Vec::push = vec_push;
+pub let Vec::extend_from_slice = vec_extend_from_slice;
+pub let Vec::resize = vec_resize;
+pub let Vec::is_empty = vec_is_empty;
+pub let Vec::pop = vec_pop;
+pub let Vec::get = vec_get;
+pub let Vec::first = vec_first;
+pub let Vec::last = vec_last;
+pub let Vec::get_unchecked = vec_get_unchecked;
+pub let Vec::get_mut = vec_get_mut;
+pub let Vec::swap = vec_swap;
+pub let Vec::swap_remove = vec_swap_remove;
+pub let Vec::insert = vec_insert;
+pub let Vec::insert_from_slice = vec_insert_from_slice;
+pub let Vec::remove = vec_remove;
+pub let Vec::append = vec_append;
+pub let Vec::truncate = vec_truncate;
+pub let Vec::clear = vec_clear;
+pub let Vec::reverse = vec_reverse;
+pub let Vec::split_off = vec_split_off;
+pub let Vec::drain = vec_drain;
+pub let Vec::sort_unstable = vec_sort_unstable;
+pub let Vec::sort_stable = vec_sort_stable;
+pub let Vec::partition_by = vec_partition_by;
+pub let Vec::dedup = vec_dedup;
+pub let Vec::as_slice = vec_as_slice;
+pub let Vec::as_mut_slice = vec_as_mut_slice;
+pub let Vec::iter = vec_iter;
+pub let Vec::into_iter = vec_into_iter;
+pub let VecIntoIter::next = vec_into_iter_next;
+pub let VecIntoIter::discard = vec_into_iter_discard;
+
+// The hash table has ordinary library-owned storage.  Its initial dense
+// layout keeps the VM surface small; hash calls establish the stable contract
+// now, while the library may later introduce buckets without a new VM value.
+pub struct HashMap<K, V> { private entries: Vec<HashMapEntry<K, V>> }
+pub struct HashMapEntry<K, V> { private key: K, private value: V }
+
+fn hash_key<K>(key: &K) -> usize
+    where K: Hash {
+    let state = hasher_new();
+    Hash::hash(key, &mut state);
+    hasher_finish(state)
+}
+fn hash_map_find_from<K, V>(value: &HashMap<K, V>, key: &K, index: usize) -> Option<usize>
+    where K: Eq {
+    handle index < vec_len(&(*value).entries) {
+        false => Result::Err(()),
+        true => {
+            let entry = vec_get_unchecked(&(*value).entries, index);
+            handle Eq::eq(&(*entry).key, key) {
+                true => Result::Ok(index),
+                false => hash_map_find_from(value, key, index + 1),
+            }
+        },
+    }
+}
+fn hash_map_find<K, V>(value: &HashMap<K, V>, key: &K) -> Option<usize>
+    where K: Eq, K: Hash {
+    let fingerprint = hash_key(key);
+    hash_map_find_from(value, key, fingerprint - fingerprint)
+}
+pub fn hash_map_new<K, V>() -> HashMap<K, V> { HashMap { entries: vec_new() } }
+pub fn hash_map_len<K, V>(value: &HashMap<K, V>) -> usize { vec_len(&(*value).entries) }
+pub fn hash_map_is_empty<K, V>(value: &HashMap<K, V>) -> Bool { vec_is_empty(&(*value).entries) }
+pub fn hash_map_contains_key<K, V>(value: &HashMap<K, V>, key: &K) -> Bool
+    where K: Eq, K: Hash {
+    handle hash_map_find(value, key) {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+// The result is tied only to `value`; `key` is consulted during lookup and
+// cannot be the storage behind the returned reference. Its input lifetime is
+// therefore elided, while the output's provenance stays explicit.
+pub fn hash_map_get<'a, K, V>(value: &'a HashMap<K, V>, key: &K) -> Option<&'a V>
+    where K: Eq, K: Hash {
+    handle hash_map_find(value, key) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(index) => {
+            let entry = __g1_array_get_borrow_shared(&(*value).entries.storage, index);
+            Result::Ok(&(*entry).value)
+        },
+    }
+}
+pub fn hash_map_insert<K, V>(value: &mut HashMap<K, V>, key: K, item: V) -> Option<V>
+    where K: Eq, K: Hash, K: Use<[0, 1]> {
+    handle hash_map_find(& *value, &key) {
+        Result::Err(_) => {
+            vec_push(&mut (*value).entries, HashMapEntry { key: key, value: item });
+            Result::Err(())
+        },
+        Result::Ok(index) => handle vec_remove(&mut (*value).entries, index) {
+            Result::Ok(previous) => {
+                vec_push(&mut (*value).entries, HashMapEntry { key: key, value: item });
+                Result::Ok(previous.value)
+            },
+            Result::Err(_) => Result::Err(()),
+        },
+    }
+}
+pub fn hash_map_remove<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<V>
+    where K: Eq, K: Hash, K: Use<[0, 1]> {
+    handle hash_map_find(& *value, key) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(index) => handle vec_remove(&mut (*value).entries, index) {
+            Result::Ok(previous) => Result::Ok(previous.value),
+            Result::Err(_) => Result::Err(()),
+        },
+    }
+}
+pub let HashMap::new = hash_map_new;
+pub let HashMap::len = hash_map_len;
+pub let HashMap::is_empty = hash_map_is_empty;
+pub let HashMap::contains_key = hash_map_contains_key;
+pub let HashMap::get = hash_map_get;
+pub let HashMap::insert = hash_map_insert;
+pub let HashMap::remove = hash_map_remove;
+
+// Like HashMap, HashSet is a source-owned deterministic collection. The
+// initial dense Vec representation deliberately keeps the VM unaware of map
+// layouts; calling Hash establishes the stable hashing contract while a
+// future std-only bucket layout remains free to change.
+pub struct HashSet<T> { private entries: Vec<T> }
+fn hash_set_find_from<T>(value: &HashSet<T>, item: &T, index: usize) -> Option<usize>
+    where T: Eq {
+    handle index < vec_len(&(*value).entries) {
+        false => Result::Err(()),
+        true => {
+            let entry = vec_get_unchecked(&(*value).entries, index);
+            handle Eq::eq(entry, item) {
+                true => Result::Ok(index),
+                false => hash_set_find_from(value, item, index + 1),
+            }
+        },
+    }
+}
+fn hash_set_find<T>(value: &HashSet<T>, item: &T) -> Option<usize>
+    where T: Eq, T: Hash {
+    let fingerprint = hash_key(item);
+    hash_set_find_from(value, item, fingerprint - fingerprint)
+}
+pub fn hash_set_new<T>() -> HashSet<T> { HashSet { entries: vec_new() } }
+pub fn hash_set_len<T>(value: &HashSet<T>) -> usize { vec_len(&(*value).entries) }
+pub fn hash_set_is_empty<T>(value: &HashSet<T>) -> Bool { vec_is_empty(&(*value).entries) }
+pub fn hash_set_contains<T>(value: &HashSet<T>, item: &T) -> Bool
+    where T: Eq, T: Hash {
+    handle hash_set_find(value, item) {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+// A duplicate consumes `item` without storing it, so affine-erasure evidence
+// is required. `true` means a new resident was inserted.
+pub fn hash_set_insert<T>(value: &mut HashSet<T>, item: T) -> Bool
+    where T: Eq, T: Hash, T: Use<[0, 1]> {
+    handle hash_set_find(& *value, &item) {
+        Result::Ok(_) => false,
+        Result::Err(_) => {
+            vec_push(&mut (*value).entries, item);
+            true
+        },
+    }
+}
+// Removal returns the resident, preserving its complete ownership contract.
+pub fn hash_set_remove<T>(value: &mut HashSet<T>, item: &T) -> Option<T>
+    where T: Eq, T: Hash {
+    handle hash_set_find(& *value, item) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(index) => vec_remove(&mut (*value).entries, index),
+    }
+}
+pub let HashSet::new = hash_set_new;
+pub let HashSet::len = hash_set_len;
+pub let HashSet::is_empty = hash_set_is_empty;
+pub let HashSet::contains = hash_set_contains;
+pub let HashSet::insert = hash_set_insert;
+pub let HashSet::remove = hash_set_remove;
+
+// Queue and compiler-work-list shapes are ordinary wrappers over `Vec`; no
+// separate VM collection representation is needed.
+pub struct VecDeque<T> { private storage: Vec<T> }
+pub fn vec_deque_new<T>() -> VecDeque<T> { VecDeque { storage: vec_new() } }
+pub fn vec_deque_len<T>(value: &VecDeque<T>) -> usize { vec_len(&value.storage) }
+pub fn vec_deque_is_empty<T>(value: &VecDeque<T>) -> Bool { vec_is_empty(&value.storage) }
+pub fn vec_deque_push_back<T>(value: &mut VecDeque<T>, item: T) -> () {
+    vec_push(&mut value.storage, item)
+}
+pub fn vec_deque_push_front<T>(value: &mut VecDeque<T>, item: T) -> () {
+    handle vec_insert(&mut value.storage, 0, item) {
+        Result::Ok(_) => (),
+        Result::Err(_) => (),
+    }
+}
+pub fn vec_deque_pop_back<T>(value: &mut VecDeque<T>) -> Option<T> {
+    vec_pop(&mut value.storage)
+}
+pub fn vec_deque_pop_front<T>(value: &mut VecDeque<T>) -> Option<T> {
+    vec_remove(&mut value.storage, 0)
+}
+pub fn vec_deque_front<T>(value: &VecDeque<T>) -> Option<&T> { vec_first(&value.storage) }
+pub fn vec_deque_back<T>(value: &VecDeque<T>) -> Option<&T> { vec_last(&value.storage) }
+
+pub let VecDeque::new = vec_deque_new;
+pub let VecDeque::len = vec_deque_len;
+pub let VecDeque::is_empty = vec_deque_is_empty;
+pub let VecDeque::push_back = vec_deque_push_back;
+pub let VecDeque::push_front = vec_deque_push_front;
+pub let VecDeque::pop_back = vec_deque_pop_back;
+pub let VecDeque::pop_front = vec_deque_pop_front;
+pub let VecDeque::front = vec_deque_front;
+pub let VecDeque::back = vec_deque_back;
+
+pub struct Stack<T> { private storage: Vec<T> }
+pub fn stack_new<T>() -> Stack<T> { Stack { storage: vec_new() } }
+pub fn stack_len<T>(value: &Stack<T>) -> usize { vec_len(&value.storage) }
+pub fn stack_is_empty<T>(value: &Stack<T>) -> Bool { vec_is_empty(&value.storage) }
+pub fn stack_push<T>(value: &mut Stack<T>, item: T) -> () { vec_push(&mut value.storage, item) }
+pub fn stack_pop<T>(value: &mut Stack<T>) -> Option<T> { vec_pop(&mut value.storage) }
+pub fn stack_peek<T>(value: &Stack<T>) -> Option<&T> { vec_last(&value.storage) }
+
+pub let Stack::new = stack_new;
+pub let Stack::len = stack_len;
+pub let Stack::is_empty = stack_is_empty;
+pub let Stack::push = stack_push;
+pub let Stack::pop = stack_pop;
+pub let Stack::peek = stack_peek;
+
+// WorkList is explicitly LIFO: it is the cheap deterministic building block
+// needed by compiler passes that schedule newly discovered work.
+pub struct WorkList<T> { private storage: Vec<T> }
+pub fn work_list_new<T>() -> WorkList<T> { WorkList { storage: vec_new() } }
+pub fn work_list_len<T>(value: &WorkList<T>) -> usize { vec_len(&value.storage) }
+pub fn work_list_is_empty<T>(value: &WorkList<T>) -> Bool { vec_is_empty(&value.storage) }
+pub fn work_list_push<T>(value: &mut WorkList<T>, item: T) -> () { vec_push(&mut value.storage, item) }
+pub fn work_list_pop<T>(value: &mut WorkList<T>) -> Option<T> { vec_pop(&mut value.storage) }
+
+pub let WorkList::new = work_list_new;
+pub let WorkList::len = work_list_len;
+pub let WorkList::is_empty = work_list_is_empty;
+pub let WorkList::push = work_list_push;
+pub let WorkList::pop = work_list_pop;
+
+// `String` owns an ordinary byte vector. Its constructors and mutators are
+// responsible for the UTF-8 invariant; `Str` is the immutable borrowed view
+// returned from that storage and never exposes mutable bytes.
+pub struct String { private storage: Vec<u8> }
+pub struct Utf8Error {
+    private bytes: Vec<u8>,
+    private valid_up_to: usize,
+}
+
+pub fn string_new() -> String { String { storage: vec_new() } }
+pub fn string_from_utf8(value: Vec<u8>) -> Result<String, Utf8Error> {
+    let valid_up_to = __g1_array_utf8_valid_up_to(&value.storage);
+    handle valid_up_to == vec_len(&value) {
+        true => Result::Ok(String { storage: value }),
+        false => Result::Err(Utf8Error {
+            bytes: value,
+            valid_up_to: valid_up_to,
+        }),
+    }
+}
+pub fn string_len(value: &String) -> usize { vec_len(&value.storage) }
+pub fn string_is_empty(value: &String) -> Bool {
+    handle string_len(value) { 0 => true, _ => false }
+}
+pub fn string_push(value: &mut String, character: char) -> () {
+    vec_push_utf8_char(&mut value.storage, character)
+}
+pub fn string_push_str(value: &mut String, source: Str) -> () {
+    vec_extend_from_slice(&mut value.storage, source.bytes)
+}
+pub fn string_insert(value: &mut String, index: usize, source: Str) -> Result<(), StringRangeError> {
+    handle __g1_array_insert_utf8_from_slice(
+        &mut value.storage.storage,
+        index,
+        source.bytes.storage,
+        source.bytes.start,
+        source.bytes.length,
+    ) {
+        0 => Result::Err(StringRangeError::NotCharBoundary),
+        _ => Result::Ok(()),
+    }
+}
+pub fn string_pop(value: &mut String) -> Option<char> {
+    handle __g1_array_pop_utf8_char(&mut value.storage.storage) {
+        (character, 0) => Result::Err(()),
+        (character, _) => Result::Ok(character),
+    }
+}
+fn string_remove_character_info(storage: &Vec<u8>, index: usize) -> Result<(char, usize), StringRangeError> {
+    let view = Str { bytes: vec_as_slice(storage) };
+    handle index > str_len(view) {
+        true => Result::Err(StringRangeError::OutOfBounds),
+        false => handle str_is_char_boundary(view, index) {
+            false => Result::Err(StringRangeError::NotCharBoundary),
+            true => handle __g1_array_utf8_char_at(
+                &storage.storage,
+                0,
+                vec_len(storage),
+                index,
+            ) {
+                (character, 0) => Result::Err(StringRangeError::OutOfBounds),
+                (character, width) => Result::Ok((character, width)),
+            },
+        },
+    }
+}
+pub fn string_remove(value: &mut String, index: usize) -> Result<char, StringRangeError> {
+    handle string_remove_character_info(&value.storage, index) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok((character, width)) => {
+            handle width {
+                1 => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                    _ => Result::Ok(character),
+                },
+                2 => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                    _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                        _ => Result::Ok(character),
+                    },
+                },
+                3 => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                    _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                        _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                            _ => Result::Ok(character),
+                        },
+                    },
+                },
+                4 => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                    _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                        _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                            _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
+                                _ => Result::Ok(character),
+                            },
+                        },
+                    },
+                },
+                _ => Result::Err(StringRangeError::OutOfBounds),
+            }
+        },
+    }
+}
+pub fn str_to_string(source: Str) -> String {
+    let value = string_new();
+    string_push_str(&mut value, source);
+    value
+}
+pub fn string_as_str(value: &String) -> Str {
+    Str { bytes: vec_as_slice(&value.storage) }
+}
+pub fn utf8_error_valid_up_to(value: &Utf8Error) -> usize { value.valid_up_to }
+pub fn utf8_error_into_bytes(value: Utf8Error) -> Vec<u8> { value.bytes }
+
+pub let String::new = string_new;
+pub let String::from_utf8 = string_from_utf8;
+pub let String::insert = string_insert;
+pub let String::len = string_len;
+pub let String::is_empty = string_is_empty;
+pub let String::push = string_push;
+pub let String::push_str = string_push_str;
+pub let String::pop = string_pop;
+pub let String::remove = string_remove;
+pub let String::as_str = string_as_str;
+pub let Str::to_string = str_to_string;
+pub let Utf8Error::valid_up_to = utf8_error_valid_up_to;
+pub let Utf8Error::into_bytes = utf8_error_into_bytes;
+
+pub fn identity<T>(value: T) -> T { value }
+
+pub fn replace<T>(target: &mut T, incoming: T) -> T {
+    let previous = move *target;
+    *target = move incoming;
+    previous
+}
+
+pub fn swap<T>(left: &mut T, right: &mut T) -> () {
+    let left_value = move *left;
+    let right_value = move *right;
+    *left = move right_value;
+    *right = move left_value;
+}
+
+pub trait Default { default() -> Self; }
+
+pub fn default_value<T>() -> T where T: Default { Default::default() }
+
+// Move the old occupant out while restoring a valid default before returning.
+// This works for exact-linear values because it performs no implicit discard.
+pub fn take<T>(target: &mut T) -> T where T: Default {
+    replace(target, default_value())
+}
+
+pub impl Default for u8 { default() -> u8 { 0 } }
+pub impl Default for u16 { default() -> u16 { 0 } }
+pub impl Default for u32 { default() -> u32 { 0 } }
+pub impl Default for u64 { default() -> u64 { 0 } }
+pub impl Default for u128 { default() -> u128 { 0 } }
+pub impl Default for usize { default() -> usize { 0 } }
+pub impl Default for i8 { default() -> i8 { 0 } }
+pub impl Default for i16 { default() -> i16 { 0 } }
+pub impl Default for i32 { default() -> i32 { 0 } }
+pub impl Default for i64 { default() -> i64 { 0 } }
+pub impl Default for i128 { default() -> i128 { 0 } }
+pub impl Default for isize { default() -> isize { 0 } }
+pub impl Default for f32 { default() -> f32 { 0.0 } }
+pub impl Default for f64 { default() -> f64 { 0.0 } }
+pub impl Default for char { default() -> char { '\u{0}' } }
+pub impl<T> Default for Option<T> { default() -> Option<T> { None } }
+pub impl<T> Default for Vec<T> { default() -> Vec<T> { vec_new() } }
+pub impl<K, V> Default for HashMap<K, V> { default() -> HashMap<K, V> { hash_map_new() } }
+pub impl<T> Default for HashSet<T> { default() -> HashSet<T> { hash_set_new() } }
+pub impl<T> Default for VecDeque<T> { default() -> VecDeque<T> { vec_deque_new() } }
+pub impl<T> Default for Stack<T> { default() -> Stack<T> { stack_new() } }
+pub impl<T> Default for WorkList<T> { default() -> WorkList<T> { work_list_new() } }
+pub impl Default for String { default() -> String { string_new() } }
+
+pub trait Eq { eq(left: &Self, right: &Self) -> Bool; }
+pub trait Ord { compare(left: &Self, right: &Self) -> Ordering; }
+pub trait Hash { hash(value: &Self, state: &mut Hasher) -> (); }
+pub trait Display { display(value: &Self, formatter: &mut Formatter) -> (); }
+pub trait Debug { debug(value: &Self, formatter: &mut Formatter) -> (); }
+
+// Formatting is an ordinary source-owned String buffer. Hashing remains a
+// separate deterministic state object because collection lookup will use it
+// without exposing VM representation details.
+pub struct Hasher { private state: usize }
+pub struct Formatter { private output: String }
+
+pub fn hasher_new() -> Hasher { Hasher { state: 5381 } }
+pub fn hasher_write_usize(value: &mut Hasher, input: usize) -> () {
+    // Hash accumulation is deliberately wrapping.  A deterministic hasher
+    // must remain total for every sequence of caller-provided words rather
+    // than exposing arithmetic overflow as a collection operation failure.
+    (*value).state = __g1_int_wrapping_add((*value).state * 33, input);
+}
+pub fn hasher_finish(value: Hasher) -> usize { value.state }
+pub fn formatter_new() -> Formatter { Formatter { output: string_new() } }
+pub fn formatter_write_str(value: &mut Formatter, text: Str) -> () {
+    string_push_str(&mut value.output, text)
+}
+pub fn formatter_into_string(value: Formatter) -> String { value.output }
+pub fn format_value<T>(value: &T) -> String where T: Display {
+    let formatter = formatter_new();
+    Display::display(value, &mut formatter);
+    formatter_into_string(formatter)
+}
+pub fn format_debug_value<T>(value: &T) -> String where T: Debug {
+    let formatter = formatter_new();
+    Debug::debug(value, &mut formatter);
+    formatter_into_string(formatter)
+}
+
+pub let Hasher::new = hasher_new;
+pub let Hasher::write_usize = hasher_write_usize;
+pub let Hasher::finish = hasher_finish;
+pub let Formatter::new = formatter_new;
+pub let Formatter::write_str = formatter_write_str;
+pub let Formatter::into_string = formatter_into_string;
+pub let format = format_value;
+pub let format_debug = format_debug_value;
+
+pub impl Eq for i64 { eq(left: &i64, right: &i64) -> Bool { *left == *right } }
+pub impl Eq for usize { eq(left: &usize, right: &usize) -> Bool { *left == *right } }
+pub impl Hash for usize {
+    hash(value: &usize, state: &mut Hasher) -> () { hasher_write_usize(state, *value) }
+}
+pub impl Hash for i64 {
+    hash(value: &i64, state: &mut Hasher) -> () {
+        hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value))
+    }
+}
+pub impl Hash for u8 { hash(value: &u8, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for u16 { hash(value: &u16, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for u32 { hash(value: &u32, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for u64 { hash(value: &u64, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for u128 { hash(value: &u128, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for i8 { hash(value: &i8, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for i16 { hash(value: &i16, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for i32 { hash(value: &i32, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for i128 { hash(value: &i128, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for isize { hash(value: &isize, state: &mut Hasher) -> () { hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(*value)) } }
+pub impl Hash for char {
+    hash(value: &char, state: &mut Hasher) -> () {
+        hasher_write_usize(state, __g1_int_convert_wrapping_to_usize(char_to_u32(*value)))
+    }
+}
+pub impl Eq for u8 { eq(left: &u8, right: &u8) -> Bool { *left == *right } }
+pub impl Eq for u16 { eq(left: &u16, right: &u16) -> Bool { *left == *right } }
+pub impl Eq for u32 { eq(left: &u32, right: &u32) -> Bool { *left == *right } }
+pub impl Eq for u64 { eq(left: &u64, right: &u64) -> Bool { *left == *right } }
+pub impl Eq for u128 { eq(left: &u128, right: &u128) -> Bool { *left == *right } }
+pub impl Eq for i8 { eq(left: &i8, right: &i8) -> Bool { *left == *right } }
+pub impl Eq for i16 { eq(left: &i16, right: &i16) -> Bool { *left == *right } }
+pub impl Eq for i32 { eq(left: &i32, right: &i32) -> Bool { *left == *right } }
+pub impl Eq for i128 { eq(left: &i128, right: &i128) -> Bool { *left == *right } }
+pub impl Eq for isize { eq(left: &isize, right: &isize) -> Bool { *left == *right } }
+pub impl Eq for char { eq(left: &char, right: &char) -> Bool { *left == *right } }
+pub impl Display for String {
+    display(value: &String, formatter: &mut Formatter) -> () {
+        formatter_write_str(formatter, string_as_str(value))
+    }
+}
+pub impl Debug for String {
+    debug(value: &String, formatter: &mut Formatter) -> () {
+        formatter_write_str(formatter, string_as_str(value))
+    }
+}
+
+pub impl Ord for i64 {
+    compare(left: &i64, right: &i64) -> Ordering {
+        handle *left < *right {
+            true => Ordering::Less,
+            false => handle *left == *right {
+                true => Ordering::Equal,
+                false => Ordering::Greater,
+            },
+        }
+    }
+}
+pub impl Ord for usize {
+    compare(left: &usize, right: &usize) -> Ordering {
+        handle *left < *right {
+            true => Ordering::Less,
+            false => handle *left == *right {
+                true => Ordering::Equal,
+                false => Ordering::Greater,
+            },
+        }
+    }
+}
+pub impl Ord for u8 {
+    compare(left: &u8, right: &u8) -> Ordering {
+        handle *left < *right {
+            true => Ordering::Less,
+            false => handle *left == *right {
+                true => Ordering::Equal,
+                false => Ordering::Greater,
+            },
+        }
+    }
+}
+pub impl Ord for char {
+    compare(left: &char, right: &char) -> Ordering {
+        handle *left < *right {
+            true => Ordering::Less,
+            false => handle *left == *right {
+                true => Ordering::Equal,
+                false => Ordering::Greater,
+            },
+        }
+    }
+}
+pub impl Ord for u16 {
+    compare(left: &u16, right: &u16) -> Ordering {
+        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    }
+}
+pub impl Ord for u32 {
+    compare(left: &u32, right: &u32) -> Ordering {
+        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    }
+}
+pub impl Ord for u64 {
+    compare(left: &u64, right: &u64) -> Ordering {
+        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    }
+}
+pub impl Ord for u128 {
+    compare(left: &u128, right: &u128) -> Ordering {
+        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    }
+}
+pub impl Ord for i8 {
+    compare(left: &i8, right: &i8) -> Ordering {
+        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    }
+}
+pub impl Ord for i16 {
+    compare(left: &i16, right: &i16) -> Ordering {
+        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    }
+}
+pub impl Ord for i32 {
+    compare(left: &i32, right: &i32) -> Ordering {
+        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    }
+}
+pub impl Ord for i128 {
+    compare(left: &i128, right: &i128) -> Ordering {
+        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    }
+}
+pub impl Ord for isize {
+    compare(left: &isize, right: &isize) -> Ordering {
+        handle *left < *right { true => Ordering::Less, false => handle *left == *right { true => Ordering::Equal, false => Ordering::Greater } }
+    }
+}
+
+// Unicode scalar values exclude both values past the Unicode maximum and the
+// UTF-16 surrogate interval.  Keeping this check in source makes the public
+// conversion an ordinary Option-returning library operation; the VM only
+// supplies the final checked representation conversion.
+pub fn char_from_u32(value: u32) -> Option<char> {
+    handle value > 1114111 {
+        true => None,
+        false => handle value < 55296 {
+            true => Result::Ok(__g1_char_from_u32_checked(value)),
+            false => handle value > 57343 {
+                true => Result::Ok(__g1_char_from_u32_checked(value)),
+                false => None,
+            },
+        },
+    }
+}
+pub fn char_to_u32(value: char) -> u32 { __g1_char_to_u32(value) }
+pub fn char_utf8_len(value: char) -> usize {
+    let scalar = char_to_u32(value);
+    handle scalar < 128 {
+        true => 1,
+        false => handle scalar < 2048 {
+            true => 2,
+            false => handle scalar < 65536 { true => 3, false => 4 },
+        },
+    }
+}
+
+// Checked conversion is source-defined policy layered over a single wrapping
+// machine leaf.  The range test happens first, so the leaf is reached only on
+// values that the target representation can contain.
+pub fn i64_to_u32_checked(value: i64) -> Option<u32> {
+    handle value < 0 {
+        true => None,
+        false => handle value > 4294967295 {
+            true => None,
+            false => Result::Ok(__g1_int_convert_checked_to_u32(value)),
+        },
+    }
+}
+pub fn i64_to_u32_wrapping(value: i64) -> u32 {
+    __g1_int_convert_wrapping_to_u32(value)
+}
+
+// Checked narrowing is expressed entirely in source: guards produce the
+// public `Option` failure, and the private conversion leaf is invoked only
+// after the value is known to fit.  The VM therefore need not expose a public
+// overflow representation for each scalar pair.
+pub fn i64_to_u8_checked(value: i64) -> Option<u8> {
+    handle value < 0 { true => None, false => handle value > 255 { true => None, false => Result::Ok(__g1_int_convert_checked_to_u8(value)) } }
+}
+pub fn i64_to_u16_checked(value: i64) -> Option<u16> {
+    handle value < 0 { true => None, false => handle value > 65535 { true => None, false => Result::Ok(__g1_int_convert_checked_to_u16(value)) } }
+}
+pub fn i64_to_usize_checked(value: i64) -> Option<usize> {
+    handle value < 0 { true => None, false => Result::Ok(__g1_int_convert_checked_to_usize(value)) }
+}
+pub fn i64_to_u64_checked(value: i64) -> Option<u64> {
+    handle value < 0 { true => None, false => Result::Ok(__g1_int_convert_checked_to_u64(value)) }
+}
+pub fn i64_to_i8_checked(value: i64) -> Option<i8> {
+    handle value < -128 { true => None, false => handle value > 127 { true => None, false => Result::Ok(__g1_int_convert_checked_to_i8(value)) } }
+}
+pub fn i64_to_i16_checked(value: i64) -> Option<i16> {
+    handle value < -32768 { true => None, false => handle value > 32767 { true => None, false => Result::Ok(__g1_int_convert_checked_to_i16(value)) } }
+}
+pub fn i64_to_i32_checked(value: i64) -> Option<i32> {
+    handle value < -2147483648 { true => None, false => handle value > 2147483647 { true => None, false => Result::Ok(__g1_int_convert_checked_to_i32(value)) } }
+}
+pub fn i64_to_isize_checked(value: i64) -> Option<isize> {
+    Result::Ok(__g1_int_convert_checked_to_isize(value))
+}
+pub fn i64_to_u128_checked(value: i64) -> Option<u128> {
+    handle value < 0 { true => None, false => Result::Ok(__g1_int_convert_checked_to_u128(value)) }
+}
+pub fn i64_to_i128_checked(value: i64) -> Option<i128> {
+    Result::Ok(__g1_int_convert_checked_to_i128(value))
+}
+pub fn i64_to_u8_wrapping(value: i64) -> u8 { __g1_int_convert_wrapping_to_u8(value) }
+pub fn i64_to_u16_wrapping(value: i64) -> u16 { __g1_int_convert_wrapping_to_u16(value) }
+pub fn i64_to_u64_wrapping(value: i64) -> u64 { __g1_int_convert_wrapping_to_u64(value) }
+pub fn i64_to_usize_wrapping(value: i64) -> usize { __g1_int_convert_wrapping_to_usize(value) }
+pub fn i64_to_i8_wrapping(value: i64) -> i8 { __g1_int_convert_wrapping_to_i8(value) }
+pub fn i64_to_i16_wrapping(value: i64) -> i16 { __g1_int_convert_wrapping_to_i16(value) }
+pub fn i64_to_i32_wrapping(value: i64) -> i32 { __g1_int_convert_wrapping_to_i32(value) }
+pub fn i64_to_i64_wrapping(value: i64) -> i64 { __g1_int_convert_wrapping_to_i64(value) }
+pub fn i64_to_isize_wrapping(value: i64) -> isize { __g1_int_convert_wrapping_to_isize(value) }
+pub fn i64_to_u128_wrapping(value: i64) -> u128 { __g1_int_convert_wrapping_to_u128(value) }
+pub fn i64_to_i128_wrapping(value: i64) -> i128 { __g1_int_convert_wrapping_to_i128(value) }
+
+// Integer overflow policy is an ordinary library choice.  The operators keep
+// their checked VM semantics; callers that explicitly want modular arithmetic
+// cross this small source-level API instead.  These leaves remain generic so
+// every frozen integer scalar uses its own width and signedness in the VM.
+pub fn wrapping_add<T>(left: T, right: T) -> T {
+    __g1_int_wrapping_add(left, right)
+}
+pub fn wrapping_sub<T>(left: T, right: T) -> T {
+    __g1_int_wrapping_sub(left, right)
+}
+pub fn wrapping_mul<T>(left: T, right: T) -> T {
+    __g1_int_wrapping_mul(left, right)
+}
+
+// Integer bit operations are ordinary source wrappers. Their private leaves
+// retain the representation-specific VM work, while public names never gain
+// authority merely by matching an opcode spelling. Shift counts use the
+// stable `u32` count ABI for every integer width.
+pub fn bit_and<T>(left: T, right: T) -> T { __g1_int_bit_and(left, right) }
+pub fn bit_or<T>(left: T, right: T) -> T { __g1_int_bit_or(left, right) }
+pub fn bit_xor<T>(left: T, right: T) -> T { __g1_int_bit_xor(left, right) }
+pub fn bit_not<T>(value: T) -> T { __g1_int_bit_not(value) }
+pub fn bit_shl<T>(value: T, count: u32) -> T { __g1_int_shl(value, count) }
+pub fn bit_shr<T>(value: T, count: u32) -> T { __g1_int_shr(value, count) }
+
+// The VM leaf performs the final IEEE-754 checked conversion.  Source owns
+// the public failure policy: NaN and values outside the half-open i64 range
+// become None rather than execution failures.
+pub fn f64_to_i64_checked(value: f64) -> Option<i64> {
+    handle __g1_f64_ne(value, value) != 0 {
+        true => None,
+        false => handle __g1_f64_lt(value, -9223372036854775808.0) != 0 {
+            true => None,
+            false => handle __g1_f64_ge(value, 9223372036854775808.0) != 0 {
+                true => None,
+                false => Result::Ok(__g1_f64_to_i64_checked(value)),
+            },
+        },
+    }
+}
+pub fn i64_to_f32(value: i64) -> f32 { __g1_i64_to_f32(value) }
+pub fn f32_add(left: f32, right: f32) -> f32 { __g1_f32_add(left, right) }
+pub fn f32_sub(left: f32, right: f32) -> f32 { __g1_f32_sub(left, right) }
+pub fn f32_mul(left: f32, right: f32) -> f32 { __g1_f32_mul(left, right) }
+pub fn f32_div(left: f32, right: f32) -> f32 { __g1_f32_div(left, right) }
+pub fn f32_rem(left: f32, right: f32) -> f32 { __g1_f32_rem(left, right) }
+pub fn f32_eq(left: f32, right: f32) -> Bool { __g1_f32_eq(left, right) != 0 }
+pub fn f32_ne(left: f32, right: f32) -> Bool { __g1_f32_ne(left, right) != 0 }
+pub fn f32_lt(left: f32, right: f32) -> Bool { __g1_f32_lt(left, right) != 0 }
+pub fn f32_le(left: f32, right: f32) -> Bool { __g1_f32_le(left, right) != 0 }
+pub fn f32_gt(left: f32, right: f32) -> Bool { __g1_f32_gt(left, right) != 0 }
+pub fn f32_ge(left: f32, right: f32) -> Bool { __g1_f32_ge(left, right) != 0 }
+pub fn f64_add(left: f64, right: f64) -> f64 { __g1_f64_add(left, right) }
+pub fn f64_sub(left: f64, right: f64) -> f64 { __g1_f64_sub(left, right) }
+pub fn f64_mul(left: f64, right: f64) -> f64 { __g1_f64_mul(left, right) }
+pub fn f64_div(left: f64, right: f64) -> f64 { __g1_f64_div(left, right) }
+pub fn f64_rem(left: f64, right: f64) -> f64 { __g1_f64_rem(left, right) }
+pub fn f64_eq(left: f64, right: f64) -> Bool { __g1_f64_eq(left, right) != 0 }
+pub fn f64_ne(left: f64, right: f64) -> Bool { __g1_f64_ne(left, right) != 0 }
+pub fn f64_lt(left: f64, right: f64) -> Bool { __g1_f64_lt(left, right) != 0 }
+pub fn f64_le(left: f64, right: f64) -> Bool { __g1_f64_le(left, right) != 0 }
+pub fn f64_gt(left: f64, right: f64) -> Bool { __g1_f64_gt(left, right) != 0 }
+pub fn f64_ge(left: f64, right: f64) -> Bool { __g1_f64_ge(left, right) != 0 }
+pub fn f32_to_i64_checked(value: f32) -> Option<i64> {
+    handle __g1_f32_ne(value, value) != 0 {
+        true => None,
+        false => handle __g1_f32_lt(value, __g1_f32_from_bits(3741319168)) != 0 {
+            true => None,
+            false => handle __g1_f32_ge(value, __g1_f32_from_bits(1593835520)) != 0 {
+                true => None,
+                false => Result::Ok(__g1_f32_to_i64_checked(value)),
+            },
+        },
+    }
+}
+
+// These are regular trait-based helpers, not scalar compiler operations.
+// Choosing either value leaves the other unused, hence the explicit affine
+// contract.  Duplicable scalars satisfy it automatically.
+pub fn min<T>(left: T, right: T) -> T where T: Ord, T: Use<[0, 1]> {
+    handle Ord::compare(&left, &right) {
+        Ordering::Greater => right,
+        _ => left,
+    }
+}
+pub fn max<T>(left: T, right: T) -> T where T: Ord, T: Use<[0, 1]> {
+    handle Ord::compare(&left, &right) {
+        Ordering::Less => right,
+        _ => left,
+    }
+}
+pub fn clamp<T>(value: T, lower: T, upper: T) -> T
+    where T: Ord, T: Use<[0, 1]> {
+    handle Ord::compare(&value, &lower) {
+        Ordering::Less => lower,
+        _ => handle Ord::compare(&value, &upper) {
+            Ordering::Greater => upper,
+            _ => value,
+        },
+    }
+}
+
+// Result/Option inspection discards the unselected payload, so both payloads
+// must permit affine erasure. `[0,0]` is intentionally not a public bound.
+pub fn result_is_ok<A, E>(value: Result<A, E>) -> Bool
+    where A: Use<[0, 1]>, E: Use<[0, 1]> {
+    handle value {
+        Result::Ok(_) => true,
+        Result::Err(_) => false,
+    }
+}
+
+pub fn result_is_err<A, E>(value: Result<A, E>) -> Bool
+    where A: Use<[0, 1]>, E: Use<[0, 1]> {
+    not(result_is_ok(value))
+}
+
+pub fn result_map<A, E, B, F>(value: Result<A, E>, transform: F) -> Result<B, E>
+    where F: Fn<(A), Output = B> {
+    handle value {
+        Result::Ok(item) => Result::Ok(transform(item)),
+        Result::Err(error) => Result::Err(error),
+    }
+}
+
+pub fn result_map_err<A, E, E2, F>(value: Result<A, E>, transform: F) -> Result<A, E2>
+    where F: Fn<(E), Output = E2> {
+    handle value {
+        Result::Ok(item) => Result::Ok(item),
+        Result::Err(error) => Result::Err(transform(error)),
+    }
+}
+
+pub fn result_and_then<A, E, B, F>(value: Result<A, E>, transform: F) -> Result<B, E>
+    where F: Fn<(A), Output = Result<B, E>> {
+    handle value {
+        Result::Ok(item) => transform(item),
+        Result::Err(error) => Result::Err(error),
+    }
+}
+
+pub fn result_or_else<A, E, E2, F>(value: Result<A, E>, transform: F) -> Result<A, E2>
+    where F: Fn<(E), Output = Result<A, E2>> {
+    handle value {
+        Result::Ok(item) => Result::Ok(item),
+        Result::Err(error) => transform(error),
+    }
+}
+
+pub fn result_unwrap_or<A, E>(value: Result<A, E>, fallback: A) -> A
+    where A: Use<[0, 1]>, E: Use<[0, 1]> {
+    handle value {
+        Result::Ok(item) => item,
+        Result::Err(_) => fallback,
+    }
+}
+
+// `Option` is the standard temporary slot. Moving its old representation out
+// before storing `None` transfers a present payload exactly once and leaves a
+// valid empty occupant regardless of whether `T` has a Default value.
+pub fn option_take<T>(target: &mut Option<T>) -> Option<T> {
+    let previous = move *target;
+    *target = None;
+    previous
+}
+
+// Replacing an optional resident returns the complete previous state. This is
+// the primitive ownership-preserving insertion operation; callers that only
+// need the old payload can inspect the resulting Option normally.
+pub fn option_insert<T>(target: &mut Option<T>, value: T) -> Option<T> {
+    let previous = move *target;
+    *target = Some(value);
+    previous
+}
+
+// `replace` is the same ownership-preserving transition as insertion; the
+// distinct spelling makes the returned previous option explicit at callsites.
+pub fn option_replace<T>(target: &mut Option<T>, value: T) -> Option<T> {
+    option_insert(target, value)
+}
+
+// When already occupied, the supplied replacement is erased, so this uses
+// the public affine contract. The returned reference borrows the resident.
+pub fn option_get_or_insert<'a, T>(target: &'a mut Option<T>, value: T) -> &'a mut T
+    where T: Use<[0, 1]> {
+    handle *target is Result::Ok(_) {
+        true => &mut target.0,
+        false => {
+            *target = Some(value);
+            &mut target.0
+        },
+    }
+}
+
+// These variants defer construction until the empty branch.  In particular,
+// no candidate T is constructed and then erased when the option is already
+// occupied.  The closure itself is affine because that occupied branch does
+// not invoke it.
+pub fn option_get_or_insert_with<'a, T, F>(target: &'a mut Option<T>, make: F) -> &'a mut T
+    where F: Fn<(), Output = T>, F: Use<[0, 1]> {
+    handle *target is Result::Ok(_) {
+        true => &mut target.0,
+        false => {
+            *target = Some(make());
+            &mut target.0
+        },
+    }
+}
+
+// Default construction is deferred to the vacant branch just like the
+// closure-based variant.  Unlike `get_or_insert`, there is no supplied value
+// to erase on the occupied path, so `T` needs only its normal Default bound.
+pub fn option_get_or_insert_default<'a, T>(target: &'a mut Option<T>) -> &'a mut T
+    where T: Default {
+    handle *target is Result::Ok(_) {
+        true => &mut target.0,
+        false => {
+            *target = Some(default_value<T>());
+            &mut target.0
+        },
+    }
+}
+
+
+pub fn result_as_ref<'a, A, E>(value: &'a Result<A, E>) -> Result<&'a A, &'a E> {
+    handle *value is Result::Ok(_) {
+        true => Result::Ok(&value.0),
+        false => Result::Err(&value.0),
+    }
+}
+
+pub fn result_as_mut<'a, A, E>(value: &'a mut Result<A, E>) -> Result<&'a mut A, &'a mut E> {
+    handle *value is Result::Ok(_) {
+        true => Result::Ok(&mut value.0),
+        false => Result::Err(&mut value.0),
+    }
+}
+
+pub let Result::is_ok = result_is_ok;
+pub let Result::is_err = result_is_err;
+pub let Result::map = result_map;
+pub let Result::map_err = result_map_err;
+pub let Result::and_then = result_and_then;
+pub let Result::or_else = result_or_else;
+pub let Result::unwrap_or = result_unwrap_or;
+pub let Result::as_ref = result_as_ref;
+pub let Result::as_mut = result_as_mut;
+pub let Option::is_some = result_is_ok;
+pub let Option::is_none = result_is_err;
+pub let Option::map = result_map;
+pub let Option::and_then = result_and_then;
+pub let Option::or_else = result_or_else;
+pub let Option::unwrap_or = result_unwrap_or;
+pub let Option::as_ref = result_as_ref;
+pub let Option::as_mut = result_as_mut;
+pub let Option::take = option_take;
+pub let Option::insert = option_insert;
+pub let Option::replace = option_replace;
+pub let Option::get_or_insert = option_get_or_insert;
+pub let Option::get_or_insert_with = option_get_or_insert_with;
+pub let Option::get_or_insert_default = option_get_or_insert_default;
+
+// These fixities are declaration-owned, never compiler keywords.
+pub infixr 1 else;
+pub infixl 2 or;
+pub infixl 3 and;
+pub prefix 4 not;
+
+// The right operands are zero-argument Fn values, so they are evaluated only
+// on the selected path. Every discarded payload uses affine erasure.
+pub fn if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E>
+    where F: Fn<(), Output = B>, A: Use<[0, 1]> {
+    handle condition {
+        Result::Ok(_) => Result::Ok(body()),
+        Result::Err(error) => Result::Err(error),
+    }
+}
+
+pub fn else<A, E, F>(value: Result<A, E>, fallback: F) -> A
+    where F: Fn<(), Output = A>, E: Use<[0, 1]> {
+    handle value {
+        Result::Ok(item) => item,
+        Result::Err(_) => fallback(),
+    }
+}
+
+pub fn and<A, E, B, F>(value: Result<A, E>, next: F) -> Result<B, E>
+    where F: Fn<(), Output = Result<B, E>>, A: Use<[0, 1]> {
+    handle value {
+        Result::Ok(_) => next(),
+        Result::Err(error) => Result::Err(error),
+    }
+}
+
+pub fn or<A, E, E2, F>(value: Result<A, E>, alternative: F) -> Result<A, E2>
+    where F: Fn<(), Output = Result<A, E2>>, E: Use<[0, 1]> {
+    handle value {
+        Result::Ok(item) => Result::Ok(item),
+        Result::Err(_) => alternative(),
+    }
+}
+
+pub fn not<A, E>(value: Result<A, E>) -> Result<E, A> {
+    handle value {
+        Result::Ok(item) => Result::Err(item),
+        Result::Err(error) => Result::Ok(error),
+    }
+}
+
+// The control kernel is ordinary source code. `step` returns `Ok(next)` to
+// continue or `Err(final)` to leave through the caller-provided label. This
+// keeps the label in the traversal frame: a callback need not own the label
+// merely to request an early exit, and the alternatives remain an explicit
+// source-level result protocol.
+fn fold_until_from<A, F, L>(index: usize, end: usize, accumulator: A, exit: L, step: F) -> A
+    where F: Fn<(A, usize), Output = Result<A, A>>, F: Use<[0, *]>, L: Label<A> {
+    handle index < end {
+        false => accumulator,
+        true => handle step(accumulator, index) {
+            Result::Ok(next) => fold_until_from(index + 1, end, next, exit, step),
+            Result::Err(final) => exit(final),
+        },
+    }
+}
+pub fn fold_until<A, F, L>(range: Range<usize>, accumulator: A, exit: L, step: F) -> A
+    where F: Fn<(A, usize), Output = Result<A, A>>, F: Use<[0, *]>, L: Label<A> {
+    fold_until_from(range.start, range.end, accumulator, exit, step)
+}
+
+// Stateful looping is likewise a library protocol. A body owns its incoming
+// state and explicitly chooses the next state or final result; recursive
+// invocation is the tail position of the Continue arm. The short aliases are
+// ordinary bindings, not parser keywords.
+pub enum LoopStep<S, B> { Continue(S), Break(B) }
+fn loop_state_from<S, B, F>(state: S, body: F) -> B
+    where F: Fn<(S), Output = LoopStep<S, B>>, F: Use<[0, *]> {
+    handle body(state) {
+        LoopStep::Continue(next) => loop_state_from(next, body),
+        LoopStep::Break(result) => result,
+    }
+}
+pub fn loop_state<S, B, F>(initial: S, body: F) -> B
+    where F: Fn<(S), Output = LoopStep<S, B>>, F: Use<[0, *]> {
+    loop_state_from(initial, body)
+}
+pub let loop = loop_state;
+pub let break = LoopStep::Break;
+pub let continue = LoopStep::Continue;
+
+// Every named callable already owns an implicit lexical label of its own
+// name. `return` is just the ordinary library forwarding helper for that
+// compiler-minted capability; source still writes the destination explicitly
+// as `@function_name` and no parser keyword is involved.
+pub fn return<T, L>(value: T, exit: L) -> ! where L: Label<T> { exit(value) }
+
+// Cooperative control remains effect-based. The library merely names the
+// operations and provides ergonomic forwarding functions; an embedding or
+// caller supplies the handler policy (scheduling, buffering, diagnostics,
+// and so on). No dedicated VM opcode is needed for any of them.
+pub effect Yield<T> { yield(value: T) -> (); }
+pub effect Await<T> { await(value: T) -> T; }
+pub effect Fail<E> { fail(error: E) -> !; }
+pub fn yield<T>(value: T) -> () / {Yield<T>} { Yield<T>::yield(value) }
+pub fn await<T>(value: T) -> T / {Await<T>} { Await<T>::await(value) }
+pub fn fail<E>(error: E) -> ! / {Fail<E>} { Fail<E>::fail(error) }
+
+// Result propagation is likewise a source function. `Label` evidence is
+// compiler-sealed, but passing the destination and selecting the Err branch
+// are ordinary generic code; an invocation of `exit` is terminal.
+pub fn try<T, E, S, L>(value: Result<T, E>, exit: L) -> T
+    where L: Label<Result<S, E>> {
+    handle value {
+        Result::Ok(inner) => inner,
+        Result::Err(error) => exit(Result::Err(error)),
+    }
+}

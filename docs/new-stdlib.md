@@ -59,7 +59,11 @@ Range<T> = { start: T, end: T }
 
 `Option` does not receive a distinct runtime representation. Its initial API
 is `Some`, `None`, `is_some`, `is_none`, `map`, `and_then`, `or_else`,
-`unwrap_or`, `as_ref`, `as_mut`, `take`, `replace`, and insertion helpers.
+`unwrap_or`, `as_ref`, `as_mut`, `take`, `replace`, `get_or_insert`,
+`get_or_insert_with`, and `get_or_insert_default`. `get_or_insert` requires
+`T: Use<[0,1]>`, because the provided value is discarded when the option is
+already occupied. The latter two construct only in the empty branch; the
+default variant has the normal `T: Default` bound.
 `Result` supplies `Ok`, `Err`, `is_ok`, `is_err`, `map`, `map_err`,
 `and_then`, and `or_else`.
 
@@ -130,6 +134,27 @@ through `try(value, @function)`; tail-call/label-based `loop`, `break`, and
 combinators above. These are all library control, lowered through the language
 core rather than represented by dedicated compiler control nodes.
 
+The initial reusable control kernel is deliberately small:
+
+```text
+fold_until(range, accumulator, @exit, step)
+  step: (A, usize) -> Result<A, A>
+  Ok(next)    continues with `next`
+  Err(final)  transfers `final` to `@exit`
+
+LoopStep<S, B> = Continue(S) | Break(B)
+loop_state(initial, body) -> B
+  body: S -> LoopStep<S, B>
+```
+
+`fold_until` owns the label and performs the one actual transfer. This avoids
+giving a callback an affine label token which would otherwise need to be moved
+both into the callback and into its recursive continuation. The source-level
+`break` and `continue` bindings construct `LoopStep::Break` and
+`LoopStep::Continue`; `loop` aliases `loop_state`. `return(value,
+@function)` is the corresponding library forwarding helper for a named
+function's implicit label. None of these names are parser keywords.
+
 ### 2.3 Category 3 — scalar and primitive surface
 
 Implement source-facing `()`, `!`, `u8`, `u16`, `u32`, `u64`, `u128`, `i8`,
@@ -139,6 +164,11 @@ operations where applicable, wrapping conversion, and checked conversion
 returning `Option<T>`. Float operations preserve the canonical NaN and signed
 zero rules established by the VM; public float-to-integer conversion is always
 checked.
+
+The ordinary source-level bit API is `bit_and`, `bit_or`, `bit_xor`,
+`bit_not`, `bit_shl`, and `bit_shr`. The shift helpers use a `u32` count for
+every integer width; their private leaves retain the VM's integer-width and
+shift-count checks.
 
 `char` provides scalar validation, `u32` conversion, UTF-8 encoded length, and
 encoding/decoding support. Primitive leaves are private, manifest-bound layer-1
@@ -183,6 +213,14 @@ Hasher
 iteration. `Slice`/`SliceMut` provide validated views, checked subslicing,
 splitting, indexing access, and iteration without copying their elements.
 
+`SliceMut::split_at` consumes one mutable view and returns two mutable views
+only after checking the requested split lies inside its existing window. Its
+implementation may use one private, manifest-bound array leaf that consumes a
+unique array borrow plus `(start, length, split)` and materializes the two
+disjoint window borrows. The leaf is not a public pointer API: ordinary code
+can neither name it nor construct a `SliceMut` because the backing borrow and
+window fields remain private to `std`.
+
 Moves preserve obligations: `pop`, `remove`, `swap_remove`, `drain`,
 `split_off`, `append`, and by-value iteration transfer elements out. Operations
 that silently discard residents—such as `clear`, shrinking `truncate`, or
@@ -198,7 +236,18 @@ map/set results.
 
 Implement in-place unstable sort, stable sort using a reusable scratch vector,
 binary search, lower/upper bounds, partition, deduplication, and lexicographic
-slice comparison. Do not add a broad iterator-adapter tower or a tree map in
+slice comparison. The initial partition spelling is:
+
+```text
+Vec::partition_by(&mut Vec<T>, F) -> usize
+where F: Fn<(&T), Output = Bool>, F: Use<[0,infinity]>
+```
+
+It rearranges the vector in place, returns the first index of the false
+partition, and makes no stability promise. The explicit duplicability bound
+means the predicate can be invoked once per examined resident; ordinary
+capture-free named functions and closures with duplicable captures satisfy it
+without adding a compiler collection callback intrinsic. Do not add a broad iterator-adapter tower or a tree map in
 this tranche; compiler code may use indexed loops, vectors plus sorting, and
 hash maps directly.
 
@@ -385,3 +434,98 @@ relationship likewise name their lifetime explicitly.
   the `String`/`Str` model before it becomes a stable library promise.
 - General `Slice<'a, T>` remains the collection view. `Str<'a>` is the
   text-specific view that adds the UTF-8 invariant.
+
+## 8. Slice representation and static compiler data
+
+`Slice<'a, T>` is an ordinary standard-library type, not a public compiler
+enum or a pair of public static/dynamic variants. Semantically it is a shared
+fat pointer:
+
+```text
+Slice<'a, T>    = { data: *const T, len: usize }
+SliceMut<'a, T> = { data: *mut T,   len: usize }
+```
+
+The VM may retain hidden provenance or a backing handle in addition to those
+machine words when that is necessary to keep an arena allocation alive. That
+is an implementation detail. The source-level representation and API are one
+uniform slice abstraction: a slice may view either a live `Array<T>` allocation
+or compiler-provided read-only static storage without becoming a public sum
+type.
+
+Static storage is identified in the verified artifact by a segment identity,
+range, element layout, and stable type tag. The tag is a type identity rather
+than an ad-hoc string, so a UTF-8 literal, a raw byte blob, and an embedded
+image cannot be confused or cast by ordinary source code:
+
+```text
+Utf8Bytes       // compiler data behind "..."
+u8              // compiler data behind b"..."
+PngImage        // an explicitly embedded PNG asset
+OpaqueAsset     // declared arbitrary static binary data
+```
+
+The compiler/VM's one hidden representation is conceptually:
+
+```text
+__StaticData<T> = { segment_id, byte_offset, length, type_tag }
+```
+
+It is not constructible or nameable by ordinary source code. The VM resolves a
+verified `segment_id` to immutable compiler-owned or mapped data; bytecode
+never carries an arbitrary machine pointer. The artifact constant table stores
+the segment's tag, alignment, bounds, and bytes. A verifier-approved operation
+must use the matching tag and remain in range, so ordinary code cannot cast a
+PNG segment to UTF-8, or one opaque asset kind to another.
+
+The lowering and public wrapping rules are deliberately concrete:
+
+```text
+"..."  -> hidden __StaticData<Utf8Bytes>
+        -> standard-library Str<'static>
+
+b"..." -> hidden __StaticData<u8>
+        -> standard-library Slice<'static, u8>
+```
+
+`String` remains an ordinary opaque `Vec<u8>`/`Array<u8>` wrapper in `std`.
+`String::as_str(&String)` creates the same standard-library `Str` abstraction
+over a borrowed array, while `Str::as_bytes` returns a normal
+`Slice<u8>` without allocating. Static and dynamic views therefore share one
+public API despite having different backing storage.
+
+The trusted standard-library implementation needs one representation bridge
+plus a tiny sealed inspection interface over hidden static data:
+
+```text
+static_as_array(raw) -> &'static Array<T>
+static_len(raw) -> usize
+static_subslice(raw, start, len) -> raw
+static_get_shared(raw, index) -> &'static T
+```
+
+`static_as_array` is not a second public slice representation. It is the
+single private bridge that lets `std` build its normal `Slice { storage, start,
+length }` view over read-only segment data; the VM may implement that array as
+a provenance-carrying static facade rather than an allocation. The other three
+leaves inspect or narrow sealed data directly. All four are private
+manifest-bound leaves, not callable authority obtained by spelling their
+names. The standard library owns every public `Slice` and `Str` operation.
+
+The compiler and VM may use internal pointers after resolving a verified
+segment, but neither arbitrary pointers nor a constructible `StaticData<T>`
+value are exposed to source. `StaticData<T>` is at most an internal Core and
+artifact-constant notion used to materialize a normal static slice. The VM
+verifier checks segment tags, alignment, bounds, immutability, and the static
+lifetime before such a view can exist.
+
+`Str<'a>` remains a standard-library newtype over `Slice<'a, u8>` whose
+constructors establish valid UTF-8. Thus `"hello"` lowers to read-only static
+UTF-8 data and becomes `Str<'static>` without allocation, while
+`String::as_str(&String)` produces the same `Str` abstraction over the owned
+buffer. `Str::as_bytes` returns the underlying `Slice<u8>` without copying.
+
+The only privileged operations are private, manifest-bound view-materializing
+leaves and verifier support for static literal segments. Bounds checks,
+sub-slicing policy, indexing, UTF-8 boundary validation, image decoding, and
+all public `Slice`/`Str` APIs remain standard-library code.

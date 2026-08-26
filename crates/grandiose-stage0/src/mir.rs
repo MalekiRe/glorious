@@ -706,6 +706,31 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: String,
     },
+    /// Compiler-emitted, sealed read-only bytes.  This is intentionally not
+    /// an array or `Bytes`: the tag and alignment remain part of the artifact
+    /// type so embedded data cannot be reinterpreted by ordinary source.
+    ConstStaticData {
+        dst: MirLocal,
+        tag: u128,
+        alignment: u32,
+        bytes: Vec<u8>,
+    },
+    StaticLen {
+        dst: MirLocal,
+        value: MirLocal,
+    },
+    StaticSubslice {
+        dst: MirLocal,
+        value: MirLocal,
+        start: MirLocal,
+        length: MirLocal,
+    },
+    StaticGetBorrowShared {
+        dst: MirLocal,
+        value: MirLocal,
+        index: MirLocal,
+    },
+    StaticAsArrayBorrow { dst: MirLocal, value: MirLocal },
     /// Manifest-bound, capability-free UTF-8 byte-length leaf. The callee's
     /// source identity was checked before lowering; MIR intentionally carries
     /// no name, host symbol, or ambient authority for this operation.
@@ -786,6 +811,88 @@ pub enum MirInstruction {
     ArrayLen {
         dst: MirLocal,
         value: MirLocal,
+        element_type: Type,
+    },
+    /// The sole UTF-8 validation leaf over standard-library-owned `Array<u8>`
+    /// storage. It returns the longest valid UTF-8 prefix, letting `std`
+    /// construct its own `Result<String, Utf8Error>` without a `Text` scalar.
+    ArrayUtf8ValidUpTo {
+        dst: MirLocal,
+        value: MirLocal,
+    },
+    ArrayPushUtf8Char { value: MirLocal, character: MirLocal },
+    ArrayInsertUtf8FromSlice {
+        dst: MirLocal,
+        value: MirLocal,
+        index: MirLocal,
+        source: MirLocal,
+        start: MirLocal,
+        length: MirLocal,
+    },
+    ArrayPopUtf8Char {
+        dst: MirLocal,
+        value: MirLocal,
+    },
+    ArrayUtf8CharAt {
+        dst: MirLocal,
+        value: MirLocal,
+        start: MirLocal,
+        length: MirLocal,
+        index: MirLocal,
+    },
+    ArrayExtendFromSlice {
+        value: MirLocal,
+        source: MirLocal,
+        start: MirLocal,
+        length: MirLocal,
+        element_type: Type,
+    },
+    ArrayInsertMove {
+        value: MirLocal,
+        index: MirLocal,
+        item: MirLocal,
+        element_type: Type,
+    },
+    ArrayRemoveMove {
+        dst: MirLocal,
+        value: MirLocal,
+        index: MirLocal,
+        element_type: Type,
+    },
+    ArrayAppendMove {
+        value: MirLocal,
+        source: MirLocal,
+        element_type: Type,
+    },
+    ArrayTruncateDiscard {
+        value: MirLocal,
+        length: MirLocal,
+        element_type: Type,
+    },
+    ArrayReverseMove {
+        value: MirLocal,
+        element_type: Type,
+    },
+    ArraySplitOffMove {
+        dst: MirLocal,
+        value: MirLocal,
+        index: MirLocal,
+        element_type: Type,
+    },
+    ArraySplitBorrowUnique {
+        dst: MirLocal,
+        value: MirLocal,
+        start: MirLocal,
+        length: MirLocal,
+        index: MirLocal,
+        element_type: Type,
+    },
+    ArrayInsertFromSlice {
+        value: MirLocal,
+        index: MirLocal,
+        source: MirLocal,
+        start: MirLocal,
+        length: MirLocal,
         element_type: Type,
     },
     ArrayGetCopy {
@@ -1219,6 +1326,14 @@ pub enum MirInstruction {
     },
     /// Copy through a live loan without consuming it.
     DerefCopy {
+        dst: MirLocal,
+        reference: MirLocal,
+    },
+    /// Move the referent of a unique loan into `dst`. The loan is temporarily
+    /// unavailable until a subsequent `DerefStore` restores its referent;
+    /// this is how source `move *target` supports `Option::take` without
+    /// pretending that an affine value was copied.
+    DerefMove {
         dst: MirLocal,
         reference: MirLocal,
     },
@@ -3138,6 +3253,7 @@ fn operation_input_mut(
         | MirInstruction::ConstBool { .. }
         | MirInstruction::ConstChar { .. }
         | MirInstruction::ConstText { .. }
+        | MirInstruction::ConstStaticData { .. }
         | MirInstruction::ArrayEmpty { .. }
         | MirInstruction::InstallHandler { .. }
         | MirInstruction::UninstallHandler
@@ -3158,6 +3274,7 @@ fn operation_input_mut(
         | MirInstruction::Call { arguments, .. }
         | MirInstruction::HostCall { arguments, .. } => operation_input_slot(input, arguments),
         MirInstruction::TextByteLen { value, .. }
+        | MirInstruction::StaticLen { value, .. }
         | MirInstruction::TextFromUtf8Checked { value, .. }
         | MirInstruction::TextAsBytes { value, .. }
         | MirInstruction::CharFromU32Checked { value, .. }
@@ -3168,6 +3285,7 @@ fn operation_input_mut(
         | MirInstruction::BytesUtf8ValidUpTo { value, .. }
         | MirInstruction::Blake3 { value, .. }
         | MirInstruction::ArrayLen { value, .. }
+        | MirInstruction::ArrayUtf8ValidUpTo { value, .. }
         | MirInstruction::ArrayCapacity { value, .. }
         | MirInstruction::ArrayPopMove { value, .. }
         | MirInstruction::U32ToUsize { value, .. }
@@ -3199,12 +3317,60 @@ fn operation_input_mut(
         | MirInstruction::DerefCopy {
             reference: value, ..
         }
+        | MirInstruction::DerefMove {
+            reference: value, ..
+        }
         | MirInstruction::Resume { value, .. }
         | MirInstruction::ResumeReturn { value, .. }
         | MirInstruction::Copy { src: value, .. }
         | MirInstruction::Store { src: value, .. }
         | MirInstruction::Move { src: value, .. }
         | MirInstruction::Borrow { src: value, .. } => operation_input_slot(input, [value]),
+        MirInstruction::StaticSubslice {
+            value,
+            start,
+            length,
+            ..
+        } => operation_input_slot(input, [value, start, length]),
+        MirInstruction::StaticGetBorrowShared { value, index, .. } => {
+            operation_input_slot(input, [value, index])
+        }
+        MirInstruction::StaticAsArrayBorrow { value, .. } => operation_input_slot(input, [value]),
+        MirInstruction::ArrayPushUtf8Char { value, character } => {
+            operation_input_slot(input, [value, character])
+        }
+        MirInstruction::ArrayInsertUtf8FromSlice { value, index, source, start, length, .. } => {
+            operation_input_slot(input, [value, index, source, start, length])
+        }
+        MirInstruction::ArrayPopUtf8Char { value, .. } => operation_input_slot(input, [value]),
+        MirInstruction::ArrayUtf8CharAt { value, start, length, index, .. } => {
+            operation_input_slot(input, [value, start, length, index])
+        }
+        MirInstruction::ArrayExtendFromSlice { value, source, start, length, .. } => {
+            operation_input_slot(input, [value, source, start, length])
+        }
+        MirInstruction::ArrayInsertMove { value, index, item, .. } => {
+            operation_input_slot(input, [value, index, item])
+        }
+        MirInstruction::ArrayRemoveMove { value, index, .. } => {
+            operation_input_slot(input, [value, index])
+        }
+        MirInstruction::ArrayAppendMove { value, source, .. } => {
+            operation_input_slot(input, [value, source])
+        }
+        MirInstruction::ArrayTruncateDiscard { value, length, .. } => {
+            operation_input_slot(input, [value, length])
+        }
+        MirInstruction::ArrayReverseMove { value, .. } => operation_input_slot(input, [value]),
+        MirInstruction::ArraySplitOffMove { value, index, .. } => {
+            operation_input_slot(input, [value, index])
+        }
+        MirInstruction::ArraySplitBorrowUnique { value, start, length, index, .. } => {
+            operation_input_slot(input, [value, start, length, index])
+        }
+        MirInstruction::ArrayInsertFromSlice { value, index, source, start, length, .. } => {
+            operation_input_slot(input, [value, index, source, start, length])
+        }
         MirInstruction::TextConcat { left, right, .. }
         | MirInstruction::TextEq { left, right, .. }
         | MirInstruction::BytesConcat { left, right, .. }
@@ -3368,6 +3534,19 @@ fn operation_is_effectful(instruction: &MirInstruction) -> bool {
             | MirInstruction::DerefStore { .. }
             | MirInstruction::ArraySetMove { .. }
             | MirInstruction::ArrayPushMove { .. }
+            | MirInstruction::ArrayPushUtf8Char { .. }
+            | MirInstruction::ArrayInsertUtf8FromSlice { .. }
+            | MirInstruction::ArrayPopUtf8Char { .. }
+            | MirInstruction::ArrayUtf8CharAt { .. }
+            | MirInstruction::ArrayExtendFromSlice { .. }
+            | MirInstruction::ArrayInsertMove { .. }
+            | MirInstruction::ArrayRemoveMove { .. }
+            | MirInstruction::ArrayAppendMove { .. }
+            | MirInstruction::ArrayTruncateDiscard { .. }
+            | MirInstruction::ArrayReverseMove { .. }
+            | MirInstruction::ArraySplitOffMove { .. }
+            | MirInstruction::ArraySplitBorrowUnique { .. }
+            | MirInstruction::ArrayInsertFromSlice { .. }
             | MirInstruction::ArrayPopMove { .. }
             | MirInstruction::ArrayReserve { .. }
             | MirInstruction::ArrayFinishDrained { .. }
@@ -4091,6 +4270,19 @@ fn invalidates_alias_visible_constants(instruction: &MirInstruction) -> bool {
             | MirInstruction::DerefStore { .. }
             | MirInstruction::ArraySetMove { .. }
             | MirInstruction::ArrayPushMove { .. }
+            | MirInstruction::ArrayPushUtf8Char { .. }
+            | MirInstruction::ArrayInsertUtf8FromSlice { .. }
+            | MirInstruction::ArrayPopUtf8Char { .. }
+            | MirInstruction::ArrayUtf8CharAt { .. }
+            | MirInstruction::ArrayExtendFromSlice { .. }
+            | MirInstruction::ArrayInsertMove { .. }
+            | MirInstruction::ArrayRemoveMove { .. }
+            | MirInstruction::ArrayAppendMove { .. }
+            | MirInstruction::ArrayTruncateDiscard { .. }
+            | MirInstruction::ArrayReverseMove { .. }
+            | MirInstruction::ArraySplitOffMove { .. }
+            | MirInstruction::ArraySplitBorrowUnique { .. }
+            | MirInstruction::ArrayInsertFromSlice { .. }
             | MirInstruction::ArrayPopMove { .. }
             | MirInstruction::ArrayReserve { .. }
             | MirInstruction::ArrayFinishDrained { .. }
@@ -4251,6 +4443,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
         | MirInstruction::ConstText { dst, .. }
+        | MirInstruction::ConstStaticData { dst, .. }
         | MirInstruction::MakeTuple { dst, .. }
         | MirInstruction::MakeArray { dst, .. }
         | MirInstruction::MakeRecord { dst, .. }
@@ -4266,6 +4459,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::Move { dst, .. }
         | MirInstruction::Borrow { dst, .. }
         | MirInstruction::DerefCopy { dst, .. }
+        | MirInstruction::DerefMove { dst, .. }
         | MirInstruction::NotBool { dst, .. }
         | MirInstruction::AddI64 { dst, .. }
         | MirInstruction::WrappingAddI64 { dst, .. }
@@ -4324,6 +4518,10 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::TextEq { dst, .. }
         | MirInstruction::TextFromUtf8Checked { dst, .. }
         | MirInstruction::TextAsBytes { dst, .. }
+        | MirInstruction::StaticLen { dst, .. }
+        | MirInstruction::StaticSubslice { dst, .. }
+        | MirInstruction::StaticGetBorrowShared { dst, .. }
+        | MirInstruction::StaticAsArrayBorrow { dst, .. }
         | MirInstruction::CharFromU32Checked { dst, .. }
         | MirInstruction::CharToU32 { dst, .. }
         | MirInstruction::BytesLen { dst, .. }
@@ -4336,10 +4534,17 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::Blake3 { dst, .. }
         | MirInstruction::ArrayNew { dst, .. }
         | MirInstruction::ArrayLen { dst, .. }
+        | MirInstruction::ArrayUtf8ValidUpTo { dst, .. }
+        | MirInstruction::ArrayInsertUtf8FromSlice { dst, .. }
+        | MirInstruction::ArrayPopUtf8Char { dst, .. }
+        | MirInstruction::ArrayUtf8CharAt { dst, .. }
         | MirInstruction::ArrayGetCopy { dst, .. }
         | MirInstruction::ArrayGetMove { dst, .. }
         | MirInstruction::ArrayGetBorrow { dst, .. }
         | MirInstruction::ArrayEmpty { dst, .. }
+        | MirInstruction::ArrayRemoveMove { dst, .. }
+        | MirInstruction::ArraySplitOffMove { dst, .. }
+        | MirInstruction::ArraySplitBorrowUnique { dst, .. }
         | MirInstruction::ArrayPopMove { dst, .. }
         | MirInstruction::ArrayCapacity { dst, .. }
         | MirInstruction::U32CheckedAdd { dst, .. }
@@ -4400,7 +4605,14 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::DestroyIf { .. } => None,
         MirInstruction::ArraySetMove { .. }
         | MirInstruction::ArrayPushMove { .. }
-        | MirInstruction::ArrayReserve { .. }
+            | MirInstruction::ArrayPushUtf8Char { .. }
+            | MirInstruction::ArrayExtendFromSlice { .. }
+            | MirInstruction::ArrayInsertMove { .. }
+            | MirInstruction::ArrayAppendMove { .. }
+            | MirInstruction::ArrayTruncateDiscard { .. }
+            | MirInstruction::ArrayReverseMove { .. }
+            | MirInstruction::ArrayInsertFromSlice { .. }
+            | MirInstruction::ArrayReserve { .. }
         | MirInstruction::ArrayFinishDrained { .. } => None,
     }
 }
@@ -7677,6 +7889,51 @@ impl MirFunction {
                 self.require_scalar_locals(&[*dst], ScalarType::Usize, "Text byte length result")?;
                 self.require_scalar_locals(&[*value], ScalarType::Text, "Text byte length input")?;
             }
+            MirInstruction::StaticLen { dst, value } => {
+                let data = Type::StaticData {
+                    element: Box::new(Type::Scalar(ScalarType::U8)),
+                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                    alignment: 1,
+                };
+                self.validate_local_type(*dst, &Type::Scalar(ScalarType::Usize), "static length", "the result type")?;
+                self.validate_local_type(*value, &data, "static length", "the static-data input")?;
+            }
+            MirInstruction::StaticSubslice { dst, value, start, length } => {
+                let data = Type::StaticData {
+                    element: Box::new(Type::Scalar(ScalarType::U8)),
+                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                    alignment: 1,
+                };
+                self.validate_local_type(*dst, &data, "static subslice", "the result type")?;
+                self.validate_local_type(*value, &data, "static subslice", "the static-data input")?;
+                self.require_scalar_locals(&[*start, *length], ScalarType::Usize, "static subslice bounds")?;
+            }
+            MirInstruction::StaticGetBorrowShared { dst, value, index } => {
+                let data = Type::StaticData {
+                    element: Box::new(Type::Scalar(ScalarType::U8)),
+                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                    alignment: 1,
+                };
+                let reference = Type::Reference {
+                    mutability: crate::types::Mutability::Shared,
+                    lifetime: crate::types::Lifetime::Static,
+                    referent: Box::new(Type::Scalar(ScalarType::U8)),
+                };
+                self.validate_local_type(*dst, &reference, "static shared access", "the result type")?;
+                self.validate_local_type(*value, &data, "static shared access", "the static-data input")?;
+                self.require_scalar_locals(&[*index], ScalarType::Usize, "static shared access index")?;
+            }
+            MirInstruction::StaticAsArrayBorrow { dst, value } => {
+                let reference = Type::Reference { mutability: crate::types::Mutability::Shared, lifetime: crate::types::Lifetime::Static, referent: Box::new(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))) };
+                self.validate_local_type(*dst, &reference, "static array facade", "the result type")?;
+                if !matches!(
+                    self.locals[value.0 as usize].ty,
+                    Type::StaticData { ref element, tag: crate::STATIC_UTF8_DATA_TAG | crate::STATIC_RAW_U8_DATA_TAG, alignment: 1 }
+                        if matches!(element.as_ref(), Type::Scalar(ScalarType::U8))
+                ) {
+                    return Err("static array facade requires sealed UTF-8 or raw-u8 static data".into());
+                }
+            }
             MirInstruction::TextConcat { dst, left, right } => {
                 self.require_scalar_locals(&[*dst, *left, *right], ScalarType::Text, "Text concatenation")?;
             }
@@ -7768,8 +8025,15 @@ impl MirFunction {
                 mutability: actual_mutability,
                 referent: actual_referent,
                 ..
-            } if *actual_mutability == mutability && actual_referent.as_ref() == referent => Ok(()),
-            _ => Err(format!("MIR {instruction} requires {requirement}")),
+            } if (*actual_mutability == mutability
+                || (mutability == Mutability::Shared && *actual_mutability == Mutability::Unique))
+                && actual_referent.as_ref() == referent =>
+            {
+                Ok(())
+            }
+            actual => Err(format!(
+                "MIR {instruction} requires {requirement}; expected {referent:?}, got {actual:?}"
+            )),
         }
     }
 
@@ -7985,6 +8249,292 @@ impl MirFunction {
                     "a unique Array view",
                 )?;
                 self.validate_local_type(*item, element_type, "array push", "an element item")?;
+                Ok(true)
+            }
+            MirInstruction::ArrayExtendFromSlice {
+                value,
+                source,
+                start,
+                length,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array extend from slice",
+                    "a unique destination Array view",
+                )?;
+                self.validate_array_view(
+                    *source,
+                    element_type,
+                    Mutability::Shared,
+                    "array extend from slice",
+                    "a shared source Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*start, *length],
+                    crate::types::ScalarType::Usize,
+                    "array extend from slice range",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayInsertMove {
+                value,
+                index,
+                item,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array insert",
+                    "a unique Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*index],
+                    crate::types::ScalarType::Usize,
+                    "array insert index",
+                )?;
+                self.validate_local_type(*item, element_type, "array insert", "an element item")?;
+                Ok(true)
+            }
+            MirInstruction::ArrayRemoveMove {
+                dst,
+                value,
+                index,
+                element_type,
+            } => {
+                self.validate_local_type(*dst, element_type, "array remove", "an element result")?;
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array remove",
+                    "a unique Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*index],
+                    crate::types::ScalarType::Usize,
+                    "array remove index",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayAppendMove {
+                value,
+                source,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array append",
+                    "a unique destination Array view",
+                )?;
+                self.validate_owned_array(*source, element_type, "array append", "an owned source Array")?;
+                Ok(true)
+            }
+            MirInstruction::ArrayTruncateDiscard {
+                value,
+                length,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array truncate",
+                    "a unique Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*length],
+                    crate::types::ScalarType::Usize,
+                    "array truncate length",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayReverseMove {
+                value,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array reverse",
+                    "a unique Array view",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArraySplitOffMove {
+                dst,
+                value,
+                index,
+                element_type,
+            } => {
+                self.validate_owned_array(*dst, element_type, "array split off", "an Array result")?;
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array split off",
+                    "a unique source Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*index],
+                    crate::types::ScalarType::Usize,
+                    "array split off index",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArraySplitBorrowUnique {
+                dst,
+                value,
+                start,
+                length,
+                index,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array split borrow",
+                    "a unique source Array window",
+                )?;
+                self.require_scalar_locals(
+                    &[*start, *length, *index],
+                    crate::types::ScalarType::Usize,
+                    "array split borrow bounds",
+                )?;
+                let array = Type::Array(Box::new(element_type.clone()));
+                let valid_output = matches!(
+                    &self.locals[dst.0 as usize].ty,
+                    Type::Tuple(fields) if matches!(fields.as_slice(), [
+                        Type::Reference { mutability: Mutability::Unique, referent: left, .. },
+                        Type::Reference { mutability: Mutability::Unique, referent: right, .. },
+                    ] if left.as_ref() == &array && right.as_ref() == &array)
+                );
+                if !valid_output {
+                    return Err("array split borrow requires a pair of unique Array windows".into());
+                }
+                Ok(true)
+            }
+            MirInstruction::ArrayInsertFromSlice {
+                value,
+                index,
+                source,
+                start,
+                length,
+                element_type,
+            } => {
+                self.validate_array_view(
+                    *value,
+                    element_type,
+                    Mutability::Unique,
+                    "array insert from slice",
+                    "a unique destination Array view",
+                )?;
+                self.validate_array_view(
+                    *source,
+                    element_type,
+                    Mutability::Shared,
+                    "array insert from slice",
+                    "a shared source Array view",
+                )?;
+                self.require_scalar_locals(
+                    &[*index, *start, *length],
+                    crate::types::ScalarType::Usize,
+                    "array insert from slice positions",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayInsertUtf8FromSlice {
+                dst,
+                value,
+                index,
+                source,
+                start,
+                length,
+            } => {
+                let u8_array = Type::Array(Box::new(Type::Scalar(crate::types::ScalarType::U8)));
+                self.validate_local_type(
+                    *dst,
+                    &Type::Scalar(crate::types::ScalarType::Usize),
+                    "UTF-8 array insert",
+                    "a usize result",
+                )?;
+                self.validate_array_view(
+                    *value,
+                    &Type::Scalar(crate::types::ScalarType::U8),
+                    Mutability::Unique,
+                    "UTF-8 array insert",
+                    "a unique destination Array<u8> view",
+                )?;
+                self.validate_array_view(
+                    *source,
+                    &Type::Scalar(crate::types::ScalarType::U8),
+                    Mutability::Shared,
+                    "UTF-8 array insert",
+                    "a shared source Array<u8> view",
+                )?;
+                self.require_scalar_locals(
+                    &[*index, *start, *length],
+                    crate::types::ScalarType::Usize,
+                    "UTF-8 array insert positions",
+                )?;
+                let _ = u8_array;
+                Ok(true)
+            }
+            MirInstruction::ArrayPopUtf8Char { dst, value } => {
+                self.validate_local_type(
+                    *dst,
+                    &Type::Tuple(vec![
+                        Type::Scalar(crate::types::ScalarType::Char),
+                        Type::Scalar(crate::types::ScalarType::Usize),
+                    ]),
+                    "UTF-8 array pop",
+                    "a (char, usize) result",
+                )?;
+                self.validate_array_view(
+                    *value,
+                    &Type::Scalar(crate::types::ScalarType::U8),
+                    Mutability::Unique,
+                    "UTF-8 array pop",
+                    "a unique Array<u8> view",
+                )?;
+                Ok(true)
+            }
+            MirInstruction::ArrayUtf8CharAt {
+                dst,
+                value,
+                start,
+                length,
+                index,
+            } => {
+                self.validate_local_type(
+                    *dst,
+                    &Type::Tuple(vec![
+                        Type::Scalar(crate::types::ScalarType::Char),
+                        Type::Scalar(crate::types::ScalarType::Usize),
+                    ]),
+                    "UTF-8 character lookup",
+                    "a (char, usize) result",
+                )?;
+                self.validate_array_view(
+                    *value,
+                    &Type::Scalar(crate::types::ScalarType::U8),
+                    Mutability::Shared,
+                    "UTF-8 character lookup",
+                    "a shared Array<u8> view",
+                )?;
+                self.require_scalar_locals(
+                    &[*start, *length, *index],
+                    crate::types::ScalarType::Usize,
+                    "UTF-8 character lookup positions",
+                )?;
                 Ok(true)
             }
             MirInstruction::ArrayPopMove {
@@ -8993,11 +9543,10 @@ fn mir_type_is_duplicable(ty: &Type, descriptors: &[MirNominalCopyDescriptor]) -
                 active.pop();
                 result
             }
-            // Generic bodies are checked before their concrete instance is
-            // materialized. Their copy operations are revalidated after
-            // substitution at the VM boundary, where a concrete nominal
-            // descriptor is available. Rejecting them here would make every
-            // ordinary generic helper falsely affine.
+            // Generic-copy authority is checked by `Lowerer` against the
+            // callable's explicit `Use<[0,*]>` bounds before it emits a
+            // `Copy`. MIR validation only sees the frozen generic type, so
+            // it accepts that already-proved instruction here.
             Type::Generic(_) => true,
             Type::Infer(_) | Type::Error => false,
             Type::Callable { .. } => true,
@@ -9052,7 +9601,9 @@ fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), S
         Type::Tuple(elements) => elements
             .iter()
             .try_for_each(|element| validate_mir_type(element, lifetime_binders)),
-        Type::Array(element) => validate_mir_type(element, lifetime_binders),
+        Type::Array(element) | Type::StaticData { element, .. } => {
+            validate_mir_type(element, lifetime_binders)
+        }
         Type::Reference {
             lifetime, referent, ..
         } => {
@@ -9250,7 +9801,11 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::FloatIntrinsic { .. }
         | MirInstruction::IntIntrinsic { .. }
         | MirInstruction::IntGenericIntrinsic { .. } => Ok(()),
-        MirInstruction::TextByteLen { .. } => Ok(()),
+        MirInstruction::TextByteLen { .. }
+        | MirInstruction::StaticLen { .. }
+        | MirInstruction::StaticSubslice { .. }
+        | MirInstruction::StaticGetBorrowShared { .. } => Ok(()),
+        MirInstruction::StaticAsArrayBorrow { .. } => Ok(()),
         MirInstruction::TextConcat { .. }
         | MirInstruction::TextEq { .. }
         | MirInstruction::TextFromUtf8Checked { .. }
@@ -9264,6 +9819,11 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::BytesToArray { .. }
         | MirInstruction::BytesUtf8ValidUpTo { .. }
         | MirInstruction::Blake3 { .. } => Ok(()),
+        MirInstruction::ArrayUtf8ValidUpTo { .. }
+        | MirInstruction::ArrayInsertUtf8FromSlice { .. }
+        | MirInstruction::ArrayPopUtf8Char { .. }
+        | MirInstruction::ArrayUtf8CharAt { .. } => Ok(()),
+        MirInstruction::ArrayPushUtf8Char { .. } => Ok(()),
         MirInstruction::ArrayNew { element_type, .. }
         | MirInstruction::ArrayLen { element_type, .. }
         | MirInstruction::ArrayGetCopy { element_type, .. }
@@ -9272,6 +9832,15 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::ArraySetMove { element_type, .. }
         | MirInstruction::ArrayEmpty { element_type, .. }
         | MirInstruction::ArrayPushMove { element_type, .. }
+        | MirInstruction::ArrayExtendFromSlice { element_type, .. }
+        | MirInstruction::ArrayInsertMove { element_type, .. }
+        | MirInstruction::ArrayRemoveMove { element_type, .. }
+        | MirInstruction::ArrayAppendMove { element_type, .. }
+        | MirInstruction::ArrayTruncateDiscard { element_type, .. }
+        | MirInstruction::ArrayReverseMove { element_type, .. }
+        | MirInstruction::ArraySplitOffMove { element_type, .. }
+        | MirInstruction::ArraySplitBorrowUnique { element_type, .. }
+        | MirInstruction::ArrayInsertFromSlice { element_type, .. }
         | MirInstruction::ArrayPopMove { element_type, .. }
         | MirInstruction::ArrayCapacity { element_type, .. }
         | MirInstruction::ArrayReserve { element_type, .. }
@@ -9335,6 +9904,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::ConstBool { .. }
         | MirInstruction::ConstChar { .. }
         | MirInstruction::ConstText { .. }
+        | MirInstruction::ConstStaticData { .. }
         | MirInstruction::MakeTuple { .. }
         | MirInstruction::UninstallHandler
         | MirInstruction::CaptureResumption { .. }
@@ -9352,6 +9922,7 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::Move { .. }
         | MirInstruction::Borrow { .. }
         | MirInstruction::DerefCopy { .. }
+        | MirInstruction::DerefMove { .. }
         | MirInstruction::DerefStore { .. }
         | MirInstruction::NotBool { .. }
         | MirInstruction::AddI64 { .. }
@@ -9981,7 +10552,9 @@ fn type_retains_generic_placeholder(value: &Type) -> bool {
                     .any(generic_argument_retains_generic_placeholder)
         }
         Type::Tuple(values) => values.iter().any(type_retains_generic_placeholder),
-        Type::Array(value) => type_retains_generic_placeholder(value),
+        Type::Array(value) | Type::StaticData { element: value, .. } => {
+            type_retains_generic_placeholder(value)
+        }
         Type::Reference {
             lifetime, referent, ..
         } => {
@@ -10046,7 +10619,28 @@ fn effect_row_retains_generic_placeholder(value: &crate::EffectRow) -> bool {
 fn instruction_retains_generic_placeholder(instruction: &MirInstruction) -> bool {
     match instruction {
         MirInstruction::MakeArray { element_type, .. }
-        | MirInstruction::ProjectArray { element_type, .. } => {
+        | MirInstruction::ProjectArray { element_type, .. }
+        | MirInstruction::ArrayNew { element_type, .. }
+        | MirInstruction::ArrayLen { element_type, .. }
+        | MirInstruction::ArrayGetCopy { element_type, .. }
+        | MirInstruction::ArrayGetMove { element_type, .. }
+        | MirInstruction::ArrayGetBorrow { element_type, .. }
+        | MirInstruction::ArraySetMove { element_type, .. }
+        | MirInstruction::ArrayEmpty { element_type, .. }
+        | MirInstruction::ArrayPushMove { element_type, .. }
+        | MirInstruction::ArrayExtendFromSlice { element_type, .. }
+        | MirInstruction::ArrayInsertMove { element_type, .. }
+        | MirInstruction::ArrayRemoveMove { element_type, .. }
+        | MirInstruction::ArrayAppendMove { element_type, .. }
+        | MirInstruction::ArrayTruncateDiscard { element_type, .. }
+        | MirInstruction::ArrayReverseMove { element_type, .. }
+        | MirInstruction::ArraySplitOffMove { element_type, .. }
+        | MirInstruction::ArraySplitBorrowUnique { element_type, .. }
+        | MirInstruction::ArrayInsertFromSlice { element_type, .. }
+        | MirInstruction::ArrayPopMove { element_type, .. }
+        | MirInstruction::ArrayCapacity { element_type, .. }
+        | MirInstruction::ArrayReserve { element_type, .. }
+        | MirInstruction::ArrayFinishDrained { element_type, .. } => {
             type_retains_generic_placeholder(element_type)
         }
         MirInstruction::MakeRecord { field_types, .. }
@@ -10144,13 +10738,20 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::DeferredLiteral { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
         | MirInstruction::ConstChar { dst, .. }
-        | MirInstruction::ConstText { dst, .. } => vec![*dst],
+        | MirInstruction::ConstText { dst, .. }
+        | MirInstruction::ConstStaticData { dst, .. } => vec![*dst],
         MirInstruction::FloatIntrinsic { dst, arguments, .. }
         | MirInstruction::IntIntrinsic { dst, arguments, .. }
         | MirInstruction::IntGenericIntrinsic { dst, arguments, .. } => std::iter::once(*dst)
             .chain(arguments.iter().copied())
             .collect(),
         MirInstruction::TextByteLen { dst, value } => vec![*dst, *value],
+        MirInstruction::StaticLen { dst, value } => vec![*dst, *value],
+        MirInstruction::StaticSubslice { dst, value, start, length } => {
+            vec![*dst, *value, *start, *length]
+        }
+        MirInstruction::StaticGetBorrowShared { dst, value, index } => vec![*dst, *value, *index],
+        MirInstruction::StaticAsArrayBorrow { dst, value } => vec![*dst, *value],
         MirInstruction::TextConcat { dst, left, right }
         | MirInstruction::TextEq { dst, left, right } => vec![*dst, *left, *right],
         MirInstruction::TextFromUtf8Checked { dst, value }
@@ -10174,6 +10775,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
             dst, length, fill, ..
         } => vec![*dst, *length, *fill],
         MirInstruction::ArrayLen { dst, value, .. }
+        | MirInstruction::ArrayUtf8ValidUpTo { dst, value }
         | MirInstruction::ArrayCapacity { dst, value, .. }
         | MirInstruction::ArrayPopMove { dst, value, .. } => vec![*dst, *value],
         MirInstruction::ArrayGetCopy {
@@ -10190,6 +10792,33 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         } => vec![*value, *index, *item],
         MirInstruction::ArrayEmpty { dst, .. } => vec![*dst],
         MirInstruction::ArrayPushMove { value, item, .. } => vec![*value, *item],
+        MirInstruction::ArrayPushUtf8Char { value, character } => vec![*value, *character],
+        MirInstruction::ArrayInsertUtf8FromSlice { dst, value, index, source, start, length } => {
+            vec![*dst, *value, *index, *source, *start, *length]
+        }
+        MirInstruction::ArrayPopUtf8Char { dst, value } => vec![*dst, *value],
+        MirInstruction::ArrayUtf8CharAt { dst, value, start, length, index } => {
+            vec![*dst, *value, *start, *length, *index]
+        }
+        MirInstruction::ArrayExtendFromSlice { value, source, start, length, .. } => {
+            vec![*value, *source, *start, *length]
+        }
+        MirInstruction::ArrayInsertMove { value, index, item, .. } => {
+            vec![*value, *index, *item]
+        }
+        MirInstruction::ArrayRemoveMove { dst, value, index, .. } => {
+            vec![*dst, *value, *index]
+        }
+        MirInstruction::ArrayAppendMove { value, source, .. } => vec![*value, *source],
+        MirInstruction::ArrayTruncateDiscard { value, length, .. } => vec![*value, *length],
+        MirInstruction::ArrayReverseMove { value, .. } => vec![*value],
+        MirInstruction::ArraySplitOffMove { dst, value, index, .. } => vec![*dst, *value, *index],
+        MirInstruction::ArraySplitBorrowUnique { dst, value, start, length, index, .. } => {
+            vec![*dst, *value, *start, *length, *index]
+        }
+        MirInstruction::ArrayInsertFromSlice { value, index, source, start, length, .. } => {
+            vec![*value, *index, *source, *start, *length]
+        }
         MirInstruction::ArrayReserve {
             value, additional, ..
         } => vec![*value, *additional],
@@ -10276,7 +10905,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::Store { dst, src }
         | MirInstruction::Move { dst, src } => vec![*dst, *src],
         MirInstruction::Borrow { dst, src, .. } => vec![*dst, *src],
-        MirInstruction::DerefCopy { dst, reference } => vec![*dst, *reference],
+        MirInstruction::DerefCopy { dst, reference }
+        | MirInstruction::DerefMove { dst, reference } => vec![*dst, *reference],
         MirInstruction::DerefStore { reference, src } => vec![*reference, *src],
         MirInstruction::NotBool { dst, value } => vec![*dst, *value],
         MirInstruction::BitNotI64 { dst, value } => vec![*dst, *value],
@@ -12636,6 +13266,18 @@ impl Lowerer<'_> {
         let has_fallback = fallback_index.is_some();
         let join = self.alloc(self.body.expression(label).ty.clone(), CoreId(u32::MAX));
 
+        // A selected completion arm may forward this lexical destination
+        // through an ordinary `L: Label<T>` helper (the source-level
+        // `return(value, @function)` form).  It has the same rejoin as a
+        // direct `transfer`, but it must be represented by a sealed runtime
+        // token so that the call made in the helper can unwind here.  Keep
+        // the mapping scoped to arm lowering: a label value remains invalid
+        // in closures or outside the lexical label body.
+        let has_first_class_label = self.contains_label_value(completion, brand);
+        if has_first_class_label {
+            self.label_values.insert(brand, (MirBlockId(1), join));
+        }
+
         // Reserve entry and typed rejoin before arm emission.  The VM's entry
         // block is fixed at zero, and every ordinary arm reaches exactly the
         // same label-result parameter while a transfer bypasses it through a
@@ -12696,6 +13338,9 @@ impl Lowerer<'_> {
                 terminator,
             });
             arms.push(id);
+        }
+        if has_first_class_label {
+            self.label_values.remove(&brand);
         }
         self.values = boundary_values;
         self.named = boundary_named;
@@ -13051,9 +13696,10 @@ impl Lowerer<'_> {
         let CoreKind::Completion { ref clauses, .. } = self.body.expression(completion).kind else {
             return None;
         };
-        clauses
-            .iter()
-            .any(|clause| self.contains_label_transfer(clause.body, brand))
+        clauses.iter().any(|clause| {
+            self.contains_label_transfer(clause.body, brand)
+                || self.contains_label_value(clause.body, brand)
+        })
             .then_some((brand, completion, prefix))
     }
 
@@ -26007,19 +26653,35 @@ impl Lowerer<'_> {
                 bodies.push(id);
                 continue;
             }
-            let Some(body) = self.value(clause.body) else {
-                self.named = previous_named;
-                return Some(self.invalid_function(parameters));
-            };
-            let instructions = std::mem::take(&mut self.instructions);
-            self.named = previous_named;
             let id = MirBlockId(blocks.len() as u32);
-            blocks.push(MirBlock {
-                scope: MirScopeId::ROOT,
-                parameters: vec![],
-                instructions,
-                terminator: MirTerminator::Return { value: body },
-            });
+            if matches!(self.body.expression(clause.body).ty, Type::Never) {
+                // A direct or first-class label invocation is terminal. It
+                // still has to be evaluated so the VM can perform its
+                // nonlocal jump, but it cannot be emitted as a `Return` of
+                // the enclosing completion's ordinary result type.
+                self.statement(clause.body)?;
+                let instructions = std::mem::take(&mut self.instructions);
+                self.named = previous_named;
+                blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions,
+                    terminator: MirTerminator::Unreachable,
+                });
+            } else {
+                let Some(body) = self.value(clause.body) else {
+                    self.named = previous_named;
+                    return Some(self.invalid_function(parameters));
+                };
+                let instructions = std::mem::take(&mut self.instructions);
+                self.named = previous_named;
+                blocks.push(MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions,
+                    terminator: MirTerminator::Return { value: body },
+                });
+            }
             bodies.push(id);
         }
         self.values = entry_values;
@@ -27566,6 +28228,26 @@ impl Lowerer<'_> {
                         return None;
                     }
                 },
+                Type::StaticData { tag, alignment, element }
+                    if matches!(element.as_ref(), Type::Scalar(crate::types::ScalarType::U8)) => {
+                    let bytes = if text.starts_with("b\"") {
+                        parse_byte_literal(&text)
+                    } else {
+                        parse_text_literal(&text).map(String::into_bytes)
+                    };
+                    match bytes {
+                        Ok(bytes) => self.instructions.push(MirInstruction::ConstStaticData {
+                            dst,
+                            tag,
+                            alignment,
+                            bytes,
+                        }),
+                        Err(_) => {
+                            self.error("G6003", "invalid static UTF-8 literal at MIR lowering");
+                            return None;
+                        }
+                    }
+                }
                 Type::Generic(_) if crate::core::literal_is_numeric(&text) => self
                     .instructions
                     .push(MirInstruction::DeferredLiteral { dst, text }),
@@ -27818,8 +28500,14 @@ impl Lowerer<'_> {
                     .push(MirInstruction::DerefCopy { dst, reference });
             }
             CoreKind::Move(value) => {
-                let src = self.capability_value(value)?;
-                self.instructions.push(MirInstruction::Move { dst, src });
+                if let CoreKind::Deref(reference) = self.body.expression(value).kind {
+                    let reference = self.capability_value(reference)?;
+                    self.instructions
+                        .push(MirInstruction::DerefMove { dst, reference });
+                } else {
+                    let src = self.capability_value(value)?;
+                    self.instructions.push(MirInstruction::Move { dst, src });
+                }
             }
             CoreKind::IntrinsicCall {
                 operator,
@@ -27921,6 +28609,38 @@ impl Lowerer<'_> {
                         MirInstruction::IntIntrinsic {
                             dst,
                             primitive: PrimitiveRole::IntCheckedAdd,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![left, right],
+                        }
+                    }
+                    // `str_slice` establishes `right <= left` before this
+                    // subtraction. The existing generic wrapping primitive
+                    // therefore has the same value semantics here while the
+                    // public range API reports invalid bounds first.
+                    (Type::Scalar(crate::types::ScalarType::Usize), "-") => {
+                        MirInstruction::IntIntrinsic {
+                            dst,
+                            primitive: PrimitiveRole::IntWrappingSub,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![left, right],
+                        }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::Usize), "*") => {
+                        MirInstruction::IntIntrinsic {
+                            dst,
+                            primitive: PrimitiveRole::IntWrappingMul,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![left, right],
+                        }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::Usize), "/") => {
+                        // Keep pointer-width division in the generic integer
+                        // ABI, just like `usize` addition. The VM validates
+                        // the scalar specialization and reports division by
+                        // zero or overflow deterministically.
+                        MirInstruction::IntIntrinsic {
+                            dst,
+                            primitive: PrimitiveRole::IntCheckedDiv,
                             scalar: crate::types::ScalarType::Usize,
                             arguments: vec![left, right],
                         }
@@ -28296,6 +29016,62 @@ impl Lowerer<'_> {
                     (Type::Scalar(crate::types::ScalarType::Char), ">=") => {
                         MirInstruction::GeChar { dst, left, right }
                     }
+                    // The VM's verified generic-integer family already
+                    // covers every integer width.  Keep source comparisons
+                    // on the same path when a scalar does not have a legacy
+                    // dedicated MIR opcode (for example u16 and i128), so
+                    // the source-defined Ord implementations are not
+                    // artificially limited by lowering coverage.
+                    (ty, operator) if integer_scalar_type(ty).is_some() => {
+                        let scalar = integer_scalar_type(ty)
+                            .expect("the guarded integer scalar is present");
+                        let primitive = match operator {
+                            "==" | "!=" => PrimitiveRole::IntEqual,
+                            "<" | ">=" => PrimitiveRole::IntLess,
+                            ">" | "<=" => PrimitiveRole::IntGreater,
+                            _ => unreachable!("comparison operator was filtered above"),
+                        };
+                        let (left, right) = match operator {
+                            "<=" | ">=" => (right, left),
+                            _ => (left, right),
+                        };
+                        let predicate = self.alloc(
+                            Type::Scalar(crate::types::ScalarType::U32),
+                            id,
+                        );
+                        let zero = self.alloc(
+                            Type::Scalar(crate::types::ScalarType::U32),
+                            id,
+                        );
+                        self.instructions.push(MirInstruction::ConstU32 {
+                            dst: zero,
+                            value: 0,
+                        });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive,
+                            scalar,
+                            arguments: vec![left, right],
+                        });
+                        if operator == "!=" {
+                            let equal = self.alloc(
+                                Type::Scalar(crate::types::ScalarType::Bool),
+                                id,
+                            );
+                            self.instructions.push(MirInstruction::NeU32 {
+                                dst: equal,
+                                left: predicate,
+                                right: zero,
+                            });
+                            MirInstruction::NotBool { dst, value: equal }
+                        } else {
+                            MirInstruction::NeU32 {
+                                dst,
+                                left: predicate,
+                                right: zero,
+                            }
+                        }
+                    }
                     _ => {
                         self.error("G6005", "comparison type has no MIR instruction");
                         return None;
@@ -28490,6 +29266,95 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::TextByteLen { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::StaticLen) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error("G6005", "StaticLen requires one static-data operand");
+                                    return None;
+                                };
+                                let data = Type::StaticData {
+                                    element: Box::new(Type::Scalar(crate::types::ScalarType::U8)),
+                                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                                    alignment: 1,
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty != data
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Usize)
+                                {
+                                    self.error("G6005", "StaticLen primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::StaticLen { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::StaticSubslice) => {
+                                let [value, start, length] = arguments.as_slice() else {
+                                    self.error("G6005", "StaticSubslice requires static data and two usize bounds");
+                                    return None;
+                                };
+                                let data = Type::StaticData {
+                                    element: Box::new(Type::Scalar(crate::types::ScalarType::U8)),
+                                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                                    alignment: 1,
+                                };
+                                let usize = Type::Scalar(crate::types::ScalarType::Usize);
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty != data
+                                    || self.locals[start.0 as usize].ty != usize
+                                    || self.locals[length.0 as usize].ty != usize
+                                    || self.body.expression(id).ty != data
+                                {
+                                    self.error("G6005", "StaticSubslice primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::StaticSubslice {
+                                    dst,
+                                    value: *value,
+                                    start: *start,
+                                    length: *length,
+                                });
+                            }
+                            Some(PrimitiveRole::StaticGetShared) => {
+                                let [value, index] = arguments.as_slice() else {
+                                    self.error("G6005", "StaticGetShared requires static data and an index");
+                                    return None;
+                                };
+                                let data = Type::StaticData {
+                                    element: Box::new(Type::Scalar(crate::types::ScalarType::U8)),
+                                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                                    alignment: 1,
+                                };
+                                let usize = Type::Scalar(crate::types::ScalarType::Usize);
+                                let reference = Type::Reference {
+                                    mutability: crate::types::Mutability::Shared,
+                                    lifetime: crate::types::Lifetime::Static,
+                                    referent: Box::new(Type::Scalar(crate::types::ScalarType::U8)),
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty != data
+                                    || self.locals[index.0 as usize].ty != usize
+                                    || self.body.expression(id).ty != reference
+                                {
+                                    self.error("G6005", "StaticGetShared primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::StaticGetBorrowShared {
+                                    dst,
+                                    value: *value,
+                                    index: *index,
+                                });
+                            }
+                            Some(role @ (PrimitiveRole::StaticAsArray | PrimitiveRole::StaticRawAsArray)) => {
+                                let [value] = arguments.as_slice() else { self.error("G6005", "static array bridge requires one static-data operand"); return None; };
+                                let tag = match role {
+                                    PrimitiveRole::StaticAsArray => crate::STATIC_UTF8_DATA_TAG,
+                                    PrimitiveRole::StaticRawAsArray => crate::STATIC_RAW_U8_DATA_TAG,
+                                    _ => unreachable!("role was narrowed above"),
+                                };
+                                let data = Type::StaticData { element: Box::new(Type::Scalar(crate::types::ScalarType::U8)), tag, alignment: 1 };
+                                let reference = Type::Reference { mutability: crate::types::Mutability::Shared, lifetime: crate::types::Lifetime::Static, referent: Box::new(Type::Array(Box::new(Type::Scalar(crate::types::ScalarType::U8)))) };
+                                if !generic_arguments.is_empty() || self.locals[value.0 as usize].ty != data || self.body.expression(id).ty != reference { self.error("G6005", "static array bridge ABI does not match manifest contract"); return None; }
+                                self.instructions.push(MirInstruction::StaticAsArrayBorrow { dst, value: *value });
                             }
                             Some(PrimitiveRole::TextConcat) => {
                                 let [left, right] = arguments.as_slice() else {
@@ -29149,29 +30014,47 @@ impl Lowerer<'_> {
                                 let [value] = arguments.as_slice() else {
                                     self.error(
                                         "G6005",
-                                        "generic wrapping i64-to-usize conversion requires one operand",
+                                        "generic wrapping integer-to-usize conversion requires one operand",
                                     );
                                     return None;
                                 };
-                                if generic_arguments.as_slice()
-                                    != [GenericArgument::Type(Type::Scalar(
-                                        crate::types::ScalarType::I64,
-                                    ))]
-                                    || self.locals[value.0 as usize].ty
-                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                let scalar = match generic_arguments.as_slice() {
+                                    [GenericArgument::Type(Type::Scalar(scalar))]
+                                        if integer_scalar_type(&Type::Scalar(*scalar)).is_some() =>
+                                    {
+                                        *scalar
+                                    }
+                                    _ => {
+                                        self.error(
+                                            "G6005",
+                                            "generic wrapping integer-to-usize conversion requires one frozen integer scalar argument",
+                                        );
+                                        return None;
+                                    }
+                                };
+                                if self.locals[value.0 as usize].ty != Type::Scalar(scalar)
                                     || self.body.expression(id).ty
                                         != Type::Scalar(crate::types::ScalarType::Usize)
                                 {
                                     self.error(
                                         "G6005",
-                                        "generic wrapping i64-to-usize conversion is only VM-specialized for frozen i64",
+                                        "generic wrapping integer-to-usize conversion does not match its frozen scalar contract",
                                     );
                                     return None;
                                 }
-                                self.instructions.push(MirInstruction::I64ToUsizeWrapping {
-                                    dst,
-                                    value: *value,
-                                });
+                                if scalar == crate::types::ScalarType::I64 {
+                                    self.instructions.push(MirInstruction::I64ToUsizeWrapping {
+                                        dst,
+                                        value: *value,
+                                    });
+                                } else {
+                                    self.instructions.push(MirInstruction::IntIntrinsic {
+                                        dst,
+                                        primitive: PrimitiveRole::IntConvertWrappingToUsize,
+                                        scalar,
+                                        arguments: vec![*value],
+                                    });
+                                }
                             }
                             Some(PrimitiveRole::IntConvertWrappingToU8) => {
                                 let [value] = arguments.as_slice() else {
@@ -29382,28 +30265,46 @@ impl Lowerer<'_> {
                                     value: *value,
                                 });
                             }
-                            Some(PrimitiveRole::IntBitNot) => {
+                            Some(role @ PrimitiveRole::IntBitNot) => {
                                 let [value] = arguments.as_slice() else {
                                     self.error("G6005", "generic int bit-not requires one operand");
                                     return None;
                                 };
-                                if generic_arguments.as_slice()
-                                    != [GenericArgument::Type(Type::Scalar(
-                                        crate::types::ScalarType::I64,
-                                    ))]
-                                    || self.locals[value.0 as usize].ty
-                                        != Type::Scalar(crate::types::ScalarType::I64)
-                                    || self.body.expression(id).ty
-                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                let scalar = match generic_arguments.as_slice() {
+                                    [GenericArgument::Type(Type::Scalar(scalar))]
+                                        if integer_scalar_type(&Type::Scalar(*scalar)).is_some() =>
+                                    {
+                                        *scalar
+                                    }
+                                    _ => {
+                                        self.error(
+                                            "G6005",
+                                            "generic int bit-not requires one frozen integer scalar argument",
+                                        );
+                                        return None;
+                                    }
+                                };
+                                let expected = Type::Scalar(scalar);
+                                if self.locals[value.0 as usize].ty != expected
+                                    || self.body.expression(id).ty != expected
                                 {
                                     self.error(
                                         "G6005",
-                                        "generic int bit-not is only VM-specialized for frozen i64",
+                                        "generic int bit-not operand does not match its frozen scalar contract",
                                     );
                                     return None;
                                 }
-                                self.instructions
-                                    .push(MirInstruction::BitNotI64 { dst, value: *value });
+                                if scalar == crate::types::ScalarType::I64 {
+                                    self.instructions
+                                        .push(MirInstruction::BitNotI64 { dst, value: *value });
+                                } else {
+                                    self.instructions.push(MirInstruction::IntIntrinsic {
+                                        dst,
+                                        primitive: role,
+                                        scalar,
+                                        arguments: vec![*value],
+                                    });
+                                }
                             }
                             Some(PrimitiveRole::IntWrappingNeg) => {
                                 let [value] = arguments.as_slice() else {
@@ -29440,7 +30341,7 @@ impl Lowerer<'_> {
                                     right: *value,
                                 });
                             }
-                            Some(PrimitiveRole::IntShr) => {
+                            Some(role @ PrimitiveRole::IntShr) => {
                                 let [left, right] = arguments.as_slice() else {
                                     self.error(
                                         "G6005",
@@ -29448,30 +30349,48 @@ impl Lowerer<'_> {
                                     );
                                     return None;
                                 };
-                                if generic_arguments.as_slice()
-                                    != [GenericArgument::Type(Type::Scalar(
-                                        crate::types::ScalarType::I64,
-                                    ))]
-                                    || self.locals[left.0 as usize].ty
-                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                let scalar = match generic_arguments.as_slice() {
+                                    [GenericArgument::Type(Type::Scalar(scalar))]
+                                        if integer_scalar_type(&Type::Scalar(*scalar)).is_some() =>
+                                    {
+                                        *scalar
+                                    }
+                                    _ => {
+                                        self.error(
+                                            "G6005",
+                                            "generic int shift requires one frozen integer scalar argument",
+                                        );
+                                        return None;
+                                    }
+                                };
+                                let expected = Type::Scalar(scalar);
+                                if self.locals[left.0 as usize].ty != expected
                                     || self.locals[right.0 as usize].ty
                                         != Type::Scalar(crate::types::ScalarType::U32)
-                                    || self.body.expression(id).ty
-                                        != Type::Scalar(crate::types::ScalarType::I64)
+                                    || self.body.expression(id).ty != expected
                                 {
                                     self.error(
                                         "G6005",
-                                        "generic int shift primitive is only VM-specialized for frozen i64 and u32 count",
+                                        "generic int shift operands do not match its frozen scalar contract",
                                     );
                                     return None;
                                 }
-                                self.instructions.push(MirInstruction::IntShrI64 {
-                                    dst,
-                                    left: *left,
-                                    right: *right,
-                                });
+                                if scalar == crate::types::ScalarType::I64 {
+                                    self.instructions.push(MirInstruction::IntShrI64 {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    });
+                                } else {
+                                    self.instructions.push(MirInstruction::IntIntrinsic {
+                                        dst,
+                                        primitive: role,
+                                        scalar,
+                                        arguments: vec![*left, *right],
+                                    });
+                                }
                             }
-                            Some(PrimitiveRole::IntShl) => {
+                            Some(role @ PrimitiveRole::IntShl) => {
                                 let [value, count] = arguments.as_slice() else {
                                     self.error(
                                         "G6005",
@@ -29479,98 +30398,46 @@ impl Lowerer<'_> {
                                     );
                                     return None;
                                 };
-                                if generic_arguments.as_slice()
-                                    != [GenericArgument::Type(Type::Scalar(
-                                        crate::types::ScalarType::I64,
-                                    ))]
-                                    || self.locals[value.0 as usize].ty
-                                        != Type::Scalar(crate::types::ScalarType::I64)
-                                    || self.locals[count.0 as usize].ty
-                                        != Type::Scalar(crate::types::ScalarType::U32)
-                                    || self.body.expression(id).ty
-                                        != Type::Scalar(crate::types::ScalarType::I64)
-                                {
-                                    self.error(
-                                        "G6005",
-                                        "generic int shift-left is only VM-specialized for frozen i64 with a u32 count",
-                                    );
-                                    return None;
-                                }
-                                self.instructions.push(MirInstruction::ShlI64 {
-                                    dst,
-                                    value: *value,
-                                    count: *count,
-                                });
-                            }
-                            Some(PrimitiveRole::IntBitAnd) => {
-                                let [left, right] = arguments.as_slice() else {
-                                    self.error(
-                                        "G6005",
-                                        "generic int bitwise-and requires two operands",
-                                    );
-                                    return None;
-                                };
-                                if matches!(
-                                    generic_arguments.as_slice(),
-                                    [GenericArgument::Type(Type::Generic(_))]
-                                ) {
-                                    self.instructions.push(MirInstruction::BitAndGeneric {
-                                        dst,
-                                        left: *left,
-                                        right: *right,
-                                    });
-                                    // The generic source template is retained only so a
-                                    // concrete caller can materialize it later.  Preserve
-                                    // normal expression memoization before leaving this
-                                    // direct-lowering fast path.
-                                    self.values.insert(id, dst);
-                                    return Some(dst);
-                                }
                                 let scalar = match generic_arguments.as_slice() {
-                                    [GenericArgument::Type(Type::Scalar(scalar))] => *scalar,
+                                    [GenericArgument::Type(Type::Scalar(scalar))]
+                                        if integer_scalar_type(&Type::Scalar(*scalar)).is_some() =>
+                                    {
+                                        *scalar
+                                    }
                                     _ => {
                                         self.error(
                                             "G6005",
-                                            "generic int bitwise-and requires one frozen scalar argument",
+                                            "generic int shift requires one frozen integer scalar argument",
                                         );
                                         return None;
                                     }
                                 };
                                 let expected = Type::Scalar(scalar);
-                                if self.locals[left.0 as usize].ty != expected
-                                    || self.locals[right.0 as usize].ty != expected
+                                if self.locals[value.0 as usize].ty != expected
+                                    || self.locals[count.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::U32)
                                     || self.body.expression(id).ty != expected
                                 {
                                     self.error(
                                         "G6005",
-                                        "generic int bitwise-and operands do not match its frozen scalar contract",
+                                        "generic int shift operands do not match its frozen scalar contract",
                                     );
                                     return None;
                                 }
-                                self.instructions.push(match scalar {
-                                    crate::types::ScalarType::I64 => MirInstruction::BitAndI64 {
+                                if scalar == crate::types::ScalarType::I64 {
+                                    self.instructions.push(MirInstruction::ShlI64 {
                                         dst,
-                                        left: *left,
-                                        right: *right,
-                                    },
-                                    crate::types::ScalarType::U32 => MirInstruction::BitAndU32 {
+                                        value: *value,
+                                        count: *count,
+                                    });
+                                } else {
+                                    self.instructions.push(MirInstruction::IntIntrinsic {
                                         dst,
-                                        left: *left,
-                                        right: *right,
-                                    },
-                                    crate::types::ScalarType::U64 => MirInstruction::BitAndU64 {
-                                        dst,
-                                        left: *left,
-                                        right: *right,
-                                    },
-                                    _ => {
-                                        self.error(
-                                            "G6005",
-                                            "generic int bitwise-and is not yet VM-specialized for this scalar",
-                                        );
-                                        return None;
-                                    }
-                                });
+                                        primitive: role,
+                                        scalar,
+                                        arguments: vec![*value, *count],
+                                    });
+                                }
                             }
                             Some(
                                 role @ (PrimitiveRole::IntCheckedAdd
@@ -29581,6 +30448,7 @@ impl Lowerer<'_> {
                                 | PrimitiveRole::IntEqual
                                 | PrimitiveRole::IntLess
                                 | PrimitiveRole::IntGreater
+                                | PrimitiveRole::IntBitAnd
                                 | PrimitiveRole::IntBitXor
                                 | PrimitiveRole::IntBitOr),
                             ) => {
@@ -29591,32 +30459,49 @@ impl Lowerer<'_> {
                                     );
                                     return None;
                                 };
-                                if generic_arguments.as_slice()
-                                    != [GenericArgument::Type(Type::Scalar(
-                                        crate::types::ScalarType::I64,
-                                    ))]
-                                    || self.locals[left.0 as usize].ty
-                                        != Type::Scalar(crate::types::ScalarType::I64)
-                                    || self.locals[right.0 as usize].ty
-                                        != Type::Scalar(crate::types::ScalarType::I64)
-                                    || (matches!(
+                                let scalar = match generic_arguments.as_slice() {
+                                    [GenericArgument::Type(Type::Scalar(scalar))]
+                                        if integer_scalar_type(&Type::Scalar(*scalar)).is_some() =>
+                                    {
+                                        *scalar
+                                    }
+                                    _ => {
+                                        self.error(
+                                            "G6005",
+                                            "generic int primitive requires one frozen integer scalar argument",
+                                        );
+                                        return None;
+                                    }
+                                };
+                                let expected = Type::Scalar(scalar);
+                                let result = if matches!(
                                         role,
                                         PrimitiveRole::IntEqual
                                             | PrimitiveRole::IntLess
                                             | PrimitiveRole::IntGreater
-                                    ) && self.body.expression(id).ty
-                                        != Type::Scalar(crate::types::ScalarType::U32))
-                                    || (!matches!(
-                                        role,
-                                        PrimitiveRole::IntEqual
-                                            | PrimitiveRole::IntLess
-                                            | PrimitiveRole::IntGreater
-                                    ) && self.body.expression(id).ty
-                                        != Type::Scalar(crate::types::ScalarType::I64))
+                                    ) {
+                                    Type::Scalar(crate::types::ScalarType::U32)
+                                } else {
+                                    expected.clone()
+                                };
+                                if self.locals[left.0 as usize].ty != expected
+                                    || self.locals[right.0 as usize].ty != expected
+                                    || self.body.expression(id).ty != result
                                 {
-                                    self.error("G6005", "generic int primitive is only VM-specialized for frozen i64");
+                                    self.error(
+                                        "G6005",
+                                        "generic int primitive operands do not match its frozen scalar contract",
+                                    );
                                     return None;
                                 }
+                                if scalar != crate::types::ScalarType::I64 {
+                                    self.instructions.push(MirInstruction::IntIntrinsic {
+                                        dst,
+                                        primitive: role,
+                                        scalar,
+                                        arguments: vec![*left, *right],
+                                    });
+                                } else {
                                 self.instructions.push(match role {
                                     PrimitiveRole::IntCheckedAdd => MirInstruction::AddI64 {
                                         dst,
@@ -29681,6 +30566,7 @@ impl Lowerer<'_> {
                                     },
                                     _ => unreachable!("int primitive role was narrowed above"),
                                 });
+                                }
                             }
                             Some(PrimitiveRole::IntConvertCheckedToI64) => {
                                 let [value] = arguments.as_slice() else {
@@ -29990,6 +30876,148 @@ impl Lowerer<'_> {
                                 self.instructions
                                     .push(MirInstruction::I64ToI128Checked { dst, value: *value });
                             }
+                            Some(PrimitiveRole::ArrayUtf8ValidUpTo) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error("G6005", "ArrayUtf8ValidUpTo requires one borrowed Array<u8> operand");
+                                    return None;
+                                };
+                                let expected = Type::Reference {
+                                    mutability: crate::types::Mutability::Shared,
+                                    lifetime: crate::types::Lifetime::Elided,
+                                    referent: Box::new(Type::Array(Box::new(Type::Scalar(crate::types::ScalarType::U8)))),
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty != expected
+                                    || self.body.expression(id).ty != Type::Scalar(crate::types::ScalarType::Usize)
+                                {
+                                    self.error("G6005", "ArrayUtf8ValidUpTo primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::ArrayUtf8ValidUpTo {
+                                    dst,
+                                    value: *value,
+                                });
+                            }
+                            Some(PrimitiveRole::ArrayPushUtf8Char) => {
+                                let [value, character] = arguments.as_slice() else {
+                                    self.error("G6005", "ArrayPushUtf8Char requires a unique Array<u8> and char");
+                                    return None;
+                                };
+                                let expected = Type::Reference {
+                                    mutability: crate::types::Mutability::Unique,
+                                    lifetime: crate::types::Lifetime::Elided,
+                                    referent: Box::new(Type::Array(Box::new(Type::Scalar(crate::types::ScalarType::U8)))),
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty != expected
+                                    || self.locals[character.0 as usize].ty != Type::Scalar(crate::types::ScalarType::Char)
+                                    || self.body.expression(id).ty != Type::Unit
+                                {
+                                    self.error("G6005", "ArrayPushUtf8Char primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::ArrayPushUtf8Char {
+                                    value: *value,
+                                    character: *character,
+                                });
+                                self.instructions.push(MirInstruction::ConstUnit { dst });
+                            }
+                            Some(PrimitiveRole::ArrayInsertUtf8FromSlice) => {
+                                let [value, index, source, start, length] = arguments.as_slice() else {
+                                    self.error("G6005", "ArrayInsertUtf8FromSlice requires unique destination, index, shared source, start, and length operands");
+                                    return None;
+                                };
+                                let u8_array = Type::Array(Box::new(Type::Scalar(crate::types::ScalarType::U8)));
+                                let unique_u8_array = Type::Reference {
+                                    mutability: crate::types::Mutability::Unique,
+                                    lifetime: crate::types::Lifetime::Elided,
+                                    referent: Box::new(u8_array.clone()),
+                                };
+                                let shared_u8_array = Type::Reference {
+                                    mutability: crate::types::Mutability::Shared,
+                                    lifetime: crate::types::Lifetime::Elided,
+                                    referent: Box::new(u8_array),
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty != unique_u8_array
+                                    || !(self.locals[source.0 as usize].ty == shared_u8_array
+                                        || matches!(self.locals[source.0 as usize].ty, Type::Reference { mutability: crate::types::Mutability::Unique, .. }))
+                                    || self.locals[index.0 as usize].ty != Type::Scalar(crate::types::ScalarType::Usize)
+                                    || self.locals[start.0 as usize].ty != Type::Scalar(crate::types::ScalarType::Usize)
+                                    || self.locals[length.0 as usize].ty != Type::Scalar(crate::types::ScalarType::Usize)
+                                    || self.body.expression(id).ty != Type::Scalar(crate::types::ScalarType::Usize)
+                                {
+                                    self.error("G6005", "ArrayInsertUtf8FromSlice primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::ArrayInsertUtf8FromSlice {
+                                    dst,
+                                    value: *value,
+                                    index: *index,
+                                    source: *source,
+                                    start: *start,
+                                    length: *length,
+                                });
+                            }
+                            Some(PrimitiveRole::ArrayPopUtf8Char) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error("G6005", "ArrayPopUtf8Char requires a unique Array<u8> operand");
+                                    return None;
+                                };
+                                let expected = Type::Reference {
+                                    mutability: crate::types::Mutability::Unique,
+                                    lifetime: crate::types::Lifetime::Elided,
+                                    referent: Box::new(Type::Array(Box::new(Type::Scalar(crate::types::ScalarType::U8)))),
+                                };
+                                let result = Type::Tuple(vec![
+                                    Type::Scalar(crate::types::ScalarType::Char),
+                                    Type::Scalar(crate::types::ScalarType::Usize),
+                                ]);
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty != expected
+                                    || self.body.expression(id).ty != result
+                                {
+                                    self.error("G6005", "ArrayPopUtf8Char primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::ArrayPopUtf8Char {
+                                    dst,
+                                    value: *value,
+                                });
+                            }
+                            Some(PrimitiveRole::ArrayUtf8CharAt) => {
+                                let [value, start, length, index] = arguments.as_slice() else {
+                                    self.error("G6005", "ArrayUtf8CharAt requires a shared Array<u8>, start, length, and index");
+                                    return None;
+                                };
+                                let shared = Type::Reference {
+                                    mutability: crate::types::Mutability::Shared,
+                                    lifetime: crate::types::Lifetime::Elided,
+                                    referent: Box::new(Type::Array(Box::new(Type::Scalar(crate::types::ScalarType::U8)))),
+                                };
+                                let result = Type::Tuple(vec![
+                                    Type::Scalar(crate::types::ScalarType::Char),
+                                    Type::Scalar(crate::types::ScalarType::Usize),
+                                ]);
+                                if !generic_arguments.is_empty()
+                                    || !(self.locals[value.0 as usize].ty == shared
+                                        || matches!(self.locals[value.0 as usize].ty, Type::Reference { mutability: crate::types::Mutability::Unique, .. }))
+                                    || self.locals[start.0 as usize].ty != Type::Scalar(crate::types::ScalarType::Usize)
+                                    || self.locals[length.0 as usize].ty != Type::Scalar(crate::types::ScalarType::Usize)
+                                    || self.locals[index.0 as usize].ty != Type::Scalar(crate::types::ScalarType::Usize)
+                                    || self.body.expression(id).ty != result
+                                {
+                                    self.error("G6005", "ArrayUtf8CharAt primitive ABI does not match manifest contract");
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::ArrayUtf8CharAt {
+                                    dst,
+                                    value: *value,
+                                    start: *start,
+                                    length: *length,
+                                    index: *index,
+                                });
+                            }
                             Some(
                                 role @ (PrimitiveRole::ArrayNew
                                 | PrimitiveRole::ArrayLen
@@ -30000,24 +31028,49 @@ impl Lowerer<'_> {
                                 | PrimitiveRole::ArraySetMove
                                 | PrimitiveRole::ArrayEmpty
                                 | PrimitiveRole::ArrayPushMove
+                                | PrimitiveRole::ArrayExtendFromSlice
+                                | PrimitiveRole::ArrayInsertMove
+                                | PrimitiveRole::ArrayRemoveMove
+                                | PrimitiveRole::ArrayAppendMove
+                                | PrimitiveRole::ArrayTruncateDiscard
+                                | PrimitiveRole::ArrayReverseMove
+                                | PrimitiveRole::ArraySplitOffMove
+                                | PrimitiveRole::ArraySplitBorrowUnique
+                                | PrimitiveRole::ArrayInsertFromSlice
                                 | PrimitiveRole::ArrayPopMove
                                 | PrimitiveRole::ArrayCapacity
                                 | PrimitiveRole::ArrayReserve
                                 | PrimitiveRole::ArrayFinishDrained),
                             ) => {
-                                let [GenericArgument::Type(element_type)] =
-                                    generic_arguments.as_slice()
-                                else {
+                                let element_types = generic_arguments
+                                    .iter()
+                                    .filter_map(|argument| match argument {
+                                        GenericArgument::Type(element_type) => {
+                                            Some(element_type.clone())
+                                        }
+                                        _ => None,
+                                    })
+                                    .collect::<Vec<_>>();
+                                let [element_type] = element_types.as_slice() else {
                                     self.error(
                                         "G6005",
-                                        "Array primitive requires one frozen type argument",
+                                        "Array primitive requires exactly one frozen element type argument",
                                     );
                                     return None;
                                 };
                                 let array = Type::Array(Box::new(element_type.clone()));
+                                // A shared array read may be satisfied by a unique borrow.
+                                // The latter is reborrowed as shared for the duration of the
+                                // primitive operation, just like an ordinary `&mut T` can be
+                                // read through `&T` source APIs.
                                 let shared_array = |ty: &Type| {
                                     matches!(ty, Type::Reference {
                                     mutability: crate::types::Mutability::Shared,
+                                    referent,
+                                    ..
+                                } if referent.as_ref() == &array)
+                                    || matches!(ty, Type::Reference {
+                                    mutability: crate::types::Mutability::Unique,
                                     referent,
                                     ..
                                 } if referent.as_ref() == &array)
@@ -30081,6 +31134,28 @@ impl Lowerer<'_> {
                                                 }
                                             },
                                         );
+                                    }
+                                    PrimitiveRole::ArrayUtf8ValidUpTo => {
+                                        let [value] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayUtf8ValidUpTo requires one borrowed Array<u8> operand");
+                                            return None;
+                                        };
+                                        let expected = Type::Reference {
+                                            mutability: crate::types::Mutability::Shared,
+                                            lifetime: crate::types::Lifetime::Elided,
+                                            referent: Box::new(Type::Array(Box::new(Type::Scalar(crate::types::ScalarType::U8)))),
+                                        };
+                                        if !generic_arguments.is_empty()
+                                            || self.locals[value.0 as usize].ty != expected
+                                            || *result != usize
+                                        {
+                                            self.error("G6005", "ArrayUtf8ValidUpTo primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayUtf8ValidUpTo {
+                                            dst,
+                                            value: *value,
+                                        });
                                     }
                                     PrimitiveRole::ArrayGetCopy => {
                                         let [value, index] = arguments.as_slice() else {
@@ -30190,6 +31265,207 @@ impl Lowerer<'_> {
                                         self.instructions.push(MirInstruction::ArrayPushMove {
                                             value: *value,
                                             item: *item,
+                                            element_type: element_type.clone(),
+                                        });
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    PrimitiveRole::ArrayExtendFromSlice => {
+                                        let [value, source, start, length] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayExtendFromSlice requires unique destination, shared source, start, and length operands");
+                                            return None;
+                                        };
+                                        let Type::Reference { referent, .. } = &self.locals[source.0 as usize].ty else {
+                                            self.error("G6005", "ArrayExtendFromSlice source must be an Array reference");
+                                            return None;
+                                        };
+                                        let Type::Array(concrete_element_type) = referent.as_ref() else {
+                                            self.error("G6005", "ArrayExtendFromSlice source must be an Array reference");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || !shared_array(&self.locals[source.0 as usize].ty)
+                                            || self.locals[start.0 as usize].ty != usize
+                                            || self.locals[length.0 as usize].ty != usize
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArrayExtendFromSlice primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayExtendFromSlice {
+                                            value: *value,
+                                            source: *source,
+                                            start: *start,
+                                            length: *length,
+                                            element_type: concrete_element_type.as_ref().clone(),
+                                        });
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    PrimitiveRole::ArrayInsertMove => {
+                                        let [value, index, item] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayInsertMove requires uniquely borrowed Array, index, and item operands");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[index.0 as usize].ty != usize
+                                            || self.locals[item.0 as usize].ty != *element_type
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArrayInsertMove primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayInsertMove {
+                                            value: *value,
+                                            index: *index,
+                                            item: *item,
+                                            element_type: element_type.clone(),
+                                        });
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    PrimitiveRole::ArrayRemoveMove => {
+                                        let [value, index] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayRemoveMove requires uniquely borrowed Array and index operands");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[index.0 as usize].ty != usize
+                                            || *result != *element_type
+                                        {
+                                            self.error("G6005", "ArrayRemoveMove primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayRemoveMove {
+                                            dst,
+                                            value: *value,
+                                            index: *index,
+                                            element_type: element_type.clone(),
+                                        });
+                                    }
+                                    PrimitiveRole::ArrayAppendMove => {
+                                        let [value, source] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayAppendMove requires a uniquely borrowed destination and owned source Array");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[source.0 as usize].ty != array
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArrayAppendMove primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayAppendMove {
+                                            value: *value,
+                                            source: *source,
+                                            element_type: element_type.clone(),
+                                        });
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    PrimitiveRole::ArrayTruncateDiscard => {
+                                        let [value, length] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayTruncateDiscard requires a uniquely borrowed Array and length");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[length.0 as usize].ty != usize
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArrayTruncateDiscard primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayTruncateDiscard {
+                                            value: *value,
+                                            length: *length,
+                                            element_type: element_type.clone(),
+                                        });
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    PrimitiveRole::ArrayReverseMove => {
+                                        let [value] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayReverseMove requires a uniquely borrowed Array");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArrayReverseMove primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayReverseMove {
+                                            value: *value,
+                                            element_type: element_type.clone(),
+                                        });
+                                        self.instructions.push(MirInstruction::ConstUnit { dst });
+                                    }
+                                    PrimitiveRole::ArraySplitOffMove => {
+                                        let [value, index] = arguments.as_slice() else {
+                                            self.error("G6005", "ArraySplitOffMove requires a uniquely borrowed Array and index");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || self.locals[index.0 as usize].ty != usize
+                                            || *result != array
+                                        {
+                                            self.error("G6005", "ArraySplitOffMove primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArraySplitOffMove {
+                                            dst,
+                                            value: *value,
+                                            index: *index,
+                                            element_type: element_type.clone(),
+                                        });
+                                    }
+                                    PrimitiveRole::ArraySplitBorrowUnique => {
+                                        let [value, start, length, index] = arguments.as_slice() else {
+                                            self.error("G6005", "ArraySplitBorrowUnique requires a unique Array window and start, length, and split index operands");
+                                            return None;
+                                        };
+                                        let is_unique_array = unique_array(&self.locals[value.0 as usize].ty);
+                                        let is_usize = |local: MirLocal| {
+                                            self.locals[local.0 as usize].ty == usize
+                                        };
+                                        let result_is_windows = matches!(result, Type::Tuple(fields) if matches!(fields.as_slice(), [
+                                            Type::Reference { mutability: crate::types::Mutability::Unique, referent: left, .. },
+                                            Type::Reference { mutability: crate::types::Mutability::Unique, referent: right, .. },
+                                        ] if left.as_ref() == &array && right.as_ref() == &array));
+                                        if !is_unique_array
+                                            || !is_usize(*start)
+                                            || !is_usize(*length)
+                                            || !is_usize(*index)
+                                            || !result_is_windows
+                                        {
+                                            self.error("G6005", "ArraySplitBorrowUnique primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArraySplitBorrowUnique {
+                                            dst,
+                                            value: *value,
+                                            start: *start,
+                                            length: *length,
+                                            index: *index,
+                                            element_type: element_type.clone(),
+                                        });
+                                    }
+                                    PrimitiveRole::ArrayInsertFromSlice => {
+                                        let [value, index, source, start, length] = arguments.as_slice() else {
+                                            self.error("G6005", "ArrayInsertFromSlice requires unique destination, index, shared source, start, and length operands");
+                                            return None;
+                                        };
+                                        if !unique_array(&self.locals[value.0 as usize].ty)
+                                            || !shared_array(&self.locals[source.0 as usize].ty)
+                                            || self.locals[index.0 as usize].ty != usize
+                                            || self.locals[start.0 as usize].ty != usize
+                                            || self.locals[length.0 as usize].ty != usize
+                                            || *result != unit
+                                        {
+                                            self.error("G6005", "ArrayInsertFromSlice primitive ABI does not match manifest contract");
+                                            return None;
+                                        }
+                                        self.instructions.push(MirInstruction::ArrayInsertFromSlice {
+                                            value: *value,
+                                            index: *index,
+                                            source: *source,
+                                            start: *start,
+                                            length: *length,
                                             element_type: element_type.clone(),
                                         });
                                         self.instructions.push(MirInstruction::ConstUnit { dst });
@@ -31025,7 +32301,85 @@ impl Lowerer<'_> {
         {
             return principal == crate::quantity::Quantity::UNRESTRICTED;
         }
+        if !self.generic_components_have_unrestricted_use(ty) {
+            return false;
+        }
         mir_type_is_duplicable(ty, &self.nominal_copy_descriptors)
+    }
+
+    fn generic_components_have_unrestricted_use(&self, ty: &Type) -> bool {
+        fn argument_is_unrestricted(lowerer: &Lowerer<'_>, argument: &GenericArgument) -> bool {
+            match argument {
+                GenericArgument::Type(ty) => lowerer.generic_components_have_unrestricted_use(ty),
+                _ => true,
+            }
+        }
+        match ty {
+            Type::Generic(index) => self.generic_has_unrestricted_use(*index),
+            Type::Nominal { arguments, .. } => arguments
+                .iter()
+                .all(|argument| argument_is_unrestricted(self, argument)),
+            Type::Projection {
+                subject,
+                trait_arguments,
+                item_arguments,
+                ..
+            } => {
+                self.generic_components_have_unrestricted_use(subject)
+                    && trait_arguments
+                        .iter()
+                        .all(|argument| argument_is_unrestricted(self, argument))
+                    && item_arguments
+                        .iter()
+                        .all(|argument| argument_is_unrestricted(self, argument))
+            }
+            Type::Tuple(elements) => elements
+                .iter()
+                .all(|element| self.generic_components_have_unrestricted_use(element)),
+            Type::Array(element) | Type::StaticData { element, .. } => {
+                self.generic_components_have_unrestricted_use(element)
+            }
+            Type::Reference { referent, .. } => self.generic_components_have_unrestricted_use(referent),
+            Type::Callable {
+                parameters, result, ..
+            } => {
+                parameters
+                    .iter()
+                    .all(|parameter| self.generic_components_have_unrestricted_use(parameter))
+                    && self.generic_components_have_unrestricted_use(result)
+            }
+            Type::Infer(_) | Type::Error => false,
+            _ => true,
+        }
+    }
+
+    /// A generic has no structural copy property of its own.  It becomes
+    /// duplicable only when the source callable explicitly proves
+    /// `T: Use<[0,*]>`.  Keep that proof at the lowering boundary so the VM
+    /// never receives a `Copy` for an unconstrained (and potentially affine)
+    /// type parameter, while recursive source bodies may still reuse a
+    /// deliberately unrestricted callback or value.
+    fn generic_has_unrestricted_use(&self, index: u32) -> bool {
+        let Some(signatures) = self.signatures else {
+            return false;
+        };
+        let Some(header) = signatures.definitions.get(&self.owner) else {
+            return false;
+        };
+        let signature = match header {
+            ElaboratedHeader::Callable(signature)
+            | ElaboratedHeader::ValueAlias { signature, .. } => signature,
+            _ => return false,
+        };
+        signature.where_bounds.iter().any(|(subject, relation)| {
+            *subject == Type::Generic(index)
+                && relation.definition == crate::resolution::language_use_trait_definition()
+                && matches!(
+                    relation.arguments.as_slice(),
+                    [GenericArgument::ConstQuantity(quantity)]
+                        if *quantity == crate::quantity::Quantity::UNRESTRICTED
+                )
+        })
     }
     /// Return the storage identity carried directly by a block result. A
     /// whole local moves across the block boundary; its source scope must not
@@ -31441,6 +32795,44 @@ impl Lowerer<'_> {
                 "lifted callable source-storage analysis did not converge",
             );
             return None;
+        }
+        // A closure body is an independently executable function. It must
+        // therefore receive the same normal-completion lowering as a package
+        // root: source `Bool` conversion, `match` helpers, and other
+        // completion expressions are control-flow graphs, not ordinary MIR
+        // values. Previously lifted bodies bypassed that dispatcher and
+        // failed when a typed predicate returned the source Bool carrier.
+        let has_tail_completion = match &child.body.expression(body).kind {
+            CoreKind::Completion { .. } => true,
+            CoreKind::Block(values) => values.last().is_some_and(|tail| {
+                matches!(child.body.expression(*tail).kind, CoreKind::Completion { .. })
+            }),
+            _ => false,
+        };
+        if has_tail_completion {
+            let Some(mut function) =
+                child.lower_root_completion_handler(body, lifted_parameters.clone())
+            else {
+                self.diagnostics.extend(child.diagnostics);
+                self.error("G6002", "lifted completion body did not lower to a decision CFG");
+                return None;
+            };
+            if !child.diagnostics.is_empty() {
+                self.diagnostics.extend(child.diagnostics);
+                return None;
+            }
+            function.captures = captures.len() as u32;
+            let function = MirLowering::freeze(function, &child_flow);
+            if let Err(message) = function.validate() {
+                self.error("G6002", &message);
+                return None;
+            }
+            if self.lifted.insert(definition, function).is_some() {
+                self.error("G6008", "lifted callable identity collision");
+                return None;
+            }
+            self.lifted.extend(child.lifted);
+            return Some(definition);
         }
         let Some(root) = child.value(body) else {
             self.diagnostics.extend(child.diagnostics);
@@ -31946,6 +33338,9 @@ fn literal_type(text: &str) -> Option<Type> {
         TokenKind::String if parse_text_literal(text).is_ok() => {
             Some(Type::Scalar(crate::types::ScalarType::Text))
         }
+        TokenKind::ByteString if parse_byte_literal(text).is_ok() => {
+            Some(Type::Scalar(crate::types::ScalarType::Bytes))
+        }
         _ => None,
     }
 }
@@ -32065,6 +33460,28 @@ fn parse_i32_literal(text: &str) -> Result<i32, ()> {
 fn parse_i128_literal(text: &str) -> Result<i128, ()> {
     let (radix, digits) = normalized_integer_literal(text);
     i128::from_str_radix(&digits, radix).map_err(|_| ())
+}
+
+fn integer_scalar_type(ty: &Type) -> Option<crate::types::ScalarType> {
+    let Type::Scalar(scalar) = ty else {
+        return None;
+    };
+    matches!(
+        scalar,
+        crate::types::ScalarType::U8
+            | crate::types::ScalarType::U16
+            | crate::types::ScalarType::U32
+            | crate::types::ScalarType::U64
+            | crate::types::ScalarType::U128
+            | crate::types::ScalarType::Usize
+            | crate::types::ScalarType::I8
+            | crate::types::ScalarType::I16
+            | crate::types::ScalarType::I32
+            | crate::types::ScalarType::I64
+            | crate::types::ScalarType::I128
+            | crate::types::ScalarType::Isize
+    )
+    .then_some(*scalar)
 }
 
 fn is_generic_integer_runtime_role(role: PrimitiveRole) -> bool {
@@ -32230,6 +33647,60 @@ pub(crate) fn parse_text_literal(text: &str) -> Result<String, ()> {
     Ok(result)
 }
 
+/// Decode a `b"..."` literal exactly as accepted by the lexer. Direct source
+/// characters and Unicode escapes contribute their UTF-8 encoding; `\\xNN`
+/// contributes one raw octet and may therefore produce non-UTF-8 data.
+pub(crate) fn parse_byte_literal(text: &str) -> Result<Vec<u8>, ()> {
+    let Some(body) = text
+        .strip_prefix("b\"")
+        .and_then(|value| value.strip_suffix('"'))
+    else {
+        return Err(());
+    };
+    let mut values = body.chars();
+    let mut result = Vec::new();
+    while let Some(value) = values.next() {
+        if value == '\n' {
+            return Err(());
+        }
+        if value != '\\' {
+            let mut encoded = [0; 4];
+            result.extend_from_slice(value.encode_utf8(&mut encoded).as_bytes());
+            continue;
+        }
+        match values.next() {
+            Some('x') => {
+                let first = ascii_hex(values.next()).ok_or(())?;
+                let second = ascii_hex(values.next()).ok_or(())?;
+                result.push(first * 16 + second);
+            }
+            Some(selector @ ('n' | 'r' | 't' | '0' | '\\' | '\'' | '"')) => {
+                let escaped = selector.to_string();
+                let mut escaped_chars = escaped.chars();
+                let decoded = parse_scalar_escape(&mut escaped_chars)?;
+                let mut encoded = [0; 4];
+                result.extend_from_slice(decoded.encode_utf8(&mut encoded).as_bytes());
+            }
+            Some('u') => {
+                let mut escaped = String::from("u");
+                loop {
+                    let next = values.next().ok_or(())?;
+                    escaped.push(next);
+                    if next == '}' {
+                        break;
+                    }
+                }
+                let mut escaped_chars = escaped.chars();
+                let decoded = parse_scalar_escape(&mut escaped_chars)?;
+                let mut encoded = [0; 4];
+                result.extend_from_slice(decoded.encode_utf8(&mut encoded).as_bytes());
+            }
+            _ => return Err(()),
+        }
+    }
+    Ok(result)
+}
+
 /// Decode precisely the scalar escapes admitted by the lossless lexer.  This
 /// is intentionally shared by literal lowering and VM pattern matching so a
 /// recovered or hostile typed product cannot give the same spelling a second,
@@ -32285,6 +33756,15 @@ fn ascii_hex(value: Option<char>) -> Option<u8> {
 #[cfg(test)]
 mod mir_place_arena_tests {
     use super::*;
+
+    #[test]
+    fn byte_literals_preserve_raw_octets_and_encode_unicode_as_utf8() {
+        assert_eq!(
+            parse_byte_literal(r#"b"\x00\xffA\u{e9}""#),
+            Ok(vec![0, 0xff, b'A', 0xc3, 0xa9])
+        );
+        assert!(parse_byte_literal(r#"b"\xg0""#).is_err());
+    }
 
     fn operation_validation_function(entries: Vec<Option<MirOperationData>>) -> MirFunction {
         MirFunction {

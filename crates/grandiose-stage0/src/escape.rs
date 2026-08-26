@@ -102,10 +102,14 @@ fn parameter_value(ty: &Type) -> Value {
     match ty {
         Type::Reference { .. } => Value::ExternalBorrowed,
         Type::Tuple(values) => Value::Aggregate(values.iter().map(parameter_value).collect()),
-        // Array length is not retained in `Type`, and nominal field layouts
-        // intentionally remain interface-owned. Preserve the sound subset
-        // whose projection layout is explicit in frozen Core.
-        Type::Array(_) | Type::Nominal { .. } | Type::Projection { .. } => Value::None,
+        // Nominal layouts are interface-owned and cannot be reopened here,
+        // but every reference nested in a parameter still originates outside
+        // the callee. Treat the opaque parameter as an external structural
+        // carrier; frozen path forwarding can then retain that fact without
+        // inventing a body-local loan (for example `Str -> Result<Str, E>`).
+        Type::Nominal { .. } | Type::Projection { .. } => Value::ExternalBorrowed,
+        // Array length is not retained in `Type`, so it remains opaque.
+        Type::Array(_) | Type::StaticData { .. } => Value::None,
         Type::Callable { .. }
         | Type::Generic(_)
         | Type::Infer(_)
@@ -162,6 +166,12 @@ impl Analyzer<'_> {
                 Value::Aggregate(self.strict_values(fields))
             }
             CoreKind::Field { base, index, .. } => match self.value(base) {
+                // Opaque parameter layouts may carry a static/caller-owned
+                // reference at any declaration-approved field path. Keep
+                // that external provenance while traversing the source-level
+                // projection; the concrete path is independently frozen on
+                // the call boundary.
+                Value::ExternalBorrowed => Value::ExternalBorrowed,
                 Value::Aggregate(fields) => {
                     fields.get(index as usize).cloned().unwrap_or(Value::None)
                 }
@@ -370,7 +380,13 @@ impl Analyzer<'_> {
             } => {
                 let computation = self.value(computation);
                 let incoming = self.values.clone();
-                let mut exits = vec![computation.clone()];
+                // Core admits a Completion only after its pattern matrix has
+                // proved it exhaustive. Unlike an effect handler, normal
+                // completion therefore cannot fall through with the original
+                // subject as its result. Keeping that impossible exit made a
+                // temporary `Option<&T>` look like the enclosing function's
+                // return value even when every arm consumed the reference.
+                let mut exits = Vec::with_capacity(clauses.len());
                 for clause in clauses {
                     self.values = incoming.clone();
                     self.bind_pattern_value(&clause.pattern, computation.clone());
@@ -559,7 +575,7 @@ impl Analyzer<'_> {
         // Every Core borrow of a stable place should have a matching
         // PlaceFlow event. Keep this fail-closed until a future region source
         // explicitly teaches both passes about a new kind of loan.
-        if !self.loan_roots.contains(&root) {
+        if !self.has_frozen_loan_root(&root) {
             self.error(
                 self.body.expression(id).span,
                 "G5016",
@@ -567,6 +583,16 @@ impl Analyzer<'_> {
             );
         }
         Value::Borrowed { root }
+    }
+
+    fn has_frozen_loan_root(&self, spelling: &str) -> bool {
+        self.loan_roots.iter().any(|root| {
+            root == spelling
+                || root
+                    .strip_prefix(spelling)
+                    .and_then(|suffix| suffix.strip_prefix('#'))
+                    .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit()))
+        })
     }
 
     /// A projected enum/record payload still belongs to the incoming loan.
@@ -764,6 +790,16 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
 }
 
 fn value_at_path(value: &Value, path: &[u32]) -> Option<Value> {
+    // `ExternalBorrowed` is the sealed marker for a call whose *every*
+    // reference leaf is static/external.  A later source-level library call
+    // may forward one nested reference leaf (for example, `Str::as_bytes`
+    // forwards the backing reference inside a `Str`).  Its nominal layout is
+    // deliberately unavailable to this pass, but every such leaf remains
+    // external, so it is sound to preserve that fact through any frozen
+    // structural path.
+    if matches!(value, Value::ExternalBorrowed) {
+        return Some(Value::ExternalBorrowed);
+    }
     let mut value = value;
     for field in path {
         let Value::Aggregate(fields) = value else {
@@ -831,6 +867,7 @@ fn contains_open_type_parameter(value: &Type) -> bool {
         Type::Generic(_) => true,
         Type::Tuple(values) => values.iter().any(contains_open_type_parameter),
         Type::Array(value)
+        | Type::StaticData { element: value, .. }
         | Type::Reference {
             referent: value, ..
         } => contains_open_type_parameter(value),

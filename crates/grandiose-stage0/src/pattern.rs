@@ -466,15 +466,15 @@ impl Elaborator<'_> {
     /// interval explicitly permits zero uses; an unknown generic interval is
     /// not proof and must remain source-visible rather than being erased.
     fn discard_omitted_tuple_payload(&mut self, span: Span, ty: Type) {
-        let zero_use_allowed = self
+        let affine_erasure_allowed = self
             .signatures
             .principal_use_interval(&ty)
-            .is_some_and(|quantity| quantity.contains(crate::Quantity::ZERO));
-        if !zero_use_allowed {
+            .is_some_and(|quantity| quantity.contains(crate::Quantity::AFFINE));
+        if !affine_erasure_allowed {
             self.error(
                 span,
                 "G4219",
-                "omitted enum payload requires a `Use<[0,0]>` zero-use proof",
+                "omitted enum payload requires affine `Use<[0,1]>` erasure permission",
             );
         }
         self.discarded.push(ty);

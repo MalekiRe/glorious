@@ -155,6 +155,13 @@ pub use signature::{
     is_intrinsic_runs_in_trait,
 };
 pub use source::{LexedFile, LexerDiagnostic, LineIndex, SourcePosition, Span, Token, TokenKind};
+
+/// Stable, sealed artifact tag for compiler-emitted UTF-8 literal data.
+/// This is deliberately distinct from raw `b"..."` bytes even though both
+/// currently have `u8` elements at the VM boundary.
+pub(crate) const STATIC_UTF8_DATA_TAG: u128 = 0x4752_414e_4449_4f53_455f_5354_4154_4943;
+/// Stable, sealed artifact tag for compiler-emitted raw byte literal data.
+pub(crate) const STATIC_RAW_U8_DATA_TAG: u128 = 0x4752_414e_4449_4f53_455f_5241_5755_385f;
 pub use trait_solver::{
     DEFAULT_MAX_TRAIT_DEPTH, DEFAULT_MAX_TRAIT_STEPS, TraitAnswer, TraitCandidateExplanation,
     TraitCandidateRejection, TraitConstProjectionAnswer, TraitCyclePolicy,

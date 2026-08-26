@@ -205,7 +205,9 @@ fn track_value_graph(value: &Value, visited: &mut BTreeSet<u128>) {
                 aggregate: object, ..
             } => track_value_graph(&Value::Aggregate(object.clone()), visited),
             ReferenceTarget::CallableCapture(capture) => track_capture_graph(capture, visited),
-            ReferenceTarget::DropSlot(_) | ReferenceTarget::WholePlace(_) => {}
+            ReferenceTarget::DropSlot(_)
+            | ReferenceTarget::WholePlace(_)
+            | ReferenceTarget::StaticDataElement { .. } => {}
         },
         _ => {}
     }
@@ -865,12 +867,29 @@ pub enum ReferenceTarget {
         array: ArenaObject<ArrayValue>,
         index: usize,
     },
+    StaticDataElement {
+        data: Rc<StaticDataValue>,
+        index: usize,
+    },
     Aggregate(ArenaObject<AggregateValue>),
     AggregateField {
         aggregate: ArenaObject<AggregateValue>,
         field: usize,
     },
     CallableCapture(ArenaObject<Option<Value>>),
+}
+
+/// A bounded immutable view into one verified artifact data segment. The
+/// segment identity is retained separately from its bytes so equal payloads
+/// from differently tagged declarations never become interchangeable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StaticDataValue {
+    pub segment: u32,
+    pub tag: u128,
+    pub alignment: u32,
+    pub bytes: Rc<[u8]>,
+    pub offset: usize,
+    pub length: usize,
 }
 
 /// An owned runtime value. Aggregate slots are optional so execution can
@@ -890,6 +909,9 @@ pub enum Value {
     /// Immutable, cheaply copied octet handle. Conversion to Array<u8> is the
     /// explicit mutable deep-copy boundary.
     Bytes(Rc<[u8]>),
+    /// Compiler-owned immutable bytes with verifier-established type tag and
+    /// range. This is not exposed as a source-level runtime value.
+    StaticData(Rc<StaticDataValue>),
     /// Runtime-only indirection installed when a whole register place is
     /// borrowed. It is transparent to bytecode value/type semantics.
     Place(SlotHandle),
@@ -958,7 +980,9 @@ fn value_edge_identities(value: &Value, edges: &mut Vec<u128>) {
                 aggregate: object, ..
             } => edges.push(object.identity()),
             ReferenceTarget::CallableCapture(capture) => edges.push(capture.identity()),
-            ReferenceTarget::DropSlot(_) | ReferenceTarget::WholePlace(_) => {}
+            ReferenceTarget::DropSlot(_)
+            | ReferenceTarget::WholePlace(_)
+            | ReferenceTarget::StaticDataElement { .. } => {}
         },
         _ => {}
     }

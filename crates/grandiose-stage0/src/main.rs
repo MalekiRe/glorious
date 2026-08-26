@@ -365,6 +365,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
                             PrimitiveRole::ArrayGetMove,
                             PrimitiveRole::ArrayGetBorrowShared,
                             PrimitiveRole::ArrayGetBorrowUnique,
+                            PrimitiveRole::ArraySplitBorrowUnique,
                             PrimitiveRole::ArraySetMove,
                             PrimitiveRole::ArrayEmpty,
                             PrimitiveRole::ArrayPushMove,

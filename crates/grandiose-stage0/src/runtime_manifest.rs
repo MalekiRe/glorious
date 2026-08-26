@@ -524,6 +524,29 @@ pub enum PrimitiveRole {
     /// operations to the trusted distributed standard library identity.
     ArrayNew,
     ArrayLen,
+    /// Validate the existing `Array<u8>` storage for `String::from_utf8`
+    /// without introducing a public compiler-owned byte-buffer type.
+    ArrayUtf8ValidUpTo,
+    ArrayPushUtf8Char,
+    /// Copy a verified range from a shared Array into a unique Array. This
+    /// stays private to `std`; public `Vec::extend_from_slice` and
+    /// `String::push_str` own the safe API and its duplication bound.
+    ArrayExtendFromSlice,
+    /// Private storage leaves. `std::Vec` owns their checked public API.
+    ArrayInsertMove,
+    ArrayRemoveMove,
+    ArrayAppendMove,
+    ArrayInsertFromSlice,
+    ArrayInsertUtf8FromSlice,
+    ArrayTruncateDiscard,
+    ArrayReverseMove,
+    ArraySplitOffMove,
+    /// Consume a uniquely borrowed Array window and return two verifier-
+    /// bounded, disjoint unique windows. This is private infrastructure for
+    /// the standard library's `SliceMut::split_at`.
+    ArraySplitBorrowUnique,
+    ArrayPopUtf8Char,
+    ArrayUtf8CharAt,
     ArrayGetCopy,
     ArrayGetMove,
     ArrayGetBorrowShared,
@@ -535,6 +558,20 @@ pub enum PrimitiveRole {
     ArrayCapacity,
     ArrayReserve,
     ArrayFinishDrained,
+    /// Private standard-library leaves over compiler-emitted immutable data.
+    /// They are manifest-bound and remain inaccessible to ordinary packages.
+    StaticLen,
+    StaticSubslice,
+    StaticGetShared,
+    /// Reinterpret compiler-emitted immutable UTF-8 data as an immutable
+    /// byte array for the standard library's ordinary `Slice` wrapper.
+    /// This is a private bridge leaf; ordinary source cannot name its type.
+    StaticAsArray,
+    /// Raw byte specialization of the same private static-array bridge.
+    /// The public result is still `Slice<'static, u8>`; this distinct
+    /// manifest identity prevents raw assets from being accepted by UTF-8
+    /// operations such as `Str` construction.
+    StaticRawAsArray,
 }
 
 impl PrimitiveRole {
@@ -549,6 +586,20 @@ impl PrimitiveRole {
             Self::Abort => return 147,
             Self::ArrayNew => return 148,
             Self::ArrayLen => return 149,
+            Self::ArrayUtf8ValidUpTo => return 167,
+            Self::ArrayPushUtf8Char => return 168,
+            Self::ArrayExtendFromSlice => return 169,
+            Self::ArrayInsertMove => return 170,
+            Self::ArrayRemoveMove => return 171,
+            Self::ArrayAppendMove => return 172,
+            Self::ArrayInsertFromSlice => return 173,
+            Self::ArrayInsertUtf8FromSlice => return 174,
+            Self::ArrayTruncateDiscard => return 175,
+            Self::ArrayReverseMove => return 176,
+            Self::ArraySplitOffMove => return 177,
+            Self::ArraySplitBorrowUnique => return 180,
+            Self::ArrayPopUtf8Char => return 178,
+            Self::ArrayUtf8CharAt => return 179,
             Self::ArrayGetCopy => return 150,
             Self::ArrayGetMove => return 151,
             Self::ArrayGetBorrowShared => return 152,
@@ -562,6 +613,11 @@ impl PrimitiveRole {
             Self::ArrayFinishDrained => return 160,
             Self::IntWrappingNeg => return 161,
             Self::Blake3 => return 162,
+            Self::StaticLen => return 163,
+            Self::StaticSubslice => return 164,
+            Self::StaticGetShared => return 165,
+            Self::StaticAsArray => return 166,
+            Self::StaticRawAsArray => return 181,
             _ => {}
         }
         const LEGACY: [&str; 70] = [
@@ -804,6 +860,20 @@ impl PrimitiveRole {
             Self::Abort => "abort",
             Self::ArrayNew => "array-new",
             Self::ArrayLen => "array-len",
+            Self::ArrayUtf8ValidUpTo => "array-utf8-valid-up-to",
+            Self::ArrayPushUtf8Char => "array-push-utf8-char",
+            Self::ArrayExtendFromSlice => "array-extend-from-slice",
+            Self::ArrayInsertMove => "array-insert-move",
+            Self::ArrayRemoveMove => "array-remove-move",
+            Self::ArrayAppendMove => "array-append-move",
+            Self::ArrayInsertFromSlice => "array-insert-from-slice",
+            Self::ArrayInsertUtf8FromSlice => "array-insert-utf8-from-slice",
+            Self::ArrayTruncateDiscard => "array-truncate-discard",
+            Self::ArrayReverseMove => "array-reverse-move",
+            Self::ArraySplitOffMove => "array-split-off-move",
+            Self::ArraySplitBorrowUnique => "array-split-borrow-unique",
+            Self::ArrayPopUtf8Char => "array-pop-utf8-char",
+            Self::ArrayUtf8CharAt => "array-utf8-char-at",
             Self::ArrayGetCopy => "array-get-copy",
             Self::ArrayGetMove => "array-get-move",
             Self::ArrayGetBorrowShared => "array-get-borrow-shared",
@@ -815,6 +885,11 @@ impl PrimitiveRole {
             Self::ArrayCapacity => "array-capacity",
             Self::ArrayReserve => "array-reserve",
             Self::ArrayFinishDrained => "array-finish-drained",
+            Self::StaticLen => "static-len",
+            Self::StaticSubslice => "static-subslice",
+            Self::StaticGetShared => "static-get-shared",
+            Self::StaticAsArray => "static-as-array",
+            Self::StaticRawAsArray => "static-raw-as-array",
             Self::Float(_) => unreachable!("handled before the static selector table"),
         })
         .to_owned()
@@ -901,6 +976,20 @@ impl PrimitiveRole {
             "int-convert-wrapping-to-i128" => Self::IntConvertWrappingToI128,
             "array-new" => Self::ArrayNew,
             "array-len" => Self::ArrayLen,
+            "array-utf8-valid-up-to" => Self::ArrayUtf8ValidUpTo,
+            "array-push-utf8-char" => Self::ArrayPushUtf8Char,
+            "array-extend-from-slice" => Self::ArrayExtendFromSlice,
+            "array-insert-move" => Self::ArrayInsertMove,
+            "array-remove-move" => Self::ArrayRemoveMove,
+            "array-append-move" => Self::ArrayAppendMove,
+            "array-insert-from-slice" => Self::ArrayInsertFromSlice,
+            "array-insert-utf8-from-slice" => Self::ArrayInsertUtf8FromSlice,
+            "array-truncate-discard" => Self::ArrayTruncateDiscard,
+            "array-reverse-move" => Self::ArrayReverseMove,
+            "array-split-off-move" => Self::ArraySplitOffMove,
+            "array-split-borrow-unique" => Self::ArraySplitBorrowUnique,
+            "array-pop-utf8-char" => Self::ArrayPopUtf8Char,
+            "array-utf8-char-at" => Self::ArrayUtf8CharAt,
             "array-get-copy" => Self::ArrayGetCopy,
             "array-get-move" => Self::ArrayGetMove,
             "array-get-borrow-shared" => Self::ArrayGetBorrowShared,
@@ -912,6 +1001,11 @@ impl PrimitiveRole {
             "array-capacity" => Self::ArrayCapacity,
             "array-reserve" => Self::ArrayReserve,
             "array-finish-drained" => Self::ArrayFinishDrained,
+            "static-len" => Self::StaticLen,
+            "static-subslice" => Self::StaticSubslice,
+            "static-get-shared" => Self::StaticGetShared,
+            "static-as-array" => Self::StaticAsArray,
+            "static-raw-as-array" => Self::StaticRawAsArray,
             _ => return None,
         })
     }
@@ -1753,6 +1847,184 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             vec![array_reference(Mutability::Shared)],
             Type::Scalar(ScalarType::Usize),
         ),
+        PrimitiveRole::ArrayUtf8ValidUpTo => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Reference {
+                mutability: Mutability::Shared,
+                lifetime: Lifetime::Elided,
+                referent: Box::new(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))),
+            }],
+            result: Type::Scalar(ScalarType::Usize),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::ArrayPushUtf8Char => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Reference {
+                mutability: Mutability::Unique,
+                lifetime: Lifetime::Elided,
+                referent: Box::new(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))),
+            }, Type::Scalar(ScalarType::Char)],
+            result: Type::Unit,
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::ArrayExtendFromSlice => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                array_reference(Mutability::Shared),
+                Type::Scalar(ScalarType::Usize),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Unit,
+        )
+        .with_where_bounds(array_use_bound()),
+        PrimitiveRole::ArrayInsertMove => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+                Type::Generic(0),
+            ],
+            Type::Unit,
+        ),
+        PrimitiveRole::ArrayRemoveMove => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Generic(0),
+        ),
+        PrimitiveRole::ArrayAppendMove => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Array(Box::new(Type::Generic(0))),
+            ],
+            Type::Unit,
+        ),
+        PrimitiveRole::ArrayInsertFromSlice => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+                array_reference(Mutability::Shared),
+                Type::Scalar(ScalarType::Usize),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Unit,
+        )
+        .with_where_bounds(array_use_bound()),
+        PrimitiveRole::ArrayInsertUtf8FromSlice => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![
+                Type::Reference {
+                    mutability: Mutability::Unique,
+                    lifetime: Lifetime::Elided,
+                    referent: Box::new(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))),
+                },
+                Type::Scalar(ScalarType::Usize),
+                Type::Reference {
+                    mutability: Mutability::Shared,
+                    lifetime: Lifetime::Elided,
+                    referent: Box::new(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))),
+                },
+                Type::Scalar(ScalarType::Usize),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            result: Type::Scalar(ScalarType::Usize),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::ArrayTruncateDiscard => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Unit,
+        )
+        .with_where_bounds(array_affine_use_bound()),
+        PrimitiveRole::ArrayReverseMove => array_signature(
+            vec![array_reference(Mutability::Unique)],
+            Type::Unit,
+        ),
+        PrimitiveRole::ArraySplitOffMove => array_signature(
+            vec![
+                array_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Array(Box::new(Type::Generic(0))),
+        ),
+        PrimitiveRole::ArraySplitBorrowUnique => array_borrow_signature(
+            vec![
+                array_borrow_reference(Mutability::Unique),
+                Type::Scalar(ScalarType::Usize),
+                Type::Scalar(ScalarType::Usize),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            Type::Tuple(vec![
+                Type::Reference {
+                    mutability: Mutability::Unique,
+                    lifetime: Lifetime::Generic(0),
+                    referent: Box::new(Type::Array(Box::new(Type::Generic(1)))),
+                },
+                Type::Reference {
+                    mutability: Mutability::Unique,
+                    lifetime: Lifetime::Generic(0),
+                    referent: Box::new(Type::Array(Box::new(Type::Generic(1)))),
+                },
+            ]),
+        ),
+        PrimitiveRole::ArrayPopUtf8Char => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Reference {
+                mutability: Mutability::Unique,
+                lifetime: Lifetime::Elided,
+                referent: Box::new(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))),
+            }],
+            result: Type::Tuple(vec![
+                Type::Scalar(ScalarType::Char),
+                Type::Scalar(ScalarType::Usize),
+            ]),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::ArrayUtf8CharAt => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![
+                Type::Reference {
+                    mutability: Mutability::Shared,
+                    lifetime: Lifetime::Elided,
+                    referent: Box::new(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))),
+                },
+                Type::Scalar(ScalarType::Usize),
+                Type::Scalar(ScalarType::Usize),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            result: Type::Tuple(vec![
+                Type::Scalar(ScalarType::Char),
+                Type::Scalar(ScalarType::Usize),
+            ]),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::ArrayGetCopy => array_signature(
             vec![
                 array_reference(Mutability::Shared),
@@ -1771,26 +2043,26 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         PrimitiveRole::ArrayPopMove => {
             array_signature(vec![array_reference(Mutability::Unique)], Type::Generic(0))
         }
-        PrimitiveRole::ArrayGetBorrowShared => array_signature(
+        PrimitiveRole::ArrayGetBorrowShared => array_borrow_signature(
             vec![
-                array_reference(Mutability::Shared),
+                array_borrow_reference(Mutability::Shared),
                 Type::Scalar(ScalarType::Usize),
             ],
             Type::Reference {
                 mutability: Mutability::Shared,
-                lifetime: Lifetime::Elided,
-                referent: Box::new(Type::Generic(0)),
+                lifetime: Lifetime::Generic(0),
+                referent: Box::new(Type::Generic(1)),
             },
         ),
-        PrimitiveRole::ArrayGetBorrowUnique => array_signature(
+        PrimitiveRole::ArrayGetBorrowUnique => array_borrow_signature(
             vec![
-                array_reference(Mutability::Unique),
+                array_borrow_reference(Mutability::Unique),
                 Type::Scalar(ScalarType::Usize),
             ],
             Type::Reference {
                 mutability: Mutability::Unique,
-                lifetime: Lifetime::Elided,
-                referent: Box::new(Type::Generic(0)),
+                lifetime: Lifetime::Generic(0),
+                referent: Box::new(Type::Generic(1)),
             },
         ),
         PrimitiveRole::ArraySetMove => array_signature(
@@ -1818,7 +2090,90 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
         PrimitiveRole::ArrayFinishDrained => {
             array_signature(vec![Type::Array(Box::new(Type::Generic(0)))], Type::Unit)
         }
+        PrimitiveRole::StaticLen => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![static_utf8_data()],
+            result: Type::Scalar(ScalarType::Usize),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::StaticSubslice => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![
+                static_utf8_data(),
+                Type::Scalar(ScalarType::Usize),
+                Type::Scalar(ScalarType::Usize),
+            ],
+            result: static_utf8_data(),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::StaticGetShared => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![static_utf8_data(), Type::Scalar(ScalarType::Usize)],
+            result: Type::Reference {
+                mutability: Mutability::Shared,
+                lifetime: Lifetime::Static,
+                referent: Box::new(Type::Scalar(ScalarType::U8)),
+            },
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::StaticAsArray => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![static_utf8_data()],
+            result: Type::Reference {
+                mutability: Mutability::Shared,
+                lifetime: Lifetime::Static,
+                referent: Box::new(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))),
+            },
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
+        PrimitiveRole::StaticRawAsArray => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::StaticData {
+                element: Box::new(Type::Scalar(ScalarType::U8)),
+                tag: crate::STATIC_RAW_U8_DATA_TAG,
+                alignment: 1,
+            }],
+            result: Type::Reference {
+                mutability: Mutability::Shared,
+                lifetime: Lifetime::Static,
+                referent: Box::new(Type::Array(Box::new(Type::Scalar(ScalarType::U8)))),
+            },
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::Float(_) => unreachable!("handled before the legacy signature table"),
+    }
+}
+
+fn static_utf8_data() -> Type {
+    Type::StaticData {
+        element: Box::new(Type::Scalar(ScalarType::U8)),
+        tag: crate::STATIC_UTF8_DATA_TAG,
+        alignment: 1,
     }
 }
 
@@ -1842,6 +2197,28 @@ fn array_reference(mutability: Mutability) -> Type {
         mutability,
         lifetime: Lifetime::Elided,
         referent: Box::new(Type::Array(Box::new(Type::Generic(0)))),
+    }
+}
+
+fn array_borrow_reference(mutability: Mutability) -> Type {
+    Type::Reference {
+        mutability,
+        lifetime: Lifetime::Generic(0),
+        referent: Box::new(Type::Array(Box::new(Type::Generic(1)))),
+    }
+}
+
+fn array_borrow_signature(parameters: Vec<Type>, result: Type) -> crate::CallableSignature {
+    crate::CallableSignature {
+        generics: 2,
+        generic_kinds: vec![crate::GenericKind::Lifetime, crate::GenericKind::Type],
+        parameters,
+        result,
+        effects: EffectRow::empty(),
+        invocation: Quantity::ONCE,
+        where_bounds: vec![],
+        where_associated_type_bindings: vec![],
+        where_associated_effect_bindings: vec![],
     }
 }
 
@@ -1871,6 +2248,20 @@ fn array_use_bound() -> Vec<(Type, crate::ElaboratedTraitReference)> {
             )],
         },
     )]
+}
+
+fn array_affine_use_bound() -> Vec<(Type, crate::ElaboratedTraitReference)> {
+    vec![
+        (
+            Type::Generic(0),
+            crate::ElaboratedTraitReference {
+                definition: DefKey(Digest::of_bytes(
+                    b"grandiose-stage0-language-prelude-use-v1",
+                )),
+                arguments: vec![crate::GenericArgument::ConstQuantity(Quantity::AFFINE)],
+            },
+        ),
+    ]
 }
 
 trait CallableSignatureExt {

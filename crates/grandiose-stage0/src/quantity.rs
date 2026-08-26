@@ -89,6 +89,14 @@ impl Quantity {
     pub fn requires_positive_use(self) -> bool {
         self.lower > 0
     }
+
+    /// Source-level principal `Use` contracts deliberately expose only the
+    /// three useful ownership classes.  `ZERO` remains an analysis result for
+    /// one control-flow path, but is not a principal capability users may
+    /// declare for a value type.
+    pub fn is_public_principal_use(self) -> bool {
+        matches!(self, Self::UNRESTRICTED | Self::AFFINE | Self::ONCE)
+    }
 }
 
 fn upper_leq(left: Option<u64>, right: Option<u64>) -> bool {

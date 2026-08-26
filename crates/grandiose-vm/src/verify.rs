@@ -306,6 +306,11 @@ pub(crate) enum ImageConstant<'a> {
     Inline(&'a Constant),
     Text(&'a str),
     Bytes(&'a [u8]),
+    StaticData {
+        tag: u128,
+        alignment: u32,
+        bytes: &'a [u8],
+    },
 }
 
 fn strip_descriptor_names(tables: &mut DecodedTables) {
@@ -351,6 +356,7 @@ fn strip_descriptor_names(tables: &mut DecodedTables) {
             | Type::Char
             | Type::Text
             | Type::Bytes
+            | Type::StaticData { .. }
             | Type::Array { .. }
             | Type::RefShared { .. }
             | Type::RefUnique { .. }
@@ -444,6 +450,9 @@ impl ExecutionImage {
                     *text = String::new();
                 }
                 (Constant::Bytes(bytes), Some(EncodedConstantPayload::Bytes(_))) => {
+                    *bytes = Vec::new();
+                }
+                (Constant::StaticData { bytes, .. }, Some(EncodedConstantPayload::StaticData(_))) => {
                     *bytes = Vec::new();
                 }
                 (_, None) => {}
@@ -546,6 +555,16 @@ impl ExecutionImage {
             Some(EncodedConstantPayload::Bytes(range)) => ImageConstant::Bytes(
                 &self.encoded.as_ref().expect("encoded payload has storage")[range.clone()],
             ),
+            Some(EncodedConstantPayload::StaticData(range)) => {
+                let Constant::StaticData { tag, alignment, .. } = descriptor else {
+                    unreachable!("decoded static payload must have a static-data descriptor");
+                };
+                ImageConstant::StaticData {
+                    tag: *tag,
+                    alignment: *alignment,
+                    bytes: &self.encoded.as_ref().expect("encoded payload has storage")[range.clone()],
+                }
+            }
         }
     }
 
@@ -555,6 +574,15 @@ impl ExecutionImage {
             ImageConstant::Inline(constant) => constant.clone(),
             ImageConstant::Text(text) => Constant::Text(text.to_owned()),
             ImageConstant::Bytes(bytes) => Constant::Bytes(bytes.to_vec()),
+            ImageConstant::StaticData {
+                tag,
+                alignment,
+                bytes,
+            } => Constant::StaticData {
+                tag,
+                alignment,
+                bytes: bytes.to_vec(),
+            },
         }
     }
 
@@ -1927,6 +1955,7 @@ fn verify_types(a: &Artifact) -> Result<(), VerifyError> {
             }
         }
     }
+    let mut static_tags = BTreeSet::new();
     for declared_type in &a.types {
         let ty = declared_type.representation();
         match ty {
@@ -2016,7 +2045,37 @@ fn verify_types(a: &Artifact) -> Result<(), VerifyError> {
             | Type::RefUnique { referent: element } => {
                 runtime_type_at(a, *element)?;
             }
+            Type::StaticData {
+                element,
+                tag,
+                alignment,
+            } => {
+                runtime_type_at(a, *element)?;
+                if *alignment == 0 || !alignment.is_power_of_two() || !static_tags.insert(*tag) {
+                    return Err(VerifyError::InvalidType(u32::MAX));
+                }
+            }
             _ => {}
+        }
+    }
+    for constant in &a.constants {
+        if let Constant::StaticData { tag, alignment, .. } = constant {
+            constant_type(a, constant)?;
+            if *alignment == 0 || !alignment.is_power_of_two() {
+                return Err(VerifyError::InvalidType(u32::MAX));
+            }
+            if !a.types.iter().any(|ty| {
+                matches!(
+                    ty.representation(),
+                    Type::StaticData {
+                        tag: type_tag,
+                        alignment: type_alignment,
+                        ..
+                    } if type_tag == tag && type_alignment == alignment
+                )
+            }) {
+                return Err(VerifyError::InvalidType(u32::MAX));
+            }
         }
     }
     fn visit(a: &Artifact, id: TypeId, marks: &mut [u8]) -> Result<(), VerifyError> {
@@ -14040,14 +14099,41 @@ fn verify_loans(
                 } else {
                     None
                 };
+                // Static data is immutable compiler-owned storage, not a
+                // borrow of a source register. A shared element reference is
+                // nevertheless retained as a loan carrier so ordinary
+                // DEREF_COPY/END_BORROW validation still applies. Its owner
+                // lives outside the function's register namespace and cannot
+                // conflict with any mutable source place.
+                let static_shared = matches!(op, Primitive::StaticGetShared).then(|| CarrierLoan {
+                    path: vec![],
+                    loan: Loan {
+                        place: BorrowedPlace {
+                            owner: u32::MAX,
+                            projections: vec![],
+                        },
+                        unique: false,
+                        suspended_parent: None,
+                        authorization_active: true,
+                        referent_initialized: true,
+                    },
+                });
+                let static_read_only = matches!(
+                    op,
+                    Primitive::StaticLen | Primitive::StaticSubslice | Primitive::StaticGetShared
+                );
                 for &register in args {
-                    consume_owner(&loans, register)?;
-                    end_reference(&mut loans, register)?;
+                    if !static_read_only {
+                        consume_owner(&loans, register)?;
+                        end_reference(&mut loans, register)?;
+                    }
                 }
                 if let Some(mut loan) = inherited {
                     loan.loan.unique = matches!(op, Primitive::ArrayGetBorrowUnique);
                     loan.loan.place.projections.push(u32::MAX);
                     loan.path.clear();
+                    loans[*dst as usize] = vec![loan];
+                } else if let Some(loan) = static_shared {
                     loans[*dst as usize] = vec![loan];
                 } else if let Some(transported) = transported {
                     loans[*dst as usize] = transported;
@@ -16144,9 +16230,15 @@ fn transfer(
                     ty: element.unwrap(),
                 });
             }
+            let static_read_only = matches!(
+                op,
+                Primitive::StaticLen | Primitive::StaticSubslice | Primitive::StaticGetShared
+            );
             for &r in args {
                 read(s, r)?;
-                consume(s, r)?;
+                if !static_read_only {
+                    consume(s, r)?;
+                }
             }
             write(s, *dst)?;
             next()
@@ -17979,6 +18071,7 @@ fn snapshot_cloneable(a: &Artifact, id: TypeId, stack: &mut Vec<TypeId>) -> bool
         | Type::Char
         | Type::Text
         | Type::Bytes
+        | Type::StaticData { .. }
         | Type::Available { .. } => true,
         Type::RefShared { .. } => true,
         Type::Never | Type::RefUnique { .. } => false,
@@ -18082,6 +18175,7 @@ fn supports_copy(a: &Artifact, id: TypeId) -> bool {
             | Type::Char
             | Type::Text
             | Type::Bytes
+            | Type::StaticData { .. }
             | Type::RefShared { .. } => true,
             Type::Never => false,
             Type::Array { .. } | Type::RefUnique { .. } => false,
@@ -18153,6 +18247,7 @@ fn supports_zero_use(a: &Artifact, id: TypeId) -> bool {
             | Type::Char
             | Type::Text
             | Type::Bytes
+            | Type::StaticData { .. }
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => true,
             Type::Never => false,
@@ -18191,6 +18286,23 @@ fn supports_zero_use(a: &Artifact, id: TypeId) -> bool {
     supports(a, id, &mut vec![false; a.types.len()])
 }
 fn constant_type(a: &Artifact, c: &Constant) -> Result<TypeId, VerifyError> {
+    if let Constant::StaticData { tag, alignment, .. } = c {
+        return a
+            .types
+            .iter()
+            .position(|ty| {
+                matches!(
+                    ty.representation(),
+                    Type::StaticData {
+                        tag: type_tag,
+                        alignment: type_alignment,
+                        ..
+                    } if type_tag == tag && type_alignment == alignment
+                )
+            })
+            .map(|index| index as TypeId)
+            .ok_or(VerifyError::InvalidType(u32::MAX));
+    }
     let predicate: fn(&Type) -> bool = match c {
         Constant::Unit => |x| matches!(x, Type::Unit),
         Constant::U8(_) => |x| matches!(x, Type::U8),
@@ -18210,6 +18322,7 @@ fn constant_type(a: &Artifact, c: &Constant) -> Result<TypeId, VerifyError> {
         Constant::Char(_) => |x| matches!(x, Type::Char),
         Constant::Text(_) => |x| matches!(x, Type::Text),
         Constant::Bytes(_) => |x| matches!(x, Type::Bytes),
+        Constant::StaticData { .. } => unreachable!("static data handled above"),
     };
     a.types
         .iter()

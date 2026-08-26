@@ -68,6 +68,14 @@ pub enum VmType {
         kind: ConstKind,
     },
     Array(Box<VmType>),
+    /// Sealed artifact-backed data. This is deliberately distinct from both
+    /// `Bytes` and an ordinary array: it carries the verifier-owned type tag
+    /// and alignment needed to prevent reinterpreting embedded assets.
+    StaticData {
+        element: Box<VmType>,
+        tag: u128,
+        alignment: u32,
+    },
     Tuple(Vec<VmType>),
     Nominal {
         definition: DefKey,
@@ -350,6 +358,31 @@ pub enum VmInstruction {
         dst: u32,
         value: String,
     },
+    /// Sealed static bytes emitted only by compiler literal lowering.  The
+    /// destination's `StaticData<u8>` type supplies the stable tag and
+    /// alignment contract verified below.
+    ConstStaticData {
+        dst: u32,
+        tag: u128,
+        alignment: u32,
+        bytes: Vec<u8>,
+    },
+    StaticLen {
+        dst: u32,
+        value: u32,
+    },
+    StaticSubslice {
+        dst: u32,
+        value: u32,
+        start: u32,
+        length: u32,
+    },
+    StaticGetBorrowShared {
+        dst: u32,
+        value: u32,
+        index: u32,
+    },
+    StaticAsArrayBorrow { dst: u32, value: u32 },
     /// Opcode 64: trusted `Text -> usize` byte-length primitive. It carries
     /// neither a symbol nor a capability because manifest authority was
     /// consumed while lowering source identity to this sealed instruction.
@@ -429,6 +462,82 @@ pub enum VmInstruction {
     ArrayLen {
         dst: u32,
         value: u32,
+        element_type: VmType,
+    },
+    ArrayUtf8ValidUpTo {
+        dst: u32,
+        value: u32,
+    },
+    ArrayPushUtf8Char { value: u32, character: u32 },
+    ArrayInsertUtf8FromSlice {
+        dst: u32,
+        value: u32,
+        index: u32,
+        source: u32,
+        start: u32,
+        length: u32,
+    },
+    ArrayPopUtf8Char { dst: u32, value: u32 },
+    ArrayUtf8CharAt {
+        dst: u32,
+        value: u32,
+        start: u32,
+        length: u32,
+        index: u32,
+    },
+    ArrayExtendFromSlice {
+        value: u32,
+        source: u32,
+        start: u32,
+        length: u32,
+        element_type: VmType,
+    },
+    ArrayInsertMove {
+        value: u32,
+        index: u32,
+        item: u32,
+        element_type: VmType,
+    },
+    ArrayRemoveMove {
+        dst: u32,
+        value: u32,
+        index: u32,
+        element_type: VmType,
+    },
+    ArrayAppendMove {
+        value: u32,
+        source: u32,
+        element_type: VmType,
+    },
+    ArrayTruncateDiscard {
+        value: u32,
+        length: u32,
+        element_type: VmType,
+    },
+    ArrayReverseMove {
+        value: u32,
+        element_type: VmType,
+    },
+    ArraySplitOffMove {
+        dst: u32,
+        value: u32,
+        index: u32,
+        element_type: VmType,
+    },
+    ArraySplitBorrowUnique {
+        dst: u32,
+        value: u32,
+        start: u32,
+        length: u32,
+        index: u32,
+        element_type: VmType,
+    },
+    ArrayInsertFromSlice {
+        value: u32,
+        index: u32,
+        source: u32,
+        start: u32,
+        length: u32,
         element_type: VmType,
     },
     ArrayGetCopy {
@@ -822,6 +931,12 @@ pub enum VmInstruction {
         reborrow: bool,
     },
     DerefCopy {
+        dst: u32,
+        reference: u32,
+    },
+    /// Move through a unique reference. The verifier makes the reference
+    /// temporarily unreadable until `DerefStore` restores a referent.
+    DerefMove {
         dst: u32,
         reference: u32,
     },
@@ -1964,7 +2079,13 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// closure descriptor cannot redirect to an ABI-compatible sibling body.
 /// Schema 83 makes all generic and frozen integer shifts reject a count at or
 /// beyond the operand width instead of silently masking it.
-pub const STAGE0_VM_SCHEMA: u32 = 90;
+/// Schema 91 adds the sealed `StaticData` type encoding. Its tag and
+/// alignment are part of the frozen type identity rather than being erased
+/// into the legacy Text/Bytes representations.
+/// Schema 92 adds `DerefMove`, allowing a unique borrowed referent to be
+/// moved out and restored without treating an affine value as copied.
+/// Schema 93 adds sealed `ConstStaticData` literals.
+pub const STAGE0_VM_SCHEMA: u32 = 93;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2798,8 +2919,29 @@ fn emit_with_specialized_lifted_targets(
         .map(vm_nominal_copy_descriptor)
         .collect::<Result<Vec<_>, _>>()?;
     nominal_copy_descriptors.sort_by_key(vm_nominal_copy_descriptor_key);
+    // Lifetimes deliberately do not exist in VM type identity.  A source
+    // body can therefore reach the same nominal layout once through an
+    // explicit `'static` view and once through an elided view.  Collapse the
+    // identical VM descriptors here, at the representation-erasure boundary;
+    // retain a hard failure if erasure would make two distinct layouts claim
+    // the same identity.
+    let mut canonical_descriptors: Vec<VmNominalCopyDescriptor> =
+        Vec::with_capacity(nominal_copy_descriptors.len());
+    for descriptor in nominal_copy_descriptors {
+        if let Some(previous) = canonical_descriptors.last() {
+            if previous.definition == descriptor.definition && previous.arguments == descriptor.arguments {
+                if *previous != descriptor {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "lifetime-erased nominal copy layouts disagree",
+                    });
+                }
+                continue;
+            }
+        }
+        canonical_descriptors.push(descriptor);
+    }
     let function = VmFunction {
-        nominal_copy_descriptors,
+        nominal_copy_descriptors: canonical_descriptors,
         definition: function.definition,
         captures: function.captures,
         parameters: function.parameters.len() as u32,
@@ -3166,6 +3308,15 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
             kind: *kind,
         }),
         Type::Array(element) => Ok(VmType::Array(Box::new(vm_type(element)?))),
+        Type::StaticData {
+            element,
+            tag,
+            alignment,
+        } => Ok(VmType::StaticData {
+            element: Box::new(vm_type(element)?),
+            tag: *tag,
+            alignment: *alignment,
+        }),
         Type::Tuple(values) => Ok(VmType::Tuple(
             values.iter().map(vm_type).collect::<Result<Vec<_>, _>>()?,
         )),
@@ -3495,6 +3646,7 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::ConstU32Expr(_) => 13,
         VmType::ConstQuantity { .. } => 14,
         VmType::ConstGeneric { .. } => 15,
+        VmType::StaticData { .. } => 29,
     });
     match value {
         VmType::Callable {
@@ -3545,6 +3697,15 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::Reference { unique, referent } => {
             output.push(*unique as u8);
             encode_type(referent, output);
+        }
+        VmType::StaticData {
+            element,
+            tag,
+            alignment,
+        } => {
+            encode_type(element, output);
+            output.extend_from_slice(&tag.to_le_bytes());
+            output.extend_from_slice(&alignment.to_le_bytes());
         }
         VmType::Array(element) => encode_type(element, output),
         _ => {}
@@ -3955,6 +4116,11 @@ impl<'a> Decoder<'a> {
             4 => Ok(VmType::Char),
             5 => Ok(VmType::Text),
             18 => Ok(VmType::Bytes),
+            29 => Ok(VmType::StaticData {
+                element: Box::new(self.vm_type_at_depth(depth + 1)?),
+                tag: self.u128()?,
+                alignment: self.u32()?,
+            }),
             6 => {
                 let count = self.count("callable parameters", MAX_DECODE_REGISTERS)?;
                 let mut parameters = Vec::with_capacity(count);
@@ -4625,6 +4791,10 @@ impl<'a> Decoder<'a> {
                 reference: self.u32()?,
                 src: self.u32()?,
             }),
+            174 => Ok(VmInstruction::DerefMove {
+                dst: self.u32()?,
+                reference: self.u32()?,
+            }),
             39 => Ok(VmInstruction::UpdateRecord {
                 dst: self.u32()?,
                 base: self.u32()?,
@@ -4997,6 +5167,117 @@ impl<'a> Decoder<'a> {
             24 => Ok(VmInstruction::ConstText {
                 dst: self.u32()?,
                 value: self.text()?,
+            }),
+            175 => Ok(VmInstruction::ConstStaticData {
+                dst: self.u32()?,
+                tag: self.u128()?,
+                alignment: self.u32()?,
+                bytes: {
+                    let length = usize::try_from(self.u64()?).map_err(|_| {
+                        VmArtifactError::MalformedEncoding {
+                            message: "static-data length does not fit usize",
+                        }
+                    })?;
+                    self.bytes(length)?.to_vec()
+                },
+            }),
+            176 => Ok(VmInstruction::StaticLen {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
+            177 => Ok(VmInstruction::StaticSubslice {
+                dst: self.u32()?,
+                value: self.u32()?,
+                start: self.u32()?,
+                length: self.u32()?,
+            }),
+            178 => Ok(VmInstruction::StaticGetBorrowShared {
+                dst: self.u32()?,
+                value: self.u32()?,
+                index: self.u32()?,
+            }),
+            179 => Ok(VmInstruction::StaticAsArrayBorrow { dst: self.u32()?, value: self.u32()? }),
+            180 => Ok(VmInstruction::ArrayUtf8ValidUpTo {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
+            181 => Ok(VmInstruction::ArrayPushUtf8Char {
+                value: self.u32()?,
+                character: self.u32()?,
+            }),
+            187 => Ok(VmInstruction::ArrayInsertUtf8FromSlice {
+                dst: self.u32()?,
+                value: self.u32()?,
+                index: self.u32()?,
+                source: self.u32()?,
+                start: self.u32()?,
+                length: self.u32()?,
+            }),
+            188 => Ok(VmInstruction::ArrayTruncateDiscard {
+                value: self.u32()?,
+                length: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
+            }),
+            189 => Ok(VmInstruction::ArrayReverseMove {
+                value: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
+            }),
+            190 => Ok(VmInstruction::ArraySplitOffMove {
+                dst: self.u32()?,
+                value: self.u32()?,
+                index: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
+            }),
+            193 => Ok(VmInstruction::ArraySplitBorrowUnique {
+                dst: self.u32()?,
+                value: self.u32()?,
+                start: self.u32()?,
+                length: self.u32()?,
+                index: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
+            }),
+            191 => Ok(VmInstruction::ArrayPopUtf8Char {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
+            192 => Ok(VmInstruction::ArrayUtf8CharAt {
+                dst: self.u32()?,
+                value: self.u32()?,
+                start: self.u32()?,
+                length: self.u32()?,
+                index: self.u32()?,
+            }),
+            182 => Ok(VmInstruction::ArrayExtendFromSlice {
+                value: self.u32()?,
+                source: self.u32()?,
+                start: self.u32()?,
+                length: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
+            }),
+            183 => Ok(VmInstruction::ArrayInsertMove {
+                value: self.u32()?,
+                index: self.u32()?,
+                item: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
+            }),
+            184 => Ok(VmInstruction::ArrayRemoveMove {
+                dst: self.u32()?,
+                value: self.u32()?,
+                index: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
+            }),
+            185 => Ok(VmInstruction::ArrayAppendMove {
+                value: self.u32()?,
+                source: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
+            }),
+            186 => Ok(VmInstruction::ArrayInsertFromSlice {
+                value: self.u32()?,
+                index: self.u32()?,
+                source: self.u32()?,
+                start: self.u32()?,
+                length: self.u32()?,
+                element_type: self.vm_type_at_depth(0)?,
             }),
             64 => Ok(VmInstruction::TextByteLen {
                 dst: self.u32()?,
@@ -5640,8 +5921,6 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                         });
                     }
                 }
-                verify_effect_operation_specialization(target, &generic_bindings)?;
-                let expected = instantiate_vm_type(&return_type(target)?, &generic_bindings);
                 let found = register_type(function, *dst)?;
                 // A non-returning target has no normal edge on which `dst`
                 // becomes observable. Its source callable may have been
@@ -5651,6 +5930,24 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                 let target_returns = declared_result(target)?
                     .map(|(_, returns)| returns)
                     .unwrap_or(true);
+                let declared_return = return_type(target)?;
+                // Constructors such as `vec_new<T>()` have no value argument
+                // from which to infer `T`: their destination is the only
+                // concrete part of the call ABI.  Treat it as an additional
+                // unification site, just as ordinary parameters are.  This
+                // also rejects an artifact whose arguments and destination
+                // demand incompatible specializations of the same binder.
+                if target_returns
+                    && !unify_call_type(&declared_return, &found, &mut generic_bindings)
+                {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *dst,
+                        expected: declared_return,
+                        found,
+                    });
+                }
+                verify_effect_operation_specialization(target, &generic_bindings)?;
+                let expected = instantiate_vm_type(&declared_return, &generic_bindings);
                 if target_returns && expected != found {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
@@ -5759,11 +6056,23 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                         });
                     }
                 }
-                verify_effect_operation_specialization(target, &generic_bindings)?;
-                let expected = instantiate_vm_type(&return_type(target)?, &generic_bindings);
                 let target_returns = declared_result(target)?
                     .map(|(_, returns)| returns)
                     .unwrap_or(true);
+                let declared_return = return_type(target)?;
+                // A first-class zero-argument generic constructor likewise
+                // receives its specialization from the callable result.
+                if target_returns
+                    && !unify_call_type(&declared_return, result.as_ref(), &mut generic_bindings)
+                {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *dst,
+                        expected: declared_return,
+                        found: *result,
+                    });
+                }
+                verify_effect_operation_specialization(target, &generic_bindings)?;
+                let expected = instantiate_vm_type(&declared_return, &generic_bindings);
                 if target_returns && expected != *result {
                     return Err(VmArtifactError::TypeMismatch {
                         register: *dst,
@@ -6006,6 +6315,20 @@ fn unify_call_type(
             VmType::Array(found) => unify_call_type(expected, found, bindings),
             _ => false,
         },
+        VmType::StaticData {
+            element: expected_element,
+            tag: expected_tag,
+            alignment: expected_alignment,
+        } => match found {
+            VmType::StaticData {
+                element: found_element,
+                tag: found_tag,
+                alignment: found_alignment,
+            } if expected_tag == found_tag && expected_alignment == found_alignment => {
+                unify_call_type(expected_element, found_element, bindings)
+            }
+            _ => false,
+        },
         VmType::Reference {
             unique: expected_unique,
             referent: expected_referent,
@@ -6071,6 +6394,15 @@ fn instantiate_vm_type(value: &VmType, bindings: &BTreeMap<u32, VmType>) -> VmTy
                 .collect(),
         ),
         VmType::Array(element) => VmType::Array(Box::new(instantiate_vm_type(element, bindings))),
+        VmType::StaticData {
+            element,
+            tag,
+            alignment,
+        } => VmType::StaticData {
+            element: Box::new(instantiate_vm_type(element, bindings)),
+            tag: *tag,
+            alignment: *alignment,
+        },
         VmType::Nominal {
             definition,
             arguments,
@@ -6396,6 +6728,40 @@ fn lower_instruction(
             dst: dst.0,
             value: value.clone(),
         },
+        MirInstruction::ConstStaticData {
+            dst,
+            tag,
+            alignment,
+            bytes,
+        } => VmInstruction::ConstStaticData {
+            dst: dst.0,
+            tag: *tag,
+            alignment: *alignment,
+            bytes: bytes.clone(),
+        },
+        MirInstruction::StaticLen { dst, value } => VmInstruction::StaticLen {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::StaticSubslice {
+            dst,
+            value,
+            start,
+            length,
+        } => VmInstruction::StaticSubslice {
+            dst: dst.0,
+            value: value.0,
+            start: start.0,
+            length: length.0,
+        },
+        MirInstruction::StaticGetBorrowShared { dst, value, index } => {
+            VmInstruction::StaticGetBorrowShared {
+                dst: dst.0,
+                value: value.0,
+                index: index.0,
+            }
+        }
+        MirInstruction::StaticAsArrayBorrow { dst, value } => VmInstruction::StaticAsArrayBorrow { dst: dst.0, value: value.0 },
         MirInstruction::TextByteLen { dst, value } => VmInstruction::TextByteLen {
             dst: dst.0,
             value: value.0,
@@ -6488,6 +6854,152 @@ fn lower_instruction(
             value: value.0,
             element_type: vm_type(element_type)
                 .map_err(|ty| VmArtifactError::UnsupportedType { local: dst.0, ty })?,
+        },
+        MirInstruction::ArrayUtf8ValidUpTo { dst, value } => VmInstruction::ArrayUtf8ValidUpTo {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::ArrayPushUtf8Char { value, character } => VmInstruction::ArrayPushUtf8Char {
+            value: value.0,
+            character: character.0,
+        },
+        MirInstruction::ArrayInsertUtf8FromSlice {
+            dst,
+            value,
+            index,
+            source,
+            start,
+            length,
+        } => VmInstruction::ArrayInsertUtf8FromSlice {
+            dst: dst.0,
+            value: value.0,
+            index: index.0,
+            source: source.0,
+            start: start.0,
+            length: length.0,
+        },
+        MirInstruction::ArrayPopUtf8Char { dst, value } => VmInstruction::ArrayPopUtf8Char {
+            dst: dst.0,
+            value: value.0,
+        },
+        MirInstruction::ArrayUtf8CharAt { dst, value, start, length, index } => {
+            VmInstruction::ArrayUtf8CharAt {
+                dst: dst.0,
+                value: value.0,
+                start: start.0,
+                length: length.0,
+                index: index.0,
+            }
+        }
+        MirInstruction::ArrayExtendFromSlice {
+            value,
+            source,
+            start,
+            length,
+            element_type,
+        } => VmInstruction::ArrayExtendFromSlice {
+            value: value.0,
+            source: source.0,
+            start: start.0,
+            length: length.0,
+            element_type: vm_type(element_type)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: value.0, ty })?,
+        },
+        MirInstruction::ArrayInsertMove {
+            value,
+            index,
+            item,
+            element_type,
+        } => VmInstruction::ArrayInsertMove {
+            value: value.0,
+            index: index.0,
+            item: item.0,
+            element_type: vm_type(element_type)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: value.0, ty })?,
+        },
+        MirInstruction::ArrayRemoveMove {
+            dst,
+            value,
+            index,
+            element_type,
+        } => VmInstruction::ArrayRemoveMove {
+            dst: dst.0,
+            value: value.0,
+            index: index.0,
+            element_type: vm_type(element_type)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: value.0, ty })?,
+        },
+        MirInstruction::ArrayAppendMove {
+            value,
+            source,
+            element_type,
+        } => VmInstruction::ArrayAppendMove {
+            value: value.0,
+            source: source.0,
+            element_type: vm_type(element_type)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: value.0, ty })?,
+        },
+        MirInstruction::ArrayTruncateDiscard {
+            value,
+            length,
+            element_type,
+        } => VmInstruction::ArrayTruncateDiscard {
+            value: value.0,
+            length: length.0,
+            element_type: vm_type(element_type)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: value.0, ty })?,
+        },
+        MirInstruction::ArrayReverseMove {
+            value,
+            element_type,
+        } => VmInstruction::ArrayReverseMove {
+            value: value.0,
+            element_type: vm_type(element_type)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: value.0, ty })?,
+        },
+        MirInstruction::ArraySplitOffMove {
+            dst,
+            value,
+            index,
+            element_type,
+        } => VmInstruction::ArraySplitOffMove {
+            dst: dst.0,
+            value: value.0,
+            index: index.0,
+            element_type: vm_type(element_type)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: value.0, ty })?,
+        },
+        MirInstruction::ArraySplitBorrowUnique {
+            dst,
+            value,
+            start,
+            length,
+            index,
+            element_type,
+        } => VmInstruction::ArraySplitBorrowUnique {
+            dst: dst.0,
+            value: value.0,
+            start: start.0,
+            length: length.0,
+            index: index.0,
+            element_type: vm_type(element_type)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: value.0, ty })?,
+        },
+        MirInstruction::ArrayInsertFromSlice {
+            value,
+            index,
+            source,
+            start,
+            length,
+            element_type,
+        } => VmInstruction::ArrayInsertFromSlice {
+            value: value.0,
+            index: index.0,
+            source: source.0,
+            start: start.0,
+            length: length.0,
+            element_type: vm_type(element_type)
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: value.0, ty })?,
         },
         MirInstruction::ArrayGetCopy {
             dst,
@@ -6987,6 +7499,10 @@ fn lower_instruction(
             reborrow: *reborrow,
         },
         MirInstruction::DerefCopy { dst, reference } => VmInstruction::DerefCopy {
+            dst: dst.0,
+            reference: reference.0,
+        },
+        MirInstruction::DerefMove { dst, reference } => VmInstruction::DerefMove {
             dst: dst.0,
             reference: reference.0,
         },
@@ -7972,6 +8488,77 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 expect_type(function, *dst, VmType::Text)?;
                 write(&mut states, *dst)?
             }
+            VmInstruction::ConstStaticData {
+                dst,
+                tag,
+                alignment,
+                ..
+            } => {
+                let found = function
+                    .registers
+                    .get(*dst as usize)
+                    .ok_or(VmArtifactError::InvalidRegister { register: *dst })?;
+                match found {
+                    VmType::StaticData {
+                        element,
+                        tag: found_tag,
+                        alignment: found_alignment,
+                    } if element.as_ref() == &VmType::U8
+                        && found_tag == tag
+                        && found_alignment == alignment => {}
+                    _ => {
+                        return Err(VmArtifactError::ResultType {
+                            expected: VmType::StaticData {
+                                element: Box::new(VmType::U8),
+                                tag: *tag,
+                                alignment: *alignment,
+                            },
+                            found: found.clone(),
+                        });
+                    }
+                }
+                write(&mut states, *dst)?
+            }
+            VmInstruction::StaticLen { dst, value } => {
+                expect_type(function, *dst, VmType::Usize)?;
+                let data = function
+                    .registers
+                    .get(*value as usize)
+                    .ok_or(VmArtifactError::InvalidRegister { register: *value })?;
+                if !matches!(data, VmType::StaticData { element, tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943, alignment: 1 } if element.as_ref() == &VmType::U8) {
+                    return Err(VmArtifactError::ResultType {
+                        expected: VmType::StaticData { element: Box::new(VmType::U8), tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943, alignment: 1 },
+                        found: data.clone(),
+                    });
+                }
+                read(&states, *value)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::StaticSubslice { dst, value, start, length } => {
+                let expected = VmType::StaticData { element: Box::new(VmType::U8), tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943, alignment: 1 };
+                expect_type(function, *dst, expected.clone())?;
+                expect_type(function, *value, expected)?;
+                expect_type(function, *start, VmType::Usize)?;
+                expect_type(function, *length, VmType::Usize)?;
+                read(&states, *value)?;
+                read(&states, *start)?;
+                read(&states, *length)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::StaticGetBorrowShared { dst, value, index } => {
+                expect_type(function, *dst, VmType::Reference { unique: false, referent: Box::new(VmType::U8) })?;
+                let expected = VmType::StaticData { element: Box::new(VmType::U8), tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943, alignment: 1 };
+                expect_type(function, *value, expected)?;
+                expect_type(function, *index, VmType::Usize)?;
+                read(&states, *value)?;
+                read(&states, *index)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::StaticAsArrayBorrow { dst, value } => {
+                expect_type(function, *dst, VmType::Reference { unique: false, referent: Box::new(VmType::Array(Box::new(VmType::U8))) })?;
+                expect_static_u8_type(function, *value)?;
+                read(&states, *value)?; write(&mut states, *dst)?
+            }
             VmInstruction::TextByteLen { dst, value } => {
                 expect_type(function, *dst, VmType::Usize)?;
                 expect_type(function, *value, VmType::Text)?;
@@ -8120,6 +8707,238 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 )?;
                 read(&states, *value)?;
                 write(&mut states, *dst)?;
+            }
+            VmInstruction::ArrayUtf8ValidUpTo { dst, value } => {
+                expect_type(function, *dst, VmType::Usize)?;
+                expect_type(
+                    function,
+                    *value,
+                    VmType::Reference {
+                        unique: false,
+                        referent: Box::new(VmType::Array(Box::new(VmType::U8))),
+                    },
+                )?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::ArrayPushUtf8Char { value, character } => {
+                expect_type(function, *value, VmType::Reference { unique: true, referent: Box::new(VmType::Array(Box::new(VmType::U8))) })?;
+                expect_type(function, *character, VmType::Char)?;
+                read(&states, *value)?;
+                read(&states, *character)?;
+                states.registers[*character as usize] = Some(false);
+            }
+            VmInstruction::ArrayInsertUtf8FromSlice {
+                dst,
+                value,
+                index,
+                source,
+                start,
+                length,
+            } => {
+                expect_type(function, *dst, VmType::Usize)?;
+                expect_type(function, *value, VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(VmType::U8))),
+                })?;
+                expect_type(function, *index, VmType::Usize)?;
+                expect_type(function, *source, VmType::Reference {
+                    unique: false,
+                    referent: Box::new(VmType::Array(Box::new(VmType::U8))),
+                })?;
+                expect_type(function, *start, VmType::Usize)?;
+                expect_type(function, *length, VmType::Usize)?;
+                read(&states, *value)?;
+                read(&states, *index)?;
+                read(&states, *source)?;
+                read(&states, *start)?;
+                read(&states, *length)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::ArrayPopUtf8Char { dst, value } => {
+                expect_type(function, *dst, VmType::Tuple(vec![VmType::Char, VmType::Usize]))?;
+                expect_type(function, *value, VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(VmType::U8))),
+                })?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::ArrayUtf8CharAt { dst, value, start, length, index } => {
+                expect_type(function, *dst, VmType::Tuple(vec![VmType::Char, VmType::Usize]))?;
+                expect_type(function, *value, VmType::Reference {
+                    unique: false,
+                    referent: Box::new(VmType::Array(Box::new(VmType::U8))),
+                })?;
+                for register in [*value, *start, *length, *index] {
+                    read(&states, register)?;
+                }
+                expect_type(function, *start, VmType::Usize)?;
+                expect_type(function, *length, VmType::Usize)?;
+                expect_type(function, *index, VmType::Usize)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::ArrayExtendFromSlice {
+                value,
+                source,
+                start,
+                length,
+                element_type,
+            } => {
+                expect_type(
+                    function,
+                    *value,
+                    VmType::Reference {
+                        unique: true,
+                        referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                    },
+                )?;
+                expect_type(
+                    function,
+                    *source,
+                    VmType::Reference {
+                        unique: false,
+                        referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                    },
+                )?;
+                expect_type(function, *start, VmType::Usize)?;
+                expect_type(function, *length, VmType::Usize)?;
+                read(&states, *value)?;
+                read(&states, *source)?;
+                read(&states, *start)?;
+                read(&states, *length)?;
+            }
+            VmInstruction::ArrayInsertMove {
+                value,
+                index,
+                item,
+                element_type,
+            } => {
+                expect_type(function, *value, VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                })?;
+                expect_type(function, *index, VmType::Usize)?;
+                expect_type(function, *item, element_type.clone())?;
+                read(&states, *value)?;
+                read(&states, *index)?;
+                read(&states, *item)?;
+                states.registers[*item as usize] = Some(false);
+            }
+            VmInstruction::ArrayRemoveMove {
+                dst,
+                value,
+                index,
+                element_type,
+            } => {
+                expect_type(function, *dst, element_type.clone())?;
+                expect_type(function, *value, VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                })?;
+                expect_type(function, *index, VmType::Usize)?;
+                read(&states, *value)?;
+                read(&states, *index)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::ArrayAppendMove {
+                value,
+                source,
+                element_type,
+            } => {
+                expect_type(function, *value, VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                })?;
+                expect_type(function, *source, VmType::Array(Box::new(element_type.clone())))?;
+                read(&states, *value)?;
+                read(&states, *source)?;
+                states.registers[*source as usize] = Some(false);
+            }
+            VmInstruction::ArrayTruncateDiscard {
+                value,
+                length,
+                element_type,
+            } => {
+                expect_type(function, *value, VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                })?;
+                expect_type(function, *length, VmType::Usize)?;
+                read(&states, *value)?;
+                read(&states, *length)?;
+            }
+            VmInstruction::ArrayReverseMove {
+                value,
+                element_type,
+            } => {
+                expect_type(function, *value, VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                })?;
+                read(&states, *value)?;
+            }
+            VmInstruction::ArraySplitOffMove {
+                dst,
+                value,
+                index,
+                element_type,
+            } => {
+                expect_type(function, *dst, VmType::Array(Box::new(element_type.clone())))?;
+                expect_type(function, *value, VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                })?;
+                expect_type(function, *index, VmType::Usize)?;
+                read(&states, *value)?;
+                read(&states, *index)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::ArraySplitBorrowUnique {
+                dst,
+                value,
+                start,
+                length,
+                index,
+                element_type,
+            } => {
+                let array = VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                };
+                expect_type(function, *dst, VmType::Tuple(vec![array.clone(), array.clone()]))?;
+                expect_type(function, *value, array)?;
+                for register in [start, length, index] {
+                    expect_type(function, *register, VmType::Usize)?;
+                    read(&states, *register)?;
+                }
+                read(&states, *value)?;
+                write(&mut states, *dst)?;
+            }
+            VmInstruction::ArrayInsertFromSlice {
+                value,
+                index,
+                source,
+                start,
+                length,
+                element_type,
+            } => {
+                expect_type(function, *value, VmType::Reference {
+                    unique: true,
+                    referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                })?;
+                expect_type(function, *index, VmType::Usize)?;
+                expect_type(function, *source, VmType::Reference {
+                    unique: false,
+                    referent: Box::new(VmType::Array(Box::new(element_type.clone()))),
+                })?;
+                expect_type(function, *start, VmType::Usize)?;
+                expect_type(function, *length, VmType::Usize)?;
+                read(&states, *value)?;
+                read(&states, *index)?;
+                read(&states, *source)?;
+                read(&states, *start)?;
+                read(&states, *length)?;
             }
             VmInstruction::ArrayGetCopy {
                 dst,
@@ -9487,8 +10306,37 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                     states.reference_origins[*dst as usize] = states.reference_origins[*reference as usize].clone();
                 }
             }
-            VmInstruction::DerefStore { reference, src } => {
+            VmInstruction::DerefMove { dst, reference } => {
                 read(&states, *reference)?;
+                let VmType::Reference {
+                    unique: true,
+                    referent,
+                } = register_type(function, *reference)?
+                else {
+                    return Err(VmArtifactError::TypeMismatch {
+                        register: *reference,
+                        expected: VmType::Reference {
+                            unique: true,
+                            referent: Box::new(VmType::Unit),
+                        },
+                        found: register_type(function, *reference)?,
+                    });
+                };
+                expect_type(function, *dst, *referent)?;
+                write(&mut states, *dst)?;
+                states.labels[*dst as usize] = states.labels[*reference as usize];
+                states.resumptions[*dst as usize] = states.resumptions[*reference as usize];
+                // Hold the unique loan itself while its referent is absent.
+                // Every normal read of the reference now fails until the
+                // accompanying DerefStore reinitializes it.
+                states.registers[*reference as usize] = Some(false);
+            }
+            VmInstruction::DerefStore { reference, src } => {
+                match states.registers.get(*reference as usize).copied() {
+                    Some(Some(_)) => {}
+                    Some(None) => return Err(VmArtifactError::ReadBeforeWrite { register: *reference }),
+                    None => return Err(VmArtifactError::InvalidRegister { register: *reference }),
+                }
                 read(&states, *src)?;
                 // `ResumeSnapshot` authenticates an exact live handler
                 // frame, but an indirect store has no frozen provenance slot
@@ -9526,6 +10374,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                         return Err(VmArtifactError::ReadBeforeWrite { register: origin });
                     }
                 }
+                states.registers[*reference as usize] = Some(true);
             }
             VmInstruction::NotBool { dst, value } => {
                 read(&states, *value)?;
@@ -9998,6 +10847,18 @@ fn validate_vm_generic_arguments(values: &[VmGenericArgument]) -> Result<(), VmA
 fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
     match value {
         VmType::Array(value) => validate_vm_type(value),
+        VmType::StaticData {
+            element,
+            alignment,
+            ..
+        } => {
+            if *alignment == 0 || !alignment.is_power_of_two() {
+                return Err(VmArtifactError::MalformedEncoding {
+                    message: "static-data type has invalid alignment",
+                });
+            }
+            validate_vm_type(element)
+        }
         VmType::Tuple(values) => values.iter().try_for_each(validate_vm_type),
         VmType::Nominal { arguments, .. } => arguments
             .iter()
@@ -10554,6 +11415,27 @@ fn expect_type(
         })
     }
 }
+
+fn expect_static_u8_type(function: &VmFunction, register: u32) -> Result<(), VmArtifactError> {
+    let found = register_type(function, register)?;
+    if matches!(
+        found,
+        VmType::StaticData { ref element, tag: crate::STATIC_UTF8_DATA_TAG | crate::STATIC_RAW_U8_DATA_TAG, alignment: 1 }
+            if **element == VmType::U8
+    ) {
+        Ok(())
+    } else {
+        Err(VmArtifactError::TypeMismatch {
+            register,
+            expected: VmType::StaticData {
+                element: Box::new(VmType::U8),
+                tag: crate::STATIC_UTF8_DATA_TAG,
+                alignment: 1,
+            },
+            found,
+        })
+    }
+}
 fn same_type(function: &VmFunction, destination: u32, source: u32) -> Result<(), VmArtifactError> {
     let expected = register_type(function, destination)?;
     let found = register_type(function, source)?;
@@ -10625,11 +11507,19 @@ enum VmValue {
     Char(char),
     Text(Arc<str>),
     Bytes(Arc<[u8]>),
+    StaticData {
+        tag: u128,
+        alignment: u32,
+        bytes: Arc<[u8]>,
+        offset: usize,
+        length: usize,
+    },
     Tuple(Arc<[VmValue]>),
     Array {
         values: Arc<[VmValue]>,
         capacity: usize,
     },
+    StaticArray { bytes: Arc<[u8]>, offset: usize, length: usize },
     Record {
         definition: DefKey,
         fields: Arc<[VmValue]>,
@@ -10784,10 +11674,16 @@ impl VmValue {
             Self::Char(_) => VmType::Char,
             Self::Text(_) => VmType::Text,
             Self::Bytes(_) => VmType::Bytes,
+            Self::StaticData { tag, alignment, .. } => VmType::StaticData {
+                element: Box::new(VmType::U8),
+                tag: *tag,
+                alignment: *alignment,
+            },
             Self::Tuple(values) => VmType::Tuple(values.iter().map(VmValue::ty).collect()),
             Self::Array { values, .. } => VmType::Array(Box::new(
                 values.first().map(VmValue::ty).unwrap_or(VmType::Unit),
             )),
+            Self::StaticArray { .. } => VmType::Array(Box::new(VmType::U8)),
             Self::Record { signature, .. } => signature.clone(),
             Self::Enum { signature, .. } => signature.clone(),
             Self::Callable { signature, .. } => signature.clone(),
@@ -10810,6 +11706,15 @@ fn project_reference(value: &VmValue, fields: &[u32]) -> Result<VmValue, VmArtif
     let values: &[VmValue] = match value {
         VmValue::Tuple(values) => values,
         VmValue::Array { values, .. } => values,
+        VmValue::StaticArray { bytes, offset, length } => {
+            let value = bytes
+                .get(*offset..offset.saturating_add(*length))
+                .and_then(|bytes| bytes.get(*field as usize))
+                .copied()
+                .map(VmValue::U8)
+                .ok_or(VmArtifactError::InvalidRegister { register: *field })?;
+            return project_reference(&value, rest);
+        }
         VmValue::Record { fields, .. } | VmValue::Enum { fields, .. } => fields,
         value => {
             return Err(VmArtifactError::ResultType {
@@ -10855,6 +11760,7 @@ fn store_reference(
                 capacity: *capacity,
             })
         }
+        VmValue::StaticArray { .. } => return Err(VmArtifactError::UnsupportedEscapingUniqueReference),
         VmValue::Record {
             definition,
             fields: old,
@@ -10959,15 +11865,17 @@ fn reference_target<'a>(
         ReferenceTarget::Caller {
             caller_depth,
             register,
-        } => callers
-            .len()
-            .checked_sub(*caller_depth as usize + 1)
-            .and_then(|index| callers.get(index))
-            .and_then(|caller| caller.registers.get(*register as usize))
-            .and_then(Option::as_ref)
-            .ok_or(VmArtifactError::InvalidRegister {
+        } => {
+            let value = callers
+                .len()
+                .checked_sub(*caller_depth as usize + 1)
+                .and_then(|index| callers.get(index))
+                .and_then(|caller| caller.registers.get(*register as usize))
+                .and_then(Option::as_ref);
+            value.ok_or(VmArtifactError::InvalidRegister {
                 register: *register,
-            }),
+            })
+        }
         ReferenceTarget::Captured(value) => Ok(value),
     }
 }
@@ -11037,6 +11945,74 @@ fn referenced_array(
             found: found.ty(),
         }),
     }
+}
+
+fn referenced_array_len(registers: &[Option<VmValue>], callers: &[RuntimeProgramCaller], reference: &VmValue) -> Result<usize, VmArtifactError> {
+    let VmValue::Reference { target, fields, .. } = reference else { return Err(VmArtifactError::InvalidRegister { register: 0 }); };
+    match project_reference(reference_target(registers, callers, target)?, fields)? {
+        VmValue::Array { values, .. } => Ok(values.len()),
+        VmValue::StaticArray { length, .. } => Ok(length),
+        found => Err(VmArtifactError::ResultType { expected: VmType::Array(Box::new(VmType::Unit)), found: found.ty() }),
+    }
+}
+
+fn referenced_array_get(registers: &[Option<VmValue>], callers: &[RuntimeProgramCaller], reference: &VmValue, index: usize) -> Result<VmValue, VmArtifactError> {
+    let VmValue::Reference { target, fields, .. } = reference else { return Err(VmArtifactError::InvalidRegister { register: 0 }); };
+    match project_reference(reference_target(registers, callers, target)?, fields)? {
+        VmValue::Array { values, .. } => values.get(index).cloned().ok_or(VmArtifactError::InvalidRegister { register: index as u32 }),
+        VmValue::StaticArray { bytes, offset, length } => bytes
+            .get(offset..offset.saturating_add(length)).and_then(|bytes| bytes.get(index)).copied()
+            .map(VmValue::U8).ok_or(VmArtifactError::InvalidRegister { register: index as u32 }),
+        found => Err(VmArtifactError::ResultType { expected: VmType::Array(Box::new(VmType::Unit)), found: found.ty() }),
+    }
+}
+
+/// Return the prefix before the first malformed or incomplete UTF-8 sequence
+/// without materializing an intermediate `Bytes` value. This is the runtime
+/// half of std's `String::from_utf8(Vec<u8>)` leaf and works for both ordinary
+/// arrays and the read-only static-array facade.
+fn referenced_array_utf8_valid_prefix(
+    registers: &[Option<VmValue>],
+    callers: &[RuntimeProgramCaller],
+    reference: &VmValue,
+) -> Result<usize, VmArtifactError> {
+    let length = referenced_array_len(registers, callers, reference)?;
+    let byte = |index| match referenced_array_get(registers, callers, reference, index)? {
+        VmValue::U8(value) => Ok(value),
+        found => Err(VmArtifactError::ResultType {
+            expected: VmType::U8,
+            found: found.ty(),
+        }),
+    };
+    let mut index = 0;
+    while index < length {
+        let first = byte(index)?;
+        let (following, second_range) = match first {
+            0x00..=0x7f => {
+                index += 1;
+                continue;
+            }
+            0xc2..=0xdf => (1, 0x80..=0xbf),
+            0xe0 => (2, 0xa0..=0xbf),
+            0xed => (2, 0x80..=0x9f),
+            0xe1..=0xec | 0xee..=0xef => (2, 0x80..=0xbf),
+            0xf0 => (3, 0x90..=0xbf),
+            0xf1..=0xf3 => (3, 0x80..=0xbf),
+            0xf4 => (3, 0x80..=0x8f),
+            _ => return Ok(index),
+        };
+        let Some(end) = index.checked_add(following + 1).filter(|end| *end <= length) else {
+            return Ok(index);
+        };
+        if !second_range.contains(&byte(index + 1)?) {
+            return Ok(index);
+        }
+        if (index + 2..end).any(|position| !matches!(byte(position), Ok(0x80..=0xbf))) {
+            return Ok(index);
+        }
+        index = end;
+    }
+    Ok(length)
 }
 
 fn replace_referenced_array(
@@ -11134,7 +12110,8 @@ fn execute_array_primitive(
         VmInstruction::ArrayNew {
             dst, length, fill, ..
         } => {
-            let length = index(*length, registers)?;
+            let length_value = *length;
+            let length = index(length_value, registers)?;
             budget.reserve_value("array elements", length)?;
             let fill = registers[*fill as usize]
                 .as_ref()
@@ -11153,14 +12130,13 @@ fn execute_array_primitive(
         }
         VmInstruction::ArrayLen { dst, value, .. } => {
             registers[*dst as usize] = Some(VmValue::Usize(
-                referenced_array(
+                referenced_array_len(
                     registers,
                     callers,
                     registers[*value as usize]
                         .as_ref()
                         .ok_or(VmArtifactError::InvalidRegister { register: *value })?,
-                )?
-                .len() as u64,
+                )? as u64,
             ));
         }
         VmInstruction::ArrayCapacity { dst, value, .. } => {
@@ -11170,10 +12146,12 @@ fn execute_array_primitive(
             let VmValue::Reference { target, fields, .. } = reference else {
                 return Err(VmArtifactError::InvalidRegister { register: *value });
             };
-            let VmValue::Array { capacity, .. } =
+            let capacity = match
                 project_reference(reference_target(registers, callers, target)?, fields)?
-            else {
-                return Err(VmArtifactError::InvalidRegister { register: *value });
+            {
+                VmValue::Array { capacity, .. } => capacity,
+                VmValue::StaticArray { length, .. } => length,
+                _ => return Err(VmArtifactError::InvalidRegister { register: *value }),
             };
             registers[*dst as usize] = Some(VmValue::Usize(capacity as u64));
         }
@@ -11183,21 +12161,8 @@ fn execute_array_primitive(
             index: position,
             ..
         } => {
-            let values = referenced_array(
-                registers,
-                callers,
-                registers[*value as usize]
-                    .as_ref()
-                    .ok_or(VmArtifactError::InvalidRegister { register: *value })?,
-            )?;
-            registers[*dst as usize] = Some(
-                values
-                    .get(index(*position, registers)?)
-                    .ok_or(VmArtifactError::InvalidRegister {
-                        register: *position,
-                    })?
-                    .clone(),
-            );
+            let reference = registers[*value as usize].as_ref().ok_or(VmArtifactError::InvalidRegister { register: *value })?;
+            registers[*dst as usize] = Some(referenced_array_get(registers, callers, reference, index(*position, registers)?)?);
         }
         VmInstruction::ArrayGetMove {
             dst,
@@ -11231,18 +12196,19 @@ fn execute_array_primitive(
             let reference = registers[*value as usize]
                 .as_ref()
                 .ok_or(VmArtifactError::InvalidRegister { register: *value })?;
-            let values = referenced_array(registers, callers, reference)?;
-            values
-                .get(position)
-                .ok_or(VmArtifactError::InvalidRegister {
-                    register: position as u32,
-                })?;
-            registers[*dst as usize] = Some(array_element_borrow(
-                reference,
-                position as u32,
-                *unique,
-                element_type,
-            )?);
+            let VmValue::Reference { target, fields, .. } = reference else { return Err(VmArtifactError::InvalidRegister { register: *value }); };
+            match project_reference(reference_target(registers, callers, target)?, fields)? {
+                VmValue::Array { values, .. } => {
+                    values.get(position).ok_or(VmArtifactError::InvalidRegister { register: position as u32 })?;
+                    registers[*dst as usize] = Some(array_element_borrow(reference, position as u32, *unique, element_type)?);
+                }
+                VmValue::StaticArray { .. } => {
+                    if *unique { return Err(VmArtifactError::UnsupportedEscapingUniqueReference); }
+                    let value = referenced_array_get(registers, callers, reference, position)?;
+                    registers[*dst as usize] = Some(VmValue::Reference { target: ReferenceTarget::Captured(Arc::new(value)), fields: Arc::from([]), unique: false, referent: element_type.clone() });
+                }
+                _ => return Err(VmArtifactError::InvalidRegister { register: *value }),
+            }
         }
         VmInstruction::ArraySetMove {
             value,
@@ -11278,6 +12244,311 @@ fn execute_array_primitive(
                     .ok_or(VmArtifactError::InvalidRegister { register: *item })?,
             );
             replace_referenced_array(registers, callers, &reference, values, budget)?;
+        }
+        VmInstruction::ArrayPushUtf8Char { value, character } => {
+            let reference = registers[*value as usize].as_ref().ok_or(VmArtifactError::InvalidRegister { register: *value })?.clone();
+            let character_register = *character;
+            let character = expect_char(registers[character_register as usize].as_ref().ok_or(VmArtifactError::InvalidRegister { register: character_register })?)?;
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            let mut encoded = [0; 4];
+            values.extend(character.encode_utf8(&mut encoded).bytes().map(VmValue::U8));
+            registers[character_register as usize] = None;
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
+        }
+        VmInstruction::ArrayInsertUtf8FromSlice { dst, value, index: position, source, start, length } => {
+            let destination_reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let position = index(*position, registers)?;
+            let source_reference = registers[*source as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *source })?;
+            let start = index(*start, registers)?;
+            let length_register = *length;
+            let length = index(length_register, registers)?;
+            let end = start.checked_add(length).ok_or(VmArtifactError::InvalidRegister {
+                register: length_register,
+            })?;
+            if end > referenced_array_len(registers, callers, source_reference)? {
+                return Err(VmArtifactError::InvalidRegister { register: *source });
+            }
+            let copied = (start..end)
+                .map(|index| referenced_array_get(registers, callers, source_reference, index))
+                .collect::<Result<Vec<_>, _>>()?;
+            let destination_length = referenced_array_len(registers, callers, &destination_reference)?;
+            let boundary = if position > destination_length {
+                false
+            } else if position == 0 || position == destination_length {
+                true
+            } else {
+                let byte = expect_u8(&referenced_array_get(
+                    registers,
+                    callers,
+                    &destination_reference,
+                    position,
+                )?)?;
+                byte < 128 || byte >= 192
+            };
+            if boundary {
+                let mut values = referenced_array(registers, callers, &destination_reference)?.to_vec();
+                budget.reserve_value("array elements", values.len().saturating_add(copied.len()))?;
+                values.splice(position..position, copied);
+                replace_referenced_array(registers, callers, &destination_reference, values, budget)?;
+            }
+            registers[*dst as usize] = Some(VmValue::Usize(u64::from(boundary)));
+        }
+        VmInstruction::ArrayPopUtf8Char { dst, value } => {
+            let reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            let (character, present) = if values.is_empty() {
+                ('\0', false)
+            } else {
+                let bytes = values.iter().map(expect_u8).collect::<Result<Vec<_>, _>>()?;
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|_| VmArtifactError::InvalidRegister { register: *value })?;
+                let character = text.chars().next_back().expect("nonempty UTF-8 text");
+                values.truncate(values.len().saturating_sub(character.len_utf8()));
+                (character, true)
+            };
+            if present {
+                replace_referenced_array(registers, callers, &reference, values, budget)?;
+            }
+            registers[*dst as usize] = Some(VmValue::Tuple(
+                Arc::from([VmValue::Char(character), VmValue::Usize(u64::from(present))]),
+            ));
+        }
+        VmInstruction::ArrayUtf8CharAt { dst, value, start, length, index: position } => {
+            let reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?;
+            let start = index(*start, registers)?;
+            let length_register = *length;
+            let length = index(length_register, registers)?;
+            let end = start.checked_add(length).ok_or(VmArtifactError::InvalidRegister {
+                register: length_register,
+            })?;
+            if end > referenced_array_len(registers, callers, reference)? {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            }
+            let position_register = *position;
+            let position = index(position_register, registers)?;
+            let (character, width) = if position >= length {
+                ('\0', 0)
+            } else {
+                let bytes = (start..end)
+                    .map(|index| referenced_array_get(registers, callers, reference, index))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .iter()
+                    .map(expect_u8)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let text = std::str::from_utf8(&bytes)
+                    .map_err(|_| VmArtifactError::InvalidRegister { register: *value })?;
+                let suffix = text.get(position..).ok_or(VmArtifactError::InvalidRegister {
+                    register: position_register,
+                })?;
+                let character = suffix.chars().next().ok_or(VmArtifactError::InvalidRegister {
+                    register: position_register,
+                })?;
+                (character, character.len_utf8())
+            };
+            registers[*dst as usize] = Some(VmValue::Tuple(
+                Arc::from([VmValue::Char(character), VmValue::Usize(width as u64)]),
+            ));
+        }
+        VmInstruction::ArrayExtendFromSlice { value, source, start, length, .. } => {
+            // Snapshot the source before replacing the destination. This also
+            // gives deterministic behavior if a trusted caller supplies two
+            // views of the same backing allocation.
+            let source_reference = registers[*source as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *source })?
+                .clone();
+            let start = index(*start, registers)?;
+            let length_register = *length;
+            let length = index(length_register, registers)?;
+            let end = start.checked_add(length).ok_or(VmArtifactError::InvalidRegister {
+                register: length as u32,
+            })?;
+            if end > referenced_array_len(registers, callers, &source_reference)? {
+                return Err(VmArtifactError::InvalidRegister { register: *source });
+            }
+            let copied = (start..end)
+                .map(|index| referenced_array_get(registers, callers, &source_reference, index))
+                .collect::<Result<Vec<_>, _>>()?;
+            let destination_reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let mut values = referenced_array(registers, callers, &destination_reference)?.to_vec();
+            budget.reserve_value("array elements", values.len().saturating_add(copied.len()))?;
+            values.extend(copied);
+            replace_referenced_array(registers, callers, &destination_reference, values, budget)?;
+        }
+        VmInstruction::ArrayInsertMove { value, index: position, item, .. } => {
+            let reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let position = index(*position, registers)?;
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            if position > values.len() {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            }
+            budget.reserve_value("array elements", values.len().saturating_add(1))?;
+            let item = registers[*item as usize]
+                .take()
+                .ok_or(VmArtifactError::InvalidRegister { register: *item })?;
+            values.insert(position, item);
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
+        }
+        VmInstruction::ArrayRemoveMove { dst, value, index: position, .. } => {
+            let reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let position = index(*position, registers)?;
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            if position >= values.len() {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            }
+            let removed = values.remove(position);
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
+            registers[*dst as usize] = Some(removed);
+        }
+        VmInstruction::ArrayAppendMove { value, source, .. } => {
+            let reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let source_register = *source;
+            let source_value = registers[source_register as usize]
+                .take()
+                .ok_or(VmArtifactError::InvalidRegister { register: source_register })?;
+            let VmValue::Array { values: source, .. } = source_value else {
+                return Err(VmArtifactError::InvalidRegister { register: source_register });
+            };
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            budget.reserve_value("array elements", values.len().saturating_add(source.len()))?;
+            values.extend(source.iter().cloned());
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
+        }
+        VmInstruction::ArrayTruncateDiscard { value, length, .. } => {
+            let reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let length = index(*length, registers)?;
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            values.truncate(length);
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
+        }
+        VmInstruction::ArrayReverseMove { value, .. } => {
+            let reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            values.reverse();
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
+        }
+        VmInstruction::ArraySplitOffMove { dst, value, index: position, .. } => {
+            let reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let position = index(*position, registers)?;
+            let mut values = referenced_array(registers, callers, &reference)?.to_vec();
+            if position > values.len() {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            }
+            let suffix = values.split_off(position);
+            let capacity = suffix.len();
+            replace_referenced_array(registers, callers, &reference, values, budget)?;
+            registers[*dst as usize] = Some(VmValue::Array {
+                values: suffix.into(),
+                capacity,
+            });
+        }
+        VmInstruction::ArraySplitBorrowUnique {
+            dst,
+            value,
+            start,
+            length,
+            index: split,
+            ..
+        } => {
+            let reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let VmValue::Reference {
+                target,
+                fields,
+                unique: true,
+                referent,
+            } = reference
+            else {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            };
+            let start = index(*start, registers)?;
+            let length_register = *length;
+            let length = index(length_register, registers)?;
+            let split = index(*split, registers)?;
+            let end = start.checked_add(length).ok_or(VmArtifactError::InvalidRegister {
+                register: length_register,
+            })?;
+            if split > length || end > referenced_array_len(registers, callers, &VmValue::Reference {
+                target: target.clone(), fields: fields.clone(), unique: true, referent: referent.clone(),
+            })? {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            }
+            // The compiler verifies the private array-window leaf identity and
+            // `SliceMut` keeps its own start/length fields. The two reference
+            // carriers intentionally share one allocation, but source code
+            // cannot forge or widen either private view.
+            let make_window = || VmValue::Reference {
+                target: target.clone(),
+                fields: fields.clone(),
+                unique: true,
+                referent: referent.clone(),
+            };
+            registers[*dst as usize] = Some(VmValue::Tuple(
+                vec![make_window(), make_window()].into(),
+            ));
+        }
+        VmInstruction::ArrayInsertFromSlice { value, index: position, source, start, length, .. } => {
+            let source_reference = registers[*source as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *source })?
+                .clone();
+            let position = index(*position, registers)?;
+            let start = index(*start, registers)?;
+            let length_register = *length;
+            let length = index(length_register, registers)?;
+            let end = start.checked_add(length).ok_or(VmArtifactError::InvalidRegister {
+                register: length_register,
+            })?;
+            if end > referenced_array_len(registers, callers, &source_reference)? {
+                return Err(VmArtifactError::InvalidRegister { register: *source });
+            }
+            let copied = (start..end)
+                .map(|index| referenced_array_get(registers, callers, &source_reference, index))
+                .collect::<Result<Vec<_>, _>>()?;
+            let destination_reference = registers[*value as usize]
+                .as_ref()
+                .ok_or(VmArtifactError::InvalidRegister { register: *value })?
+                .clone();
+            let mut values = referenced_array(registers, callers, &destination_reference)?.to_vec();
+            if position > values.len() {
+                return Err(VmArtifactError::InvalidRegister { register: *value });
+            }
+            budget.reserve_value("array elements", values.len().saturating_add(copied.len()))?;
+            values.splice(position..position, copied);
+            replace_referenced_array(registers, callers, &destination_reference, values, budget)?;
         }
         VmInstruction::ArrayPopMove { dst, value, .. } => {
             let reference = registers[*value as usize]
@@ -11504,11 +12775,13 @@ fn rebase_caller_references(value: VmValue, caller_depth: u32) -> Result<VmValue
     }
 }
 
-/// Move a value across an ordinary call boundary. Shared references retain the
-/// existing immutable capture behavior; unique references instead retain a
-/// live caller-frame target so stores in either frame address the same owner.
-/// A unique reference into a callee-local register is not permitted to escape
-/// on return, preserving the source lifetime boundary.
+/// Move a value across an ordinary call boundary. Shared references rooted in
+/// the current frame retain the existing immutable snapshot behavior, while
+/// references already rooted in a caller frame must be rebased live: they are
+/// reborrows of a caller-owned loan, not new snapshots. Unique references are
+/// always live caller-frame targets so stores in either frame address the same
+/// owner. A unique reference into a callee-local register is not permitted to
+/// escape on return, preserving the source lifetime boundary.
 fn transfer_call_frame_value(
     value: &VmValue,
     registers: &[Option<VmValue>],
@@ -11516,7 +12789,12 @@ fn transfer_call_frame_value(
 ) -> Result<VmValue, VmArtifactError> {
     match value {
         VmValue::Reference {
-            unique: true,
+            unique: false,
+            target: ReferenceTarget::Register(_) | ReferenceTarget::Captured(_),
+            ..
+        } => freeze_frame_value(value, registers),
+        VmValue::Reference {
+            unique,
             target,
             fields,
             referent,
@@ -11557,6 +12835,12 @@ fn transfer_call_frame_value(
                     caller_depth: caller_depth - 1,
                     register: *register,
                 },
+                // Captured/static shared storage already has a frame-neutral
+                // identity. Unlike a lexical register it needs no rebasing
+                // at an ordinary call boundary.
+                (_, ReferenceTarget::Captured(value)) if !*unique => {
+                    ReferenceTarget::Captured(value.clone())
+                }
                 (_, ReferenceTarget::Captured(_))
                 | (UniqueReferenceTransfer::ToCaller, ReferenceTarget::Register(_)) => {
                     return Err(VmArtifactError::UnsupportedEscapingUniqueReference);
@@ -11565,11 +12849,10 @@ fn transfer_call_frame_value(
             Ok(VmValue::Reference {
                 target,
                 fields: fields.clone(),
-                unique: true,
+                unique: *unique,
                 referent: referent.clone(),
             })
         }
-        VmValue::Reference { .. } => freeze_frame_value(value, registers),
         VmValue::Tuple(values) => Ok(VmValue::Tuple(
             values
                 .iter()
@@ -11638,6 +12921,10 @@ fn format_vm_value(value: &VmValue) -> String {
         VmValue::Char(value) => format!("{value:?}"),
         VmValue::Text(value) => format!("{value:?}"),
         VmValue::Bytes(value) => format!("{value:?}"),
+        VmValue::StaticData { tag, alignment, bytes, offset, length } => {
+            let end = offset.saturating_add(*length).min(bytes.len());
+            format!("static<{tag:#x}, align {alignment}>({:?})", &bytes[*offset..end])
+        }
         VmValue::Tuple(values) => format!(
             "({})",
             values
@@ -11654,6 +12941,10 @@ fn format_vm_value(value: &VmValue) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
+        VmValue::StaticArray { bytes, offset, length } => {
+            let end = offset.saturating_add(*length).min(bytes.len());
+            format!("{:?}", &bytes[*offset..end])
+        }
         VmValue::Record {
             definition, fields, ..
         } => format!(
@@ -12493,6 +13784,27 @@ fn expect_text(value: impl Borrow<VmValue>) -> Result<Arc<str>, VmArtifactError>
         }),
     }
 }
+fn expect_static_utf8(
+    value: impl Borrow<VmValue>,
+) -> Result<(Arc<[u8]>, usize, usize), VmArtifactError> {
+    match value.borrow() {
+        VmValue::StaticData {
+            tag: crate::STATIC_UTF8_DATA_TAG | crate::STATIC_RAW_U8_DATA_TAG,
+            alignment: 1,
+            bytes,
+            offset,
+            length,
+        } => Ok((bytes.clone(), *offset, *length)),
+        value => Err(VmArtifactError::ResultType {
+            expected: VmType::StaticData {
+                element: Box::new(VmType::U8),
+                tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                alignment: 1,
+            },
+            found: value.ty(),
+        }),
+    }
+}
 fn compare_i64_values(left: i64, right: i64, op: VmCompare) -> bool {
     match op {
         VmCompare::Equal => left == right,
@@ -12658,6 +13970,15 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
         VmType::Char => matches!(value, VmValue::Char(_)),
         VmType::Text => matches!(value, VmValue::Text(_)),
         VmType::Bytes => matches!(value, VmValue::Bytes(_)),
+        VmType::StaticData {
+            element,
+            tag,
+            alignment,
+        } => matches!(value, VmValue::StaticData {
+            tag: value_tag,
+            alignment: value_alignment,
+            ..
+        } if element.as_ref() == &VmType::U8 && tag == value_tag && alignment == value_alignment),
         VmType::Tuple(expected) => {
             matches!(value, VmValue::Tuple(values) if values.len() == expected.len() && values.iter().zip(expected).all(|(value, ty)| value_matches_vm_type(value, ty)))
         }
@@ -12689,6 +14010,17 @@ fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
         VmType::Array(expected) => {
             matches!(actual, VmType::Array(actual) if vm_type_matches(actual, expected))
         }
+        VmType::StaticData {
+            element: expected_element,
+            tag: expected_tag,
+            alignment: expected_alignment,
+        } => matches!(actual, VmType::StaticData {
+            element: actual_element,
+            tag: actual_tag,
+            alignment: actual_alignment,
+        } if actual_tag == expected_tag
+            && actual_alignment == expected_alignment
+            && vm_type_matches(actual_element, expected_element)),
         VmType::Tuple(expected) => {
             matches!(actual, VmType::Tuple(actual) if actual.len() == expected.len() && actual.iter().zip(expected).all(|(actual, expected)| vm_type_matches(actual, expected)))
         }
@@ -13046,6 +14378,63 @@ fn execute(
                 budget.reserve_value("text bytes", value.len())?;
                 registers[dst as usize] = Some(VmValue::Text(Arc::from(value)));
             }
+            VmInstruction::ConstStaticData {
+                dst,
+                tag,
+                alignment,
+                bytes,
+            } => {
+                budget.reserve_value("static-data bytes", bytes.len())?;
+                let length = bytes.len();
+                registers[dst as usize] = Some(VmValue::StaticData {
+                    tag,
+                    alignment,
+                    bytes: Arc::from(bytes),
+                    offset: 0,
+                    length,
+                });
+            }
+            VmInstruction::StaticLen { dst, value } => {
+                let (_, _, length) = expect_static_utf8(
+                    registers[value as usize].as_ref().expect("verified register"),
+                )?;
+                registers[dst as usize] = Some(VmValue::Usize(length as u64));
+            }
+            VmInstruction::StaticSubslice { dst, value, start, length } => {
+                let (bytes, offset, available) = expect_static_utf8(
+                    registers[value as usize].as_ref().expect("verified register"),
+                )?;
+                let start = expect_usize(registers[start as usize].as_ref().expect("verified register"))? as usize;
+                let length = expect_usize(registers[length as usize].as_ref().expect("verified register"))? as usize;
+                let end = start.checked_add(length).filter(|end| *end <= available)
+                    .ok_or(VmArtifactError::InvalidRegister { register: start as u32 })?;
+                registers[dst as usize] = Some(VmValue::StaticData {
+                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                    alignment: 1,
+                    bytes,
+                    offset: offset + start,
+                    length: end - start,
+                });
+            }
+            VmInstruction::StaticGetBorrowShared { dst, value, index } => {
+                let (bytes, offset, length) = expect_static_utf8(
+                    registers[value as usize].as_ref().expect("verified register"),
+                )?;
+                let index = expect_usize(registers[index as usize].as_ref().expect("verified register"))? as usize;
+                let byte = *bytes.get(offset.checked_add(index).filter(|_| index < length).ok_or(
+                    VmArtifactError::InvalidRegister { register: index as u32 },
+                )?).ok_or(VmArtifactError::InvalidRegister { register: index as u32 })?;
+                registers[dst as usize] = Some(VmValue::Reference {
+                    target: ReferenceTarget::Captured(Arc::new(VmValue::U8(byte))),
+                    fields: Arc::from([]),
+                    unique: false,
+                    referent: VmType::U8,
+                });
+            }
+            VmInstruction::StaticAsArrayBorrow { dst, value } => {
+                let (bytes, offset, length) = expect_static_utf8(registers[value as usize].as_ref().expect("verified register"))?;
+                registers[dst as usize] = Some(VmValue::Reference { target: ReferenceTarget::Captured(Arc::new(VmValue::StaticArray { bytes, offset, length })), fields: Arc::from([]), unique: false, referent: VmType::Array(Box::new(VmType::U8)) });
+            }
             VmInstruction::TextByteLen { dst, value } => {
                 let text = expect_text(
                     registers[value as usize]
@@ -13237,6 +14626,14 @@ fn execute(
                 )?;
                 registers[dst as usize] = Some(VmValue::Usize(valid_utf8_prefix(&bytes) as u64));
             }
+            VmInstruction::ArrayUtf8ValidUpTo { dst, value } => {
+                let valid = referenced_array_utf8_valid_prefix(
+                    &registers,
+                    &[],
+                    registers[value as usize].as_ref().expect("verified register"),
+                )?;
+                registers[dst as usize] = Some(VmValue::Usize(valid as u64));
+            }
             VmInstruction::Blake3 { dst, value } => {
                 let bytes = expect_bytes(
                     registers[value as usize].as_ref().expect("verified register"),
@@ -13254,6 +14651,19 @@ fn execute(
             | VmInstruction::ArraySetMove { .. }
             | VmInstruction::ArrayEmpty { .. }
             | VmInstruction::ArrayPushMove { .. }
+            | VmInstruction::ArrayPushUtf8Char { .. }
+            | VmInstruction::ArrayInsertUtf8FromSlice { .. }
+            | VmInstruction::ArrayPopUtf8Char { .. }
+            | VmInstruction::ArrayUtf8CharAt { .. }
+            | VmInstruction::ArrayExtendFromSlice { .. }
+            | VmInstruction::ArrayInsertMove { .. }
+            | VmInstruction::ArrayRemoveMove { .. }
+            | VmInstruction::ArrayAppendMove { .. }
+            | VmInstruction::ArrayTruncateDiscard { .. }
+            | VmInstruction::ArrayReverseMove { .. }
+            | VmInstruction::ArraySplitOffMove { .. }
+            | VmInstruction::ArraySplitBorrowUnique { .. }
+            | VmInstruction::ArrayInsertFromSlice { .. }
             | VmInstruction::ArrayPopMove { .. }
             | VmInstruction::ArrayCapacity { .. }
             | VmInstruction::ArrayReserve { .. }
@@ -14130,6 +15540,23 @@ fn execute(
                     fields,
                 )?);
             }
+            VmInstruction::DerefMove { dst, reference } => {
+                let VmValue::Reference { target, fields, .. } = registers[reference as usize]
+                    .as_ref()
+                    .expect("verified register")
+                else {
+                    return Err(VmArtifactError::InvalidRegister { register: reference });
+                };
+                // The verifier has made the unique loan unreadable until its
+                // matching store. Runtime storage can retain the old value in
+                // that interval because no verified instruction can observe
+                // it; cloning here is representation sharing, not language
+                // copying.
+                registers[dst as usize] = Some(project_reference(
+                    reference_target(&registers, &[], target)?,
+                    fields,
+                )?);
+            }
             VmInstruction::DerefStore { reference, src } => {
                 let VmValue::Reference {
                     target,
@@ -14990,12 +16417,49 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmInstruction::ArrayUtf8CharAt { dst, value, start, length, index } => {
+            output.push(192);
+            for register in [dst, value, start, length, index] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+        }
         VmInstruction::ConstText { dst, value } => {
             output.push(24);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&(value.len() as u64).to_le_bytes());
             output.extend_from_slice(value.as_bytes());
         }
+        VmInstruction::ConstStaticData {
+            dst,
+            tag,
+            alignment,
+            bytes,
+        } => {
+            output.push(175);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&tag.to_le_bytes());
+            output.extend_from_slice(&alignment.to_le_bytes());
+            output.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+            output.extend_from_slice(bytes);
+        }
+        VmInstruction::StaticLen { dst, value } => {
+            output.push(176);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::StaticSubslice { dst, value, start, length } => {
+            output.push(177);
+            for value in [dst, value, start, length] {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        VmInstruction::StaticGetBorrowShared { dst, value, index } => {
+            output.push(178);
+            for value in [dst, value, index] {
+                output.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        VmInstruction::StaticAsArrayBorrow { dst, value } => { output.push(179); output.extend_from_slice(&dst.to_le_bytes()); output.extend_from_slice(&value.to_le_bytes()); }
         VmInstruction::MakeTuple { dst, fields } => {
             output.push(33);
             output.extend_from_slice(&dst.to_le_bytes());
@@ -15258,6 +16722,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
         }
         VmInstruction::DerefCopy { dst, reference } => {
             output.push(53);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&reference.to_le_bytes());
+        }
+        VmInstruction::DerefMove { dst, reference } => {
+            output.push(174);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&reference.to_le_bytes());
         }
@@ -15540,6 +17009,137 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.push(140);
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
+            encode_type(element_type, output);
+        }
+        VmInstruction::ArrayUtf8ValidUpTo { dst, value } => {
+            output.push(180);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::ArrayPushUtf8Char { value, character } => {
+            output.push(181);
+            output.extend_from_slice(&value.to_le_bytes());
+            output.extend_from_slice(&character.to_le_bytes());
+        }
+        VmInstruction::ArrayInsertUtf8FromSlice {
+            dst,
+            value,
+            index,
+            source,
+            start,
+            length,
+        } => {
+            output.push(187);
+            for register in [dst, value, index, source, start, length] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+        }
+        VmInstruction::ArrayTruncateDiscard {
+            value,
+            length,
+            element_type,
+        } => {
+            output.push(188);
+            output.extend_from_slice(&value.to_le_bytes());
+            output.extend_from_slice(&length.to_le_bytes());
+            encode_type(element_type, output);
+        }
+        VmInstruction::ArrayReverseMove { value, element_type } => {
+            output.push(189);
+            output.extend_from_slice(&value.to_le_bytes());
+            encode_type(element_type, output);
+        }
+        VmInstruction::ArraySplitOffMove {
+            dst,
+            value,
+            index,
+            element_type,
+        } => {
+            output.push(190);
+            for register in [dst, value, index] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+            encode_type(element_type, output);
+        }
+        VmInstruction::ArraySplitBorrowUnique {
+            dst,
+            value,
+            start,
+            length,
+            index,
+            element_type,
+        } => {
+            output.push(193);
+            for register in [dst, value, start, length, index] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+            encode_type(element_type, output);
+        }
+        VmInstruction::ArrayPopUtf8Char { dst, value } => {
+            output.push(191);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
+        VmInstruction::ArrayExtendFromSlice {
+            value,
+            source,
+            start,
+            length,
+            element_type,
+        } => {
+            output.push(182);
+            output.extend_from_slice(&value.to_le_bytes());
+            output.extend_from_slice(&source.to_le_bytes());
+            output.extend_from_slice(&start.to_le_bytes());
+            output.extend_from_slice(&length.to_le_bytes());
+            encode_type(element_type, output);
+        }
+        VmInstruction::ArrayInsertMove {
+            value,
+            index,
+            item,
+            element_type,
+        } => {
+            output.push(183);
+            for register in [value, index, item] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+            encode_type(element_type, output);
+        }
+        VmInstruction::ArrayRemoveMove {
+            dst,
+            value,
+            index,
+            element_type,
+        } => {
+            output.push(184);
+            for register in [dst, value, index] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
+            encode_type(element_type, output);
+        }
+        VmInstruction::ArrayAppendMove {
+            value,
+            source,
+            element_type,
+        } => {
+            output.push(185);
+            output.extend_from_slice(&value.to_le_bytes());
+            output.extend_from_slice(&source.to_le_bytes());
+            encode_type(element_type, output);
+        }
+        VmInstruction::ArrayInsertFromSlice {
+            value,
+            index,
+            source,
+            start,
+            length,
+            element_type,
+        } => {
+            output.push(186);
+            for register in [value, index, source, start, length] {
+                output.extend_from_slice(&register.to_le_bytes());
+            }
             encode_type(element_type, output);
         }
         VmInstruction::ArrayGetCopy {
@@ -16192,6 +17792,62 @@ fn execute_with_arguments_with_host(
                 budget.reserve_value("text bytes", value.len())?;
                 registers[*dst as usize] = Some(VmValue::Text(Arc::from(value.as_str())));
             }
+            VmInstruction::ConstStaticData {
+                dst,
+                tag,
+                alignment,
+                bytes,
+            } => {
+                budget.reserve_value("static-data bytes", bytes.len())?;
+                registers[*dst as usize] = Some(VmValue::StaticData {
+                    tag: *tag,
+                    alignment: *alignment,
+                    bytes: Arc::from(bytes.as_slice()),
+                    offset: 0,
+                    length: bytes.len(),
+                });
+            }
+            VmInstruction::StaticLen { dst, value } => {
+                let (_, _, length) = expect_static_utf8(
+                    registers[*value as usize].as_ref().expect("verified register"),
+                )?;
+                registers[*dst as usize] = Some(VmValue::Usize(length as u64));
+            }
+            VmInstruction::StaticSubslice { dst, value, start, length } => {
+                let (bytes, offset, available) = expect_static_utf8(
+                    registers[*value as usize].as_ref().expect("verified register"),
+                )?;
+                let start = expect_usize(registers[*start as usize].as_ref().expect("verified register"))? as usize;
+                let length = expect_usize(registers[*length as usize].as_ref().expect("verified register"))? as usize;
+                let end = start.checked_add(length).filter(|end| *end <= available)
+                    .ok_or(VmArtifactError::InvalidRegister { register: start as u32 })?;
+                registers[*dst as usize] = Some(VmValue::StaticData {
+                    tag: 0x4752_414e_4449_4f53_455f_5354_4154_4943,
+                    alignment: 1,
+                    bytes,
+                    offset: offset + start,
+                    length: end - start,
+                });
+            }
+            VmInstruction::StaticGetBorrowShared { dst, value, index } => {
+                let (bytes, offset, length) = expect_static_utf8(
+                    registers[*value as usize].as_ref().expect("verified register"),
+                )?;
+                let index = expect_usize(registers[*index as usize].as_ref().expect("verified register"))? as usize;
+                let byte = *bytes.get(offset.checked_add(index).filter(|_| index < length).ok_or(
+                    VmArtifactError::InvalidRegister { register: index as u32 },
+                )?).ok_or(VmArtifactError::InvalidRegister { register: index as u32 })?;
+                registers[*dst as usize] = Some(VmValue::Reference {
+                    target: ReferenceTarget::Captured(Arc::new(VmValue::U8(byte))),
+                    fields: Arc::from([]),
+                    unique: false,
+                    referent: VmType::U8,
+                });
+            }
+            VmInstruction::StaticAsArrayBorrow { dst, value } => {
+                let (bytes, offset, length) = expect_static_utf8(registers[*value as usize].as_ref().expect("verified register"))?;
+                registers[*dst as usize] = Some(VmValue::Reference { target: ReferenceTarget::Captured(Arc::new(VmValue::StaticArray { bytes, offset, length })), fields: Arc::from([]), unique: false, referent: VmType::Array(Box::new(VmType::U8)) });
+            }
             VmInstruction::TextByteLen { dst, value } => {
                 let text = expect_text(
                     registers[*value as usize]
@@ -16385,6 +18041,14 @@ fn execute_with_arguments_with_host(
                 )?;
                 registers[*dst as usize] = Some(VmValue::Usize(valid_utf8_prefix(&bytes) as u64));
             }
+            VmInstruction::ArrayUtf8ValidUpTo { dst, value } => {
+                let valid = referenced_array_utf8_valid_prefix(
+                    &registers,
+                    &callers,
+                    registers[*value as usize].as_ref().expect("verified register"),
+                )?;
+                registers[*dst as usize] = Some(VmValue::Usize(valid as u64));
+            }
             VmInstruction::Blake3 { dst, value } => {
                 let bytes = expect_bytes(
                     registers[*value as usize]
@@ -16404,6 +18068,19 @@ fn execute_with_arguments_with_host(
             | VmInstruction::ArraySetMove { .. }
             | VmInstruction::ArrayEmpty { .. }
             | VmInstruction::ArrayPushMove { .. }
+            | VmInstruction::ArrayPushUtf8Char { .. }
+            | VmInstruction::ArrayInsertUtf8FromSlice { .. }
+            | VmInstruction::ArrayPopUtf8Char { .. }
+            | VmInstruction::ArrayUtf8CharAt { .. }
+            | VmInstruction::ArrayExtendFromSlice { .. }
+            | VmInstruction::ArrayInsertMove { .. }
+            | VmInstruction::ArrayRemoveMove { .. }
+            | VmInstruction::ArrayAppendMove { .. }
+            | VmInstruction::ArrayTruncateDiscard { .. }
+            | VmInstruction::ArrayReverseMove { .. }
+            | VmInstruction::ArraySplitOffMove { .. }
+            | VmInstruction::ArraySplitBorrowUnique { .. }
+            | VmInstruction::ArrayInsertFromSlice { .. }
             | VmInstruction::ArrayPopMove { .. }
             | VmInstruction::ArrayCapacity { .. }
             | VmInstruction::ArrayReserve { .. }
@@ -17346,6 +19023,25 @@ fn execute_with_arguments_with_host(
                 };
                 registers[*dst as usize] = Some(value);
             }
+            VmInstruction::DerefMove { dst, reference } => {
+                let VmValue::Reference { target, fields, .. } = registers[*reference as usize]
+                    .as_ref()
+                    .expect("verified register")
+                else {
+                    return Err(VmArtifactError::InvalidRegister { register: *reference });
+                };
+                let value = project_reference(
+                    reference_target(&registers, &callers, target)?,
+                    fields,
+                )?;
+                let value = match target {
+                    ReferenceTarget::Caller { caller_depth, .. } => {
+                        rebase_caller_references(value, *caller_depth)?
+                    }
+                    ReferenceTarget::Register(_) | ReferenceTarget::Captured(_) => value,
+                };
+                registers[*dst as usize] = Some(value);
+            }
             VmInstruction::DerefStore { reference, src } => {
                 let VmValue::Reference {
                     target,
@@ -17361,10 +19057,25 @@ fn execute_with_arguments_with_host(
                     });
                 };
                 let (target, fields) = (target.clone(), fields.clone());
-                let replacement = registers[*src as usize]
+                let mut replacement = registers[*src as usize]
                     .as_ref()
                     .expect("verified register")
                     .clone();
+                // `DerefCopy` rebases references nested inside a value read
+                // from a caller frame into this callee's coordinate system.
+                // Before writing that aggregate back through the same caller
+                // reference, translate those nested paths in the other
+                // direction. Otherwise the stored aggregate retains a
+                // caller-depth that is one frame too large on its next use.
+                if let ReferenceTarget::Caller { caller_depth, .. } = target {
+                    for _ in 0..=caller_depth {
+                        replacement = transfer_call_frame_value(
+                            &replacement,
+                            &registers,
+                            UniqueReferenceTransfer::ToCaller,
+                        )?;
+                    }
+                }
                 store_reference_target(
                     &mut registers,
                     &mut callers,

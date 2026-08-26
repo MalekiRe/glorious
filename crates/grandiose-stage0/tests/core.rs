@@ -98,6 +98,13 @@ fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
 }
 
 #[test]
+fn generic_record_view_over_a_direct_array_borrow_is_elaborated() {
+    let source = "struct View<'a, T> { storage: &'a Array<T> } pub fn main<T>(storage: &Array<T>) -> View<'_, T> { View<'_, T> { storage: storage } }";
+    let core = core_for("generic-array-view@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+}
+
+#[test]
 fn typed_core_contextualizes_late_generic_integer_literals_from_prior_arguments() {
     for (name, float, bits, mask, scalar) in [
         (
@@ -718,7 +725,7 @@ fn typed_core_rejects_parent_only_inherited_type_effect_and_const_projections() 
 
 #[test]
 fn typed_core_materializes_defaulted_nominal_items_before_partial_move_analysis() {
-    let source = "struct Token {} struct Packet<T> { head: T, tail: i64 } trait Mark: Use<[0, 0]> {} impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } trait Family { type Item<T> = Packet<T>; } impl Family for i64 {} fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
+    let source = "struct Token {} struct Packet<T> { head: T, tail: i64 } trait Mark: Use<[0, 1]> {} impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } trait Family { type Item<T> = Packet<T>; } impl Family for i64 {} fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
     let core = core_for("core-defaulted-nominal-partial-move@0.1.0", source);
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
     assert_eq!(core.expression(core.root).ty, Type::Scalar(ScalarType::I64));
@@ -4134,10 +4141,10 @@ fn canonical_option_some_alias_lowers_to_its_enum_constructor() {
 }
 
 #[test]
-fn contextual_if_accepts_structurally_zero_use_condition_payloads() {
+fn contextual_if_accepts_affine_condition_payloads() {
     let core = core_for(
         "core-contextual-if-structural-use@0.1.0",
-        "enum Result<T, E> { Ok(T), Err(E) } if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E> where F: Fn<(), Output = B>, A: Use<[0, 0]> { condition } pub fn main() -> Result<i64, ()> { if(Result::Ok(())) { 7 } }",
+        "enum Result<T, E> { Ok(T), Err(E) } if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E> where F: Fn<(), Output = B>, A: Use<[0, 1]> { condition } pub fn main() -> Result<i64, ()> { if(Result::Ok(())) { 7 } }",
     );
     assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
 }

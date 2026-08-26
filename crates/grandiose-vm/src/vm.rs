@@ -15,7 +15,7 @@ use crate::{
     value::{
         AggregateValue, ArenaObject, ArrayValue, CallableValue, ControlHandle, HandlerValue,
         ReclamationScope, ReferenceTarget, ResumptionValue, RuntimeFrame, RuntimeLabel, SlotStore,
-        Value, reclamation_diagnostic_counts,
+        StaticDataValue, Value, reclamation_diagnostic_counts,
     },
     verify::{ExecutionImage, ImageConstant, VerifiedArtifact, VerifyError, verify},
 };
@@ -1413,7 +1413,17 @@ impl Vm {
                     // of building an iterator state machine and heap Vec on
                     // every dispatch. Variable-arity array and byte helpers
                     // retain the exact old left-to-right collection path.
-                    let v = match args.as_slice() {
+                    let v = if matches!(
+                        op,
+                        Primitive::StaticLen | Primitive::StaticSubslice | Primitive::StaticGetShared
+                    ) {
+                        let values = args
+                            .iter()
+                            .map(|register| get(frame, *register))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        static_data_primitive(a, result_type, op, &values)?
+                    } else {
+                        match args.as_slice() {
                         // The self-hosted compiler spends much of its time in
                         // checked machine-word arithmetic.  Verification has
                         // already fixed both operand and result
@@ -1539,6 +1549,7 @@ impl Vm {
                                 .collect::<Result<Vec<_>, _>>()?;
                             primitive_typed_first_type(a, result_type, op, first_arg_type, &values)?
                         }
+                        }
                     };
                     put(frame, dst, v)?;
                     frame.pc += 1;
@@ -1565,7 +1576,7 @@ impl Vm {
                                 .ok_or(RuntimeError::TypeConfusion)?;
                             let index = id.index();
                             if cache[index].is_none() {
-                                cache[index] = Some(constant_value(image.constant(id))?);
+                                cache[index] = Some(constant_value(image.constant(id), id.index() as u32)?);
                             }
                             if value == *cache[index].as_ref().unwrap() {
                                 target = *case_target;
@@ -3178,6 +3189,7 @@ impl Vm {
             | Value::F64(_)
             | Value::Text(_)
             | Value::Bytes(_)
+            | Value::StaticData(_)
             | Value::Reference { .. } => {}
             Value::Place(_) => unreachable!("places are unwrapped before destruction"),
         }
@@ -3208,6 +3220,7 @@ fn runtime_value_kind(value: &Value) -> &'static str {
         Value::F64(_) => "f64",
         Value::Text(_) => "text",
         Value::Bytes(_) => "bytes",
+        Value::StaticData(_) => "static-data",
         Value::Place(_) => "place",
         Value::Array(_) => "array",
         Value::Reference { .. } => "reference",
@@ -3580,6 +3593,15 @@ fn copy_reference_target(
             .and_then(Option::as_ref)
             .cloned()
             .ok_or(RuntimeError::TypeConfusion)?,
+        ReferenceTarget::StaticDataElement { data, index } => {
+            let offset = data
+                .offset
+                .checked_add(*index)
+                .ok_or(RuntimeError::TypeConfusion)?;
+            Value::U64(u64::from(
+                *data.bytes.get(offset).ok_or(RuntimeError::TypeConfusion)?,
+            ))
+        }
         ReferenceTarget::Aggregate(aggregate) => Value::Aggregate(aggregate.clone()),
         ReferenceTarget::AggregateField { aggregate, field } => aggregate
             .try_borrow()
@@ -3624,7 +3646,9 @@ fn observe_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeEr
             .and_then(Option::as_ref)
             .cloned()
             .ok_or(RuntimeError::TypeConfusion)?,
-        ReferenceTarget::Array(_) | ReferenceTarget::Aggregate(_) => {
+        ReferenceTarget::Array(_)
+        | ReferenceTarget::Aggregate(_)
+        | ReferenceTarget::StaticDataElement { .. } => {
             return Err(RuntimeError::TypeConfusion);
         }
     };
@@ -3745,7 +3769,9 @@ fn reference_target_enum_tag(target: &ReferenceTarget) -> Result<u32, RuntimeErr
                     .ok_or(RuntimeError::TypeConfusion)?,
             )
         }
-        ReferenceTarget::Array(_) => Err(RuntimeError::TypeConfusion),
+        ReferenceTarget::Array(_) | ReferenceTarget::StaticDataElement { .. } => {
+            Err(RuntimeError::TypeConfusion)
+        }
     }
 }
 
@@ -3782,6 +3808,7 @@ fn take_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeError
             .get_mut(*index)
             .and_then(Option::take)
             .ok_or(RuntimeError::TypeConfusion),
+        ReferenceTarget::StaticDataElement { .. } => Err(RuntimeError::TypeConfusion),
         ReferenceTarget::Aggregate(aggregate) => {
             let mut aggregate = aggregate
                 .try_borrow_mut()
@@ -3878,6 +3905,7 @@ fn store_reference_target(target: &ReferenceTarget, value: Value) -> Result<(), 
             }
             *slot = Some(value);
         }
+        ReferenceTarget::StaticDataElement { .. } => return Err(RuntimeError::TypeConfusion),
     }
     Ok(())
 }
@@ -4957,6 +4985,10 @@ fn remap_shared_reference_target(
                 .unwrap_or_else(|| array.clone()),
             index: *index,
         },
+        ReferenceTarget::StaticDataElement { data, index } => ReferenceTarget::StaticDataElement {
+            data: data.clone(),
+            index: *index,
+        },
         ReferenceTarget::Aggregate(aggregate) => context
             .aggregates
             .get(&aggregate.identity())
@@ -4998,16 +5030,40 @@ impl Vm {
         if let Some(value) = &cache[index] {
             return Ok(value.clone());
         }
-        let value = constant_value(a.constant(id))?;
+        let value = constant_value(a.constant(id), id.index() as u32)?;
         cache[index] = Some(value.clone());
         Ok(value)
     }
 }
 
-fn constant_value(c: ImageConstant<'_>) -> Result<Value, RuntimeError> {
+fn constant_value(c: ImageConstant<'_>, segment: u32) -> Result<Value, RuntimeError> {
     match c {
         ImageConstant::Text(text) => Ok(Value::Text(Rc::from(text))),
         ImageConstant::Bytes(bytes) => Ok(Value::Bytes(Rc::from(bytes))),
+        ImageConstant::StaticData {
+            tag,
+            alignment,
+            bytes,
+        } => Ok(Value::StaticData(Rc::new(StaticDataValue {
+            segment,
+            tag,
+            alignment,
+            bytes: Rc::from(bytes),
+            offset: 0,
+            length: bytes.len(),
+        }))),
+        ImageConstant::Inline(Constant::StaticData {
+            tag,
+            alignment,
+            bytes,
+        }) => Ok(Value::StaticData(Rc::new(StaticDataValue {
+            segment,
+            tag: *tag,
+            alignment: *alignment,
+            bytes: Rc::from(bytes.as_slice()),
+            offset: 0,
+            length: bytes.len(),
+        }))),
         ImageConstant::Inline(constant) => inline_constant_value(constant),
     }
 }
@@ -5032,6 +5088,9 @@ fn inline_constant_value(c: &Constant) -> Result<Value, RuntimeError> {
         Constant::Char(x) => Value::U64(u64::from(*x as u32)),
         Constant::Text(x) => Value::Text(Rc::from(x.as_str())),
         Constant::Bytes(x) => Value::Bytes(Rc::from(x.as_slice())),
+        Constant::StaticData { .. } => {
+            return Err(RuntimeError::TypeConfusion);
+        }
     })
 }
 fn value_matches(a: &ExecutionImage, v: &Value, ty: TypeId) -> bool {
@@ -5048,6 +5107,17 @@ fn value_matches(a: &ExecutionImage, v: &Value, ty: TypeId) -> bool {
         | (Type::F64, Value::F64(_))
         | (Type::Text, Value::Text(_))
         | (Type::Bytes, Value::Bytes(_)) => true,
+        (
+            Type::StaticData {
+                tag,
+                alignment,
+                ..
+            },
+            Value::StaticData(value),
+        ) => value.tag == *tag
+            && value.alignment == *alignment
+            && value.offset <= value.bytes.len()
+            && value.length <= value.bytes.len().saturating_sub(value.offset),
         (Type::I8, Value::I64(value)) => i8::try_from(*value).is_ok(),
         (Type::I16, Value::I64(value)) => i16::try_from(*value).is_ok(),
         (Type::I32, Value::I64(value)) => i32::try_from(*value).is_ok(),
@@ -5259,6 +5329,77 @@ fn runtime_field_index(
         })
 }
 
+/// Execute the sealed artifact-static-data leaves. The verifier establishes
+/// the matching hidden type tag and reference result; these dynamic checks
+/// retain that boundary for in-memory artifacts and hostile VM callers.
+fn static_data_primitive(
+    a: &ExecutionImage,
+    result_type: TypeId,
+    op: Primitive,
+    values: &[Value],
+) -> Result<Value, RuntimeError> {
+    match (op, values) {
+        (Primitive::StaticLen, [Value::StaticData(data)]) => u64::try_from(data.length)
+            .map(Value::U64)
+            .map_err(|_| RuntimeError::TypeConfusion),
+        (
+            Primitive::StaticSubslice,
+            [Value::StaticData(data), Value::U64(start), Value::U64(length)],
+        ) => {
+            let start = to_index(*start)?;
+            let length = to_index(*length)?;
+            let end = start.checked_add(length).ok_or(RuntimeError::IndexOutOfBounds)?;
+            if end > data.length {
+                return Err(RuntimeError::IndexOutOfBounds);
+            }
+            let Type::StaticData { tag, alignment, .. } = a
+                .checked_type(result_type)
+                .map(Type::representation)
+                .ok_or(RuntimeError::TypeConfusion)?
+            else {
+                return Err(RuntimeError::TypeConfusion);
+            };
+            if *tag != data.tag || *alignment != data.alignment {
+                return Err(RuntimeError::TypeConfusion);
+            }
+            let offset = data
+                .offset
+                .checked_add(start)
+                .ok_or(RuntimeError::IndexOutOfBounds)?;
+            Ok(Value::StaticData(Rc::new(StaticDataValue {
+                segment: data.segment,
+                tag: data.tag,
+                alignment: data.alignment,
+                bytes: data.bytes.clone(),
+                offset,
+                length,
+            })))
+        }
+        (Primitive::StaticGetShared, [Value::StaticData(data), Value::U64(index)]) => {
+            let index = to_index(*index)?;
+            if index >= data.length {
+                return Err(RuntimeError::IndexOutOfBounds);
+            }
+            let Type::RefShared { referent } = a
+                .checked_type(result_type)
+                .map(Type::representation)
+                .ok_or(RuntimeError::TypeConfusion)?
+            else {
+                return Err(RuntimeError::TypeConfusion);
+            };
+            Ok(Value::Reference {
+                referent_type: *referent,
+                unique: false,
+                target: ReferenceTarget::StaticDataElement {
+                    data: data.clone(),
+                    index,
+                },
+            })
+        }
+        _ => Err(RuntimeError::TypeConfusion),
+    }
+}
+
 fn primitive_typed(
     a: &ExecutionImage,
     result_type: TypeId,
@@ -5324,6 +5465,9 @@ fn primitive_typed(
             [Value::U64(value)] => Ok(Value::U64(*value)),
             _ => Err(RuntimeError::TypeConfusion),
         },
+        Primitive::StaticLen | Primitive::StaticSubslice | Primitive::StaticGetShared => {
+            static_data_primitive(a, result_type, op, v)
+        }
         Primitive::TextByteLen => match v {
             [Value::Text(x)] => Ok(Value::U64(x.len() as u64)),
             _ => Err(RuntimeError::TypeConfusion),
@@ -6911,6 +7055,7 @@ mod tests {
                 },
                 Instruction::Return { src: Some(4) },
             ],
+            required_features: 1,
             ..Artifact::default()
         };
         assert_eq!(
@@ -8201,6 +8346,68 @@ mod tests {
         assert_eq!(
             Vm::from_artifact(a).unwrap().run(0, vec![]).unwrap(),
             Value::U64(1)
+        );
+    }
+
+    #[test]
+    fn sealed_static_data_preserves_segment_tag_bounds_and_shared_access() {
+        let mut types = Type::predefined();
+        let static_bytes = types.len() as TypeId;
+        types.push(Type::StaticData {
+            element: U8,
+            tag: 0x4752_414e_4449_4f53_455f_5554_4638_0001,
+            alignment: 1,
+        });
+        let shared_u8 = types.len() as TypeId;
+        types.push(Type::RefShared { referent: U8 });
+        let artifact = Artifact {
+            types,
+            constants: vec![
+                Constant::Usize(1),
+                Constant::StaticData {
+                    tag: 0x4752_414e_4449_4f53_455f_5554_4638_0001,
+                    alignment: 1,
+                    bytes: b"xyz".to_vec(),
+                },
+            ],
+            functions: vec![Function {
+                flags: 0,
+                name: "main".into(),
+                params: vec![],
+                return_type: U8,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, static_bytes, USIZE, shared_u8, U8],
+                code_start: 0,
+                code_len: 6,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 1,
+                },
+                Instruction::Const {
+                    dst: 2,
+                    constant: 0,
+                },
+                Instruction::Primitive {
+                    dst: 3,
+                    op: Primitive::StaticGetShared,
+                    args: vec![1, 2],
+                },
+                Instruction::DerefCopy { dst: 4, src: 3 },
+                Instruction::EndBorrow { reference: 3 },
+                Instruction::Return { src: Some(4) },
+            ],
+            required_features: 1 | (1 << 1),
+            ..Artifact::default()
+        };
+        let encoded = artifact.encode();
+        let decoded = Artifact::decode(&encoded).expect("static data artifact must round-trip");
+        assert_eq!(
+            Vm::from_artifact(decoded).unwrap().run(0, vec![]).unwrap(),
+            Value::U64(b'y' as u64)
         );
     }
 

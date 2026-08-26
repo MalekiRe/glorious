@@ -156,7 +156,11 @@ fn maximal_capability_flags(ty: &Type) -> u8 {
         | Type::F64
         | Type::Char
         | Type::Text
-        | Type::Bytes => DUPLICABLE | ZERO_USE_ALLOWED,
+        | Type::Bytes
+        // Static data is immutable, segment-backed compiler data. It is
+        // deliberately a distinct representation from legacy Text/Bytes so
+        // public library views need not inherit compiler scalar types.
+        | Type::StaticData { .. } => DUPLICABLE | ZERO_USE_ALLOWED,
         Type::Array { .. } => 0,
         Type::RefUnique { .. } => ZERO_USE_ALLOWED,
         Type::RefShared { .. } => DUPLICABLE | ZERO_USE_ALLOWED,
@@ -206,6 +210,14 @@ pub enum Type {
     Char,
     Text,
     Bytes,
+    /// Hidden typed immutable artifact data. `tag` is a stable compiler type
+    /// identity (not a source spelling); `element` describes values exposed
+    /// by the sealed static-data access leaves.
+    StaticData {
+        element: TypeId,
+        tag: u128,
+        alignment: u32,
+    },
     Array {
         element: TypeId,
     },
@@ -354,6 +366,7 @@ impl Type {
                 | Self::Resumption { .. }
                 | Self::BindingPack { .. }
                 | Self::Available { .. }
+                | Self::StaticData { .. }
         )
     }
 }
@@ -395,6 +408,13 @@ pub enum Constant {
     Char(char),
     Text(String),
     Bytes(Vec<u8>),
+    /// One verified immutable data segment. Its constant-table index is the
+    /// segment identity; a runtime view adds only offset and length.
+    StaticData {
+        tag: u128,
+        alignment: u32,
+        bytes: Vec<u8>,
+    },
 }
 
 /// Supported subset of the frozen, type-generic primitive table.
@@ -469,6 +489,9 @@ pub enum Primitive {
     ArrayCapacity = 0x006a,
     ArrayReserve = 0x006b,
     ArrayFinishDrained = 0x006c,
+    StaticLen = 0x0070,
+    StaticSubslice = 0x0071,
+    StaticGetShared = 0x0072,
 }
 impl Primitive {
     pub fn from_u32(n: u32) -> Option<Self> {
@@ -541,6 +564,9 @@ impl Primitive {
             0x006a => Self::ArrayCapacity,
             0x006b => Self::ArrayReserve,
             0x006c => Self::ArrayFinishDrained,
+            0x0070 => Self::StaticLen,
+            0x0071 => Self::StaticSubslice,
+            0x0072 => Self::StaticGetShared,
             _ => return None,
         })
     }
@@ -614,7 +640,8 @@ pub(crate) fn primitive_result_type(op: Primitive, args: &[TypeId]) -> Option<Ty
         BytesUtf8ValidUpTo => (args == [BYTES]).then_some(USIZE),
         BytesFromArrayMove | BytesToArray | ArrayNew | ArrayLen | ArrayGetCopy | ArrayGetMove
         | ArrayGetBorrowShared | ArrayGetBorrowUnique | ArraySetMove | ArrayEmpty
-        | ArrayPushMove | ArrayPopMove | ArrayCapacity | ArrayReserve | ArrayFinishDrained => None,
+        | ArrayPushMove | ArrayPopMove | ArrayCapacity | ArrayReserve | ArrayFinishDrained
+        | StaticLen | StaticSubslice | StaticGetShared => None,
     }
 }
 
@@ -638,6 +665,14 @@ pub(crate) fn primitive_signature(
     };
     let unique_array_element = |id| match ty(id) {
         Some(Type::RefUnique { referent }) => array_element(*referent),
+        _ => None,
+    };
+    let static_data = |id| match ty(id) {
+        Some(Type::StaticData {
+            element,
+            tag,
+            alignment,
+        }) => Some((*element, *tag, *alignment)),
         _ => None,
     };
     use Primitive::*;
@@ -693,6 +728,16 @@ pub(crate) fn primitive_signature(
             unique_array_element(*array_ref).is_some() && result == UNIT
         }
         (ArrayFinishDrained, [array]) => array_element(*array).is_some() && result == UNIT,
+        (StaticLen, [value]) => static_data(*value).is_some() && result == USIZE,
+        (StaticSubslice, [value, USIZE, USIZE]) => {
+            static_data(*value).is_some() && static_data(*value) == static_data(result)
+        }
+        (StaticGetShared, [value, USIZE]) => {
+            let Some((element, _, _)) = static_data(*value) else {
+                return false;
+            };
+            matches!(ty(result), Some(Type::RefShared { referent }) if *referent == element)
+        }
         _ => false,
     }
 }
@@ -1022,6 +1067,7 @@ pub(crate) struct DecodedArtifact {
 pub(crate) enum EncodedConstantPayload {
     Text(Range<usize>),
     Bytes(Range<usize>),
+    StaticData(Range<usize>),
 }
 
 /// Dense immutable instruction storage used after verification. Variable
@@ -2278,6 +2324,17 @@ fn encode_types(
             let mut p = Vec::new();
             put_u32(&mut p, *element);
             rs.push(record(0x21, 0x10, p))
+        } else if let Type::StaticData {
+            element,
+            tag,
+            alignment,
+        } = t
+        {
+            let mut p = Vec::new();
+            put_u32(&mut p, *element);
+            p.extend(tag.to_le_bytes());
+            put_u32(&mut p, *alignment);
+            rs.push(record(0x2b, 0x11, p))
         } else if let Type::RefShared { referent } = t {
             let mut p = Vec::new();
             put_u32(&mut p, *referent);
@@ -2436,6 +2493,25 @@ fn decode_types(
                 0x24 => Type::RefShared { referent: target },
                 0x25 => Type::RefUnique { referent: target },
                 _ => unreachable!(),
+            })
+        } else if tag == 0x2b {
+            if flags & !USE_CAPABILITY_FLAGS != 0x11 & !USE_CAPABILITY_FLAGS
+                || flags & USE_CAPABILITY_FLAGS & !(DUPLICABLE | ZERO_USE_ALLOWED) != 0
+            {
+                return Err(DecodeError::InvalidTable("static data type flags"));
+            }
+            let mut r = Reader::new(p);
+            let element = r.u32()?;
+            let tag = u128::from_le_bytes(r.take(16)?.try_into().unwrap());
+            let alignment = r.u32()?;
+            if alignment == 0 || !alignment.is_power_of_two() {
+                return Err(DecodeError::InvalidTable("static data alignment"));
+            }
+            r.finish()?;
+            out.push(Type::StaticData {
+                element,
+                tag,
+                alignment,
             })
         } else if tag == 0x20 {
             if flags & !(USE_CAPABILITY_FLAGS | ZERO_SIZED) != 0 {
@@ -2680,6 +2756,7 @@ fn constant_tag(c: &Constant) -> u8 {
         Constant::Char(_) => 16,
         Constant::Text(_) => 17,
         Constant::Bytes(_) => 18,
+        Constant::StaticData { .. } => 19,
     }
 }
 
@@ -2778,6 +2855,16 @@ fn constant_wire_key(c: &Constant, names: &BTreeMap<String, u32>) -> (u8, Vec<u8
         Constant::Bytes(x) => {
             put_u32(&mut payload, x.len() as u32);
             payload.extend(x);
+        }
+        Constant::StaticData {
+            tag,
+            alignment,
+            bytes,
+        } => {
+            payload.extend(tag.to_le_bytes());
+            put_u32(&mut payload, *alignment);
+            put_u32(&mut payload, bytes.len() as u32);
+            payload.extend(bytes);
         }
     }
     (constant_tag(c), payload)
@@ -2883,6 +2970,26 @@ fn decode_constants(
                 } else {
                     Vec::new()
                 })
+            }
+            19 => {
+                let tag = u128::from_le_bytes(r.take(16)?.try_into().unwrap());
+                let alignment = r.u32()?;
+                if alignment == 0 || !alignment.is_power_of_two() {
+                    return Err(DecodeError::InvalidTable("static data alignment"));
+                }
+                let n = r.u32()? as usize;
+                let bytes = r.take(n)?;
+                let start = bytes.as_ptr() as usize - encoded.as_ptr() as usize;
+                encoded_payload = Some(EncodedConstantPayload::StaticData(start..start + n));
+                Constant::StaticData {
+                    tag,
+                    alignment,
+                    bytes: if materialize_payloads {
+                        bytes.to_vec()
+                    } else {
+                        Vec::new()
+                    },
+                }
             }
             _ => return Err(DecodeError::InvalidTable("constant tag")),
         };
@@ -4643,15 +4750,38 @@ fn infer_register_types(
             }
             for (pc, i) in ins.iter().enumerate() {
                 match i {
-                    Instruction::Const { dst, constant } => set(
-                        &mut t,
-                        *dst,
-                        const_type(
-                            constants
-                                .get(*constant as usize)
-                                .ok_or(DecodeError::InvalidTable("constant"))?,
-                        ),
-                    )?,
+                    Instruction::Const { dst, constant } => {
+                        let constant = constants
+                            .get(*constant as usize)
+                            .ok_or(DecodeError::InvalidTable("constant"))?;
+                        // Static data has a declaration-owned tag/type. Map
+                        // the segment to its unique sealed type-table entry;
+                        // this lets old compact artifacts reconstruct the
+                        // register type even when they omit explicit hints.
+                        if let Constant::StaticData { tag, alignment, .. } = constant {
+                            let matching = types
+                                .iter()
+                                .enumerate()
+                                .filter_map(|(index, ty)| {
+                                    matches!(
+                                        ty.representation(),
+                                        Type::StaticData {
+                                            tag: type_tag,
+                                            alignment: type_alignment,
+                                            ..
+                                        } if type_tag == tag && type_alignment == alignment
+                                    )
+                                    .then_some(index as TypeId)
+                                })
+                                .collect::<Vec<_>>();
+                            let [static_type] = matching.as_slice() else {
+                                return Err(DecodeError::InvalidTable("static data type"));
+                            };
+                            set(&mut t, *dst, *static_type)?;
+                        } else {
+                            set(&mut t, *dst, const_type(constant))?;
+                        }
+                    }
                     Instruction::Move { dst, src } | Instruction::Copy { dst, src } => {
                         match (t[*dst as usize], t[*src as usize]) {
                             (Some(x), _) => set(&mut t, *src, x)?,
@@ -6121,6 +6251,11 @@ fn const_type(c: &Constant) -> u32 {
         Constant::Char(_) => CHAR,
         Constant::Text(_) => TEXT,
         Constant::Bytes(_) => BYTES,
+        // Static-data constants require their artifact-declared hidden
+        // `Type::StaticData` identity, so format-only register inference
+        // cannot choose one without the type table. Artifacts containing one
+        // must carry frozen register type hints.
+        Constant::StaticData { .. } => u32::MAX,
     }
 }
 fn words_bytes(w: &[u32]) -> Vec<u8> {

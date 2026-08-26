@@ -663,7 +663,9 @@ fn owned_nominal_layout_cycle(
             .find_map(|element| owned_nominal_layout_cycle(element, signatures, active)),
         // Arrays are heap-backed in the Stage 0 VM. The remaining forms are
         // references or executable contracts, never inline nominal storage.
-        Type::Array(_) | Type::Reference { .. } | Type::Callable { .. } => None,
+        Type::Array(_) | Type::StaticData { .. } | Type::Reference { .. } | Type::Callable { .. } => {
+            None
+        }
         Type::Unit
         | Type::Never
         | Type::Scalar(_)
@@ -766,7 +768,9 @@ fn type_contains_generic_argument(value: &Type, argument: &GenericArgument) -> b
         Type::Tuple(values) => values
             .iter()
             .any(|current| type_contains_generic_argument(current, argument)),
-        Type::Array(value) => type_contains_generic_argument(value, argument),
+        Type::Array(value) | Type::StaticData { element: value, .. } => {
+            type_contains_generic_argument(value, argument)
+        }
         Type::Reference { referent, .. } => type_contains_generic_argument(referent, argument),
         Type::Callable {
             parameters,
@@ -985,6 +989,16 @@ impl ElaboratedInterface {
                 });
                 continue;
             };
+            if !declared.is_public_principal_use() {
+                diagnostics.push(SignatureDiagnostic {
+                    code: "G4194",
+                    message: format!(
+                        "manual `Use` interval {:?} is not a public principal contract; use [0, *], [0, 1], or [1, 1]",
+                        declared
+                    ),
+                });
+                continue;
+            }
             if !matches!(implementation.self_ty, Type::Nominal { .. }) {
                 diagnostics.push(SignatureDiagnostic {
                     code: "G4194",
@@ -1083,6 +1097,10 @@ impl ElaboratedInterface {
             // An array is moved as one aggregate, but every element must be
             // legal under that aggregate's interval.
             Type::Array(value) => self.principal_use(value, active),
+            // A static-data handle is immutable, sealed compiler data. It is
+            // freely reusable regardless of the element's ordinary ownership
+            // contract; raw handles never expose an owning element value.
+            Type::StaticData { .. } => Some(Quantity::UNRESTRICTED),
             Type::Reference { mutability, .. } => Some(match mutability {
                 Mutability::Shared => Quantity::UNRESTRICTED,
                 Mutability::Unique => Quantity::AFFINE,
@@ -2106,7 +2124,7 @@ impl ElaboratedInterface {
                     self.validate_type_projection_obligations(value, ambient, diagnostics);
                 }
             }
-            Type::Array(value) => {
+            Type::Array(value) | Type::StaticData { element: value, .. } => {
                 self.validate_type_projection_obligations(value, ambient, diagnostics)
             }
             Type::Reference { referent, .. } => {
@@ -4247,19 +4265,40 @@ impl Elaborator<'_> {
         self.bind_generics(&header.generics);
         let (where_bounds, where_associated_type_bindings, where_associated_effect_bindings) =
             self.callable_where_bounds(&header.where_bounds);
+        let parameters = header
+            .parameters
+            .iter()
+            .map(|parameter| self.ty(&parameter.ty))
+            .collect::<Vec<_>>();
+        let result = header
+            .result
+            .as_ref()
+            .map(|value| self.ty(value))
+            .unwrap_or(Type::Unit);
+        // Omitted lifetimes in a callable declaration are not independent
+        // anonymous regions. Each input spelling introduces one hidden
+        // callable-region binder, and an omitted result lifetime is tied to
+        // that binder when there is exactly one borrowed input. This is the
+        // ordinary elision rule behind APIs such as
+        // `Vec::get(&Vec<T>, usize) -> &T`; without it a source-level wrapper
+        // cannot return a borrow projected through a library collection.
+        if type_contains_elided_lifetime(&result)
+            && parameters
+                .iter()
+                .filter(|parameter| type_contains_elided_lifetime(parameter))
+                .count()
+                > 1
+        {
+            self.error(
+                "G3327",
+                "an elided output lifetime is ambiguous with multiple borrowed inputs".into(),
+            );
+        }
         CallableSignature {
             generics: header.generics.len() as u32,
             generic_kinds: header.generics.kinds(),
-            parameters: header
-                .parameters
-                .iter()
-                .map(|parameter| self.ty(&parameter.ty))
-                .collect(),
-            result: header
-                .result
-                .as_ref()
-                .map(|value| self.ty(value))
-                .unwrap_or(Type::Unit),
+            parameters,
+            result,
             effects: self.effect_row(&header.effects),
             invocation: Quantity::ONCE,
             where_bounds,
@@ -5517,6 +5556,41 @@ impl Elaborator<'_> {
                     }
                 };
             }
+            // The bundled standard library may spell the sealed backing
+            // handle in order to publish aliases such as `Str<'a>`.  It is
+            // never resolved for an application package, so ordinary source
+            // cannot construct a compiler static-data capability merely by
+            // copying this spelling.
+            if name == "__StaticData" && self.module.package.0 == "std@0.1.0" {
+                return match arguments.as_slice() {
+                    [HeaderGenericArgument::Type(element)] => {
+                        let tag = match element {
+                            HeaderType::Path(path) if path.as_slice() == ["Utf8Bytes"] => {
+                                crate::STATIC_UTF8_DATA_TAG
+                            }
+                            HeaderType::Path(path) if path.as_slice() == ["u8"] => {
+                                crate::STATIC_RAW_U8_DATA_TAG
+                            }
+                            _ => {
+                                self.error(
+                                    "G3305",
+                                    "`__StaticData` accepts only `Utf8Bytes` or `u8` in bundled std".into(),
+                                );
+                                return Type::Error;
+                            }
+                        };
+                        Type::StaticData {
+                            element: Box::new(Type::Scalar(crate::ScalarType::U8)),
+                            tag,
+                            alignment: 1,
+                        }
+                    }
+                    _ => {
+                        self.arity(name, 1, arguments.len());
+                        Type::Error
+                    }
+                };
+            }
         }
         match self
             .index
@@ -5563,21 +5637,52 @@ impl Elaborator<'_> {
     ) -> Option<Vec<GenericArgument>> {
         let kinds = self.index.type_generic_kinds(definition).unwrap_or(&[]);
         let defaults = self.index.type_generic_defaults(definition).unwrap_or(&[]);
-        if source.len() > kinds.len()
-            || (source.len()..kinds.len())
-                .any(|index| defaults.get(index).is_none_or(Option::is_none))
+        // Lifetime parameters are conventionally written first (`Slice<'a,
+        // T>`), but source elision must still permit `Slice<T>` and `Str`.
+        // If the first supplied argument is not a lifetime, elide the entire
+        // leading lifetime prefix before matching the remaining positional
+        // arguments. Explicit `Slice<'a, T>` continues to use that spelling
+        // unchanged.
+        let leading_elided = if matches!(source.first(), Some(HeaderGenericArgument::Lifetime(_)))
+        {
+            0
+        } else {
+            kinds
+                .iter()
+                .take_while(|kind| **kind == GenericKind::Lifetime)
+                .count()
+        };
+        let supplied_end = leading_elided + source.len();
+        if supplied_end > kinds.len()
+            || (supplied_end..kinds.len()).any(|index| {
+                // Omitted nominal lifetime slots are the declaration-level
+                // spelling of lifetime elision: `Str` means `Str<'_>`. A
+                // type/effect/const slot still needs an explicit argument or
+                // a declared default, so this cannot silently manufacture a
+                // generic collection element type.
+                kinds[index] != GenericKind::Lifetime
+                    && defaults.get(index).is_none_or(Option::is_none)
+            })
         {
             self.arity(name, kinds.len(), source.len());
             return None;
         }
-        let mut arguments =
-            self.elaborate_type_generic_arguments(name, source, &kinds[..source.len()]);
-        for index in source.len()..kinds.len() {
-            let default = defaults
-                .get(index)
-                .and_then(Option::as_ref)
-                .expect("missing nominal default was rejected above");
-            arguments.push(instantiate_nominal_default(default, &arguments));
+        let mut arguments = vec![GenericArgument::Lifetime(Lifetime::Elided); leading_elided];
+        arguments.extend(self.elaborate_type_generic_arguments(
+            name,
+            source,
+            &kinds[leading_elided..supplied_end],
+        ));
+        for index in supplied_end..kinds.len() {
+            if kinds[index] == GenericKind::Lifetime {
+                arguments.push(GenericArgument::Lifetime(Lifetime::Elided));
+            } else {
+                let default = defaults
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .expect("missing nominal default was rejected above");
+                arguments.push(instantiate_nominal_default(default, &arguments));
+            }
         }
         Some(arguments)
     }
@@ -5761,6 +5866,34 @@ impl Elaborator<'_> {
     }
     fn error(&mut self, code: &'static str, message: String) {
         self.diagnostics.push(SignatureDiagnostic { code, message });
+    }
+}
+
+fn type_contains_elided_lifetime(ty: &Type) -> bool {
+    match ty {
+        Type::Nominal { arguments, .. } => arguments.iter().any(|argument| match argument {
+            GenericArgument::Lifetime(Lifetime::Elided) => true,
+            GenericArgument::Type(ty) => type_contains_elided_lifetime(ty),
+            _ => false,
+        }),
+        Type::Reference { lifetime, referent, .. } => {
+            *lifetime == Lifetime::Elided || type_contains_elided_lifetime(referent)
+        }
+        Type::Tuple(values) => values.iter().any(type_contains_elided_lifetime),
+        Type::Array(value) => type_contains_elided_lifetime(value),
+        Type::Callable { parameters, result, .. } => {
+            parameters.iter().any(type_contains_elided_lifetime)
+                || type_contains_elided_lifetime(result)
+        }
+        Type::Projection { subject, trait_arguments, item_arguments, .. } => {
+            type_contains_elided_lifetime(subject)
+                || trait_arguments.iter().chain(item_arguments).any(|argument| {
+                    matches!(argument, GenericArgument::Lifetime(Lifetime::Elided))
+                        || matches!(argument, GenericArgument::Type(ty) if type_contains_elided_lifetime(ty))
+                })
+        }
+        Type::StaticData { element, .. } => type_contains_elided_lifetime(element),
+        _ => false,
     }
 }
 

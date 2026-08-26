@@ -1025,7 +1025,9 @@ fn contains_overlap_generic(value: &Type, index: u32, bindings: &OverlapBindings
         Type::Tuple(arguments) => arguments
             .iter()
             .any(|argument| contains_overlap_generic(argument, index, bindings)),
-        Type::Array(value) => contains_overlap_generic(&value, index, bindings),
+        Type::Array(value) | Type::StaticData { element: value, .. } => {
+            contains_overlap_generic(&value, index, bindings)
+        }
         Type::Reference { referent, .. } => contains_overlap_generic(&referent, index, bindings),
         Type::Projection {
             subject,

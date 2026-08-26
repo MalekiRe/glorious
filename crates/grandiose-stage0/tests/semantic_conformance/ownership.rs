@@ -210,10 +210,10 @@ fn semantic_plain_owned_argument_cannot_be_used_after_implicit_move() {
 }
 
 #[test]
-fn semantic_available_is_affine_intrinsic_evidence_with_zero_use_release() {
+fn semantic_available_is_affine_intrinsic_evidence_with_affine_erasure_release() {
     let source = r#"
         release<'e, E>(available: Available<'e, E>) ->
-        where E: Environment<'e>, E: Use<[0, 0]>
+        where E: Environment<'e>, E: Use<[0, 1]>
         {
             available_to_unit(available)
         }
@@ -223,7 +223,7 @@ fn semantic_available_is_affine_intrinsic_evidence_with_zero_use_release() {
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let missing_zero_use = r#"
+    let missing_affine_erasure = r#"
         release<'e, E>(available: Available<'e, E>) ->
         where E: Environment<'e>
         {
@@ -232,9 +232,9 @@ fn semantic_available_is_affine_intrinsic_evidence_with_zero_use_release() {
         pub main() -> i64 { 42 }
     "#;
     assert_semantic_rejection(
-        missing_zero_use,
-        "Available<E> release requires zero-use evidence",
-        &[&["available"], &["use", "zero", "[0,0]", "[0, 0]"]],
+        missing_affine_erasure,
+        "Available<E> release requires affine erasure evidence",
+        &[&["available"], &["use", "affine", "[0,1]", "[0, 1]"]],
     );
 }
 
@@ -328,21 +328,18 @@ fn semantic_manual_use_may_restrict_but_never_widen_structure() {
 }
 
 #[test]
-fn semantic_incompatible_structural_use_intervals_are_rejected() {
+fn semantic_zero_only_principal_use_is_rejected() {
     let source = r#"
         struct Erased {}
         impl Use<[0, 0]> for Erased {}
-        struct Linear {}
-        impl Use<[1, 1]> for Linear {}
-        struct Impossible { erased: Erased, linear: Linear }
         pub main() -> i64 { 42 }
     "#;
     assert_semantic_rejection(
         source,
-        "structural principal intervals must have a nonempty intersection",
+        "zero-only Use is not a public principal contract",
         &[
-            &["use", "principal", "quantity"],
-            &["intersection", "empty", "interval"],
+            &["use", "principal"],
+            &["[0, 0]", "[0,0]", "affine", "public"],
         ],
     );
 }

@@ -231,7 +231,9 @@ fn type_depth(value: &Type) -> usize {
                 .chain(item_arguments.iter().map(instance_argument_depth)),
         ),
         Type::Tuple(values) => nested_depth(values.iter().map(type_depth)),
-        Type::Array(value) => nested_depth([type_depth(value)]),
+        Type::Array(value) | Type::StaticData { element: value, .. } => {
+            nested_depth([type_depth(value)])
+        }
         Type::Reference { referent, .. } => nested_depth([type_depth(referent)]),
         Type::Callable {
             parameters,
@@ -331,7 +333,7 @@ fn is_concrete_type(value: &Type) -> bool {
         Type::Nominal { arguments, .. } => arguments.iter().all(is_concrete_generic_argument),
         Type::Tuple(arguments) => arguments.iter().all(is_concrete_type),
         Type::Projection { .. } => false,
-        Type::Array(element) => is_concrete_type(element),
+        Type::Array(element) | Type::StaticData { element, .. } => is_concrete_type(element),
         Type::Reference {
             lifetime, referent, ..
         } => {

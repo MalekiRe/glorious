@@ -2249,6 +2249,14 @@ impl Analyzer<'_> {
             };
             let Some(parent) = self.reference_loan_from_value_path(argument, &path.argument_fields)
             else {
+                // A call classified as `External` has proved that all of its
+                // reference leaves are static/external.  Forwarding one of
+                // those leaves needs no caller loan to keep alive; in
+                // particular this lets ordinary std wrappers project the
+                // backing reference of a static `Str` into a `Slice`.
+                if self.external_reference_path(argument) {
+                    continue;
+                }
                 self.error(
                     self.body.expression(argument).span,
                     "G5023",
@@ -2298,11 +2306,33 @@ impl Analyzer<'_> {
     fn reference_loan_from_value(&self, id: CoreId) -> Option<ProjectionLoan> {
         match &self.body.expression(id).kind {
             CoreKind::Borrow { unique, value } => {
-                self.projection(*value).map(|place| ProjectionLoan {
-                    place,
-                    unique: *unique,
-                    owner: None,
-                })
+                self.projection(*value)
+                    .map(|place| ProjectionLoan {
+                        place,
+                        unique: *unique,
+                        owner: None,
+                    })
+                    .or_else(|| {
+                        // `&(*incoming).field` is not a new borrow of a
+                        // body-local place: it is a reborrow whose backing
+                        // region is carried by `incoming`.  Keeping that
+                        // provenance lets ordinary library wrappers forward
+                        // references into fields of borrowed structs (for
+                        // example a HashMap's entry vector) without making
+                        // the resulting reference outlive its caller.
+                        let reference = self.reborrow_reference(*value)?;
+                        let key = self.reference_origin_key(reference)?;
+                        self.projection_loans
+                            .iter()
+                            .find(|loan| loan.owner.as_deref() == Some(key.as_str()))
+                            .cloned()
+                            .or_else(|| self.reference_origins.get(&key).cloned())
+                            .map(|parent| ProjectionLoan {
+                                place: parent.place,
+                                unique: *unique,
+                                owner: parent.owner,
+                            })
+                    })
             }
             CoreKind::Local(_) | CoreKind::Field { .. } => {
                 let key = self.reference_origin_key(id)?;
@@ -2337,15 +2367,52 @@ impl Analyzer<'_> {
         if fields.is_empty() {
             return self.reference_loan_from_value(id);
         }
+        // A call can return a nominal aggregate which carries a reference in
+        // one of its fields (for example `Vec::as_mut_slice` and then
+        // `SliceMut::iter`). The frozen caller-path relation already proves
+        // that field aliases an argument field; follow it before treating the
+        // call expression as an anonymous aggregate. This makes provenance
+        // compose through wrappers that have not been let-bound.
+        match &self.body.expression(id).kind {
+            CoreKind::Call {
+                arguments,
+                reference_origin: CallReferenceOrigin::Paths(paths),
+                ..
+            }
+            | CoreKind::Perform {
+                arguments,
+                reference_origin: CallReferenceOrigin::Paths(paths),
+                ..
+            } => {
+                for path in paths {
+                    if !fields.starts_with(&path.result_fields) {
+                        continue;
+                    }
+                    let argument = *arguments.get(path.argument as usize)?;
+                    let mut argument_fields = path.argument_fields.clone();
+                    argument_fields.extend_from_slice(&fields[path.result_fields.len()..]);
+                    if let Some(loan) = self.reference_loan_from_value_path(argument, &argument_fields) {
+                        return Some(loan);
+                    }
+                }
+            }
+            _ => {}
+        }
         let mut value = id;
-        for field in fields {
+        let mut remaining = fields;
+        while let Some((field, tail)) = remaining.split_first() {
             let fields = match &self.body.expression(value).kind {
                 CoreKind::Tuple(fields)
                 | CoreKind::Array(fields)
                 | CoreKind::Record { fields, .. }
                 | CoreKind::Enum { fields, .. } => fields,
                 _ => {
-                    let key = projection_key(&self.reference_origin_key(value)?, &[*field]);
+                    // A local/field expression stands for an already-built
+                    // aggregate, so all remaining projections belong to its
+                    // single lexical origin. Looking up only the first
+                    // projection loses nested reference carriers such as
+                    // `Str { bytes: Slice { storage: &Array<_>, .. } }`.
+                    let key = projection_key(&self.reference_origin_key(value)?, remaining);
                     return self
                         .projection_loans
                         .iter()
@@ -2355,8 +2422,24 @@ impl Analyzer<'_> {
                 }
             };
             value = *fields.get(*field as usize)?;
+            remaining = tail;
         }
         self.reference_loan_from_value(value)
+    }
+
+    fn external_reference_path(&self, id: CoreId) -> bool {
+        match &self.body.expression(id).kind {
+            CoreKind::Call {
+                reference_origin: CallReferenceOrigin::External,
+                ..
+            }
+            | CoreKind::Perform {
+                reference_origin: CallReferenceOrigin::External,
+                ..
+            } => true,
+            CoreKind::Field { base, .. } => self.external_reference_path(*base),
+            _ => false,
+        }
     }
 
     /// Handler payload binders are ordinary branch locals, but their backing
@@ -2924,6 +3007,7 @@ fn contains_open_type_parameter(value: &crate::types::Type) -> bool {
         crate::types::Type::Generic(_) => true,
         crate::types::Type::Tuple(values) => values.iter().any(contains_open_type_parameter),
         crate::types::Type::Array(value)
+        | crate::types::Type::StaticData { element: value, .. }
         | crate::types::Type::Reference {
             referent: value, ..
         } => contains_open_type_parameter(value),

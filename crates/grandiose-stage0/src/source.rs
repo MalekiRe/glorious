@@ -69,6 +69,9 @@ pub enum TokenKind {
     Integer,
     Float,
     String,
+    /// An immutable raw byte sequence. Unlike `String`, `\\xNN` accepts the
+    /// complete byte range, so this token can describe non-UTF-8 assets.
+    ByteString,
     Character,
     Operator,
     Punctuation(char),
@@ -254,6 +257,7 @@ impl Lexer<'_> {
             b'/' if self.peek(1) == Some(b'/') => self.line_comment(start),
             b'/' if self.peek(1) == Some(b'*') => self.block_comment(start),
             b'"' => self.string(start),
+            b'b' if self.peek(1) == Some(b'"') => self.byte_string(start),
             b'\'' => self.lifetime_or_character(start),
             b'0'..=b'9' => self.number(start),
             byte if is_identifier_start(byte) => self.identifier(start),
@@ -482,6 +486,37 @@ impl Lexer<'_> {
         self.diagnostic(start, "G1002", "unterminated string literal");
     }
 
+    fn byte_string(&mut self, start: usize) {
+        debug_assert_eq!(self.peek(0), Some(b'b'));
+        debug_assert_eq!(self.peek(1), Some(b'"'));
+        self.index += 2;
+        let mut valid = true;
+        while self.index < self.bytes.len() {
+            let byte = self.bytes[self.index];
+            if byte == b'"' {
+                self.index += 1;
+                self.push(
+                    if valid { TokenKind::ByteString } else { TokenKind::Invalid },
+                    start,
+                );
+                if !valid {
+                    self.diagnostic(start, "G1011", "invalid escape sequence in byte string literal");
+                }
+                return;
+            }
+            if byte == b'\n' {
+                break;
+            }
+            if byte == b'\\' {
+                valid &= self.byte_escape();
+            } else {
+                self.index += utf8_width(byte);
+            }
+        }
+        self.push(TokenKind::Invalid, start);
+        self.diagnostic(start, "G1012", "unterminated byte string literal");
+    }
+
     fn character(&mut self, start: usize) {
         self.index += 1;
         let mut count = 0_u32;
@@ -556,6 +591,27 @@ impl Lexer<'_> {
             b'u' => self.unicode_escape(),
             _ => false,
         }
+    }
+
+    /// Byte strings share the ordinary escape grammar but intentionally admit
+    /// all `\\xNN` octets.  Unicode escapes and direct non-ASCII source text
+    /// are UTF-8 encoded by literal lowering; they do not reinterpret source
+    /// encoding as an arbitrary machine pointer or asset type.
+    fn byte_escape(&mut self) -> bool {
+        debug_assert_eq!(self.peek(0), Some(b'\\'));
+        if self.peek(1) != Some(b'x') {
+            return self.scalar_escape();
+        }
+        self.index += 2;
+        let Some(first) = self.peek(0).and_then(digit_value) else {
+            return false;
+        };
+        let Some(second) = self.peek(1).and_then(digit_value) else {
+            return false;
+        };
+        let _ = (first, second);
+        self.index += 2;
+        true
     }
 
     fn unicode_escape(&mut self) -> bool {

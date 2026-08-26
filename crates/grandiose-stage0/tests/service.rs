@@ -1294,7 +1294,7 @@ const BYTES_RUNTIME_LEAVES: &str = "pub fn __g1_text_byte_len(value: Text) -> us
 
 const TEXT_BYTES_RUNTIME_LEAVES: &str = "pub fn __g1_text_byte_len(value: Text) -> usize { () } pub fn __g1_text_concat(left: Text, right: Text) -> Text { () } pub fn __g1_text_eq(left: Text, right: Text) -> u32 { () } pub fn __g1_text_from_utf8_checked(value: Bytes) -> Text { () } pub fn __g1_text_as_bytes(value: Text) -> Bytes { () } pub fn __g1_char_from_u32_checked(value: u32) -> char { () } pub fn __g1_char_to_u32(value: char) -> u32 { () } pub fn __g1_bytes_len(value: Bytes) -> usize { () } pub fn __g1_bytes_concat(left: Bytes, right: Bytes) -> Bytes { () } pub fn __g1_bytes_get(bytes: Bytes, index: usize) -> u8 { () } pub fn __g1_bytes_slice(bytes: Bytes, start: usize, end: usize) -> Bytes { () } pub fn __g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () } pub fn __g1_bytes_to_array(value: Bytes) -> Array<u8> { () } pub fn __g1_bytes_utf8_valid_up_to(value: Bytes) -> usize { () } ";
 
-const ARRAY_RUNTIME_LEAVES: &str = "pub fn __g1_array_new<T>(length: usize, fill: T) -> Array<T> where T: Use<[0, *]> { () } pub fn __g1_array_len<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_get_copy<T>(value: &Array<T>, index: usize) -> T where T: Use<[0, *]> { () } pub fn __g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T { () } pub fn __g1_array_get_borrow_shared<T>(value: &Array<T>, index: usize) -> &T { () } pub fn __g1_array_get_borrow_unique<T>(value: &mut Array<T>, index: usize) -> &mut T { () } pub fn __g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) { () } pub fn __g1_array_empty<T>() -> Array<T> { () } pub fn __g1_array_push_move<T>(value: &mut Array<T>, item: T) { () } pub fn __g1_array_pop_move<T>(value: &mut Array<T>) -> T { () } pub fn __g1_array_capacity<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_reserve<T>(value: &mut Array<T>, additional: usize) { () } pub fn __g1_array_finish_drained<T>(value: Array<T>) { () } ";
+const ARRAY_RUNTIME_LEAVES: &str = "pub fn __g1_array_new<T>(length: usize, fill: T) -> Array<T> where T: Use<[0, *]> { () } pub fn __g1_array_len<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_get_copy<T>(value: &Array<T>, index: usize) -> T where T: Use<[0, *]> { () } pub fn __g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T { () } pub fn __g1_array_get_borrow_shared<'a, T>(value: &'a Array<T>, index: usize) -> &'a T { () } pub fn __g1_array_get_borrow_unique<'a, T>(value: &'a mut Array<T>, index: usize) -> &'a mut T { () } pub fn __g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) { () } pub fn __g1_array_empty<T>() -> Array<T> { () } pub fn __g1_array_push_move<T>(value: &mut Array<T>, item: T) { () } pub fn __g1_array_pop_move<T>(value: &mut Array<T>) -> T { () } pub fn __g1_array_capacity<T>(value: &Array<T>) -> usize { () } pub fn __g1_array_reserve<T>(value: &mut Array<T>, additional: usize) { () } pub fn __g1_array_finish_drained<T>(value: Array<T>) { () } ";
 
 fn array_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
@@ -4209,7 +4209,7 @@ fn service_allows_partial_move_when_a_conditional_drop_impl_is_not_selected() {
     // property.  `Pair<i64>` has no `Mark` evidence, so its conditional hook
     // does not apply and its visible fields retain ordinary partial-move
     // semantics.
-    let source = "trait Mark: Use<[0, 0]> {} pub struct Pair<T> { left: T, right: i64 } impl<T> Use<[0, 0]> for Pair<T> where T: Mark {} impl<T> Drop for Pair<T> where T: Mark { drop(&mut self) -> {} } pub fn main() -> i64 { let pair = Pair<i64> { left: 40, right: 2 }; move pair.left + pair.right }";
+    let source = "trait Mark: Use<[0, 1]> {} pub struct Pair<T> { left: T, right: i64 } impl<T> Use<[0, 1]> for Pair<T> where T: Mark {} impl<T> Drop for Pair<T> where T: Mark { drop(&mut self) -> {} } pub fn main() -> i64 { let pair = Pair<i64> { left: 40, right: 2 }; move pair.left + pair.right }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
@@ -4220,7 +4220,7 @@ fn service_rejects_partial_move_when_a_conditional_drop_impl_is_selected() {
     // The matching instantiation remains opaque: selecting a conditional
     // hook must retain the same complete-aggregate guarantee as a direct
     // `Drop` implementation.
-    let source = "trait Mark: Use<[0, 0]> {} pub struct Marker {} impl Use<[0, 0]> for Marker {} impl Mark for Marker {} pub struct Pair<T> { left: T, right: i64 } impl<T> Use<[0, 0]> for Pair<T> where T: Mark {} impl<T> Drop for Pair<T> where T: Mark { drop(&mut self) -> {} } pub fn main() -> i64 { let pair = Pair<Marker> { left: Marker {}, right: 2 }; move pair.left; pair.right }";
+    let source = "trait Mark: Use<[0, 1]> {} pub struct Marker {} impl Use<[0, 1]> for Marker {} impl Mark for Marker {} pub struct Pair<T> { left: T, right: i64 } impl<T> Use<[0, 1]> for Pair<T> where T: Mark {} impl<T> Drop for Pair<T> where T: Mark { drop(&mut self) -> {} } pub fn main() -> i64 { let pair = Pair<Marker> { left: Marker {}, right: 2 }; move pair.left; pair.right }";
     let diagnostics = match StageZeroCompiler::new().compile(request(source)) {
         Err(grandiose_stage0::ServiceError::Failed(diagnostics)) => diagnostics,
         outcome => panic!("selected conditional Drop unexpectedly compiled: {outcome:#?}"),
@@ -4236,8 +4236,8 @@ fn service_selects_conditional_drop_through_generic_nominal_facades() {
     let moving_root = "use facade::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
     let cleanup_root = "use facade::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet; 42 }";
     let handler_cleanup_root = "use facade::{make, Token}; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let packet = make<Token>(Token {}); handle Tick::tick() { Tick::tick() with _ => { move packet; 42 } } }";
-    let provider = "pub trait Mark: Use<[0, 0]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T>; } impl Family for i64 { type Item<T> = Packet<T>; } pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } }";
-    let selected = format!("{provider} impl Use<[0, 0]> for Token {{}} impl Mark for Token {{}}");
+    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T>; } impl Family for i64 { type Item<T> = Packet<T>; } pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } }";
+    let selected = format!("{provider} impl Use<[0, 1]> for Token {{}} impl Mark for Token {{}}");
     let world = |root: &str, provider: &str| {
         let mut input = request(root);
         input.sources.push(SourceInput::new(PackageKey("facade@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(), b"pub use provider::{make, Token};".as_slice()));
@@ -4283,9 +4283,9 @@ fn service_selects_defaulted_nominal_drop_through_recursive_facade_revisions() {
     // must retain that identity through `make`, so conditional Drop selection
     // sees the selected `Packet<Token>` rather than an opaque projection.
     let root = "pub mod left; pub mod right; use left::{make, Token}; pub fn main() -> i64 { let packet = make<Token>(Token {}); move packet.head; packet.tail + 40 }";
-    let left = "pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } pub trait Mark: Use<[0, 0]> {} impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T> = Packet<T>; } pub use crate::right::{make, Top as Capability};";
+    let left = "pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } pub trait Mark: Use<[0, 1]> {} impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<T> = Packet<T>; } pub use crate::right::{make, Top as Capability};";
     let right = "pub use crate::left::{Family, Mark, Packet, Token}; pub trait Top: Family {} pub fn make<T>(value: T) -> <i64 as Family>::Item<T> { Packet<T> { head: value, tail: 2 } } impl Family for i64 {} impl Top for i64 where i64: Family {}";
-    let selected = format!("{right} impl Use<[0, 0]> for Token {{}} impl Mark for Token {{}}");
+    let selected = format!("{right} impl Use<[0, 1]> for Token {{}} impl Mark for Token {{}}");
     let world = |right: &str| request_with_logical_sources(root, &[("src/left/left.glorious", left), ("src/right/right.glorious", right)]);
 
     let mut reordered = world(right);
@@ -4330,8 +4330,8 @@ fn service_preserves_hrtb_associated_nominal_partial_moves_through_closure_revis
     // implementation in a later provider revision must make that same
     // projected nominal opaque before any artifact/cache product is published.
     let root = "use facade::{Callback, Packet, Token, relay}; pub fn apply(callback: Callback) -> i64 { let returned = callback(Packet<Token> { head: Token {}, tail: 2 }); let closure = () -> i64 { move returned.head; returned.tail + 40 }; closure() } pub fn main() -> i64 { apply(relay) }";
-    let provider = "pub trait Mark: Use<[0, 0]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<'a, T> = Packet<T>; } impl Family for i64 {} pub type Callback = for<'a> (<i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token>; pub fn make<'a, T>(value: T) -> <i64 as Family>::Item<'a, T> { Packet<T> { head: value, tail: 2 } } pub fn relay<'a>(value: <i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token> { value }";
-    let selected = format!("{provider} impl Use<[0, 0]> for Token {{}} impl Mark for Token {{}}");
+    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub trait Family { type Item<'a, T> = Packet<T>; } impl Family for i64 {} pub type Callback = for<'a> (<i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token>; pub fn make<'a, T>(value: T) -> <i64 as Family>::Item<'a, T> { Packet<T> { head: value, tail: 2 } } pub fn relay<'a>(value: <i64 as Family>::Item<'a, Token>) -> <i64 as Family>::Item<'a, Token> { value }";
+    let selected = format!("{provider} impl Use<[0, 1]> for Token {{}} impl Mark for Token {{}}");
     let world = |provider: &str| {
         let mut input = request(root);
         input.sources.push(SourceInput::new(
@@ -4414,8 +4414,8 @@ fn service_preserves_closure_storage_and_conditional_drop_through_facade_handler
     // closure is invoked from a handler arm, exercising the source-storage
     // cleanup boundary across package import, Core, MIR, VM, and decoding.
     let root = "use facade::{capture, make}; effect Tick { [0,1] tick() -> i64; } pub fn main() -> i64 { let packet = make<i64>(2); let closure = capture(&packet.tail); move packet.head; handle Tick::tick() { Tick::tick() with _ => closure() } }";
-    let provider = "pub trait Mark: Use<[0, 0]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 0]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub fn make<T>(value: T) -> Packet<T> { Packet<T> { head: value, tail: 2 } } pub fn capture<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value + 40 } } pub fn capture_unique<'a>(value: &'a mut i64) -> () -> i64 { () -> i64 { *value = *value + 1; *value } }";
-    let selected = format!("{provider} impl Use<[0, 0]> for Token {{}} impl Mark for Token {{}}");
+    let provider = "pub trait Mark: Use<[0, 1]> {} pub struct Token {} pub struct Packet<T> { head: T, tail: i64 } impl<T> Use<[0, 1]> for Packet<T> where T: Mark {} impl<T> Drop for Packet<T> where T: Mark { drop(&mut self) -> {} } pub fn make<T>(value: T) -> Packet<T> { Packet<T> { head: value, tail: 2 } } pub fn capture<'a>(value: &'a i64) -> () -> i64 { () -> i64 { *value + 40 } } pub fn capture_unique<'a>(value: &'a mut i64) -> () -> i64 { () -> i64 { *value = *value + 1; *value } }";
+    let selected = format!("{provider} impl Use<[0, 1]> for Token {{}} impl Mark for Token {{}}");
     let world = |root: &str, provider: &str| {
         let mut input = request(root);
         input.sources.push(SourceInput::new(
@@ -12454,7 +12454,7 @@ fn service_orders_refutable_handler_clauses_around_an_interprocedural_call() {
 
 #[test]
 fn service_orders_generic_multi_operation_matrices_around_an_interprocedural_call() {
-    let source = "effect Console<T> { [1, 1] read(value: T) -> Text; [1, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let read = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { handle helper(40) { Console<i64>::read(0) with k => k(\"zero\"); Console<i64>::read(_) with k => k(\"value\"); Console<i64>::write(0) with k => k(0); Console<i64>::write(_) with k => k(42) } }";
+    let source = "effect Console<T> { [1, 1] read(value: T) -> Text; [1, 1] write(value: T) -> i64; } pub fn helper(value: i64) -> i64 / Console<i64> { let read = Console<i64>::read(value); Console<i64>::write(value) } pub fn main() -> i64 { handle helper(40) { Console<i64>::read(_) with k => k(\"value\"); Console<i64>::write(0) with k => k(0); Console<i64>::write(_) with k => k(42) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
@@ -12499,7 +12499,7 @@ fn service_orders_generic_multi_operation_matrices_around_an_interprocedural_cal
 
 #[test]
 fn service_orders_generic_multi_operation_matrices_through_a_function_value() {
-    let source = "effect Console<T> { [1, 1] read(value: T) -> Text; [1, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let read = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Console<i64>::read(0) with k => k(\"zero\"); Console<i64>::read(_) with k => k(\"value\"); Console<i64>::write(0) with k => k(0); Console<i64>::write(_) with k => k(42) } }";
+    let source = "effect Console<T> { [1, 1] read(value: T) -> Text; [1, 1] write(value: T) -> i64; } pub fn helper(value: i64) -> i64 / Console<i64> { let read = Console<i64>::read(value); Console<i64>::write(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Console<i64>::read(_) with k => k(\"value\"); Console<i64>::write(0) with k => k(0); Console<i64>::write(_) with k => k(42) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
@@ -12517,7 +12517,7 @@ fn service_orders_generic_multi_operation_matrices_through_a_function_value() {
 
 #[test]
 fn service_rejects_a_forged_ordered_matrix_handler_target() {
-    let source = "effect Console<T> { [1, 1] read(value: T) -> Text; [1, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let read = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { handle helper(40) { Console<i64>::read(0) with k => k(\"zero\"); Console<i64>::read(_) with k => k(\"value\"); Console<i64>::write(0) with k => k(0); Console<i64>::write(_) with k => k(42) } }";
+    let source = "effect Console<T> { [1, 1] read(value: T) -> Text; [1, 1] write(value: T) -> i64; } pub fn helper(value: i64) -> i64 / Console<i64> { let read = Console<i64>::read(value); Console<i64>::write(value) } pub fn main() -> i64 { handle helper(40) { Console<i64>::read(_) with k => k(\"value\"); Console<i64>::write(0) with k => k(0); Console<i64>::write(_) with k => k(42) } }";
     let artifact = StageZeroCompiler::new()
         .compile(request(source))
         .unwrap()
@@ -13346,7 +13346,7 @@ fn service_cancellation_frame_keeps_the_operation_result_type_across_a_call() {
 
 #[test]
 fn service_cancels_a_generic_multi_operation_call_through_distinct_vm_frames() {
-    let source = "effect Console<T> { [0, 1] read(value: T) -> Text; [0, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let text = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { handle helper(40) { Console<i64>::read(_) with _ => 42, Console<i64>::write(_) with _ => 0 } }";
+    let source = "effect Console<T> { [0, 1] read(value: T) -> Text; [0, 1] write(value: T) -> i64; } pub fn helper(value: i64) -> i64 / Console<i64> { let text = Console<i64>::read(value); Console<i64>::write(value) } pub fn main() -> i64 { handle helper(40) { Console<i64>::read(_) with _ => 42, Console<i64>::write(_) with _ => 0 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
@@ -13420,7 +13420,7 @@ fn service_cancels_a_generic_operation_instance_through_generic_call_frames() {
 
 #[test]
 fn service_cancels_a_generic_multi_operation_function_value_through_vm_frames() {
-    let source = "effect Console<T> { [0, 1] read(value: T) -> Text; [0, 1] write(value: T) -> i64; } pub fn helper<T>(value: T) -> i64 / Console<T> { let text = Console<T>::read(value); Console<T>::write(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Console<i64>::read(_) with _ => 42, Console<i64>::write(_) with _ => 0 } }";
+    let source = "effect Console<T> { [0, 1] read(value: T) -> Text; [0, 1] write(value: T) -> i64; } pub fn helper(value: i64) -> i64 / Console<i64> { let text = Console<i64>::read(value); Console<i64>::write(value) } pub fn main() -> i64 { let operation = helper; handle operation(40) { Console<i64>::read(_) with _ => 42, Console<i64>::write(_) with _ => 0 } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
@@ -20609,14 +20609,14 @@ fn service_infers_recursive_generics_from_ambient_label_and_fn_contracts() {
     let source = r#"
         enum Result<T, E> { Ok(T), Err(E) }
         pub fn if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E>
-        where F: Fn<(), Output = B>, A: Use<[0, 0]> {
+        where F: Fn<(), Output = B>, A: Use<[0, 1]> {
             handle condition {
                 Result::Ok(_) => Result::Ok(body()),
                 Result::Err(error) => Result::Err(error)
             }
         }
         pub fn else<A, E, F>(value: Result<A, E>, fallback: F) -> A
-        where F: Fn<(), Output = A>, E: Use<[0, 0]> {
+        where F: Fn<(), Output = A>, E: Use<[0, 1]> {
             handle value {
                 Result::Ok(result) => result,
                 Result::Err(_) => fallback()
@@ -20632,9 +20632,9 @@ fn service_infers_recursive_generics_from_ambient_label_and_fn_contracts() {
         ) -> A
         where L: Label<B>,
         F: Fn<(A, usize, L), Output=A, Effects={| e}>,
-        F: Use<[0, 0]> {
+        F: Use<[0, *]> {
             if(condition) {
-                step(current, end, body(accumulator, current, exit), exit, condition, body)
+                step(current, end, accumulator, exit, condition, body)
             } else {
                 accumulator
             }
@@ -20653,14 +20653,14 @@ fn service_infers_the_boolean_result_carrier_for_polymorphic_if() {
     let source = r#"
         enum Result<T, E> { Ok(T), Err(E) }
         pub fn if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E>
-        where F: Fn<(), Output = B>, A: Use<[0, 0]> {
+        where F: Fn<(), Output = B>, A: Use<[0, 1]> {
             handle condition {
                 Result::Ok(_) => Result::Ok(body()),
                 Result::Err(error) => Result::Err(error)
             }
         }
         pub fn else<A, E, F>(value: Result<A, E>, fallback: F) -> A
-        where F: Fn<(), Output = A>, E: Use<[0, 0]> {
+        where F: Fn<(), Output = A>, E: Use<[0, 1]> {
             handle value {
                 Result::Ok(result) => result,
                 Result::Err(_) => fallback()
@@ -20684,13 +20684,13 @@ fn service_preserves_contextual_callback_use_contracts() {
         ) -> A
         where L: Label<B>,
         F: Fn<(A, usize, L), Output=A>,
-        F: Use<[0, 0]> { seed }
+        F: Use<[0, 1]> { seed }
         pub fn for_range_control<L, B, F>(
             range: Range<usize>, exit: L, body: F
         )
         where L: Label<B>,
         F: Fn<(usize, L), Output=()>,
-        F: Use<[0, 0]> {
+        F: Use<[0, 1]> {
             fold_until(range, (), exit, { accumulator, index, destination => {
                 body(index, destination);
                 accumulator

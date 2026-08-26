@@ -1,4 +1,6 @@
-use grandiose_stage0::{DeclarationKind, Digest, FileKey, LexedFile, LogicalPath, PackageKey};
+use grandiose_stage0::{
+    DeclarationKind, Digest, FileKey, LexedFile, LogicalPath, PackageKey, TokenKind,
+};
 
 fn scan(source: &str) -> grandiose_stage0::DeclarationScan {
     let package = PackageKey("scan@0.1.0".into());
@@ -107,5 +109,21 @@ fn scanner_reports_g3221_for_an_unterminated_top_level_value_initializer() {
             .any(|diagnostic| diagnostic.code == "G3221"),
         "{:#?}",
         scan.diagnostics
+    );
+}
+
+#[test]
+fn lexer_distinguishes_byte_string_literals_and_accepts_raw_octet_escapes() {
+    let package = PackageKey("scanner-bytes@0.1.0".into());
+    let file = FileKey::new(
+        &package,
+        LogicalPath::parse("src/lib.glorious").unwrap().as_str(),
+    );
+    let lexed = LexedFile::lex(file, r#"let image = b"\x00\xff";"#);
+    assert!(lexed.diagnostics.is_empty(), "{:#?}", lexed.diagnostics);
+    assert!(
+        lexed.tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::ByteString)
     );
 }

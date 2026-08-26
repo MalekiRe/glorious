@@ -434,6 +434,14 @@ pub enum Type {
     },
     Tuple(Vec<Type>),
     Array(Box<Type>),
+    /// Compiler-created immutable data embedded in the artifact. This type is
+    /// deliberately not expressible in source: it is the sealed backing for
+    /// literals and trusted standard-library leaves, not a public slice type.
+    StaticData {
+        element: Box<Type>,
+        tag: u128,
+        alignment: u32,
+    },
     Reference {
         mutability: Mutability,
         lifetime: Lifetime,
@@ -588,6 +596,9 @@ impl InferContext {
                 .into_iter()
                 .try_for_each(|value| self.collect_unresolved_type_variables(value, variables)),
             Type::Array(value) => self.collect_unresolved_type_variables(*value, variables),
+            Type::StaticData { element, .. } => {
+                self.collect_unresolved_type_variables(*element, variables)
+            }
             Type::Reference { referent, .. } => {
                 self.collect_unresolved_type_variables(*referent, variables)
             }
@@ -747,6 +758,22 @@ impl InferContext {
                 Ok(Type::Array(Box::new(self.unify(*left, *right)?)))
             }
             (
+                Type::StaticData {
+                    element: left_element,
+                    tag: left_tag,
+                    alignment: left_alignment,
+                },
+                Type::StaticData {
+                    element: right_element,
+                    tag: right_tag,
+                    alignment: right_alignment,
+                },
+            ) if left_tag == right_tag && left_alignment == right_alignment => Ok(Type::StaticData {
+                element: Box::new(self.unify(*left_element, *right_element)?),
+                tag: left_tag,
+                alignment: left_alignment,
+            }),
+            (
                 Type::Reference {
                     mutability: left_mutability,
                     lifetime: left_lifetime,
@@ -837,6 +864,15 @@ impl InferContext {
                     .collect::<Result<_, _>>()?,
             )),
             Type::Array(element) => Ok(Type::Array(Box::new(self.zonk(*element)?))),
+            Type::StaticData {
+                element,
+                tag,
+                alignment,
+            } => Ok(Type::StaticData {
+                element: Box::new(self.zonk(*element)?),
+                tag,
+                alignment,
+            }),
             Type::Reference {
                 mutability,
                 lifetime,
@@ -1432,6 +1468,7 @@ impl InferContext {
                         .any(|argument| self.const_argument_occurs(variable, argument))
             }
             Type::Array(value)
+            | Type::StaticData { element: value, .. }
             | Type::Reference {
                 referent: value, ..
             } => self.const_occurs_in_type(variable, &value),
@@ -1566,6 +1603,20 @@ impl InferContext {
                 .zip(&right)
                 .all(|(left, right)| self.types_may_unify(left, right)),
             (Type::Array(left), Type::Array(right)) => self.types_may_unify(&left, &right),
+            (
+                Type::StaticData {
+                    element: left_element,
+                    tag: left_tag,
+                    alignment: left_alignment,
+                },
+                Type::StaticData {
+                    element: right_element,
+                    tag: right_tag,
+                    alignment: right_alignment,
+                },
+            ) if left_tag == right_tag && left_alignment == right_alignment => {
+                self.types_may_unify(&left_element, &right_element)
+            }
             (
                 Type::Reference {
                     mutability: left_mutability,
@@ -1707,6 +1758,7 @@ impl InferContext {
                         .any(|argument| self.effect_occurs_in_generic_argument(variable, argument))
             }
             Type::Array(element)
+            | Type::StaticData { element, .. }
             | Type::Reference {
                 referent: element, ..
             } => self.effect_occurs_in_type(variable, &element),
@@ -1758,6 +1810,7 @@ impl InferContext {
                         .any(|argument| self.generic_argument_occurs(variable, argument))
             }
             Type::Array(element)
+            | Type::StaticData { element, .. }
             | Type::Reference {
                 referent: element, ..
             } => self.occurs(variable, &element),
@@ -2090,6 +2143,16 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             output.push(5);
             encode_type(element, output);
         }
+        Type::StaticData {
+            element,
+            tag,
+            alignment,
+        } => {
+            output.push(15);
+            encode_type(element, output);
+            output.extend_from_slice(&tag.to_le_bytes());
+            output.extend_from_slice(&alignment.to_le_bytes());
+        }
         Type::Reference {
             mutability,
             lifetime,
@@ -2271,6 +2334,15 @@ pub(crate) fn canonicalize_type_identity(value: Type) -> Type {
                 .collect(),
         ),
         Type::Array(element) => Type::Array(Box::new(canonicalize_type_identity(*element))),
+        Type::StaticData {
+            element,
+            tag,
+            alignment,
+        } => Type::StaticData {
+            element: Box::new(canonicalize_type_identity(*element)),
+            tag,
+            alignment,
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -2337,6 +2409,7 @@ fn type_identity_is_well_formed(value: &Type) -> bool {
         }
         Type::Tuple(elements) => elements.iter().all(type_identity_is_well_formed),
         Type::Array(element)
+        | Type::StaticData { element, .. }
         | Type::Reference {
             referent: element, ..
         } => type_identity_is_well_formed(element),

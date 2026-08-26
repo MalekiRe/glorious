@@ -1229,7 +1229,11 @@ impl Parser<'_> {
         let index = self.current()?;
         let token = &self.lexed.tokens[index];
         match token.kind {
-            TokenKind::Integer | TokenKind::Float | TokenKind::String | TokenKind::Character => {
+            TokenKind::Integer
+            | TokenKind::Float
+            | TokenKind::String
+            | TokenKind::ByteString
+            | TokenKind::Character => {
                 self.position += 1;
                 Some(self.alloc(ExprKind::Literal(self.text(index).to_owned()), token.span))
             }
@@ -1887,7 +1891,11 @@ impl Parser<'_> {
         let start = self.current()?;
         let token = &self.lexed.tokens[start];
         match token.kind {
-            TokenKind::Integer | TokenKind::Float | TokenKind::String | TokenKind::Character => {
+            TokenKind::Integer
+            | TokenKind::Float
+            | TokenKind::String
+            | TokenKind::ByteString
+            | TokenKind::Character => {
                 self.position += 1;
                 Some(self.alloc_pattern(
                     PatternKind::Literal(self.text(start).to_owned()),

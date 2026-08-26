@@ -890,11 +890,10 @@ fn mir_rejects_forged_scalar_instruction_operand_types_before_vm_lowering() {
         value: MirLocal(6),
         element_type: Type::Scalar(ScalarType::I64),
     });
+    array_view.parameters.push(MirLocal(6));
     assert!(
-        array_view
-            .validate()
-            .is_err_and(|error| error.contains("shared Array view")),
-        "a unique Array reference must not be accepted where ArrayLen requires a shared view"
+        array_view.validate().is_ok(),
+        "a unique Array reference may be reborrowed for a shared Array read"
     );
 
     let mut array_borrow = graph();

@@ -18,9 +18,11 @@ use crate::{
     DefinitionIndex, DependencyNode, DependencyTrace, DiagnosticClass, Digest, ElaboratedHeader,
     ElaboratedInterface, EscapeFlow, FixityTable, GenericArgument, InputError, InstanceGraph,
     InstanceKey, InstanceLimits, InstanceRoot, MirFunction, MirInstance, MirInstruction,
-    MirLowering, MirProgram, ModuleGraph, PackageKey, ParsedHeader, PlaceFlow, PrimitiveRole,
+    LogicalPath, MirLowering, MirProgram, ModuleGraph, PackageKey, ParsedHeader, PlaceFlow,
+    PrimitiveRole, PrimitiveSelector,
     PublicationGuard, RequestSession, RetentionReport, RevisionError, RevisionId, Severity,
-    SourceSpan, Span, TraitConstProjectionAnswer, TraitGoal, TraitSolver, TrustedRuntimeManifest,
+    RuntimeManifestInput, SourceInput, SourceSpan, Span, TraitConstProjectionAnswer, TraitGoal,
+    TraitSolver, TrustedRuntimeManifest,
     PersistentArtifactCache, Type, TypedBody, UseFlow, VerifiedVmProgram, emit_vm_program, implementation_method_key,
     verify_vm_program,
 };
@@ -833,6 +835,232 @@ pub struct StageZeroCompiler {
     database: CompilerDatabase,
     instance_limits: InstanceLimits,
 }
+
+const BUNDLED_STANDARD_LIBRARY: &str = "std@0.1.0";
+const BUNDLED_STANDARD_SOURCE: &[u8] = include_bytes!("../../../stdlib/src/lib.glorious");
+
+fn request_mentions_bundled_standard_library(request: &CompilationRequest) -> bool {
+    request.sources.iter().any(|source| {
+        source.package != PackageKey(BUNDLED_STANDARD_LIBRARY.into())
+            && std::str::from_utf8(&source.bytes)
+                .is_ok_and(|text| text.contains("use std") || text.contains("std::"))
+    })
+}
+
+/// Attach the compiler-distributed source package unless a host already
+/// supplied that exact package. The latter remains useful for bootstrap and
+/// conformance worlds; ordinary CLI and API requests receive the canonical
+/// library automatically and still import it explicitly in source.
+fn bundled_standard_library(mut request: CompilationRequest) -> CompilationRequest {
+    let standard_library = PackageKey(BUNDLED_STANDARD_LIBRARY.into());
+    // An explicit runtime manifest is a closed authority contract. Do not
+    // silently add a second standard package whose private leaves that
+    // manifest did not bind; callers using such a manifest may still supply
+    // `std@0.1.0` explicitly when they want this distributed source package.
+    let injected = request.runtime_manifest.is_none()
+        && request_mentions_bundled_standard_library(&request)
+        && request.root_package != standard_library
+        && !request
+            .sources
+            .iter()
+            .any(|source| source.package == standard_library);
+    if injected {
+        request.sources.push(SourceInput::new(
+            standard_library.clone(),
+            LogicalPath::parse("src/lib.glorious").expect("static standard path is valid"),
+            BUNDLED_STANDARD_SOURCE,
+        ));
+    }
+    let has_bundled_source = request.sources.iter().any(|source| {
+        source.package == standard_library && source.bytes.as_ref() == BUNDLED_STANDARD_SOURCE
+    });
+    if has_bundled_source && request.runtime_manifest.is_none() {
+        request.runtime_manifest = Some(RuntimeManifestInput {
+            standard_library,
+            selectors: [
+                PrimitiveRole::ArrayLen,
+                PrimitiveRole::ArrayUtf8ValidUpTo,
+                PrimitiveRole::ArrayPushUtf8Char,
+                PrimitiveRole::ArrayExtendFromSlice,
+                PrimitiveRole::ArrayInsertMove,
+                PrimitiveRole::ArrayRemoveMove,
+                PrimitiveRole::ArrayAppendMove,
+                PrimitiveRole::ArrayInsertFromSlice,
+                PrimitiveRole::ArrayInsertUtf8FromSlice,
+                PrimitiveRole::ArrayTruncateDiscard,
+                PrimitiveRole::ArrayReverseMove,
+                PrimitiveRole::ArraySplitOffMove,
+                PrimitiveRole::ArraySplitBorrowUnique,
+                PrimitiveRole::ArrayPopUtf8Char,
+                PrimitiveRole::ArrayUtf8CharAt,
+                PrimitiveRole::ArrayGetBorrowShared,
+                PrimitiveRole::ArrayGetBorrowUnique,
+                PrimitiveRole::ArrayGetMove,
+                PrimitiveRole::ArraySetMove,
+                PrimitiveRole::ArrayEmpty,
+                PrimitiveRole::ArrayPushMove,
+                PrimitiveRole::ArrayPopMove,
+                PrimitiveRole::ArrayCapacity,
+                PrimitiveRole::ArrayReserve,
+                PrimitiveRole::StaticLen,
+                PrimitiveRole::StaticSubslice,
+                PrimitiveRole::StaticGetShared,
+                PrimitiveRole::StaticAsArray,
+                PrimitiveRole::StaticRawAsArray,
+                PrimitiveRole::CharFromU32Checked,
+                PrimitiveRole::CharToU32,
+                PrimitiveRole::IntConvertWrappingToU32,
+                PrimitiveRole::IntConvertWrappingToUsize,
+                PrimitiveRole::IntConvertWrappingToI64,
+                PrimitiveRole::IntConvertWrappingToU8,
+                PrimitiveRole::IntConvertWrappingToU16,
+                PrimitiveRole::IntConvertWrappingToI8,
+                PrimitiveRole::IntConvertWrappingToI16,
+                PrimitiveRole::IntConvertWrappingToI32,
+                PrimitiveRole::IntConvertWrappingToU64,
+                PrimitiveRole::IntConvertWrappingToIsize,
+                PrimitiveRole::IntConvertWrappingToU128,
+                PrimitiveRole::IntConvertWrappingToI128,
+                PrimitiveRole::IntConvertCheckedToU8,
+                PrimitiveRole::IntConvertCheckedToU16,
+                PrimitiveRole::IntConvertCheckedToU32,
+                PrimitiveRole::IntConvertCheckedToU64,
+                PrimitiveRole::IntConvertCheckedToUsize,
+                PrimitiveRole::IntConvertCheckedToI8,
+                PrimitiveRole::IntConvertCheckedToI16,
+                PrimitiveRole::IntConvertCheckedToI32,
+                PrimitiveRole::IntConvertCheckedToIsize,
+                PrimitiveRole::IntConvertCheckedToU128,
+                PrimitiveRole::IntConvertCheckedToI128,
+                PrimitiveRole::IntWrappingAdd,
+                PrimitiveRole::IntWrappingSub,
+                PrimitiveRole::IntWrappingMul,
+                PrimitiveRole::IntBitAnd,
+                PrimitiveRole::IntBitOr,
+                PrimitiveRole::IntBitXor,
+                PrimitiveRole::IntBitNot,
+                PrimitiveRole::IntShl,
+                PrimitiveRole::IntShr,
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Add,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Sub,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Mul,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Div,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Rem,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatCompareOp::Eq,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatCompareOp::Ne,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatCompareOp::Lt,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatCompareOp::Le,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatCompareOp::Gt,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                    operation: crate::runtime_manifest::FloatCompareOp::Ge,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::FromBits {
+                    width: crate::runtime_manifest::FloatWidth::F32,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Convert {
+                    from: crate::ScalarType::I64,
+                    to: crate::ScalarType::F32,
+                    checked: false,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Convert {
+                    from: crate::ScalarType::F32,
+                    to: crate::ScalarType::I64,
+                    checked: true,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Add,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Sub,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Mul,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Div,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Binary {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatBinaryOp::Rem,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatCompareOp::Eq,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatCompareOp::Ne,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatCompareOp::Lt,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatCompareOp::Le,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatCompareOp::Gt,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Compare {
+                    width: crate::runtime_manifest::FloatWidth::F64,
+                    operation: crate::runtime_manifest::FloatCompareOp::Ge,
+                }),
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Convert {
+                    from: crate::ScalarType::F64,
+                    to: crate::ScalarType::I64,
+                    checked: true,
+                }),
+            ]
+            .into_iter()
+            .map(|role| PrimitiveSelector {
+                role,
+                module_path: "crate".into(),
+                name: format!("__g1_{}", role.selector_name().replace('-', "_")),
+            })
+            .collect(),
+            host_imports: vec![],
+        });
+    }
+    request
+}
+
 impl StageZeroCompiler {
     pub fn new() -> Self {
         Self::default()
@@ -895,6 +1123,7 @@ impl StageZeroCompiler {
         request: CompilationRequest,
         cache: &PersistentArtifactCache,
     ) -> Result<Option<VerifiedVmProgram>, ServiceError> {
+        let request = bundled_standard_library(request);
         let world = request
             .clone()
             .normalize()
@@ -922,7 +1151,7 @@ impl StageZeroCompiler {
         request: CompilationRequest,
         parent: Option<RevisionId>,
     ) -> Result<RevisionId, ServiceError> {
-        Ok(self.database.import(request, parent)?)
+        Ok(self.database.import(bundled_standard_library(request), parent)?)
     }
 
     /// Admit a request-scoped session pinned to one active revision. The
@@ -1357,11 +1586,11 @@ impl StageZeroCompiler {
         {
             if !signatures
                 .principal_use_interval(&implementation.self_ty)
-                .is_some_and(|quantity| quantity.contains(crate::Quantity::ZERO))
+                .is_some_and(|quantity| quantity.contains(crate::Quantity::AFFINE))
             {
                 diagnostics.push(CompileDiagnostic::source(
                     "G4197",
-                    "custom `Drop` requires a zero-use `Use<[0,0]>` path; a positive lower bound cannot be destroyed",
+                    "custom `Drop` requires affine `Use<[0,1]>` erasure permission; an exact-linear value cannot be destroyed",
                     None,
                 ));
             }
@@ -1591,6 +1820,20 @@ impl StageZeroCompiler {
                             crate::PrimitiveRole::Blake3,
                             crate::PrimitiveRole::ArrayNew,
                             crate::PrimitiveRole::ArrayLen,
+                            crate::PrimitiveRole::ArrayUtf8ValidUpTo,
+                            crate::PrimitiveRole::ArrayPushUtf8Char,
+                            crate::PrimitiveRole::ArrayExtendFromSlice,
+                            crate::PrimitiveRole::ArrayInsertMove,
+                            crate::PrimitiveRole::ArrayRemoveMove,
+                            crate::PrimitiveRole::ArrayAppendMove,
+                            crate::PrimitiveRole::ArrayInsertFromSlice,
+                            crate::PrimitiveRole::ArrayInsertUtf8FromSlice,
+                            crate::PrimitiveRole::ArrayTruncateDiscard,
+                            crate::PrimitiveRole::ArrayReverseMove,
+                            crate::PrimitiveRole::ArraySplitOffMove,
+                            crate::PrimitiveRole::ArraySplitBorrowUnique,
+                            crate::PrimitiveRole::ArrayPopUtf8Char,
+                            crate::PrimitiveRole::ArrayUtf8CharAt,
                             crate::PrimitiveRole::ArrayGetCopy,
                             crate::PrimitiveRole::ArrayGetMove,
                             crate::PrimitiveRole::ArrayGetBorrowShared,
@@ -1602,6 +1845,11 @@ impl StageZeroCompiler {
                             crate::PrimitiveRole::ArrayCapacity,
                             crate::PrimitiveRole::ArrayReserve,
                             crate::PrimitiveRole::ArrayFinishDrained,
+                            crate::PrimitiveRole::StaticLen,
+                            crate::PrimitiveRole::StaticSubslice,
+                            crate::PrimitiveRole::StaticGetShared,
+                            crate::PrimitiveRole::StaticAsArray,
+                            crate::PrimitiveRole::StaticRawAsArray,
                             crate::PrimitiveRole::U32CheckedAdd,
                             crate::PrimitiveRole::U32CheckedSub,
                             crate::PrimitiveRole::U32CheckedMul,
@@ -2094,7 +2342,20 @@ impl StageZeroCompiler {
                     ) =>
                     {
                         arguments.first().map(|receiver| {
-                            specialize_type(&body.expression(*receiver).ty, caller.arguments())
+                            match specialize_type(
+                                &body.expression(*receiver).ty,
+                                caller.arguments(),
+                            ) {
+                                crate::Type::Reference { referent, .. } => *referent,
+                                receiver => receiver,
+                            }
+                        }).or_else(|| match &body.expression(*callee).ty {
+                            crate::Type::Callable { parameters, result, .. }
+                                if parameters.is_empty() =>
+                            {
+                                Some(specialize_type(result, caller.arguments()))
+                            }
+                            _ => None,
                         })
                     }
                     _ => None,
@@ -2519,10 +2780,14 @@ fn materialize_concrete_instances(
         for block in &mut function.blocks {
             for instruction in &mut block.instructions {
                 let receiver = match &*instruction {
-                    crate::MirInstruction::Call { arguments, .. } => arguments
+                    crate::MirInstruction::Call { arguments, dst, .. } => arguments
                         .first()
                         .and_then(|local| function.locals.get(local.0 as usize))
-                        .map(|local| local.ty.clone()),
+                        .map(|local| match local.ty.clone() {
+                            crate::Type::Reference { referent, .. } => *referent,
+                            receiver => receiver,
+                        })
+                        .or_else(|| function.locals.get(dst.0 as usize).map(|local| local.ty.clone())),
                     _ => None,
                 };
                 let (callee, generic_arguments, trait_instance) = match instruction {
@@ -3116,7 +3381,28 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
         for instruction in &mut block.instructions {
             match instruction {
                 crate::MirInstruction::MakeArray { element_type, .. }
-                | crate::MirInstruction::ProjectArray { element_type, .. } => {
+                | crate::MirInstruction::ProjectArray { element_type, .. }
+                | crate::MirInstruction::ArrayNew { element_type, .. }
+                | crate::MirInstruction::ArrayLen { element_type, .. }
+                | crate::MirInstruction::ArrayGetCopy { element_type, .. }
+                | crate::MirInstruction::ArrayGetMove { element_type, .. }
+                | crate::MirInstruction::ArrayGetBorrow { element_type, .. }
+                | crate::MirInstruction::ArraySetMove { element_type, .. }
+                | crate::MirInstruction::ArrayEmpty { element_type, .. }
+                | crate::MirInstruction::ArrayPushMove { element_type, .. }
+                | crate::MirInstruction::ArrayExtendFromSlice { element_type, .. }
+                | crate::MirInstruction::ArrayInsertMove { element_type, .. }
+                | crate::MirInstruction::ArrayRemoveMove { element_type, .. }
+                | crate::MirInstruction::ArrayAppendMove { element_type, .. }
+                | crate::MirInstruction::ArrayInsertFromSlice { element_type, .. }
+                | crate::MirInstruction::ArrayTruncateDiscard { element_type, .. }
+                | crate::MirInstruction::ArrayReverseMove { element_type, .. }
+                | crate::MirInstruction::ArraySplitOffMove { element_type, .. }
+                | crate::MirInstruction::ArraySplitBorrowUnique { element_type, .. }
+                | crate::MirInstruction::ArrayPopMove { element_type, .. }
+                | crate::MirInstruction::ArrayCapacity { element_type, .. }
+                | crate::MirInstruction::ArrayReserve { element_type, .. }
+                | crate::MirInstruction::ArrayFinishDrained { element_type, .. } => {
                     *element_type = specialize_type(element_type, arguments);
                 }
                 crate::MirInstruction::MakeRecord { field_types, .. }
@@ -3249,6 +3535,20 @@ fn register_specialized_nominal_copy_descriptors(
     for root in roots {
         register_specialized_nominal_copy_type(&root, function, signatures, &mut building);
     }
+    // Several pre-specialization descriptors may collapse to one concrete
+    // layout when their generic witnesses are substituted. Keep one exact
+    // copy of that layout; retain conflicting duplicates for the structural
+    // validator to reject rather than masking malformed metadata.
+    let mut canonical = Vec::with_capacity(function.nominal_copy_descriptors.len());
+    for descriptor in std::mem::take(&mut function.nominal_copy_descriptors) {
+        match canonical.iter().find(|existing: &&crate::MirNominalCopyDescriptor| {
+            existing.definition == descriptor.definition && existing.arguments == descriptor.arguments
+        }) {
+            Some(existing) if *existing == descriptor => {}
+            _ => canonical.push(descriptor),
+        }
+    }
+    function.nominal_copy_descriptors = canonical;
 }
 
 fn register_specialized_nominal_copy_type(
@@ -3263,7 +3563,7 @@ fn register_specialized_nominal_copy_type(
                 register_specialized_nominal_copy_type(field, function, signatures, building);
             }
         }
-        Type::Array(element) => {
+        Type::Array(element) | Type::StaticData { element, .. } => {
             register_specialized_nominal_copy_type(element, function, signatures, building)
         }
         Type::Callable {
@@ -3320,6 +3620,17 @@ fn register_specialized_nominal_copy_type(
                 }
             }
             building.pop();
+            // A nested field traversal can register this same concrete
+            // layout before its outer root completes (for example two
+            // library collection wrappers sharing `Vec<T>`). Re-check at the
+            // mutation point so specialization remains idempotent while the
+            // MIR validator can continue rejecting genuinely malformed
+            // duplicate metadata.
+            if function.nominal_copy_descriptors.iter().any(|descriptor| {
+                descriptor.definition == *definition && descriptor.arguments == *arguments
+            }) {
+                return;
+            }
             function
                 .nominal_copy_descriptors
                 .push(crate::MirNominalCopyDescriptor {

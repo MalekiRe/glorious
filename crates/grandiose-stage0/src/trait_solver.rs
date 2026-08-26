@@ -2126,7 +2126,10 @@ impl TraitSolver {
     /// through the declaration-level supertrait closure. This is exact frozen
     /// goal identity rather than unification: assumptions quantify only the
     /// source binders already present in their owner, and must never become
-    /// ambient blanket implementations for arbitrary callers.
+    /// ambient blanket implementations for arbitrary callers. `Use` is the
+    /// one exception to exact quantity identity: a principal interval is
+    /// evidence for every interval it contains. In particular,
+    /// `Use<[0,*]>` proves the affine-erasure requirement `Use<[0,1]>`.
     fn assumption_proves(&self, goal: &TraitGoal, assumptions: &[TraitGoal]) -> bool {
         let mut pending = assumptions.to_vec();
         let mut seen = Vec::<TraitGoal>::new();
@@ -2134,7 +2137,7 @@ impl TraitSolver {
             if seen.iter().any(|known| known == &candidate) {
                 continue;
             }
-            if candidate == *goal {
+            if candidate == *goal || use_assumption_contains(&candidate, goal) {
                 return true;
             }
             seen.push(candidate.clone());
@@ -2161,6 +2164,9 @@ impl TraitSolver {
             Type::Unit | Type::Never | Type::Scalar(_) => vec![],
             Type::Tuple(values) => values.clone(),
             Type::Array(value) => vec![(**value).clone()],
+            // Static data is a sealed VM handle, not an aggregate whose
+            // backing bytes participate in user-visible auto-trait proofs.
+            Type::StaticData { .. } => vec![],
             Type::Reference { referent, .. } => vec![(**referent).clone()],
             Type::Callable {
                 parameters, result, ..
@@ -2370,6 +2376,19 @@ impl TraitSolver {
             argument => Ok(argument),
         }
     }
+}
+
+fn use_assumption_contains(candidate: &TraitGoal, goal: &TraitGoal) -> bool {
+    candidate.subject == goal.subject
+        && candidate.relation.definition == crate::resolution::language_use_trait_definition()
+        && goal.relation.definition == crate::resolution::language_use_trait_definition()
+        && matches!(
+            (candidate.relation.arguments.as_slice(), goal.relation.arguments.as_slice()),
+            (
+                [GenericArgument::ConstQuantity(provided)],
+                [GenericArgument::ConstQuantity(required)],
+            ) if provided.contains(*required)
+        )
 }
 
 /// A projection failure cannot become implicit successful trait evidence.
@@ -2932,6 +2951,20 @@ fn match_type_at(
         },
         Type::Array(element) => match actual {
             Type::Array(actual_element) => {
+                match_type_at(element, actual_element, substitution, binder_depth)
+            }
+            _ => None,
+        },
+        Type::StaticData {
+            element,
+            tag,
+            alignment,
+        } => match actual {
+            Type::StaticData {
+                element: actual_element,
+                tag: actual_tag,
+                alignment: actual_alignment,
+            } if tag == actual_tag && alignment == actual_alignment => {
                 match_type_at(element, actual_element, substitution, binder_depth)
             }
             _ => None,
@@ -3591,7 +3624,9 @@ fn projection_is_concrete(value: &Type) -> bool {
                 && trait_arguments.iter().all(generic_argument_is_concrete)
                 && item_arguments.iter().all(generic_argument_is_concrete)
         }
-        Type::Array(element) => projection_is_concrete(element),
+        Type::Array(element) | Type::StaticData { element, .. } => {
+            projection_is_concrete(element)
+        }
         Type::Reference { referent, .. } => projection_is_concrete(referent),
         Type::Callable {
             parameters, result, ..
@@ -3631,7 +3666,9 @@ fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> b
                     generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders)
                 })
         }
-        Type::Array(element) => projection_is_concrete_in_hrtb_scope(element, hrtb_binders),
+        Type::Array(element) | Type::StaticData { element, .. } => {
+            projection_is_concrete_in_hrtb_scope(element, hrtb_binders)
+        }
         Type::Reference { referent, .. } => {
             projection_is_concrete_in_hrtb_scope(referent, hrtb_binders)
         }
