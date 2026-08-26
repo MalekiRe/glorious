@@ -20,6 +20,9 @@ pub fn __g1_int_convert_wrapping_to_u32<T>(value: T) -> u32 { () }
 pub fn __g1_int_convert_wrapping_to_u64<T>(value: T) -> u64 { () }
 pub fn __g1_int_convert_wrapping_to_u8<T>(value: T) -> u8 { () }
 pub fn __g1_int_convert_checked_to_i64<T>(value: T) -> i64 { () }
+// Existing stage0 primitive used by source-owned binary decoders before a
+// directory-provided u64 offset can index a byte buffer.
+pub fn __g1_int_convert_checked_to_usize<T>(value: T) -> usize { () }
 pub fn __g1_int_wrapping_add<T>(left: T, right: T) -> T { () }
 pub fn __g1_int_wrapping_sub<T>(left: T, right: T) -> T { () }
 pub fn __g1_int_wrapping_mul<T>(left: T, right: T) -> T { () }

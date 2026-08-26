@@ -45,6 +45,7 @@ use compiler_support::__g1_int_shr;
 use compiler_support::__g1_int_convert_wrapping_to_u32;
 use compiler_support::__g1_int_convert_wrapping_to_u64;
 use compiler_support::__g1_int_convert_wrapping_to_u8;
+use compiler_support::__g1_int_convert_checked_to_usize;
 use compiler_support::__g1_bytes_from_array_move;
 use compiler_support::__g1_bytes_len;
 use compiler_support::__g1_bytes_get;
@@ -102,6 +103,40 @@ pub enum G1U32Read { Value(u32), Truncated }
 pub enum G1U64Read { Value(u64), Truncated }
 pub struct G1DirectoryRecord { section: G1Section, offset: u64, byte_length: u64, count: u32, width: u32 }
 pub enum G1DirectoryRead { Value(G1DirectoryRecord), Truncated, InvalidSection }
+// The decoder carries the executable bit and entry-point identity separately
+// from the container preamble.  Later table decoding can therefore reject an
+// entry point that is absent, out of range, or present on a library image
+// without re-reading untrusted header bytes.
+pub enum G1HeaderRead { Library(u64), Executable(u32, u64), Truncated, InvalidFlags, InvalidEntry, InvalidReserved, MissingCoreFeature, UnsupportedFeatures }
+pub enum G1ContainerRead { Library(u64), Executable(u32, u64), Truncated, InvalidHeader, InvalidDirectory, EntryOutOfRange }
+pub enum G1FunctionTableRead { Value(usize, u32), Truncated, InvalidContainer }
+pub enum G1CodeTableRead { Value(usize, u32), Truncated, InvalidContainer, InvalidTable }
+pub enum G1OperandTableRead { Value(usize, u32), Truncated, InvalidContainer, InvalidTable }
+pub struct G1FunctionRecord { name: u32, signature: u32, flags: u32, registers: u32, code_start: u32, code_length: u32, instruction_count: u32, cleanup_start: u32, cleanup_count: u32, label_slots: u32, capture_type: u32, receiver_mode: u32 }
+pub enum G1FunctionRecordRead { Value(G1FunctionRecord), Truncated, InvalidIndex, InvalidReserved }
+pub enum G1CodeWordRead { Value(u32), Truncated, InvalidContainer, InvalidIndex, InvalidTable }
+pub enum G1InstructionHeaderRead { Value(u32, u32), Truncated, InvalidEncoding, UnknownOpcode, WrongArity }
+pub struct G1CleanupRecord { function: u32, first_instruction: u32, end_instruction: u32, operand_start: u32, operand_count: u32 }
+pub enum G1CleanupRecordRead { Value(G1CleanupRecord), Truncated, InvalidIndex, InvalidReserved }
+// String IDs are used throughout G1 metadata. This phase establishes the
+// table's bounded wire shape before a later UTF-8 and canonical-order reader
+// turns individual ranges into source-level names.
+pub enum G1StringTableRead { Value(u32), Truncated, InvalidContainer, InvalidTable }
+// The remaining variable tables share count-plus-offset framing. Keeping
+// their shape admission independent of record tags lets type/signature and
+// protocol decoders layer their own schemas without duplicating bounds logic.
+pub enum G1VariableTableRead { Value(u32), Truncated, InvalidContainer, InvalidSection, InvalidTable }
+// A variable-record header identifies a bounded payload inside its already
+// admitted table. The payload is still raw here: section-specific decoders
+// own tag, flag, and reference semantics.
+pub enum G1VariableRecordRead { Value(u8, u8, usize, u32), Truncated, InvalidContainer, InvalidSection, InvalidIndex, InvalidRecord }
+
+// Directory admission proves an offset is within the byte buffer whose index
+// space is `usize`; this leaf retains the checked machine-width boundary in
+// one place for every later section reader.
+fn g1_directory_offset_as_usize(offset: u64) -> usize {
+    __g1_int_convert_checked_to_usize<u64>(offset)
+}
 
 // MIR is the only authority that may select a scalar operation.  Service
 // supplies an admitted lowering; the backend maps that value to its
@@ -479,6 +514,1445 @@ pub fn g1_preamble_is_readable(bytes: Bytes) -> Bool {
     }
 }
 
+// This is the first semantic G1 decoder phase after the fixed preamble.  The
+// current container permits only the executable flag; a valid feature set
+// must include the low core-G1 bit.  `flags` is deliberately enumerated
+// rather than masked so future flag additions require an explicit source
+// schema change.
+pub fn g1_read_header(bytes: Bytes) -> G1HeaderRead {
+    handle g1_preamble_is_readable(bytes) {
+        true => g1_read_header_reserved(bytes),
+        false => G1HeaderRead::Truncated,
+        _ => G1HeaderRead::Truncated,
+    }
+}
+
+fn g1_read_header_reserved(bytes: Bytes) -> G1HeaderRead {
+    handle g1_read_u64_le(bytes, 40) {
+        G1U64Read::Value(0) => g1_read_header_flags(bytes),
+        G1U64Read::Value(_) => G1HeaderRead::InvalidReserved,
+        _ => G1HeaderRead::Truncated,
+    }
+}
+
+fn g1_read_header_flags(bytes: Bytes) -> G1HeaderRead {
+    handle g1_read_u32_le(bytes, 16) {
+        G1U32Read::Value(0) => g1_read_library_header_features(bytes),
+        G1U32Read::Value(1) => g1_read_executable_header_entry(bytes),
+        G1U32Read::Value(_) => G1HeaderRead::InvalidFlags,
+        _ => G1HeaderRead::Truncated,
+    }
+}
+
+fn g1_read_library_header_features(bytes: Bytes) -> G1HeaderRead {
+    handle g1_read_u32_le(bytes, 28) {
+        G1U32Read::Value(4294967295) => g1_read_library_header_feature_bits(bytes),
+        G1U32Read::Value(_) => G1HeaderRead::InvalidEntry,
+        _ => G1HeaderRead::Truncated,
+    }
+}
+
+fn g1_read_library_header_feature_bits(bytes: Bytes) -> G1HeaderRead {
+    handle g1_read_u64_le(bytes, 32) {
+        G1U64Read::Value(features) => g1_admit_library_header_features(features),
+        _ => G1HeaderRead::Truncated,
+    }
+}
+
+fn g1_read_executable_header_entry(bytes: Bytes) -> G1HeaderRead {
+    handle g1_read_u32_le(bytes, 28) {
+        G1U32Read::Value(4294967295) => G1HeaderRead::InvalidEntry,
+        G1U32Read::Value(entry) => g1_read_executable_header_feature_bits(bytes, entry),
+        _ => G1HeaderRead::Truncated,
+    }
+}
+
+fn g1_read_executable_header_feature_bits(bytes: Bytes, entry: u32) -> G1HeaderRead {
+    handle g1_read_u64_le(bytes, 32) {
+        G1U64Read::Value(features) => g1_admit_executable_header_features(entry, features),
+        _ => G1HeaderRead::Truncated,
+    }
+}
+
+fn g1_has_core_feature(features: u64) -> Bool {
+    __g1_int_wrapping_sub<u64>(features, __g1_int_wrapping_mul<u64>(__g1_int_shr<u64>(features, 1), 2)) == 1
+}
+
+fn g1_admit_library_header_features(features: u64) -> G1HeaderRead {
+    handle g1_features_are_supported(features) {
+        true => handle g1_has_core_feature(features) {
+            true => G1HeaderRead::Library(features),
+            _ => G1HeaderRead::MissingCoreFeature,
+        },
+        _ => G1HeaderRead::UnsupportedFeatures,
+    }
+}
+
+fn g1_admit_executable_header_features(entry: u32, features: u64) -> G1HeaderRead {
+    handle g1_features_are_supported(features) {
+        true => handle g1_has_core_feature(features) {
+            true => G1HeaderRead::Executable(entry, features),
+            _ => G1HeaderRead::MissingCoreFeature,
+        },
+        _ => G1HeaderRead::UnsupportedFeatures,
+    }
+}
+
+// G1 currently defines bits zero through eight and no gaps in that vocabulary.
+// This numerical bound is therefore equivalent to Rust stage0's supported-bit
+// mask, while keeping unknown required features out of source-owned decoding.
+fn g1_features_are_supported(features: u64) -> Bool { features <= 511 }
+
+// General table decoding begins only after the header and all fourteen
+// bounded directory records agree.  This deliberately returns the decoded
+// executable identity, rather than a bare Boolean, so later function-table
+// admission can prove that the declared entry is in range.
+pub fn g1_read_container(bytes: Bytes) -> G1ContainerRead {
+    handle g1_read_header(bytes) {
+        G1HeaderRead::Library(features) => g1_read_library_container(bytes, features),
+        G1HeaderRead::Executable(entry, features) => g1_read_executable_container(bytes, entry, features),
+        G1HeaderRead::Truncated => G1ContainerRead::Truncated,
+        _ => G1ContainerRead::InvalidHeader,
+    }
+}
+
+fn g1_read_library_container(bytes: Bytes, features: u64) -> G1ContainerRead {
+    handle g1_directory_is_canonical(bytes) {
+        true => G1ContainerRead::Library(features),
+        _ => G1ContainerRead::InvalidDirectory,
+    }
+}
+
+fn g1_read_executable_container(bytes: Bytes, entry: u32, features: u64) -> G1ContainerRead {
+    handle g1_directory_is_canonical(bytes) {
+        true => g1_admit_executable_entry(bytes, entry, features),
+        _ => G1ContainerRead::InvalidDirectory,
+    }
+}
+
+// Read section 8 only through a successfully admitted container. The
+// directory has already proved this offset is aligned, in bounds, and paired
+// with a 64-byte fixed record width; converting it to a byte-buffer index is
+// therefore checked but cannot lose information for an admitted artifact.
+pub fn g1_read_function_table(bytes: Bytes) -> G1FunctionTableRead {
+    handle g1_read_container(bytes) {
+        G1ContainerRead::Library(_) => g1_read_function_table_fields(bytes),
+        G1ContainerRead::Executable(_, _) => g1_read_function_table_fields(bytes),
+        G1ContainerRead::Truncated => G1FunctionTableRead::Truncated,
+        _ => G1FunctionTableRead::InvalidContainer,
+    }
+}
+
+fn g1_read_function_table_fields(bytes: Bytes) -> G1FunctionTableRead {
+    handle g1_read_u64_le(bytes, 296) {
+        G1U64Read::Value(offset) => handle g1_read_u32_le(bytes, 312) {
+            G1U32Read::Value(count) => G1FunctionTableRead::Value(g1_directory_offset_as_usize(offset), count),
+            _ => G1FunctionTableRead::Truncated,
+        },
+        _ => G1FunctionTableRead::Truncated,
+    }
+}
+
+// Section 9 is the only raw instruction-word storage. Its fixed directory
+// entry gives later opcode decoding a checked base and word count, rather than
+// letting an instruction reader derive either from untrusted operands.
+pub fn g1_read_code_table(bytes: Bytes) -> G1CodeTableRead {
+    handle g1_read_container(bytes) {
+        G1ContainerRead::Library(_) => g1_read_code_table_fields(bytes),
+        G1ContainerRead::Executable(_, _) => g1_read_code_table_fields(bytes),
+        G1ContainerRead::Truncated => G1CodeTableRead::Truncated,
+        _ => G1CodeTableRead::InvalidContainer,
+    }
+}
+
+fn g1_read_code_table_fields(bytes: Bytes) -> G1CodeTableRead {
+    handle g1_read_directory_record(bytes, 320) {
+        G1DirectoryRead::Value(record) => handle record.section {
+            G1Section::Code => handle record.width == 4 {
+                true => G1CodeTableRead::Value(g1_directory_offset_as_usize(record.offset), record.count),
+                _ => G1CodeTableRead::InvalidTable,
+            },
+            _ => G1CodeTableRead::InvalidTable,
+        },
+        G1DirectoryRead::Truncated => G1CodeTableRead::Truncated,
+        _ => G1CodeTableRead::InvalidTable,
+    }
+}
+
+pub fn g1_read_code_word(bytes: Bytes, index: u32) -> G1CodeWordRead {
+    handle g1_read_code_table(bytes) {
+        G1CodeTableRead::Value(offset, count) => handle index < count {
+            true => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(index), 4))) {
+                G1U32Read::Value(word) => G1CodeWordRead::Value(word),
+                _ => G1CodeWordRead::Truncated,
+            },
+            _ => G1CodeWordRead::InvalidIndex,
+        },
+        G1CodeTableRead::Truncated => G1CodeWordRead::Truncated,
+        G1CodeTableRead::InvalidContainer => G1CodeWordRead::InvalidContainer,
+        _ => G1CodeWordRead::InvalidTable,
+    }
+}
+
+pub fn g1_read_operand_table(bytes: Bytes) -> G1OperandTableRead {
+    handle g1_read_container(bytes) {
+        G1ContainerRead::Library(_) => g1_read_operand_table_fields(bytes),
+        G1ContainerRead::Executable(_, _) => g1_read_operand_table_fields(bytes),
+        G1ContainerRead::Truncated => G1OperandTableRead::Truncated,
+        _ => G1OperandTableRead::InvalidContainer,
+    }
+}
+
+fn g1_read_operand_table_fields(bytes: Bytes) -> G1OperandTableRead {
+    handle g1_read_directory_record(bytes, 352) {
+        G1DirectoryRead::Value(record) => handle record.section {
+            G1Section::References => handle record.width == 4 {
+                true => G1OperandTableRead::Value(g1_directory_offset_as_usize(record.offset), record.count),
+                _ => G1OperandTableRead::InvalidTable,
+            },
+            _ => G1OperandTableRead::InvalidTable,
+        },
+        G1DirectoryRead::Truncated => G1OperandTableRead::Truncated,
+        _ => G1OperandTableRead::InvalidTable,
+    }
+}
+
+// The high twelve code-word bits are reserved; the low twelve identify an
+// opcode and the following eight bits declare its inline operand-word count.
+// Decode this framing before any instruction-specific register or ownership
+// semantics can consume a word stream.
+pub fn g1_read_instruction_header(bytes: Bytes, word_index: u32) -> G1InstructionHeaderRead {
+    handle g1_read_code_word(bytes, word_index) {
+        G1CodeWordRead::Value(word) => g1_admit_instruction_header(word),
+        _ => G1InstructionHeaderRead::Truncated,
+    }
+}
+
+fn g1_admit_instruction_header(word: u32) -> G1InstructionHeaderRead {
+    handle __g1_int_shr<u32>(word, 20) == 0 {
+        true => g1_admit_instruction_header_arity(
+            __g1_int_wrapping_sub<u32>(word, __g1_int_wrapping_mul<u32>(__g1_int_shr<u32>(word, 12), 4096)),
+            __g1_int_wrapping_sub<u32>(__g1_int_shr<u32>(word, 12), __g1_int_wrapping_mul<u32>(__g1_int_shr<u32>(word, 20), 256)),
+        ),
+        _ => G1InstructionHeaderRead::InvalidEncoding,
+    }
+}
+
+fn g1_admit_instruction_header_arity(opcode: u32, operands: u32) -> G1InstructionHeaderRead {
+    handle g1_opcode_declared_arity(opcode) {
+        G1U32Read::Value(expected) => handle operands == expected {
+            true => G1InstructionHeaderRead::Value(opcode, operands),
+            _ => G1InstructionHeaderRead::WrongArity,
+        },
+        _ => G1InstructionHeaderRead::UnknownOpcode,
+    }
+}
+
+fn g1_opcode_declared_arity(opcode: u32) -> G1U32Read {
+    handle opcode {
+        0 => G1U32Read::Value(0),
+        1 => G1U32Read::Value(2),
+        2 => G1U32Read::Value(2),
+        3 => G1U32Read::Value(2),
+        4 => G1U32Read::Value(2),
+        5 => G1U32Read::Value(2),
+        6 => G1U32Read::Value(2),
+        7 => G1U32Read::Value(2),
+        8 => G1U32Read::Value(1),
+        9 => G1U32Read::Value(5),
+        10 => G1U32Read::Value(3),
+        11 => G1U32Read::Value(3),
+        12 => G1U32Read::Value(3),
+        13 => G1U32Read::Value(3),
+        14 => G1U32Read::Value(2),
+        15 => G1U32Read::Value(5),
+        16 => G1U32Read::Value(4),
+        17 => G1U32Read::Value(1),
+        18 => G1U32Read::Value(4),
+        19 => G1U32Read::Value(1),
+        20 => G1U32Read::Value(2),
+        21 => G1U32Read::Value(2),
+        22 => G1U32Read::Value(2),
+        23 => G1U32Read::Value(2),
+        24 => G1U32Read::Value(2),
+        32 => G1U32Read::Value(1),
+        33 => G1U32Read::Value(4),
+        34 => G1U32Read::Value(4),
+        35 => G1U32Read::Value(5),
+        36 => G1U32Read::Value(3),
+        37 => G1U32Read::Value(4),
+        38 => G1U32Read::Value(1),
+        39 => G1U32Read::Value(0),
+        40 => G1U32Read::Value(3),
+        41 => G1U32Read::Value(1),
+        42 => G1U32Read::Value(2),
+        43 => G1U32Read::Value(3),
+        44 => G1U32Read::Value(2),
+        45 => G1U32Read::Value(5),
+        46 => G1U32Read::Value(4),
+        64 => G1U32Read::Value(5),
+        65 => G1U32Read::Value(5),
+        66 => G1U32Read::Value(4),
+        67 => G1U32Read::Value(2),
+        68 => G1U32Read::Value(4),
+        69 => G1U32Read::Value(4),
+        70 => G1U32Read::Value(1),
+        71 => G1U32Read::Value(6),
+        72 => G1U32Read::Value(3),
+        _ => G1U32Read::Truncated,
+    }
+}
+
+// Inline instruction words name ranges in section 10. Centralize the
+// subtraction-based bounds checks so every list-bearing opcode receives the
+// same overflow-safe admission rule.
+fn g1_operand_range_is_within_table(bytes: Bytes, start: u32, count: u32) -> Bool {
+    handle g1_read_operand_table(bytes) {
+        G1OperandTableRead::Value(_, operand_count) => handle start <= operand_count {
+            true => count <= __g1_int_wrapping_sub<u32>(operand_count, start),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_operand_pair_range_is_within_table(bytes: Bytes, start: u32, pairs: u32) -> Bool {
+    handle g1_read_operand_table(bytes) {
+        G1OperandTableRead::Value(_, operand_count) => handle start <= operand_count {
+            true => pairs <= __g1_int_shr<u32>(__g1_int_wrapping_sub<u32>(operand_count, start), 1),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_read_operand_word(bytes: Bytes, index: u32) -> G1U32Read {
+    handle g1_read_operand_table(bytes) {
+        G1OperandTableRead::Value(offset, count) => handle index < count {
+            true => g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(index), 4))),
+            _ => G1U32Read::Truncated,
+        },
+        _ => G1U32Read::Truncated,
+    }
+}
+
+pub fn g1_instruction_operand_ranges_are_within_table(bytes: Bytes, word: u32) -> Bool {
+    handle g1_read_instruction_header(bytes, word) {
+        G1InstructionHeaderRead::Value(opcode, _) => g1_instruction_operand_ranges_for_opcode(bytes, word, opcode),
+        _ => false,
+    }
+}
+
+fn g1_instruction_operand_ranges_for_opcode(bytes: Bytes, word: u32, opcode: u32) -> Bool {
+    handle opcode {
+        9 => g1_instruction_range_from_inline_words(bytes, word, 3, 4),
+        15 => g1_instruction_range_from_inline_words(bytes, word, 3, 4),
+        16 => g1_instruction_range_from_inline_words(bytes, word, 2, 3),
+        18 => g1_instruction_range_from_inline_words(bytes, word, 2, 3),
+        33 => g1_instruction_pair_range_from_inline_words(bytes, word, 1, 2),
+        34 => g1_instruction_range_from_inline_words(bytes, word, 2, 3),
+        35 => g1_instruction_range_from_inline_words(bytes, word, 3, 4),
+        36 => g1_instruction_range_from_inline_words(bytes, word, 1, 2),
+        37 => g1_instruction_range_from_inline_words(bytes, word, 2, 3),
+        43 => g1_instruction_range_from_inline_words(bytes, word, 1, 2),
+        44 => g1_instruction_range_from_inline_words(bytes, word, 0, 1),
+        45 => g1_instruction_range_from_inline_words(bytes, word, 3, 4),
+        46 => g1_instruction_range_from_inline_words(bytes, word, 2, 3),
+        64 => g1_instruction_range_from_inline_words(bytes, word, 3, 4),
+        65 => g1_instruction_range_from_inline_words(bytes, word, 3, 4),
+        68 => g1_instruction_range_from_inline_words(bytes, word, 2, 3),
+        69 => g1_instruction_range_from_inline_words(bytes, word, 2, 3),
+        71 => g1_instruction_two_ranges_from_inline_words(bytes, word, 2, 3, 4, 5),
+        _ => true,
+    }
+}
+
+fn g1_instruction_range_from_inline_words(bytes: Bytes, word: u32, start_slot: u32, count_slot: u32) -> Bool {
+    handle g1_read_code_word(bytes, __g1_int_wrapping_add<u32>(word, __g1_int_wrapping_add<u32>(start_slot, 1))) {
+        G1CodeWordRead::Value(start) => handle g1_read_code_word(bytes, __g1_int_wrapping_add<u32>(word, __g1_int_wrapping_add<u32>(count_slot, 1))) {
+            G1CodeWordRead::Value(count) => g1_operand_range_is_within_table(bytes, start, count),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_instruction_pair_range_from_inline_words(bytes: Bytes, word: u32, start_slot: u32, count_slot: u32) -> Bool {
+    handle g1_read_code_word(bytes, __g1_int_wrapping_add<u32>(word, __g1_int_wrapping_add<u32>(start_slot, 1))) {
+        G1CodeWordRead::Value(start) => handle g1_read_code_word(bytes, __g1_int_wrapping_add<u32>(word, __g1_int_wrapping_add<u32>(count_slot, 1))) {
+            G1CodeWordRead::Value(count) => g1_operand_pair_range_is_within_table(bytes, start, count),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_instruction_two_ranges_from_inline_words(bytes: Bytes, word: u32, first_start: u32, first_count: u32, second_start: u32, second_count: u32) -> Bool {
+    handle g1_instruction_range_from_inline_words(bytes, word, first_start, first_count) {
+        true => g1_instruction_range_from_inline_words(bytes, word, second_start, second_count),
+        _ => false,
+    }
+}
+
+pub fn g1_read_function_record(bytes: Bytes, index: u32) -> G1FunctionRecordRead {
+    handle g1_read_function_table(bytes) {
+        G1FunctionTableRead::Value(offset, count) => handle index < count {
+            true => g1_read_function_record_at(bytes, __g1_int_wrapping_add<usize>(offset, __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(index), 64))),
+            false => G1FunctionRecordRead::InvalidIndex,
+            _ => G1FunctionRecordRead::InvalidIndex,
+        },
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_at(bytes: Bytes, offset: usize) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, offset) {
+        G1U32Read::Value(name) => g1_read_function_record_signature(bytes, offset, name),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_signature(bytes: Bytes, offset: usize, name: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 4)) {
+        G1U32Read::Value(signature) => g1_read_function_record_scalars(bytes, offset, name, signature),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_scalars(bytes: Bytes, offset: usize, name: u32, signature: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 8)) {
+        G1U32Read::Value(flags) => g1_read_function_record_registers(bytes, offset, name, signature, flags),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_registers(bytes: Bytes, offset: usize, name: u32, signature: u32, flags: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 12)) {
+        G1U32Read::Value(registers) => g1_read_function_record_code(bytes, offset, name, signature, flags, registers),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_code(bytes: Bytes, offset: usize, name: u32, signature: u32, flags: u32, registers: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 16)) {
+        G1U32Read::Value(code_start) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 20)) {
+            G1U32Read::Value(code_length) => g1_read_function_record_instruction_count(bytes, offset, name, signature, flags, registers, code_start, code_length),
+            _ => G1FunctionRecordRead::Truncated,
+        },
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_instruction_count(bytes: Bytes, offset: usize, name: u32, signature: u32, flags: u32, registers: u32, code_start: u32, code_length: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 24)) {
+        G1U32Read::Value(instruction_count) => g1_read_function_record_cleanup_start(bytes, offset, name, signature, flags, registers, code_start, code_length, instruction_count),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_cleanup_start(bytes: Bytes, offset: usize, name: u32, signature: u32, flags: u32, registers: u32, code_start: u32, code_length: u32, instruction_count: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 28)) {
+        G1U32Read::Value(cleanup_start) => g1_read_function_record_cleanup_count(bytes, offset, name, signature, flags, registers, code_start, code_length, instruction_count, cleanup_start),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_cleanup_count(bytes: Bytes, offset: usize, name: u32, signature: u32, flags: u32, registers: u32, code_start: u32, code_length: u32, instruction_count: u32, cleanup_start: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 32)) {
+        G1U32Read::Value(cleanup_count) => g1_read_function_record_label_slots(bytes, offset, name, signature, flags, registers, code_start, code_length, instruction_count, cleanup_start, cleanup_count),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_label_slots(bytes: Bytes, offset: usize, name: u32, signature: u32, flags: u32, registers: u32, code_start: u32, code_length: u32, instruction_count: u32, cleanup_start: u32, cleanup_count: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 36)) {
+        G1U32Read::Value(label_slots) => g1_read_function_record_capture_type(bytes, offset, name, signature, flags, registers, code_start, code_length, instruction_count, cleanup_start, cleanup_count, label_slots),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_capture_type(bytes: Bytes, offset: usize, name: u32, signature: u32, flags: u32, registers: u32, code_start: u32, code_length: u32, instruction_count: u32, cleanup_start: u32, cleanup_count: u32, label_slots: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 40)) {
+        G1U32Read::Value(capture_type) => g1_read_function_record_receiver_mode(bytes, offset, name, signature, flags, registers, code_start, code_length, instruction_count, cleanup_start, cleanup_count, label_slots, capture_type),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_receiver_mode(bytes: Bytes, offset: usize, name: u32, signature: u32, flags: u32, registers: u32, code_start: u32, code_length: u32, instruction_count: u32, cleanup_start: u32, cleanup_count: u32, label_slots: u32, capture_type: u32) -> G1FunctionRecordRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 44)) {
+        G1U32Read::Value(receiver_mode) => g1_read_function_record_reserved(bytes, offset, name, signature, flags, registers, code_start, code_length, instruction_count, cleanup_start, cleanup_count, label_slots, capture_type, receiver_mode),
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+fn g1_read_function_record_reserved(bytes: Bytes, offset: usize, name: u32, signature: u32, flags: u32, registers: u32, code_start: u32, code_length: u32, instruction_count: u32, cleanup_start: u32, cleanup_count: u32, label_slots: u32, capture_type: u32, receiver_mode: u32) -> G1FunctionRecordRead {
+    handle g1_read_u64_le(bytes, __g1_int_wrapping_add<usize>(offset, 48)) {
+        G1U64Read::Value(0) => handle g1_read_u64_le(bytes, __g1_int_wrapping_add<usize>(offset, 56)) {
+            G1U64Read::Value(0) => G1FunctionRecordRead::Value(G1FunctionRecord { name: name, signature: signature, flags: flags, registers: registers, code_start: code_start, code_length: code_length, instruction_count: instruction_count, cleanup_start: cleanup_start, cleanup_count: cleanup_count, label_slots: label_slots, capture_type: capture_type, receiver_mode: receiver_mode }),
+            G1U64Read::Value(_) => G1FunctionRecordRead::InvalidReserved,
+            _ => G1FunctionRecordRead::Truncated,
+        },
+        G1U64Read::Value(_) => G1FunctionRecordRead::InvalidReserved,
+        _ => G1FunctionRecordRead::Truncated,
+    }
+}
+
+// Section 9's fixed-width directory record holds the decoded instruction-word
+// count at byte 344. Use subtraction rather than `start + length` so hostile
+// metadata cannot overflow before the bound is checked.
+pub fn g1_function_code_span_is_within_code(bytes: Bytes, index: u32) -> Bool {
+    handle g1_read_function_record(bytes, index) {
+        G1FunctionRecordRead::Value(function) => handle g1_read_u32_le(bytes, 344) {
+            G1U32Read::Value(code_words) => handle function.code_start <= code_words {
+                true => function.code_length <= __g1_int_wrapping_sub<u32>(code_words, function.code_start),
+                false => false,
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// Function code ranges must be an ordered partition of section 9. This is a
+// container-level guarantee in Rust stage0: accepting only individually
+// in-bounds ranges would leave overlapping instructions or unclaimed words
+// for a later executor to interpret ambiguously.
+pub fn g1_function_code_ranges_cover_code(bytes: Bytes) -> Bool {
+    handle g1_read_function_table(bytes) {
+        G1FunctionTableRead::Value(_, function_count) => handle g1_read_code_table(bytes) {
+            G1CodeTableRead::Value(_, code_count) => g1_function_code_ranges_cover_from(bytes, 0, function_count, 0, code_count),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_function_code_ranges_cover_from(bytes: Bytes, index: u32, function_count: u32, next_word: u32, code_count: u32) -> Bool {
+    handle index == function_count {
+        true => next_word == code_count,
+        false => handle g1_read_function_record(bytes, index) {
+            G1FunctionRecordRead::Value(function) => handle function.code_start == next_word {
+                true => handle next_word <= code_count {
+                    true => handle function.code_length <= __g1_int_wrapping_sub<u32>(code_count, next_word) {
+                        true => g1_function_code_ranges_cover_from(bytes, __g1_int_wrapping_add<u32>(index, 1), function_count, __g1_int_wrapping_add<u32>(next_word, function.code_length), code_count),
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// Each function records an instruction ordinal count separately from its
+// encoded word span. Walking the admitted headers proves the two views agree
+// and rejects trailing words, truncated inline operands, or an opcode whose
+// declared arity differs from the shared source schema.
+pub fn g1_function_instruction_counts_match_code(bytes: Bytes) -> Bool {
+    handle g1_read_function_table(bytes) {
+        G1FunctionTableRead::Value(_, function_count) => handle g1_read_code_table(bytes) {
+            G1CodeTableRead::Value(_, code_count) => g1_function_instruction_counts_from(bytes, 0, function_count, code_count),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_function_instruction_counts_from(bytes: Bytes, index: u32, function_count: u32, code_count: u32) -> Bool {
+    handle index == function_count {
+        true => true,
+        false => handle g1_read_function_record(bytes, index) {
+            G1FunctionRecordRead::Value(function) => handle function.code_start <= code_count {
+                true => handle function.code_length <= __g1_int_wrapping_sub<u32>(code_count, function.code_start) {
+                    true => g1_function_instruction_count_then_next(bytes, index, function_count, code_count, function),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_function_instruction_count_then_next(bytes: Bytes, index: u32, function_count: u32, code_count: u32, function: G1FunctionRecord) -> Bool {
+    handle g1_code_span_has_instruction_count(bytes, function.code_start, function.code_length, function.instruction_count) {
+        true => g1_function_instruction_counts_from(bytes, __g1_int_wrapping_add<u32>(index, 1), function_count, code_count),
+        _ => false,
+    }
+}
+
+fn g1_code_span_has_instruction_count(bytes: Bytes, word: u32, remaining_words: u32, remaining_instructions: u32) -> Bool {
+    handle remaining_words == 0 {
+        true => remaining_instructions == 0,
+        false => handle remaining_instructions == 0 {
+            true => false,
+            false => handle g1_read_instruction_header(bytes, word) {
+                G1InstructionHeaderRead::Value(_, operands) => handle operands <= __g1_int_wrapping_sub<u32>(remaining_words, 1) {
+                    true => g1_code_span_has_instruction_count(bytes, __g1_int_wrapping_add<u32>(word, __g1_int_wrapping_add<u32>(operands, 1)), __g1_int_wrapping_sub<u32>(__g1_int_wrapping_sub<u32>(remaining_words, 1), operands), __g1_int_wrapping_sub<u32>(remaining_instructions, 1)),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn g1_function_operand_ranges_are_within_table(bytes: Bytes) -> Bool {
+    handle g1_read_function_table(bytes) {
+        G1FunctionTableRead::Value(_, function_count) => g1_function_operand_ranges_from(bytes, 0, function_count),
+        _ => false,
+    }
+}
+
+fn g1_function_operand_ranges_from(bytes: Bytes, index: u32, function_count: u32) -> Bool {
+    handle index == function_count {
+        true => true,
+        false => handle g1_read_function_record(bytes, index) {
+            G1FunctionRecordRead::Value(function) => handle g1_code_span_operand_ranges_are_within_table(bytes, function.code_start, function.code_length) {
+                true => g1_function_operand_ranges_from(bytes, __g1_int_wrapping_add<u32>(index, 1), function_count),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_code_span_operand_ranges_are_within_table(bytes: Bytes, word: u32, remaining_words: u32) -> Bool {
+    handle remaining_words == 0 {
+        true => true,
+        false => handle g1_read_instruction_header(bytes, word) {
+            G1InstructionHeaderRead::Value(_, operands) => handle operands <= __g1_int_wrapping_sub<u32>(remaining_words, 1) {
+                true => handle g1_instruction_operand_ranges_are_within_table(bytes, word) {
+                    true => g1_code_span_operand_ranges_are_within_table(bytes, __g1_int_wrapping_add<u32>(word, __g1_int_wrapping_add<u32>(operands, 1)), __g1_int_wrapping_sub<u32>(__g1_int_wrapping_sub<u32>(remaining_words, 1), operands)),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// Section 1 stores count, aggregate UTF-8 byte length, then count + 1
+// monotonic offsets. This reader proves the framing uses exactly the section
+// extent, but deliberately does not claim UTF-8 validity or sort order until
+// the source string-value representation is available.
+pub fn g1_read_string_table(bytes: Bytes) -> G1StringTableRead {
+    handle g1_read_container(bytes) {
+        G1ContainerRead::Library(_) => g1_read_string_table_section(bytes),
+        G1ContainerRead::Executable(_, _) => g1_read_string_table_section(bytes),
+        G1ContainerRead::Truncated => G1StringTableRead::Truncated,
+        _ => G1StringTableRead::InvalidContainer,
+    }
+}
+
+fn g1_read_string_table_section(bytes: Bytes) -> G1StringTableRead {
+    handle g1_read_directory_record(bytes, 64) {
+        G1DirectoryRead::Value(record) => g1_read_string_table_count(bytes, record),
+        G1DirectoryRead::Truncated => G1StringTableRead::Truncated,
+        _ => G1StringTableRead::InvalidTable,
+    }
+}
+
+fn g1_read_string_table_count(bytes: Bytes, record: G1DirectoryRecord) -> G1StringTableRead {
+    handle record.section {
+        G1Section::Strings => handle record.width == 0 {
+            true => handle record.byte_length >= 12 {
+                true => handle g1_read_u32_le(bytes, g1_directory_offset_as_usize(record.offset)) {
+                    G1U32Read::Value(count) => g1_read_string_table_total(bytes, record, count),
+                    _ => G1StringTableRead::Truncated,
+                },
+                _ => G1StringTableRead::InvalidTable,
+            },
+            _ => G1StringTableRead::InvalidTable,
+        },
+        _ => G1StringTableRead::InvalidTable,
+    }
+}
+
+fn g1_read_string_table_total(bytes: Bytes, record: G1DirectoryRecord, count: u32) -> G1StringTableRead {
+    handle count == record.count {
+        true => handle __g1_int_convert_wrapping_to_u64<u32>(count) <= __g1_int_shr<u64>(__g1_int_wrapping_sub<u64>(record.byte_length, 12), 2) {
+            true => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(g1_directory_offset_as_usize(record.offset), 4)) {
+                G1U32Read::Value(total) => g1_read_string_table_offsets(bytes, record, count, total),
+                _ => G1StringTableRead::Truncated,
+            },
+            _ => G1StringTableRead::InvalidTable,
+        },
+        _ => G1StringTableRead::InvalidTable,
+    }
+}
+
+fn g1_read_string_table_offsets(bytes: Bytes, record: G1DirectoryRecord, count: u32, total: u32) -> G1StringTableRead {
+    let start = g1_directory_offset_as_usize(record.offset);
+    let count_bytes = __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(count), 4);
+    let last_offset = __g1_int_wrapping_add<usize>(start, __g1_int_wrapping_add<usize>(8, count_bytes));
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(start, 8)) {
+        G1U32Read::Value(0) => handle g1_read_u32_le(bytes, last_offset) {
+            G1U32Read::Value(last) => handle last == total {
+                true => handle __g1_int_convert_wrapping_to_u64<u32>(total) == __g1_int_wrapping_sub<u64>(record.byte_length, __g1_int_wrapping_add<u64>(12, __g1_int_wrapping_mul<u64>(__g1_int_convert_wrapping_to_u64<u32>(count), 4))) {
+                    true => handle g1_string_offsets_are_monotonic(bytes, __g1_int_wrapping_add<usize>(start, 8), count) {
+                        true => G1StringTableRead::Value(count),
+                        _ => G1StringTableRead::InvalidTable,
+                    },
+                    _ => G1StringTableRead::InvalidTable,
+                },
+                _ => G1StringTableRead::InvalidTable,
+            },
+            _ => G1StringTableRead::Truncated,
+        },
+        _ => G1StringTableRead::InvalidTable,
+    }
+}
+
+fn g1_string_offsets_are_monotonic(bytes: Bytes, offset: usize, remaining: u32) -> Bool {
+    handle remaining == 0 {
+        true => true,
+        false => handle g1_read_u32_le(bytes, offset) {
+            G1U32Read::Value(left) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 4)) {
+                G1U32Read::Value(right) => handle left <= right {
+                    true => g1_string_offsets_are_monotonic(bytes, __g1_int_wrapping_add<usize>(offset, 4), __g1_int_wrapping_sub<u32>(remaining, 1)),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// This bounded framing reader covers variable sections whose first word is
+// their record count (constants, signatures, protocols, handler definitions,
+// and reference-return contracts). The section ID is checked before it indexes
+// the fixed fourteen-entry directory, so callers cannot turn it into an
+// unbounded byte offset.
+pub fn g1_read_variable_table(bytes: Bytes, section_id: u32) -> G1VariableTableRead {
+    handle g1_read_container(bytes) {
+        G1ContainerRead::Library(_) => g1_read_variable_table_section(bytes, section_id),
+        G1ContainerRead::Executable(_, _) => g1_read_variable_table_section(bytes, section_id),
+        G1ContainerRead::Truncated => G1VariableTableRead::Truncated,
+        _ => G1VariableTableRead::InvalidContainer,
+    }
+}
+
+fn g1_read_variable_table_section(bytes: Bytes, section_id: u32) -> G1VariableTableRead {
+    handle section_id >= 1 {
+        true => handle section_id <= 14 {
+            true => g1_read_variable_table_record(bytes, section_id),
+            _ => G1VariableTableRead::InvalidSection,
+        },
+        _ => G1VariableTableRead::InvalidSection,
+    }
+}
+
+fn g1_read_variable_table_record(bytes: Bytes, section_id: u32) -> G1VariableTableRead {
+    let directory_offset = __g1_int_wrapping_add<usize>(64, __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(__g1_int_wrapping_sub<u32>(section_id, 1)), 32));
+    handle g1_read_directory_record(bytes, directory_offset) {
+        G1DirectoryRead::Value(record) => handle record.width == 0 {
+            true => g1_read_variable_table_count(bytes, record),
+            _ => G1VariableTableRead::InvalidTable,
+        },
+        G1DirectoryRead::Truncated => G1VariableTableRead::Truncated,
+        _ => G1VariableTableRead::InvalidTable,
+    }
+}
+
+fn g1_read_variable_table_count(bytes: Bytes, record: G1DirectoryRecord) -> G1VariableTableRead {
+    handle record.byte_length >= 8 {
+        true => handle g1_read_u32_le(bytes, g1_directory_offset_as_usize(record.offset)) {
+            G1U32Read::Value(count) => handle count == record.count {
+                true => g1_read_variable_table_offsets(bytes, record, count),
+                _ => G1VariableTableRead::InvalidTable,
+            },
+            _ => G1VariableTableRead::Truncated,
+        },
+        _ => G1VariableTableRead::InvalidTable,
+    }
+}
+
+fn g1_read_variable_table_offsets(bytes: Bytes, record: G1DirectoryRecord, count: u32) -> G1VariableTableRead {
+    handle __g1_int_convert_wrapping_to_u64<u32>(count) <= __g1_int_shr<u64>(__g1_int_wrapping_sub<u64>(record.byte_length, 8), 2) {
+        true => g1_read_variable_table_first_last(bytes, record, count),
+        _ => G1VariableTableRead::InvalidTable,
+    }
+}
+
+fn g1_read_variable_table_first_last(bytes: Bytes, record: G1DirectoryRecord, count: u32) -> G1VariableTableRead {
+    let start = g1_directory_offset_as_usize(record.offset);
+    let count_bytes = __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(count), 4);
+    let last_offset = __g1_int_wrapping_add<usize>(start, __g1_int_wrapping_add<usize>(4, count_bytes));
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(start, 4)) {
+        G1U32Read::Value(0) => handle g1_read_u32_le(bytes, last_offset) {
+            G1U32Read::Value(last) => handle __g1_int_convert_wrapping_to_u64<u32>(last) == __g1_int_wrapping_sub<u64>(record.byte_length, __g1_int_wrapping_add<u64>(8, __g1_int_wrapping_mul<u64>(__g1_int_convert_wrapping_to_u64<u32>(count), 4))) {
+                true => handle g1_variable_offsets_are_strict(bytes, __g1_int_wrapping_add<usize>(start, 4), count) {
+                    true => G1VariableTableRead::Value(count),
+                    _ => G1VariableTableRead::InvalidTable,
+                },
+                _ => G1VariableTableRead::InvalidTable,
+            },
+            _ => G1VariableTableRead::Truncated,
+        },
+        _ => G1VariableTableRead::InvalidTable,
+    }
+}
+
+fn g1_variable_offsets_are_strict(bytes: Bytes, offset: usize, remaining: u32) -> Bool {
+    handle remaining == 0 {
+        true => true,
+        false => handle g1_read_u32_le(bytes, offset) {
+            G1U32Read::Value(left) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 4)) {
+                G1U32Read::Value(right) => handle left < right {
+                    true => g1_variable_offsets_are_strict(bytes, __g1_int_wrapping_add<usize>(offset, 4), __g1_int_wrapping_sub<u32>(remaining, 1)),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn g1_read_variable_record(bytes: Bytes, section_id: u32, index: u32) -> G1VariableRecordRead {
+    handle g1_read_variable_table(bytes, section_id) {
+        G1VariableTableRead::Value(count) => handle index < count {
+            true => g1_read_variable_record_from_table(bytes, section_id, index, count),
+            _ => G1VariableRecordRead::InvalidIndex,
+        },
+        G1VariableTableRead::Truncated => G1VariableRecordRead::Truncated,
+        G1VariableTableRead::InvalidContainer => G1VariableRecordRead::InvalidContainer,
+        G1VariableTableRead::InvalidSection => G1VariableRecordRead::InvalidSection,
+        _ => G1VariableRecordRead::InvalidRecord,
+    }
+}
+
+fn g1_read_variable_record_from_table(bytes: Bytes, section_id: u32, index: u32, count: u32) -> G1VariableRecordRead {
+    let directory_offset = __g1_int_wrapping_add<usize>(64, __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(__g1_int_wrapping_sub<u32>(section_id, 1)), 32));
+    handle g1_read_directory_record(bytes, directory_offset) {
+        G1DirectoryRead::Value(record) => g1_read_variable_record_offsets(bytes, record, index, count),
+        G1DirectoryRead::Truncated => G1VariableRecordRead::Truncated,
+        _ => G1VariableRecordRead::InvalidRecord,
+    }
+}
+
+fn g1_read_variable_record_offsets(bytes: Bytes, record: G1DirectoryRecord, index: u32, count: u32) -> G1VariableRecordRead {
+    let start = g1_directory_offset_as_usize(record.offset);
+    let offsets = __g1_int_wrapping_add<usize>(start, 4);
+    let index_bytes = __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(index), 4);
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offsets, index_bytes)) {
+        G1U32Read::Value(left) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(__g1_int_wrapping_add<usize>(offsets, index_bytes), 4)) {
+            G1U32Read::Value(right) => g1_read_variable_record_wire_header(bytes, start, count, left, right),
+            _ => G1VariableRecordRead::Truncated,
+        },
+        _ => G1VariableRecordRead::Truncated,
+    }
+}
+
+fn g1_read_variable_record_wire_header(bytes: Bytes, table_start: usize, count: u32, left: u32, right: u32) -> G1VariableRecordRead {
+    let data_start = __g1_int_wrapping_add<usize>(table_start, __g1_int_wrapping_add<usize>(8, __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(count), 4)));
+    let record_start = __g1_int_wrapping_add<usize>(data_start, __g1_int_convert_checked_to_usize<u32>(left));
+    handle right >= left {
+        true => handle __g1_int_wrapping_sub<u32>(right, left) >= 8 {
+            true => handle g1_read_u32_le(bytes, record_start) {
+                G1U32Read::Value(prefix) => g1_read_variable_record_payload_length(bytes, record_start, right, left, prefix),
+                _ => G1VariableRecordRead::Truncated,
+            },
+            _ => G1VariableRecordRead::InvalidRecord,
+        },
+        _ => G1VariableRecordRead::InvalidRecord,
+    }
+}
+
+fn g1_read_variable_record_payload_length(bytes: Bytes, record_start: usize, right: u32, left: u32, prefix: u32) -> G1VariableRecordRead {
+    handle __g1_int_shr<u32>(prefix, 16) == 0 {
+        true => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(record_start, 4)) {
+            G1U32Read::Value(payload_length) => handle payload_length == __g1_int_wrapping_sub<u32>(__g1_int_wrapping_sub<u32>(right, left), 8) {
+                true => G1VariableRecordRead::Value(__g1_bytes_get(bytes, record_start), __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(record_start, 1)), __g1_int_wrapping_add<usize>(record_start, 8), payload_length),
+                _ => G1VariableRecordRead::InvalidRecord,
+            },
+            _ => G1VariableRecordRead::Truncated,
+        },
+        _ => G1VariableRecordRead::InvalidRecord,
+    }
+}
+
+// A signature record has no tag flags and contains its parameter count,
+// result type ID, outward-protocol count, then exactly those two u32 rows.
+// Reference IDs are resolved only after type and protocol tables are decoded;
+// this phase rejects malformed framing before such cross-table work begins.
+pub fn g1_signature_record_has_well_formed_shape(bytes: Bytes, index: u32) -> Bool {
+    handle g1_read_variable_record(bytes, 4, index) {
+        G1VariableRecordRead::Value(0, 0, payload, length) => g1_signature_payload_has_well_formed_shape(bytes, payload, length),
+        _ => false,
+    }
+}
+
+fn g1_signature_payload_has_well_formed_shape(bytes: Bytes, payload: usize, length: u32) -> Bool {
+    handle length >= 12 {
+        true => handle g1_read_u32_le(bytes, payload) {
+            G1U32Read::Value(params) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(payload, 8)) {
+                G1U32Read::Value(outward) => __g1_int_wrapping_add<u64>(__g1_int_convert_wrapping_to_u64<u32>(params), __g1_int_convert_wrapping_to_u64<u32>(outward)) == __g1_int_shr<u64>(__g1_int_wrapping_sub<u64>(__g1_int_convert_wrapping_to_u64<u32>(length), 12), 2),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn g1_signature_table_has_well_formed_shapes(bytes: Bytes) -> Bool {
+    handle g1_read_variable_table(bytes, 4) {
+        G1VariableTableRead::Value(count) => g1_signature_shapes_from(bytes, 0, count),
+        _ => false,
+    }
+}
+
+fn g1_signature_shapes_from(bytes: Bytes, index: u32, count: u32) -> Bool {
+    handle index == count {
+        true => true,
+        false => handle g1_signature_record_has_well_formed_shape(bytes, index) {
+            true => g1_signature_shapes_from(bytes, __g1_int_wrapping_add<u32>(index, 1), count),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_signature_parameter_count(bytes: Bytes, index: u32) -> G1U32Read {
+    handle g1_read_variable_record(bytes, 4, index) {
+        G1VariableRecordRead::Value(0, 0, payload, length) => handle length >= 12 {
+            true => g1_read_u32_le(bytes, payload),
+            _ => G1U32Read::Truncated,
+        },
+        _ => G1U32Read::Truncated,
+    }
+}
+
+// Rust stage0 bounds the temporary register-type table by the representation
+// already present in the artifact: one receiver slot plus all signature
+// parameters, code words, and operand words. Preserve that allocation bound
+// before any source VM materializes per-function register state.
+pub fn g1_function_register_counts_are_bounded(bytes: Bytes) -> Bool {
+    handle g1_read_variable_table(bytes, 4) {
+        G1VariableTableRead::Value(signature_count) => handle g1_signature_parameter_total(bytes, 0, signature_count, 1) {
+            G1U64Read::Value(signature_parameters) => g1_function_register_counts_are_bounded_after_signatures(bytes, signature_parameters),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_signature_parameter_total(bytes: Bytes, index: u32, count: u32, total: u64) -> G1U64Read {
+    handle index == count {
+        true => G1U64Read::Value(total),
+        false => handle g1_signature_parameter_count(bytes, index) {
+            G1U32Read::Value(parameters) => g1_signature_parameter_total(bytes, __g1_int_wrapping_add<u32>(index, 1), count, __g1_int_wrapping_add<u64>(total, __g1_int_convert_wrapping_to_u64<u32>(parameters))),
+            _ => G1U64Read::Truncated,
+        },
+        _ => G1U64Read::Truncated,
+    }
+}
+
+fn g1_function_register_counts_are_bounded_after_signatures(bytes: Bytes, signature_parameters: u64) -> Bool {
+    handle g1_read_code_table(bytes) {
+        G1CodeTableRead::Value(_, code_words) => handle g1_read_operand_table(bytes) {
+            G1OperandTableRead::Value(_, operand_words) => handle g1_read_function_table(bytes) {
+                G1FunctionTableRead::Value(_, function_count) => g1_function_register_bounds_from(bytes, 0, function_count, __g1_int_wrapping_add<u64>(signature_parameters, __g1_int_wrapping_add<u64>(__g1_int_convert_wrapping_to_u64<u32>(code_words), __g1_int_convert_wrapping_to_u64<u32>(operand_words)))),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_function_register_bounds_from(bytes: Bytes, index: u32, count: u32, maximum: u64) -> Bool {
+    handle index == count {
+        true => true,
+        false => handle g1_read_function_record(bytes, index) {
+            G1FunctionRecordRead::Value(function) => handle __g1_int_convert_wrapping_to_u64<u32>(function.registers) <= maximum {
+                true => g1_function_register_bounds_from(bytes, __g1_int_wrapping_add<u32>(index, 1), count, maximum),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// Before decoding instructions, resolve the fixed function metadata against
+// the tables that already have stable IDs. This is deliberately narrower than
+// final type inference: it proves all immediate table references and cleanup
+// ranges are meaningful without guessing register types.
+pub fn g1_function_table_has_resolved_metadata(bytes: Bytes) -> Bool {
+    handle g1_read_string_table(bytes) {
+        G1StringTableRead::Value(string_count) => handle g1_read_variable_table(bytes, 2) {
+            G1VariableTableRead::Value(type_count) => handle g1_read_variable_table(bytes, 4) {
+                G1VariableTableRead::Value(signature_count) => handle g1_signature_table_has_well_formed_shapes(bytes) {
+                    true => handle g1_read_cleanup_table_count(bytes) {
+                        G1U32Read::Value(cleanup_count) => handle g1_read_function_table(bytes) {
+                            G1FunctionTableRead::Value(_, function_count) => g1_function_metadata_from(bytes, 0, function_count, string_count, type_count, signature_count, cleanup_count),
+                            _ => false,
+                        },
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_read_cleanup_table_count(bytes: Bytes) -> G1U32Read {
+    handle g1_read_directory_record(bytes, 384) {
+        G1DirectoryRead::Value(record) => handle record.section {
+            G1Section::Cleanup => handle record.width == 24 {
+                true => G1U32Read::Value(record.count),
+                _ => G1U32Read::Truncated,
+            },
+            _ => G1U32Read::Truncated,
+        },
+        _ => G1U32Read::Truncated,
+    }
+}
+
+pub fn g1_read_cleanup_record(bytes: Bytes, index: u32) -> G1CleanupRecordRead {
+    handle g1_read_directory_record(bytes, 384) {
+        G1DirectoryRead::Value(record) => handle record.section {
+            G1Section::Cleanup => handle record.width == 24 {
+                true => handle index < record.count {
+                    true => g1_read_cleanup_record_at(bytes, __g1_int_wrapping_add<usize>(g1_directory_offset_as_usize(record.offset), __g1_int_wrapping_mul<usize>(__g1_int_convert_checked_to_usize<u32>(index), 24))),
+                    _ => G1CleanupRecordRead::InvalidIndex,
+                },
+                _ => G1CleanupRecordRead::Truncated,
+            },
+            _ => G1CleanupRecordRead::Truncated,
+        },
+        _ => G1CleanupRecordRead::Truncated,
+    }
+}
+
+fn g1_read_cleanup_record_at(bytes: Bytes, offset: usize) -> G1CleanupRecordRead {
+    handle g1_read_u32_le(bytes, offset) {
+        G1U32Read::Value(function) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 4)) {
+            G1U32Read::Value(first_instruction) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 8)) {
+                G1U32Read::Value(end_instruction) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 12)) {
+                    G1U32Read::Value(operand_start) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 16)) {
+                        G1U32Read::Value(operand_count) => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 20)) {
+                            G1U32Read::Value(0) => G1CleanupRecordRead::Value(G1CleanupRecord { function: function, first_instruction: first_instruction, end_instruction: end_instruction, operand_start: operand_start, operand_count: operand_count }),
+                            G1U32Read::Value(_) => G1CleanupRecordRead::InvalidReserved,
+                            _ => G1CleanupRecordRead::Truncated,
+                        },
+                        _ => G1CleanupRecordRead::Truncated,
+                    },
+                    _ => G1CleanupRecordRead::Truncated,
+                },
+                _ => G1CleanupRecordRead::Truncated,
+            },
+            _ => G1CleanupRecordRead::Truncated,
+        },
+        _ => G1CleanupRecordRead::Truncated,
+    }
+}
+
+// Cleanup ranges are stored per function but encoded globally. Validate both
+// views: function records must partition the cleanup table, and each plan
+// must advance one contiguous instruction-ordinal coverage range.
+pub fn g1_cleanup_table_has_well_formed_ranges(bytes: Bytes) -> Bool {
+    handle g1_read_function_table(bytes) {
+        G1FunctionTableRead::Value(_, function_count) => handle g1_read_cleanup_table_count(bytes) {
+            G1U32Read::Value(cleanup_count) => g1_cleanup_function_ranges_from(bytes, 0, function_count, 0, cleanup_count),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_cleanup_function_ranges_from(bytes: Bytes, function_index: u32, function_count: u32, expected_cleanup_start: u32, cleanup_count: u32) -> Bool {
+    handle function_index == function_count {
+        true => expected_cleanup_start == cleanup_count,
+        false => handle g1_read_function_record(bytes, function_index) {
+            G1FunctionRecordRead::Value(function) => handle function.cleanup_start == expected_cleanup_start {
+                true => handle function.cleanup_count <= __g1_int_wrapping_sub<u32>(cleanup_count, function.cleanup_start) {
+                    true => g1_cleanup_plans_cover_function(bytes, function_index, function.cleanup_start, function.cleanup_count, function.instruction_count, 0, function_count, cleanup_count),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_cleanup_plans_cover_function(bytes: Bytes, function_index: u32, plan_index: u32, remaining_plans: u32, instruction_count: u32, next_instruction: u32, function_count: u32, cleanup_count: u32) -> Bool {
+    handle remaining_plans == 0 {
+        true => handle next_instruction == instruction_count {
+            true => g1_cleanup_function_ranges_from(bytes, __g1_int_wrapping_add<u32>(function_index, 1), function_count, plan_index, cleanup_count),
+            _ => false,
+        },
+        false => handle g1_read_cleanup_record(bytes, plan_index) {
+            G1CleanupRecordRead::Value(plan) => handle plan.function == function_index {
+                true => handle plan.first_instruction == next_instruction {
+                    true => handle plan.end_instruction > plan.first_instruction {
+                        true => handle plan.end_instruction <= instruction_count {
+                            true => handle g1_operand_range_is_within_table(bytes, plan.operand_start, plan.operand_count) {
+                                true => handle g1_cleanup_operands_are_valid(bytes, plan.operand_start, plan.operand_count, function_index, instruction_count) {
+                                    true => g1_cleanup_plans_cover_function(bytes, function_index, __g1_int_wrapping_add<u32>(plan_index, 1), __g1_int_wrapping_sub<u32>(remaining_plans, 1), instruction_count, plan.end_instruction, function_count, cleanup_count),
+                                    _ => false,
+                                },
+                                _ => false,
+                            },
+                            _ => false,
+                        },
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_cleanup_operands_are_valid(bytes: Bytes, start: u32, count: u32, function_index: u32, instruction_count: u32) -> Bool {
+    // The cleanup range itself was checked before this call. Register bounds
+    // come from the function record, while the ordinal count is threaded only
+    // to keep this validator tied to an admitted function context.
+    handle g1_read_function_record(bytes, function_index) {
+        G1FunctionRecordRead::Value(function) => handle function.instruction_count == instruction_count {
+            true => g1_cleanup_operands_from(bytes, start, count, 0, function.registers),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_cleanup_operands_from(bytes: Bytes, start: u32, count: u32, index: u32, registers: u32) -> Bool {
+    handle index == count {
+        true => true,
+        false => handle g1_read_operand_word(bytes, __g1_int_wrapping_add<u32>(start, index)) {
+            G1U32Read::Value(register) => handle register < registers {
+                true => handle g1_cleanup_operand_is_unique_in_prefix(bytes, start, index, register, 0) {
+                    true => g1_cleanup_operands_from(bytes, start, count, __g1_int_wrapping_add<u32>(index, 1), registers),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_cleanup_operand_is_unique_in_prefix(bytes: Bytes, start: u32, prefix_count: u32, register: u32, index: u32) -> Bool {
+    handle index == prefix_count {
+        true => true,
+        false => handle g1_read_operand_word(bytes, __g1_int_wrapping_add<u32>(start, index)) {
+            G1U32Read::Value(previous) => handle previous == register {
+                true => false,
+                false => g1_cleanup_operand_is_unique_in_prefix(bytes, start, prefix_count, register, __g1_int_wrapping_add<u32>(index, 1)),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_function_metadata_from(bytes: Bytes, index: u32, function_count: u32, string_count: u32, type_count: u32, signature_count: u32, cleanup_count: u32) -> Bool {
+    handle index == function_count {
+        true => true,
+        false => handle g1_read_function_record(bytes, index) {
+            G1FunctionRecordRead::Value(function) => handle g1_function_metadata_is_resolved(function, string_count, type_count, signature_count, cleanup_count) {
+                true => g1_function_metadata_from(bytes, __g1_int_wrapping_add<u32>(index, 1), function_count, string_count, type_count, signature_count, cleanup_count),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_function_metadata_is_resolved(function: G1FunctionRecord, string_count: u32, type_count: u32, signature_count: u32, cleanup_count: u32) -> Bool {
+    handle function.name < string_count {
+        true => handle function.signature < signature_count {
+            true => handle function.flags <= 7 {
+                true => handle function.capture_type < type_count {
+                    true => handle g1_function_receiver_mode_is_valid(function.receiver_mode) {
+                        true => handle function.cleanup_start <= cleanup_count {
+                            true => function.cleanup_count <= __g1_int_wrapping_sub<u32>(cleanup_count, function.cleanup_start),
+                            _ => false,
+                        },
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_function_receiver_mode_is_valid(receiver_mode: u32) -> Bool {
+    handle receiver_mode == 4294967295 {
+        true => true,
+        false => receiver_mode <= 2,
+        _ => false,
+    }
+}
+
+// The first nineteen G1 type IDs are a fixed scalar ABI, not user-defined
+// records. Decode that prefix directly so later type-reference checks cannot
+// accidentally treat a reordered or duplicated scalar encoding as ordinary
+// metadata.
+pub fn g1_type_table_has_canonical_scalar_prefix(bytes: Bytes) -> Bool {
+    handle g1_read_variable_table(bytes, 2) {
+        G1VariableTableRead::Value(count) => handle count >= 19 {
+            true => g1_predefined_type_records_from(bytes, 0),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_predefined_type_records_from(bytes: Bytes, index: u32) -> Bool {
+    handle index == 19 {
+        true => true,
+        false => handle g1_read_variable_record(bytes, 2, index) {
+            G1VariableRecordRead::Value(tag, flags, _, 0) => handle tag == __g1_int_convert_wrapping_to_u8<u32>(index) {
+                true => handle flags == g1_predefined_type_flags(index) {
+                    true => g1_predefined_type_records_from(bytes, __g1_int_wrapping_add<u32>(index, 1)),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_predefined_type_flags(index: u32) -> u8 {
+    handle index {
+        0 => 19,
+        1 => 2,
+        _ => 17,
+    }
+}
+
+// Constants use the same variable-record framing as types and signatures, but
+// their tag determines an exact scalar payload size (or a length-prefixed
+// byte/static-data payload). This phase establishes those bounds before later
+// instruction decoding resolves constant IDs into register types.
+pub fn g1_constant_table_has_well_formed_shapes(bytes: Bytes) -> Bool {
+    handle g1_read_variable_table(bytes, 3) {
+        G1VariableTableRead::Value(count) => g1_constant_shapes_from(bytes, 0, count),
+        _ => false,
+    }
+}
+
+fn g1_constant_shapes_from(bytes: Bytes, index: u32, count: u32) -> Bool {
+    handle index == count {
+        true => true,
+        false => handle g1_constant_record_has_well_formed_shape(bytes, index) {
+            true => g1_constant_shapes_from(bytes, __g1_int_wrapping_add<u32>(index, 1), count),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_constant_record_has_well_formed_shape(bytes: Bytes, index: u32) -> Bool {
+    handle g1_read_variable_record(bytes, 3, index) {
+        G1VariableRecordRead::Value(tag, 0, payload, length) => g1_constant_payload_has_well_formed_shape(bytes, tag, payload, length),
+        _ => false,
+    }
+}
+
+fn g1_constant_payload_has_well_formed_shape(bytes: Bytes, tag: u8, payload: usize, length: u32) -> Bool {
+    handle tag {
+        0 => length == 0,
+        2 => length == 1,
+        3 => length == 2,
+        4 => length == 4,
+        5 => length == 8,
+        6 => length == 16,
+        7 => length == 1,
+        8 => length == 2,
+        9 => length == 4,
+        10 => length == 8,
+        11 => length == 16,
+        12 => length == 8,
+        13 => length == 8,
+        14 => length == 4,
+        15 => length == 8,
+        16 => length == 4,
+        17 => length == 4,
+        18 => g1_length_prefixed_constant_has_well_formed_shape(bytes, payload, length, 4),
+        19 => g1_static_data_constant_has_well_formed_shape(bytes, payload, length),
+        _ => false,
+    }
+}
+
+fn g1_length_prefixed_constant_has_well_formed_shape(bytes: Bytes, payload: usize, length: u32, prefix: u32) -> Bool {
+    handle length >= prefix {
+        true => handle g1_read_u32_le(bytes, payload) {
+            G1U32Read::Value(declared) => __g1_int_convert_wrapping_to_u64<u32>(declared) == __g1_int_wrapping_sub<u64>(__g1_int_convert_wrapping_to_u64<u32>(length), __g1_int_convert_wrapping_to_u64<u32>(prefix)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_static_data_constant_has_well_formed_shape(bytes: Bytes, payload: usize, length: u32) -> Bool {
+    // tag: u128, alignment: u32, byte length: u32, then the immutable bytes.
+    // Alignment positivity is checked here; the power-of-two predicate is
+    // carried by the eventual decoded static type/constant relation.
+    handle length >= 24 {
+        true => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(payload, 16)) {
+            G1U32Read::Value(alignment) => handle alignment != 0 {
+                true => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(payload, 20)) {
+                    G1U32Read::Value(declared) => __g1_int_convert_wrapping_to_u64<u32>(declared) == __g1_int_wrapping_sub<u64>(__g1_int_convert_wrapping_to_u64<u32>(length), 24),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// Tag 0x2b is the sealed static-data type introduced for compiler-owned
+// immutable segments. Its payload is one element type ID, an opaque u128 tag,
+// and a power-of-two alignment. The tag bytes remain opaque here on purpose:
+// equality with constants is checked by the later typed constant pass.
+pub fn g1_static_data_type_record_has_well_formed_shape(bytes: Bytes, index: u32) -> Bool {
+    handle g1_read_variable_table(bytes, 2) {
+        G1VariableTableRead::Value(type_count) => handle g1_read_variable_record(bytes, 2, index) {
+            G1VariableRecordRead::Value(43, flags, payload, 24) => handle g1_static_data_type_flags_are_valid(flags) {
+                true => g1_static_data_type_payload_has_well_formed_shape(bytes, payload, type_count),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_static_data_type_flags_are_valid(flags: u8) -> Bool {
+    // Static-data's only wire flags are the two source-level use capabilities.
+    // Either capability may be narrowed by Use, so every subset is valid.
+    handle flags {
+        0 => true,
+        1 => true,
+        16 => true,
+        17 => true,
+        _ => false,
+    }
+}
+
+fn g1_static_data_type_payload_has_well_formed_shape(bytes: Bytes, payload: usize, type_count: u32) -> Bool {
+    handle g1_read_u32_le(bytes, payload) {
+        G1U32Read::Value(element) => handle element < type_count {
+            true => handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(payload, 20)) {
+                G1U32Read::Value(alignment) => g1_u32_is_power_of_two(alignment),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_u32_is_power_of_two(value: u32) -> Bool {
+    handle value == 1 {
+        true => true,
+        false => handle value == 0 {
+            true => false,
+            false => handle __g1_int_wrapping_mul<u32>(__g1_int_shr<u32>(value, 1), 2) == value {
+                true => g1_u32_is_power_of_two(__g1_int_shr<u32>(value, 1)),
+                _ => false,
+            },
+        },
+        _ => false,
+    }
+}
+
+// This composes the source-owned decoder phases that do not yet require
+// instruction type inference: canonical container framing, names, types,
+// constants, signatures, fixed function metadata, and complete code-range
+// ownership. It is intentionally not the final verifier; opcode semantics,
+// borrow flow, and cross-table nominal identities remain separate phases.
+pub fn g1_core_metadata_has_well_formed_shape(bytes: Bytes) -> Bool {
+    handle g1_read_container(bytes) {
+        G1ContainerRead::Library(_) => g1_core_metadata_tables_have_well_formed_shape(bytes),
+        G1ContainerRead::Executable(_, _) => g1_core_metadata_tables_have_well_formed_shape(bytes),
+        _ => false,
+    }
+}
+
+fn g1_core_metadata_tables_have_well_formed_shape(bytes: Bytes) -> Bool {
+    handle g1_read_string_table(bytes) {
+        G1StringTableRead::Value(_) => handle g1_type_table_has_canonical_scalar_prefix(bytes) {
+            true => handle g1_constant_table_has_well_formed_shapes(bytes) {
+                true => handle g1_signature_table_has_well_formed_shapes(bytes) {
+                    true => handle g1_function_table_has_resolved_metadata(bytes) {
+                        true => handle g1_function_code_ranges_cover_code(bytes) {
+                            true => handle g1_function_instruction_counts_match_code(bytes) {
+                                true => handle g1_function_operand_ranges_are_within_table(bytes) {
+                                    true => g1_cleanup_table_has_well_formed_ranges(bytes),
+                                    _ => false,
+                                },
+                                _ => false,
+                            },
+                            _ => false,
+                        },
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// Section 8 is the fixed-width function table. Its directory record starts
+// at byte 288; the count is at byte 312. Directory admission has already
+// established that this is the canonical functions record and that its
+// count/width/extent agree, so only the cross-table entry range remains.
+fn g1_admit_executable_entry(bytes: Bytes, entry: u32, features: u64) -> G1ContainerRead {
+    handle g1_read_u32_le(bytes, 312) {
+        G1U32Read::Value(function_count) => handle entry < function_count {
+            true => G1ContainerRead::Executable(entry, features),
+            false => G1ContainerRead::EntryOutOfRange,
+            _ => G1ContainerRead::EntryOutOfRange,
+        },
+        _ => G1ContainerRead::InvalidDirectory,
+    }
+}
+
 fn g1_preamble_version_is_valid(bytes: Bytes) -> Bool {
     handle g1_read_u32_le(bytes, 8) {
         G1U32Read::Value(1) => g1_preamble_length_is_valid(bytes),
@@ -502,6 +1976,107 @@ pub fn g1_directory_is_readable(bytes: Bytes) -> Bool {
         true => g1_directory_count_is_current(bytes),
         false => false,
         _ => false,
+    }
+}
+
+// Rust stage0 does more than establish that every directory entry lies in the
+// image: sections must form one contiguous, eight-byte-aligned canonical
+// layout, each padding byte must be zero, and the final section must consume
+// the whole artifact.  Preserve that stronger result as a separate predicate
+// so old layout probes can stay diagnostic while general decoding uses it as
+// its admission boundary.
+pub fn g1_directory_is_canonical(bytes: Bytes) -> Bool {
+    handle g1_directory_is_readable(bytes) {
+        true => g1_directory_records_are_canonical(bytes, 64, 1, 512),
+        _ => false,
+    }
+}
+
+fn g1_directory_records_are_canonical(bytes: Bytes, directory_offset: usize, expected_id: u32, expected_section_offset: u64) -> Bool {
+    handle expected_id == 15 {
+        true => expected_section_offset == g1_usize_as_u64(__g1_bytes_len(bytes)),
+        false => g1_directory_record_is_canonical(bytes, directory_offset, expected_id, expected_section_offset),
+        _ => false,
+    }
+}
+
+fn g1_directory_record_is_canonical(bytes: Bytes, directory_offset: usize, expected_id: u32, expected_section_offset: u64) -> Bool {
+    handle g1_read_directory_record(bytes, directory_offset) {
+        G1DirectoryRead::Value(record) => handle g1_section_same(record.section, g1_section(expected_id)) {
+            true => handle record.offset == expected_section_offset {
+                true => handle g1_directory_record_has_required_width(record) {
+                    true => g1_directory_record_canonical_end(bytes, directory_offset, expected_id, record),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_directory_record_has_required_width(record: G1DirectoryRecord) -> Bool {
+    handle record.section {
+        G1Section::Strings => record.width == 0,
+        G1Section::Types => record.width == 0,
+        G1Section::Constants => record.width == 0,
+        G1Section::Signatures => record.width == 0,
+        G1Section::Implementations => record.width == 24,
+        G1Section::Protocols => record.width == 0,
+        G1Section::Handlers => record.width == 0,
+        G1Section::Functions => record.width == 64,
+        G1Section::Code => record.width == 4,
+        G1Section::References => record.width == 4,
+        G1Section::Cleanup => record.width == 24,
+        G1Section::Resumption => record.width == 16,
+        G1Section::Debug => record.width == 16,
+        G1Section::SourceMap => record.width == 0,
+        _ => false,
+    }
+}
+
+fn g1_directory_record_canonical_end(bytes: Bytes, directory_offset: usize, expected_id: u32, record: G1DirectoryRecord) -> Bool {
+    handle g1_directory_record_within_artifact(record, g1_usize_as_u64(__g1_bytes_len(bytes))) {
+        true => g1_directory_record_canonical_padding(bytes, directory_offset, expected_id, record, __g1_int_wrapping_add<u64>(record.offset, record.byte_length)),
+        _ => false,
+    }
+}
+
+fn g1_directory_record_canonical_padding(bytes: Bytes, directory_offset: usize, expected_id: u32, record: G1DirectoryRecord, end: u64) -> Bool {
+    let padding = g1_padding_to_eight(end);
+    let total = g1_usize_as_u64(__g1_bytes_len(bytes));
+    handle padding <= __g1_int_wrapping_sub<u64>(total, end) {
+        true => handle g1_zero_bytes_at(bytes, g1_directory_offset_as_usize(end), g1_directory_offset_as_usize(padding)) {
+            true => g1_directory_records_are_canonical(bytes, __g1_int_wrapping_add<usize>(directory_offset, 32), __g1_int_wrapping_add<u32>(expected_id, 1), __g1_int_wrapping_add<u64>(end, padding)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_zero_bytes_at(bytes: Bytes, offset: usize, count: usize) -> Bool {
+    handle count == 0 {
+        true => true,
+        false => handle __g1_bytes_get(bytes, offset) == 0 {
+            true => g1_zero_bytes_at(bytes, __g1_int_wrapping_add<usize>(offset, 1), __g1_int_wrapping_sub<usize>(count, 1)),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_padding_to_eight(value: u64) -> u64 {
+    handle __g1_int_wrapping_sub<u64>(value, __g1_int_wrapping_mul<u64>(__g1_int_shr<u64>(value, 3), 8)) {
+        0 => 0,
+        1 => 7,
+        2 => 6,
+        3 => 5,
+        4 => 4,
+        5 => 3,
+        6 => 2,
+        7 => 1,
+        _ => 0,
     }
 }
 
@@ -1447,8 +3022,11 @@ pub fn g1_static_utf8_library_candidate_has_expected_layout() -> Bool {
             true => handle g1_declared_total_matches_bytes(candidate) {
                 true => handle g1_directory_is_readable(candidate) {
                     true => handle __g1_bytes_get(candidate, 128) == 3 {
-                        true => handle __g1_bytes_get(candidate, 144) == 32 {
-                            true => handle __g1_bytes_get(candidate, 160) == 1 {
+                        true => handle __g1_bytes_get(candidate, 144) == 46 {
+                            // Section 4's directory entry begins at 160;
+                            // section 3's one-record constant table begins
+                            // at 800 after the type table and its padding.
+                            true => handle __g1_bytes_get(candidate, 160) == 4 {
                                 true => __g1_bytes_get(candidate, 800) == 1,
                                 false => false,
                                 _ => false,
@@ -1557,7 +3135,7 @@ fn g1_static_len_entry_directory_tail(protocol: usize, handler: usize, function:
                 ),
                 g1_directory_entry(11, g1_usize_as_u64(cleanup), 72, 3, 24),
             ),
-            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 8, 0, 0))),
+            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 8, 0, 0))),
         ),
         __g1_bytes_from_array_move([]),
     )
@@ -1595,7 +3173,10 @@ fn g1_static_len_entry_cleanup_plan(first: u32, end: u32, operand_start: u32, op
 
 fn g1_static_len_entry_cleanup_table() -> Bytes {
     g1_concat3(
-        g1_static_len_entry_cleanup_plan(0, 1, 0, 0),
+        // Rust's operand-list interner canonically reuses the existing
+        // one-register prefix as the zero-register cleanup's start point.
+        // The count is zero, but the start remains wire-significant.
+        g1_static_len_entry_cleanup_plan(0, 1, 1, 0),
         g1_static_len_entry_cleanup_plan(1, 2, 0, 1),
         g1_static_len_entry_cleanup_plan(2, 3, 1, 2),
     )
@@ -1793,7 +3374,7 @@ fn g1_static_subslice_directory_tail(protocol: usize, handler: usize, function: 
                 ),
                 g1_directory_entry(11, g1_usize_as_u64(cleanup), 120, 5, 24),
             ),
-            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 8, 0, 0))),
+            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 8, 0, 0))),
         ),
         __g1_bytes_from_array_move([]),
     )
@@ -1821,8 +3402,8 @@ fn g1_static_subslice_operands() -> Bytes {
     g1_append_field(
         g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(3), u32_le_bytes(1)),
         g1_append_field(
-            g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(2)),
-            g1_append_field(g1_concat4(u32_le_bytes(3), u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(3)), u32_le_bytes(4)),
+            g1_concat4(u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(3), u32_le_bytes(2)),
+            g1_append_field(g1_concat4(u32_le_bytes(1), u32_le_bytes(4), u32_le_bytes(3), u32_le_bytes(2)), u32_le_bytes(1)),
         ),
     )
 }
@@ -1837,7 +3418,7 @@ fn g1_static_subslice_cleanup_plan(first: u32, end: u32, operand_start: u32, ope
 
 fn g1_static_subslice_cleanup_table() -> Bytes {
     g1_concat4(
-        g1_static_subslice_cleanup_plan(0, 1, 0, 0),
+        g1_static_subslice_cleanup_plan(0, 1, 3, 0),
         g1_static_subslice_cleanup_plan(1, 2, 3, 1),
         g1_static_subslice_cleanup_plan(2, 3, 4, 2),
         g1_append_field(g1_static_subslice_cleanup_plan(3, 4, 6, 3), g1_static_subslice_cleanup_plan(4, 5, 9, 4)),
@@ -1883,7 +3464,7 @@ pub fn g1_static_utf8_subslice_entry_candidate_has_expected_layout() -> Bool {
                                 true => handle __g1_bytes_get(candidate, 1036) == 113 {
                                     true => handle __g1_bytes_get(candidate, 1056) == 1 {
                                         true => handle __g1_bytes_get(candidate, 1064) == 3 {
-                                            true => __g1_bytes_get(candidate, 1092) == 1,
+                                        true => __g1_bytes_get(candidate, 1092) == 4,
                                             false => false,
                                             _ => false,
                                         },
@@ -2058,7 +3639,7 @@ fn g1_static_get_directory_tail(protocol: usize, handler: usize, function: usize
                 ),
                 g1_directory_entry(11, g1_usize_as_u64(cleanup), 144, 6, 24),
             ),
-            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 8, 0, 0))),
+            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 8, 0, 0))),
         ),
         __g1_bytes_from_array_move([]),
     )
@@ -2094,11 +3675,8 @@ fn g1_static_get_operands() -> Bytes {
     g1_append_field(
         g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(2)),
         g1_append_field(
-            g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(3), u32_le_bytes(1)),
-            g1_append_field(
-                g1_concat4(u32_le_bytes(2), u32_le_bytes(3), u32_le_bytes(1), u32_le_bytes(2)),
-                g1_concat3(u32_le_bytes(4), u32_le_bytes(1), u32_le_bytes(2)),
-            ),
+            g1_concat4(u32_le_bytes(1), u32_le_bytes(3), u32_le_bytes(2), u32_le_bytes(1)),
+            g1_append_field(g1_concat4(u32_le_bytes(4), u32_le_bytes(3), u32_le_bytes(2), u32_le_bytes(1)), g1_concat3(u32_le_bytes(4), u32_le_bytes(2), u32_le_bytes(1))),
         ),
     )
 }
@@ -2113,7 +3691,7 @@ fn g1_static_get_cleanup_plan(first: u32, end: u32, operand_start: u32, operand_
 
 fn g1_static_get_cleanup_table() -> Bytes {
     g1_concat4(
-        g1_static_get_cleanup_plan(0, 1, 0, 0),
+        g1_static_get_cleanup_plan(0, 1, 2, 0),
         g1_static_get_cleanup_plan(1, 2, 2, 1),
         g1_static_get_cleanup_plan(2, 3, 3, 2),
         g1_append_field(
@@ -3651,7 +5229,7 @@ pub fn verify_g1_unit_entry_artifact_named_four_bytes(bytes: Bytes, name: Bytes)
 }
 
 fn verify_g1_unit_entry_header(bytes: Bytes, name: Bytes) -> Bool {
-    handle g1_directory_is_readable(bytes) {
+    handle g1_directory_is_canonical(bytes) {
         true => handle g1_magic_bytes_match(bytes) {
         true => handle __g1_bytes_get(bytes, 8) == 1 {
             true => handle __g1_bytes_get(bytes, 12) == 64 {
@@ -3835,7 +5413,7 @@ fn emit_verified_named_g1_unit_entry(name: Bytes) -> ArtifactEmission {
 // requested name. This checks every length-sensitive directory offset at once
 // and remains independent of the Rust VM's later artifact verification.
 fn verify_g1_unit_entry_artifact_named(bytes: Bytes, name: Bytes) -> Bool {
-    handle g1_directory_is_readable(bytes) {
+    handle g1_directory_is_canonical(bytes) {
         true => handle __g1_bytes_len(name) == 0 {
         true => false,
         false => handle __g1_bytes_len(name) > 255 {
