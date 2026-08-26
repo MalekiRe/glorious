@@ -1,0 +1,2 @@
+crates/grandiose-stage0/tests/semantic_conformance.rs::semantic_inventory_is_total_enabled_and_machine_checkable	pass	tooling/self-host-stage0-artifact-cache-check.sh executes Grandiose verified/build/world/fingerprint cache admission and hit/miss/rejection classification.
+crates/grandiose-stage0/tests/request_and_revision.rs::stage_zero_build_identity_advances_the_vm_artifact_boundary	pass	The frozen request/revision oracle suite passes (25 tests), retaining the complete cache identity/admission contract as the implementation oracle.

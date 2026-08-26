@@ -1,0 +1,3 @@
+crates/grandiose-stage0/tests/request_and_revision.rs::snapshots_remain_pinned_to_their_immutable_world	pass	tooling/self-host-stage0-revision-check.sh executes Grandiose roots, snapshots, advancement, retirement, and stale-admission decisions.
+crates/grandiose-stage0/tests/retention.rs::retention_accounting_reports_exact_snapshot_and_session_pins_until_collection	pass	The frozen retention suite passes (3 tests), and the frozen request/revision suite passes (25 tests).
+crates/grandiose-stage0/tests/request_and_revision.rs::retired_revisions_remain_coherent_while_pinned_then_collect_at_a_safe_point	pass	The Grandiose structural boundary retains immutable lineage and pin-aware retirement before later database slices.

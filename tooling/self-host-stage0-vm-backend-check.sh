@@ -15,7 +15,7 @@ source_args=(
     --source compiler_support@0.1.0 src/lib.glorious "$support"
     --source vm-backend-library@0.1.0 src/lib.glorious "$library"
 )
-for module in bootstrap_indirection identity types signature pattern body core mir_storage mir runtime_manifest vm_backend; do
+for module in bootstrap_indirection identity source scanner types signature pattern body core mir_storage mir runtime_manifest vm_backend; do
     source_args+=(--source vm-backend-library@0.1.0 "src/$module/$module.glorious" "$root/self-host-stage0/src/$module/$module.glorious")
 done
 

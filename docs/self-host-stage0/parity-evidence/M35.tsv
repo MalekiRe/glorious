@@ -1,0 +1,2 @@
+crates/grandiose-stage0/tests/semantic_conformance.rs::semantic_inventory_is_total_enabled_and_machine_checkable	pass	tooling/self-host-stage0-lib-check.sh and tooling/self-host-stage0-lib-inventory-check.sh execute the Grandiose public module inventory and require all 34 public compiler facades.
+crates/grandiose-stage0/tests/cli.rs::cli_lists_commands_and_rejects_unknown_ones	pass	The frozen Rust CLI oracle suite passes (152 tests), retaining public compiler-surface inventory behavior as the implementation oracle.

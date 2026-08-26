@@ -563,11 +563,11 @@ fn emit_file_vm_entry_valid_package(package: Text, logical_path: Text, output_pa
 }
 
 fn emit_file_vm_main_entry(input: SourceInput, output_path: Text) -> EmitUnitEntryResult {
-    handle compile_source_unit_entry(input) {
-        ArtifactEmission::Artifact(bytes) => emit_unit_entry_bytes(output_path, bytes),
-        ArtifactEmission::Rejected => emit_source_i64_function_arithmetic_or_scalar_entry_to_file(input, output_path),
-        _ => EmitUnitEntryResult::Rejected,
-    }
+    // An i64 main is also syntactically function-shaped enough for the Unit
+    // probe. Select its typed artifact first so a value-returning entrypoint
+    // cannot be silently published as a verified Unit program returning zero.
+    // Unit remains the final fallback below.
+    emit_source_i64_function_arithmetic_or_scalar_entry_to_file(input, output_path)
 }
 
 fn emit_source_i64_function_arithmetic_or_scalar_entry_to_file(input: SourceInput, output_path: Text) -> EmitUnitEntryResult {
@@ -588,6 +588,14 @@ fn emit_source_i64_function_select_or_scalar_entry_to_file(input: SourceInput, o
 
 fn emit_source_i64_function_scalar_entry_to_file(input: SourceInput, output_path: Text) -> EmitUnitEntryResult {
     handle compile_source_i64_function_entry(input) {
+        ArtifactEmission::Artifact(bytes) => emit_unit_entry_bytes(output_path, bytes),
+        ArtifactEmission::Rejected => emit_source_unit_entry_to_file(input, output_path),
+        _ => EmitUnitEntryResult::Rejected,
+    }
+}
+
+fn emit_source_unit_entry_to_file(input: SourceInput, output_path: Text) -> EmitUnitEntryResult {
+    handle compile_source_unit_entry(input) {
         ArtifactEmission::Artifact(bytes) => emit_unit_entry_bytes(output_path, bytes),
         _ => EmitUnitEntryResult::Rejected,
     }

@@ -5,7 +5,7 @@ readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly compiler="$root/target/debug/grc-stage0"
 readonly support="$root/self-host-stage0/runtime/compiler_support.glorious"
 readonly probe="${GRANDIOSE_STAGE0_SERVICE_PROBE:-$root/self-host-stage0/probes/service.glorious}"
-readonly expected="${GRANDIOSE_STAGE0_SERVICE_EXPECTED:-2859}"
+readonly expected="${GRANDIOSE_STAGE0_SERVICE_EXPECTED:-2958}"
 
 if [[ "${GRANDIOSE_STAGE0_ALREADY_BUILT:-0}" != 1 ]]; then
     cargo build -q -p grandiose-stage0 --bin grc-stage0

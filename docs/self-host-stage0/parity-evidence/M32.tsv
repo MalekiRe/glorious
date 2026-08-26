@@ -1,0 +1,2 @@
+crates/grandiose-stage0/tests/source_and_query.rs::query_reuses_green_dependencies_and_recomputes_red_ones	pass	tooling/self-host-stage0-query-check.sh executes Grandiose empty/computing/complete/recovered query state, publication, revision matching, recovery, and dependency-gated dispatch.
+crates/grandiose-stage0/tests/source_and_query.rs::query_rejects_recovered_results_under_a_strict_policy	pass	The frozen Rust source/query oracle suite passes (14 tests), retaining the full typed-query contract for later source slices.
