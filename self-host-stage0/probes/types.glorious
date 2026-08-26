@@ -1,0 +1,37 @@
+use types_library::types;
+
+pub fn score(value: Bool) -> i64 {
+    handle value {
+        true => 1,
+        false => 0,
+        _ => 0,
+    }
+}
+
+pub fn main() -> i64 {
+    score(types::same(types::Type::I64, types::Type::I64))
+        + score(types::same(types::Type::Never, types::Type::Never))
+        + score(types::same(types::Type::I64, types::Type::U64))
+        + score(types::same(types::Type::U8, types::Type::U8))
+        + score(types::same(types::Type::Usize, types::Type::Usize))
+        + score(types::same(types::Type::U16, types::Type::U16))
+        + score(types::same(types::Type::I8, types::Type::I8))
+        + score(types::same(types::Type::F32, types::Type::F32))
+        + score(types::same(types::Type::Char, types::Type::Char))
+        + score(types::same(types::Type::Bytes, types::Type::Bytes))
+        + score(types::same(types::Type::Named("Node"), types::Type::Named("Node")))
+        + score(types::same(types::Type::Generic(2), types::Type::Generic(2)))
+        + score(types::same(types::Type::Projection("Item", 2), types::Type::Projection("Item", 2)))
+        + score(types::same(types::Type::Named("Node"), types::Type::Named("Other")))
+        + score(types::same(types::Type::Generic(2), types::Type::Generic(3)))
+        + score(types::same(types::Type::Projection("Item", 2), types::Type::Projection("Other", 2)))
+        + score(types::same(types::Type::Never, types::Type::I64))
+        + score(types::same(types::Type::U8, types::Type::Usize))
+        + score(types::same(types::Type::F32, types::Type::F64))
+        + score(types::same_term(types::Term::ValueType(types::Type::I64), types::Term::ValueType(types::Type::I64)))
+        + score(types::same_term(types::Term::EffectRow(3), types::Term::EffectRow(3)))
+        + score(types::same_term(types::Term::Lifetime(4), types::Term::Lifetime(4)))
+        + score(types::same_term(types::Term::StructuralConstant(5), types::Term::StructuralConstant(5)))
+        + score(types::same_term(types::Term::EffectRow(3), types::Term::Lifetime(3)))
+        + score(types::same_term(types::Term::StructuralConstant(5), types::Term::StructuralConstant(6)))
+}

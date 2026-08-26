@@ -1,0 +1,48 @@
+// M23 bootstrap escape admission.  Provenance is kept distinct from place
+// liveness: caller-owned references may cross a boundary, body-local loans
+// may not, and ordinary owned values carry no borrow obligation.
+use placeflow::PlaceState;
+use placeflow::can_escape_owned;
+use placeflow::can_read;
+pub enum EscapeResult { Allowed, Rejected }
+pub enum ReferenceOrigin { Owned, ExternalBorrow, LocalBorrow }
+
+pub fn return_place(state: PlaceState) -> EscapeResult {
+    handle can_escape_owned(state) { true => EscapeResult::Allowed, false => EscapeResult::Rejected, _ => EscapeResult::Rejected }
+}
+
+pub fn return_reference(origin: ReferenceOrigin) -> EscapeResult {
+    boundary(origin)
+}
+
+// Borrow provenance and place liveness are independent requirements. An
+// external borrow may return through a shared loan, but it cannot be
+// manufactured from a moved place; a local borrow remains rejected even when
+// its source place is readable.
+pub fn return_reference_from(state: PlaceState, origin: ReferenceOrigin) -> EscapeResult {
+    handle can_read(state) {
+        true => boundary(origin),
+        false => EscapeResult::Rejected,
+        _ => EscapeResult::Rejected,
+    }
+}
+
+pub fn suspend_reference(origin: ReferenceOrigin) -> EscapeResult {
+    boundary(origin)
+}
+
+// External storage is a second escape boundary.  It shares the same
+// provenance rule now; later aggregate projection paths refine the origin
+// without weakening this fail-closed admission.
+pub fn store_reference(origin: ReferenceOrigin) -> EscapeResult {
+    boundary(origin)
+}
+
+fn boundary(origin: ReferenceOrigin) -> EscapeResult {
+    handle origin {
+        ReferenceOrigin::Owned => EscapeResult::Allowed,
+        ReferenceOrigin::ExternalBorrow => EscapeResult::Allowed,
+        ReferenceOrigin::LocalBorrow => EscapeResult::Rejected,
+        _ => EscapeResult::Rejected,
+    }
+}

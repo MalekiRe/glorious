@@ -820,6 +820,7 @@ fn implemented_generic_integer_roles_have_stable_selector_round_trips() {
     use PrimitiveRole::*;
     let roles = [
         IntCheckedAdd,
+        IntCheckedDiv,
         IntWrappingAdd,
         IntWrappingSub,
         IntWrappingMul,
@@ -854,4 +855,39 @@ fn implemented_generic_integer_roles_have_stable_selector_round_trips() {
             Some(role)
         );
     }
+}
+
+#[test]
+fn blake3_requires_the_exact_manifest_bound_bytes_abi() {
+    let standard = PackageKey("compiler-support@0.1.0".into());
+    let input = RuntimeManifestInput {
+        standard_library: standard.clone(),
+        host_imports: vec![],
+        selectors: vec![PrimitiveSelector {
+            role: PrimitiveRole::Blake3,
+            module_path: "crate".into(),
+            name: "__g1_blake3".into(),
+        }],
+    };
+    let valid = interface(
+        standard.clone(),
+        "pub fn __g1_blake3(value: Bytes) -> Bytes { () }",
+    );
+    let signatures = ElaboratedInterface::elaborate(&valid);
+    input
+        .bind(vec![valid], &signatures)
+        .expect("the exact BLAKE3 bytes ABI must bind");
+
+    let invalid = interface(
+        standard,
+        "pub fn __g1_blake3(value: Bytes) -> Text { () }",
+    );
+    let invalid_signatures = ElaboratedInterface::elaborate(&invalid);
+    assert!(matches!(
+        input.bind(vec![invalid], &invalid_signatures),
+        Err(ManifestError::IncompatibleSignature {
+            role: PrimitiveRole::Blake3,
+            ..
+        })
+    ));
 }

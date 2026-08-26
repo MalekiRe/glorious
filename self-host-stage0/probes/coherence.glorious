@@ -1,0 +1,31 @@
+use coherence_library::coherence;
+use coherence_library::types;
+
+pub fn score(value: coherence::Overlap) -> i64 {
+    handle value {
+        coherence::Overlap::Conflict => 1,
+        coherence::Overlap::Disjoint => 0,
+        _ => 0,
+    }
+}
+
+pub fn main() -> i64 {
+    score(coherence::overlap(
+        coherence::implementation("Show", types::Type::I64),
+        coherence::implementation("Show", types::Type::I64)))
+        + score(coherence::overlap(
+            coherence::implementation("Show", types::Type::I64),
+            coherence::implementation("Show", types::Type::U64)))
+        + score(coherence::overlap(
+            coherence::implementation("Show", types::Type::I64),
+            coherence::implementation("Eq", types::Type::I64)))
+        + score(coherence::overlap(
+            coherence::implementation("Show", types::Type::I64),
+            coherence::negative_implementation("Show", types::Type::I64)))
+        + score(coherence::overlap(
+            coherence::implementation("Show", types::Type::I64),
+            coherence::negative_implementation("Show", types::Type::U8)))
+        + score(coherence::overlap(
+            coherence::implementation("Show", types::Type::Projection("Item", 2)),
+            coherence::implementation("Show", types::Type::Projection("Item", 2))))
+}

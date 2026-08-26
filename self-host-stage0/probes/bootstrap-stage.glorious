@@ -1,0 +1,18 @@
+use request_library::identity;
+use request_library::request;
+
+pub fn score(result: request::BootstrapStageResult) -> i64 {
+    handle result {
+        request::BootstrapStageResult::Value(_) => 1,
+        request::BootstrapStageResult::Invalid => 0,
+        _ => 0,
+    }
+}
+
+pub fn main() -> i64 {
+    score(request::bootstrap_stage(1, identity::digest_of_text("seed"), 2, request::bootstrap_limits(4, 100)))
+        + score(request::bootstrap_stage(0, identity::digest_of_text("seed"), 2, request::bootstrap_limits(4, 100)))
+        + score(request::bootstrap_stage(2, identity::digest_of_text("seed"), 4, request::bootstrap_limits(4, 100)))
+        + score(request::bootstrap_stage(3, identity::digest_of_text("seed"), 2, request::bootstrap_limits(0, 100)))
+        + score(request::bootstrap_stage(4, identity::digest_of_text("seed"), 2, request::bootstrap_limits(4, 0)))
+}

@@ -184,10 +184,11 @@ obligation on every normally completing path. Whole transfer propagates that
 obligation. Opaque explicit or implicit destruction contributes zero and requires
 `Use<[0,0]>`; cleanup cannot satisfy or discard a must-move value. Immediate
 abort and proven nontermination are the only no-successor exceptions.
-For duplicable values, a bare whole-local use transfers ownership when it is
-proven to be the final use on the current straight-line path; otherwise it
-copies and leaves the original owner live. Contextual `move value` forces an
-early or otherwise non-inferable transfer. Every copy receives its own
+An ordinary owned use of a duplicable value copies and leaves the original
+owner live. An ordinary owned use of a non-duplicable value transfers
+ownership. `move value` remains available to force an early or
+syntax-sensitive transfer (notably `move *reference`); `move (places) { ... }`
+is the optional closure-capture override. Every copy receives its own
 obligation, so copies alone never discharge the original must-move place.
 
 G1 memoized globals require the unrestricted principal `Use` interval. A global

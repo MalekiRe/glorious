@@ -1,0 +1,7 @@
+use main_cli_library::main_cli;
+
+pub fn main() -> i64 {
+    process_command_score(main_cli::parse_process_argv_command())
+}
+
+pub fn process_command_score(value: main_cli::ArgvCommand) -> i64 { handle value { main_cli::ArgvCommand::Value(main_cli::Command::Run) => 77, _ => 0 } }

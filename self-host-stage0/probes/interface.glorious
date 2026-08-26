@@ -1,0 +1,55 @@
+use interface_library::interface;
+use interface_library::header;
+use compiler_support::__g1_text_as_bytes;
+
+pub fn score(value: Bool) -> i64 {
+    handle value {
+        true => 1,
+        false => 0,
+        _ => 0,
+    }
+}
+
+pub fn main() -> i64 {
+    score(interface::is_exported(interface::definition(interface::DefinitionKind::Function, true)))
+        + score(interface::is_exported(interface::definition(interface::DefinitionKind::Struct, false)))
+        + score(interface::is_exported(interface::definition(interface::DefinitionKind::Import, true)))
+        + score_admission(interface::definition_from_header(__g1_text_as_bytes("pub fn main")))
+        + score_admission(interface::definition_from_header(__g1_text_as_bytes("fn internal")))
+        + score_admission(interface::definition_from_lead(header::leading(__g1_text_as_bytes("impl Gate for i64")), true))
+        + score_admission(interface::definition_from_lead(header::leading(__g1_text_as_bytes("value")), true))
+        + score_admission(interface::definition_from_header(__g1_text_as_bytes("pub infixl +")))
+        + score_admission(interface::definition_from_header(__g1_text_as_bytes("infixr **")))
+        + score_fixity(interface::definition_from_header(__g1_text_as_bytes("pub prefix !")))
+        + score_admission(interface::definition_from_header(__g1_text_as_bytes("pub host io fn read")))
+        + score_admission(interface::definition_from_header(__g1_text_as_bytes("pub let alias = value")))
+        + score_admission(interface::definition_from_header(__g1_text_as_bytes("pub auto trait Marker")))
+        + score_auto_trait(interface::definition_from_header(__g1_text_as_bytes("pub auto trait Marker")))
+}
+
+pub fn score_admission(value: interface::DefinitionAdmission) -> i64 {
+    handle value {
+        interface::DefinitionAdmission::Value(definition) => score(interface::is_exported(definition)),
+        interface::DefinitionAdmission::NotDeclaration => 0,
+        _ => 0,
+    }
+}
+
+pub fn score_fixity(value: interface::DefinitionAdmission) -> i64 {
+    handle value {
+        interface::DefinitionAdmission::Value(definition) => handle interface::namespace(definition) {
+            interface::DefinitionNamespace::Operator => 1,
+            _ => 0,
+        },
+        interface::DefinitionAdmission::NotDeclaration => 0,
+        _ => 0,
+    }
+}
+
+pub fn score_auto_trait(value: interface::DefinitionAdmission) -> i64 {
+    handle value {
+        interface::DefinitionAdmission::Value(definition) => score(interface::is_auto_trait(definition)),
+        interface::DefinitionAdmission::NotDeclaration => 0,
+        _ => 0,
+    }
+}

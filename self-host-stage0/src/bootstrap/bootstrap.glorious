@@ -1,0 +1,777 @@
+// M29 source-owned producer and artifact-byte convergence commitments. The
+// fixed binary codec has a bounded, exact-length admission path; full stage
+// execution and compiler artifact production remain later work.
+use compiler_support::branch_bool;
+use identity::Digest;
+use identity::DigestAdmission;
+use identity::digest_from_bytes;
+use identity::equals;
+use identity::u32_le_bytes;
+use identity::u64_le_bytes;
+use identity::digest_bytes;
+use vm_backend::CandidateProgram;
+use vm_backend::Verification;
+use vm_backend::verify;
+use vm_backend::G1U32Read;
+use vm_backend::g1_read_u32_le;
+use vm_backend::G1U64Read;
+use vm_backend::g1_read_u64_le;
+use runtime_manifest::PrimitiveSignature;
+use request::SourceWorld2;
+use request::source_world2_fingerprint;
+use request::SourceBundle;
+use request::source_bundle_fingerprint;
+use compiler_support::__g1_bytes_concat;
+use compiler_support::__g1_bytes_from_array_move;
+use compiler_support::__g1_bytes_len;
+use compiler_support::__g1_bytes_get;
+use compiler_support::__g1_bytes_slice;
+use compiler_support::__g1_int_wrapping_add;
+
+pub enum Convergence {
+    Compatible,
+    UnsupportedSchema,
+    InvalidStage,
+    StageOrderMismatch,
+    ProducerMismatch,
+    SourceWorldMismatch,
+    CodegenInputMismatch,
+    ArtifactMismatch,
+    ArtifactBytesMismatch,
+}
+
+// A bootstrap manifest may only commit an artifact after the backend's
+// candidate/verified boundary has admitted it. The compact facade records
+// that authority separately from digest comparison, so callers cannot turn a
+// rejected executable candidate into apparently compatible stage evidence.
+pub enum ArtifactAdmission { Verified, Rejected }
+pub enum ManifestPrefixAdmission { Value, Truncated, InvalidMagic, UnsupportedSchema }
+pub enum ManifestStagePrefixAdmission { Seed, Successor, Truncated, InvalidPrefix, InvalidTag, InvalidStage }
+// Full manifest admission is deliberately separate from header admission:
+// the header can be inspected while streaming, but executable bootstrap
+// evidence must consume one exact canonical record with no suffix bytes.
+pub enum ManifestBytesAdmission { Seed, Successor, Truncated, Trailing, InvalidPrefix, InvalidTag, InvalidStage, InvalidDigest, ProducerMismatch }
+// Decoding is deliberately a second phase after byte admission. This keeps
+// every direct fixed offset behind the exact-length proof and gives later
+// convergence checks typed digests rather than raw slices.
+pub struct DecodedManifest {
+    ordinal: u32,
+    producer: Digest,
+    optimization_level: u8,
+    max_sources: u32,
+    max_total_source_bytes: u64,
+    world: Digest,
+    source_semantics: Digest,
+    codegen: Digest,
+    artifact: Digest,
+    artifact_bytes: Digest,
+}
+pub enum ManifestDecode { Seed(DecodedManifest), Successor(DecodedManifest, Digest), Rejected }
+pub enum ManifestReencode { Value(Bytes), Rejected }
+
+// The canonical bootstrap envelope always starts with G0BM plus schema 2.
+// Keep this fixed, source-owned prefix independently testable before the
+// bounded manifest reader and full commitment writer are introduced.
+pub fn seed_manifest_prefix_bytes() -> Bytes {
+    __g1_bytes_concat(__g1_bytes_from_array_move([71, 48, 66, 77, 13, 10, 26, 10]), u32_le_bytes(2))
+}
+
+// Hostile manifest decoding begins with a bounded fixed prefix. Do not read
+// the schema field until all magic bytes are known present and canonical.
+pub fn admit_manifest_prefix(bytes: Bytes) -> ManifestPrefixAdmission {
+    handle __g1_bytes_len(bytes) >= 12 {
+        true => handle manifest_magic_matches(bytes) {
+            true => admit_manifest_schema(bytes),
+            false => ManifestPrefixAdmission::InvalidMagic,
+            _ => ManifestPrefixAdmission::InvalidMagic,
+        },
+        false => ManifestPrefixAdmission::Truncated,
+        _ => ManifestPrefixAdmission::Truncated,
+    }
+}
+
+pub fn manifest_prefix_is_valid(bytes: Bytes) -> Bool {
+    handle admit_manifest_prefix(bytes) {
+        ManifestPrefixAdmission::Value => true,
+        _ => false,
+    }
+}
+
+fn admit_manifest_schema(bytes: Bytes) -> ManifestPrefixAdmission {
+    handle g1_read_u32_le(bytes, 8) {
+        G1U32Read::Value(2) => ManifestPrefixAdmission::Value,
+        G1U32Read::Value(_) => ManifestPrefixAdmission::UnsupportedSchema,
+        G1U32Read::Truncated => ManifestPrefixAdmission::Truncated,
+        _ => ManifestPrefixAdmission::Truncated,
+    }
+}
+
+fn manifest_magic_matches(bytes: Bytes) -> Bool {
+    handle __g1_bytes_get(bytes, 0) == 71 {
+        true => manifest_magic_second(bytes),
+        false => false,
+        _ => false,
+    }
+}
+
+fn manifest_magic_second(bytes: Bytes) -> Bool { handle __g1_bytes_get(bytes, 1) == 48 { true => manifest_magic_third(bytes), false => false, _ => false } }
+fn manifest_magic_third(bytes: Bytes) -> Bool { handle __g1_bytes_get(bytes, 2) == 66 { true => manifest_magic_fourth(bytes), false => false, _ => false } }
+fn manifest_magic_fourth(bytes: Bytes) -> Bool { handle __g1_bytes_get(bytes, 3) == 77 { true => manifest_magic_fifth(bytes), false => false, _ => false } }
+fn manifest_magic_fifth(bytes: Bytes) -> Bool { handle __g1_bytes_get(bytes, 4) == 13 { true => manifest_magic_sixth(bytes), false => false, _ => false } }
+fn manifest_magic_sixth(bytes: Bytes) -> Bool { handle __g1_bytes_get(bytes, 5) == 10 { true => manifest_magic_seventh(bytes), false => false, _ => false } }
+fn manifest_magic_seventh(bytes: Bytes) -> Bool { handle __g1_bytes_get(bytes, 6) == 26 { true => __g1_bytes_get(bytes, 7) == 10, false => false, _ => false } }
+
+// Fixed stage fields start at byte 12. A seed is exactly the no-predecessor
+// branch; successors must contain their full 32-byte predecessor commitment
+// before later digest reconstruction can proceed.
+pub fn admit_manifest_stage_prefix(bytes: Bytes) -> ManifestStagePrefixAdmission {
+    handle admit_manifest_prefix(bytes) {
+        ManifestPrefixAdmission::Value => admit_manifest_stage_length(bytes),
+        _ => ManifestStagePrefixAdmission::InvalidPrefix,
+    }
+}
+
+fn admit_manifest_stage_length(bytes: Bytes) -> ManifestStagePrefixAdmission {
+    handle __g1_bytes_len(bytes) >= 62 {
+        true => admit_manifest_stage_scalars(bytes),
+        false => ManifestStagePrefixAdmission::Truncated,
+        _ => ManifestStagePrefixAdmission::Truncated,
+    }
+}
+
+fn admit_manifest_stage_scalars(bytes: Bytes) -> ManifestStagePrefixAdmission {
+    handle g1_read_u32_le(bytes, 12) {
+        G1U32Read::Value(ordinal) => admit_manifest_stage_limits(bytes, ordinal),
+        _ => ManifestStagePrefixAdmission::Truncated,
+    }
+}
+
+fn admit_manifest_stage_limits(bytes: Bytes, ordinal: u32) -> ManifestStagePrefixAdmission {
+    handle g1_read_u32_le(bytes, 49) {
+        G1U32Read::Value(max_sources) => handle g1_read_u64_le(bytes, 53) {
+            G1U64Read::Value(max_total_source_bytes) => admit_manifest_stage_tag(bytes, ordinal, __g1_bytes_get(bytes, 48), max_sources, max_total_source_bytes),
+            _ => ManifestStagePrefixAdmission::Truncated,
+        },
+        _ => ManifestStagePrefixAdmission::Truncated,
+    }
+}
+
+fn admit_manifest_stage_tag(bytes: Bytes, ordinal: u32, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64) -> ManifestStagePrefixAdmission {
+    handle __g1_bytes_get(bytes, 61) {
+        0 => handle seed_stage_is_valid(ordinal, optimization_level, max_sources, max_total_source_bytes) {
+            true => ManifestStagePrefixAdmission::Seed,
+            false => ManifestStagePrefixAdmission::InvalidStage,
+            _ => ManifestStagePrefixAdmission::InvalidStage,
+        },
+        1 => admit_manifest_successor_stage_length(bytes, ordinal, optimization_level, max_sources, max_total_source_bytes),
+        _ => ManifestStagePrefixAdmission::InvalidTag,
+    }
+}
+
+fn admit_manifest_successor_stage_length(bytes: Bytes, ordinal: u32, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64) -> ManifestStagePrefixAdmission {
+    handle __g1_bytes_len(bytes) >= 94 {
+        true => handle ordinal > 1 {
+            true => handle stage_limits_are_valid(optimization_level, max_sources, max_total_source_bytes) {
+                true => ManifestStagePrefixAdmission::Successor,
+                false => ManifestStagePrefixAdmission::InvalidStage,
+                _ => ManifestStagePrefixAdmission::InvalidStage,
+            },
+            false => ManifestStagePrefixAdmission::InvalidStage,
+            _ => ManifestStagePrefixAdmission::InvalidStage,
+        },
+        false => ManifestStagePrefixAdmission::Truncated,
+        _ => ManifestStagePrefixAdmission::Truncated,
+    }
+}
+
+// Admit every fixed-width manifest field before any caller treats its
+// commitments as lineage evidence. Seed records are 62-byte headers plus
+// five 32-byte commitments; successor records additionally contain the
+// 32-byte predecessor directly after their tag.
+pub fn admit_manifest_bytes(bytes: Bytes) -> ManifestBytesAdmission {
+    handle admit_manifest_stage_prefix(bytes) {
+        ManifestStagePrefixAdmission::Seed => admit_seed_manifest_bytes(bytes),
+        ManifestStagePrefixAdmission::Successor => admit_successor_manifest_bytes(bytes),
+        ManifestStagePrefixAdmission::Truncated => ManifestBytesAdmission::Truncated,
+        ManifestStagePrefixAdmission::InvalidPrefix => ManifestBytesAdmission::InvalidPrefix,
+        ManifestStagePrefixAdmission::InvalidTag => ManifestBytesAdmission::InvalidTag,
+        ManifestStagePrefixAdmission::InvalidStage => ManifestBytesAdmission::InvalidStage,
+        _ => ManifestBytesAdmission::InvalidPrefix,
+    }
+}
+
+fn admit_seed_manifest_bytes(bytes: Bytes) -> ManifestBytesAdmission {
+    handle __g1_bytes_len(bytes) == 222 {
+        // Exact extent proves the five commitment ranges are each 32 bytes:
+        // [62,94), [94,126), [126,158), [158,190), and [190,222).
+        true => ManifestBytesAdmission::Seed,
+        false => handle __g1_bytes_len(bytes) < 222 {
+            true => ManifestBytesAdmission::Truncated,
+            false => ManifestBytesAdmission::Trailing,
+            _ => ManifestBytesAdmission::Trailing,
+        },
+        _ => ManifestBytesAdmission::Trailing,
+    }
+}
+
+fn admit_successor_manifest_bytes(bytes: Bytes) -> ManifestBytesAdmission {
+    handle __g1_bytes_len(bytes) == 254 {
+        true => admit_successor_producer(bytes),
+        false => handle __g1_bytes_len(bytes) < 254 {
+            true => ManifestBytesAdmission::Truncated,
+            false => ManifestBytesAdmission::Trailing,
+            _ => ManifestBytesAdmission::Trailing,
+        },
+        _ => ManifestBytesAdmission::Trailing,
+    }
+}
+
+fn admit_successor_producer(bytes: Bytes) -> ManifestBytesAdmission {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 16, 48)) {
+        DigestAdmission::Value(producer) => admit_successor_predecessor(bytes, producer),
+        DigestAdmission::Invalid => ManifestBytesAdmission::InvalidDigest,
+        _ => ManifestBytesAdmission::InvalidDigest,
+    }
+}
+
+fn admit_successor_predecessor(bytes: Bytes, producer: Digest) -> ManifestBytesAdmission {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 62, 94)) {
+        DigestAdmission::Value(predecessor) => handle equals(producer, predecessor) {
+            // Exact extent proves the successor commitment ranges are each
+            // 32 bytes: [94,126), [126,158), [158,190), [190,222),
+            // [222,254). A Digest has no additional byte-level encoding
+            // invariant beyond that fixed width.
+            true => ManifestBytesAdmission::Successor,
+            false => ManifestBytesAdmission::ProducerMismatch,
+            _ => ManifestBytesAdmission::ProducerMismatch,
+        },
+        DigestAdmission::Invalid => ManifestBytesAdmission::InvalidDigest,
+        _ => ManifestBytesAdmission::InvalidDigest,
+    }
+}
+
+// Reconstruct one source-owned manifest only after `admit_manifest_bytes`
+// established its exact canonical extent, stage policy, and (for successors)
+// producer/predecessor equality. The helpers use literal offsets on purpose:
+// the wire record is fixed-width and the current G1 lowering has no generic
+// `usize` arithmetic instruction.
+pub fn decode_manifest(bytes: Bytes) -> ManifestDecode {
+    handle admit_manifest_bytes(bytes) {
+        ManifestBytesAdmission::Seed => decode_seed_header(bytes),
+        ManifestBytesAdmission::Successor => decode_successor_header(bytes),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_seed_header(bytes: Bytes) -> ManifestDecode {
+    handle g1_read_u32_le(bytes, 12) {
+        G1U32Read::Value(ordinal) => handle digest_from_bytes(__g1_bytes_slice(bytes, 16, 48)) {
+            DigestAdmission::Value(producer) => handle g1_read_u32_le(bytes, 49) {
+                G1U32Read::Value(max_sources) => handle g1_read_u64_le(bytes, 53) {
+                    G1U64Read::Value(max_total_source_bytes) => decode_seed_world(bytes, ordinal, producer, __g1_bytes_get(bytes, 48), max_sources, max_total_source_bytes),
+                    _ => ManifestDecode::Rejected,
+                },
+                _ => ManifestDecode::Rejected,
+            },
+            _ => ManifestDecode::Rejected,
+        },
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_seed_world(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 62, 94)) {
+        DigestAdmission::Value(world) => decode_seed_source_semantics(bytes, ordinal, producer, optimization_level, max_sources, max_total_source_bytes, world),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_seed_source_semantics(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, world: Digest) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 94, 126)) {
+        DigestAdmission::Value(source_semantics) => decode_seed_codegen(bytes, ordinal, producer, optimization_level, max_sources, max_total_source_bytes, world, source_semantics),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_seed_codegen(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, world: Digest, source_semantics: Digest) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 126, 158)) {
+        DigestAdmission::Value(codegen) => decode_seed_artifact(bytes, ordinal, producer, optimization_level, max_sources, max_total_source_bytes, world, source_semantics, codegen),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_seed_artifact(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, world: Digest, source_semantics: Digest, codegen: Digest) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 158, 190)) {
+        DigestAdmission::Value(artifact) => decode_seed_artifact_bytes(bytes, ordinal, producer, optimization_level, max_sources, max_total_source_bytes, world, source_semantics, codegen, artifact),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_seed_artifact_bytes(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, world: Digest, source_semantics: Digest, codegen: Digest, artifact: Digest) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 190, 222)) {
+        DigestAdmission::Value(artifact_bytes) => ManifestDecode::Seed(DecodedManifest { ordinal: ordinal, producer: producer, optimization_level: optimization_level, max_sources: max_sources, max_total_source_bytes: max_total_source_bytes, world: world, source_semantics: source_semantics, codegen: codegen, artifact: artifact, artifact_bytes: artifact_bytes }),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_successor_header(bytes: Bytes) -> ManifestDecode {
+    handle g1_read_u32_le(bytes, 12) {
+        G1U32Read::Value(ordinal) => handle digest_from_bytes(__g1_bytes_slice(bytes, 16, 48)) {
+            DigestAdmission::Value(producer) => handle digest_from_bytes(__g1_bytes_slice(bytes, 62, 94)) {
+                DigestAdmission::Value(predecessor) => handle g1_read_u32_le(bytes, 49) {
+                    G1U32Read::Value(max_sources) => handle g1_read_u64_le(bytes, 53) {
+                        G1U64Read::Value(max_total_source_bytes) => decode_successor_world(bytes, ordinal, producer, __g1_bytes_get(bytes, 48), max_sources, max_total_source_bytes, predecessor),
+                        _ => ManifestDecode::Rejected,
+                    },
+                    _ => ManifestDecode::Rejected,
+                },
+                _ => ManifestDecode::Rejected,
+            },
+            _ => ManifestDecode::Rejected,
+        },
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_successor_world(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, predecessor: Digest) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 94, 126)) {
+        DigestAdmission::Value(world) => decode_successor_source_semantics(bytes, ordinal, producer, optimization_level, max_sources, max_total_source_bytes, predecessor, world),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_successor_source_semantics(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, predecessor: Digest, world: Digest) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 126, 158)) {
+        DigestAdmission::Value(source_semantics) => decode_successor_codegen(bytes, ordinal, producer, optimization_level, max_sources, max_total_source_bytes, predecessor, world, source_semantics),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_successor_codegen(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, predecessor: Digest, world: Digest, source_semantics: Digest) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 158, 190)) {
+        DigestAdmission::Value(codegen) => decode_successor_artifact(bytes, ordinal, producer, optimization_level, max_sources, max_total_source_bytes, predecessor, world, source_semantics, codegen),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_successor_artifact(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, predecessor: Digest, world: Digest, source_semantics: Digest, codegen: Digest) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 190, 222)) {
+        DigestAdmission::Value(artifact) => decode_successor_artifact_bytes(bytes, ordinal, producer, optimization_level, max_sources, max_total_source_bytes, predecessor, world, source_semantics, codegen, artifact),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+fn decode_successor_artifact_bytes(bytes: Bytes, ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, predecessor: Digest, world: Digest, source_semantics: Digest, codegen: Digest, artifact: Digest) -> ManifestDecode {
+    handle digest_from_bytes(__g1_bytes_slice(bytes, 222, 254)) {
+        DigestAdmission::Value(artifact_bytes) => ManifestDecode::Successor(DecodedManifest { ordinal: ordinal, producer: producer, optimization_level: optimization_level, max_sources: max_sources, max_total_source_bytes: max_total_source_bytes, world: world, source_semantics: source_semantics, codegen: codegen, artifact: artifact, artifact_bytes: artifact_bytes }, predecessor),
+        _ => ManifestDecode::Rejected,
+    }
+}
+
+// Re-encoding is intentionally driven only by a decoded record. This gives
+// the wire-compatibility harness a byte-exact check that every fixed offset
+// and field order agrees with the canonical writer.
+pub fn reencode_manifest(bytes: Bytes) -> ManifestReencode {
+    handle decode_manifest(bytes) {
+        ManifestDecode::Seed(value) => ManifestReencode::Value(encode_seed_manifest_bytes(value.ordinal, value.producer, value.optimization_level, value.max_sources, value.max_total_source_bytes, value.world, value.source_semantics, value.codegen, value.artifact, value.artifact_bytes)),
+        ManifestDecode::Successor(value, predecessor) => ManifestReencode::Value(encode_successor_manifest_bytes(value.ordinal, value.producer, value.optimization_level, value.max_sources, value.max_total_source_bytes, predecessor, value.world, value.source_semantics, value.codegen, value.artifact, value.artifact_bytes)),
+        ManifestDecode::Rejected => ManifestReencode::Rejected,
+        _ => ManifestReencode::Rejected,
+    }
+}
+
+pub fn manifest_roundtrip_is_canonical(bytes: Bytes) -> Bool {
+    handle reencode_manifest(bytes) {
+        ManifestReencode::Value(reencoded) => manifest_bytes_equal(bytes, reencoded, 0),
+        ManifestReencode::Rejected => false,
+        _ => false,
+    }
+}
+
+fn manifest_bytes_equal(left: Bytes, right: Bytes, index: usize) -> Bool {
+    handle __g1_bytes_len(left) == __g1_bytes_len(right) {
+        true => manifest_bytes_equal_same_length(left, right, index),
+        false => false,
+        _ => false,
+    }
+}
+
+fn manifest_bytes_equal_same_length(left: Bytes, right: Bytes, index: usize) -> Bool {
+    handle index == __g1_bytes_len(left) {
+        true => true,
+        false => handle __g1_bytes_get(left, index) == __g1_bytes_get(right, index) {
+            true => manifest_bytes_equal_same_length(left, right, __g1_int_wrapping_add<usize>(index, 1)),
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// This is the byte-boundary convergence entrypoint used by a future
+// source-owned `verify-bootstrap` command. Both records must first decode
+// under the canonical codec; the later record must be a successor and name
+// the earlier artifact as its validated predecessor commitment.
+pub fn compare_manifest_bytes(earlier_bytes: Bytes, later_bytes: Bytes) -> Convergence {
+    handle decode_manifest(earlier_bytes) {
+        ManifestDecode::Seed(earlier) => compare_decoded_later(earlier, decode_manifest(later_bytes)),
+        ManifestDecode::Successor(earlier, _) => compare_decoded_later(earlier, decode_manifest(later_bytes)),
+        ManifestDecode::Rejected => Convergence::InvalidStage,
+        _ => Convergence::InvalidStage,
+    }
+}
+
+fn compare_decoded_later(earlier: DecodedManifest, later: ManifestDecode) -> Convergence {
+    handle later {
+        ManifestDecode::Successor(value, predecessor) => compare_decoded_stage(earlier, value, predecessor),
+        ManifestDecode::Seed(_) => Convergence::StageOrderMismatch,
+        ManifestDecode::Rejected => Convergence::InvalidStage,
+        _ => Convergence::InvalidStage,
+    }
+}
+
+fn compare_decoded_stage(earlier: DecodedManifest, later: DecodedManifest, predecessor: Digest) -> Convergence {
+    handle later.ordinal == __g1_int_wrapping_add<u32>(earlier.ordinal, 1) {
+        true => handle equals(predecessor, earlier.artifact) {
+            true => compare_decoded_world(earlier, later),
+            false => Convergence::ProducerMismatch,
+            _ => Convergence::ProducerMismatch,
+        },
+        false => Convergence::StageOrderMismatch,
+        _ => Convergence::StageOrderMismatch,
+    }
+}
+
+fn compare_decoded_world(earlier: DecodedManifest, later: DecodedManifest) -> Convergence {
+    handle equals(later.world, earlier.world) {
+        true => handle equals(later.source_semantics, earlier.source_semantics) {
+            true => handle equals(later.codegen, earlier.codegen) {
+                true => handle equals(later.artifact, earlier.artifact) {
+                    true => handle equals(later.artifact_bytes, earlier.artifact_bytes) {
+                        true => Convergence::Compatible,
+                        false => Convergence::ArtifactBytesMismatch,
+                        _ => Convergence::ArtifactBytesMismatch,
+                    },
+                    false => Convergence::ArtifactMismatch,
+                    _ => Convergence::ArtifactMismatch,
+                },
+                false => Convergence::CodegenInputMismatch,
+                _ => Convergence::CodegenInputMismatch,
+            },
+            false => Convergence::SourceWorldMismatch,
+            _ => Convergence::SourceWorldMismatch,
+        },
+        false => Convergence::SourceWorldMismatch,
+        _ => Convergence::SourceWorldMismatch,
+    }
+}
+
+// The Stage1 header immediately follows the fixed prefix. Its predecessor
+// tag is canonically zero; source/world/artifact commitments are appended by
+// the later writer layer.
+pub fn seed_manifest_stage_header_bytes(ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64) -> Bytes {
+    __g1_bytes_concat(
+        __g1_bytes_concat(
+            __g1_bytes_concat(seed_manifest_prefix_bytes(), u32_le_bytes(ordinal)),
+            __g1_bytes_concat(digest_bytes(producer), __g1_bytes_from_array_move([optimization_level])),
+        ),
+        __g1_bytes_concat(__g1_bytes_concat(u32_le_bytes(max_sources), u64_le_bytes(max_total_source_bytes)), __g1_bytes_from_array_move([0])),
+    )
+}
+
+// Every non-seed stage carries the exact predecessor artifact immediately
+// after the tag. The caller supplies producer and predecessor separately so
+// a later validation layer can reject a mismatch rather than silently making
+// one stand in for the other.
+pub fn successor_manifest_stage_header_bytes(ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, predecessor: Digest) -> Bytes {
+    __g1_bytes_concat(
+        __g1_bytes_concat(
+            __g1_bytes_concat(seed_manifest_prefix_bytes(), u32_le_bytes(ordinal)),
+            __g1_bytes_concat(digest_bytes(producer), __g1_bytes_from_array_move([optimization_level])),
+        ),
+        __g1_bytes_concat(__g1_bytes_concat(u32_le_bytes(max_sources), u64_le_bytes(max_total_source_bytes)), __g1_bytes_concat(__g1_bytes_from_array_move([1]), digest_bytes(predecessor))),
+    )
+}
+
+pub fn seed_manifest_commitments_bytes(world: Digest, source_semantics: Digest, codegen: Digest, artifact: Digest, artifact_bytes: Digest) -> Bytes {
+    __g1_bytes_concat(
+        __g1_bytes_concat(digest_bytes(world), digest_bytes(source_semantics)),
+        __g1_bytes_concat(__g1_bytes_concat(digest_bytes(codegen), digest_bytes(artifact)), digest_bytes(artifact_bytes)),
+    )
+}
+
+pub fn encode_seed_manifest_bytes(ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, world: Digest, source_semantics: Digest, codegen: Digest, artifact: Digest, artifact_bytes: Digest) -> Bytes {
+    __g1_bytes_concat(
+        seed_manifest_stage_header_bytes(ordinal, producer, optimization_level, max_sources, max_total_source_bytes),
+        seed_manifest_commitments_bytes(world, source_semantics, codegen, artifact, artifact_bytes),
+    )
+}
+
+pub fn encode_successor_manifest_bytes(ordinal: u32, producer: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64, predecessor: Digest, world: Digest, source_semantics: Digest, codegen: Digest, artifact: Digest, artifact_bytes: Digest) -> Bytes {
+    __g1_bytes_concat(
+        successor_manifest_stage_header_bytes(ordinal, producer, optimization_level, max_sources, max_total_source_bytes, predecessor),
+        seed_manifest_commitments_bytes(world, source_semantics, codegen, artifact, artifact_bytes),
+    )
+}
+
+// These admission predicates are deliberately pure and separate from the
+// byte writer: the writer remains a canonical formatter while a future
+// decoder can apply the same policy to hostile input before reconstructing a
+// manifest value.
+pub fn seed_stage_is_valid(ordinal: u32, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64) -> Bool {
+    handle ordinal == 1 {
+        true => stage_limits_are_valid(optimization_level, max_sources, max_total_source_bytes),
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn successor_stage_is_valid(ordinal: u32, producer: Digest, predecessor: Digest, optimization_level: u8, max_sources: u32, max_total_source_bytes: u64) -> Bool {
+    handle ordinal > 1 {
+        true => handle equals(producer, predecessor) {
+            true => stage_limits_are_valid(optimization_level, max_sources, max_total_source_bytes),
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn stage_limits_are_valid(optimization_level: u8, max_sources: u32, max_total_source_bytes: u64) -> Bool {
+    handle optimization_level <= 3 {
+        true => handle max_sources > 0 {
+            true => max_total_source_bytes > 0,
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn admit_candidate(candidate: CandidateProgram) -> ArtifactAdmission {
+    handle verify(candidate) {
+        Verification::Verified(_) => ArtifactAdmission::Verified,
+        Verification::Rejected => ArtifactAdmission::Rejected,
+        _ => ArtifactAdmission::Rejected,
+    }
+}
+
+// Bootstrap records runtime authority through the backend verifier, never by
+// trusting a declaration spelling directly.  This is the compact commitment
+// path used before a compiler artifact can name a host primitive.
+pub fn admit_runtime_declaration(package: Text, name: Text, signature: PrimitiveSignature) -> ArtifactAdmission {
+    admit_candidate(CandidateProgram::RuntimeImport(package, name, signature))
+}
+
+// Fixed-shape stage evidence. These are commitment values, not ambient host
+// handles: a later stage must be the immediate successor and name the exact
+// verified artifact that produced it.
+pub struct Manifest {
+    schema: i64,
+    stage: i64,
+    producer: i64,
+    source_world: i64,
+    codegen_input: i64,
+    artifact: i64,
+    artifact_bytes: i64,
+}
+
+// The compact integer manifest remains useful for control probes, while real
+// bootstrap lineage carries exact BLAKE3 commitments. Keep that typed form
+// explicit so no caller can accidentally compare display ordinals in place of
+// source world, codegen, artifact, or byte identities.
+pub struct DigestManifest {
+    schema: i64,
+    stage: i64,
+    producer: Digest,
+    source_world: Digest,
+    codegen_input: Digest,
+    artifact: Digest,
+    artifact_bytes: Digest,
+}
+
+pub fn manifest(schema: i64, stage: i64, producer: i64, source_world: i64, codegen_input: i64, artifact: i64, artifact_bytes: i64) -> Manifest {
+    Manifest { schema: schema, stage: stage, producer: producer, source_world: source_world, codegen_input: codegen_input, artifact: artifact, artifact_bytes: artifact_bytes }
+}
+
+pub fn digest_manifest(schema: i64, stage: i64, producer: Digest, source_world: Digest, codegen_input: Digest, artifact: Digest, artifact_bytes: Digest) -> DigestManifest {
+    DigestManifest { schema: schema, stage: stage, producer: producer, source_world: source_world, codegen_input: codegen_input, artifact: artifact, artifact_bytes: artifact_bytes }
+}
+
+pub fn digest_manifest_source_world(manifest: DigestManifest) -> Digest { manifest.source_world }
+
+// Bootstrap lineage takes the exact admitted request world, not a digest
+// supplied by a caller. This makes the stage manifest use the same canonical
+// world identity as cache admission and source-world topology.
+pub fn digest_manifest_for_source_world(
+    schema: i64,
+    stage: i64,
+    producer: Digest,
+    source_world: SourceWorld2,
+    codegen_input: Digest,
+    artifact: Digest,
+    artifact_bytes: Digest,
+) -> DigestManifest {
+    digest_manifest(schema, stage, producer, source_world2_fingerprint(source_world), codegen_input, artifact, artifact_bytes)
+}
+
+// Generalized bootstrap lineage: the cache and manifest now accept the
+// admitted arbitrary-file request world used by the service boundary.
+pub fn digest_manifest_for_source_bundle(
+    schema: i64,
+    stage: i64,
+    producer: Digest,
+    source_bundle: SourceBundle,
+    codegen_input: Digest,
+    artifact: Digest,
+    artifact_bytes: Digest,
+) -> DigestManifest {
+    digest_manifest(schema, stage, producer, source_bundle_fingerprint(source_bundle), codegen_input, artifact, artifact_bytes)
+}
+
+pub fn compare_digest_manifest(earlier: DigestManifest, later: DigestManifest) -> Convergence {
+    handle earlier.schema == 1 {
+        true => handle later.schema == 1 {
+            true => compare_digest_manifest_stages(earlier, later),
+            false => Convergence::UnsupportedSchema,
+            _ => Convergence::UnsupportedSchema,
+        },
+        false => Convergence::UnsupportedSchema,
+        _ => Convergence::UnsupportedSchema,
+    }
+}
+
+fn compare_digest_manifest_stages(earlier: DigestManifest, later: DigestManifest) -> Convergence {
+    handle earlier.stage >= 0 {
+        true => handle later.stage == earlier.stage + 1 {
+            true => compare_digest_manifest_producer(earlier, later),
+            false => Convergence::StageOrderMismatch,
+            _ => Convergence::StageOrderMismatch,
+        },
+        false => Convergence::InvalidStage,
+        _ => Convergence::InvalidStage,
+    }
+}
+
+fn compare_digest_manifest_producer(earlier: DigestManifest, later: DigestManifest) -> Convergence {
+    handle equals(later.producer, earlier.artifact) {
+        true => compare_digest_manifest_source(earlier, later),
+        false => Convergence::ProducerMismatch,
+        _ => Convergence::ProducerMismatch,
+    }
+}
+
+fn compare_digest_manifest_source(earlier: DigestManifest, later: DigestManifest) -> Convergence {
+    handle equals(later.source_world, earlier.source_world) {
+        true => handle equals(later.codegen_input, earlier.codegen_input) {
+            true => compare_digest_manifest_artifact(earlier, later),
+            false => Convergence::CodegenInputMismatch,
+            _ => Convergence::CodegenInputMismatch,
+        },
+        false => Convergence::SourceWorldMismatch,
+        _ => Convergence::SourceWorldMismatch,
+    }
+}
+
+fn compare_digest_manifest_artifact(earlier: DigestManifest, later: DigestManifest) -> Convergence {
+    handle equals(later.artifact, earlier.artifact) {
+        true => handle equals(later.artifact_bytes, earlier.artifact_bytes) {
+            true => Convergence::Compatible,
+            false => Convergence::ArtifactBytesMismatch,
+            _ => Convergence::ArtifactBytesMismatch,
+        },
+        false => Convergence::ArtifactMismatch,
+        _ => Convergence::ArtifactMismatch,
+    }
+}
+
+pub fn compare(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(earlier.schema == 1,
+        () -> Convergence { compare_later_schema(earlier, later) },
+        () -> Convergence { Convergence::UnsupportedSchema })
+}
+
+fn compare_later_schema(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(later.schema == 1,
+        () -> Convergence { compare_stage_admission(earlier, later) },
+        () -> Convergence { Convergence::UnsupportedSchema })
+}
+
+// Stage labels are serialized bootstrap identities, not arbitrary ordering
+// integers. Reject negative labels before testing adjacency so an apparent
+// -1 -> 0 successor cannot become trusted compiler lineage.
+fn compare_stage_admission(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(earlier.stage >= 0,
+        () -> Convergence { compare_later_stage_admission(earlier, later) },
+        () -> Convergence { Convergence::InvalidStage })
+}
+
+fn compare_later_stage_admission(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(later.stage >= 0,
+        () -> Convergence { compare_stage(earlier, later) },
+        () -> Convergence { Convergence::InvalidStage })
+}
+
+fn compare_stage(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(earlier.stage < later.stage,
+        () -> Convergence { compare_successor(earlier, later) },
+        () -> Convergence { Convergence::StageOrderMismatch })
+}
+
+fn compare_successor(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(later.stage == earlier.stage + 1,
+        () -> Convergence { compare_producer(earlier, later) },
+        () -> Convergence { Convergence::StageOrderMismatch })
+}
+
+fn compare_producer(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(later.producer == earlier.artifact,
+        () -> Convergence { compare_source(earlier, later) },
+        () -> Convergence { Convergence::ProducerMismatch })
+}
+
+fn compare_source(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(later.source_world == earlier.source_world,
+        () -> Convergence { compare_codegen(earlier, later) },
+        () -> Convergence { Convergence::SourceWorldMismatch })
+}
+
+fn compare_codegen(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(later.codegen_input == earlier.codegen_input,
+        () -> Convergence { compare_artifact(earlier, later) },
+        () -> Convergence { Convergence::CodegenInputMismatch })
+}
+
+fn compare_artifact(earlier: Manifest, later: Manifest) -> Convergence {
+    branch_bool(later.artifact == earlier.artifact,
+        () -> Convergence { byte_identity_matches(earlier.artifact_bytes, later.artifact_bytes) },
+        () -> Convergence { Convergence::ArtifactMismatch })
+}
+
+pub fn producer_matches(earlier_artifact: i64, later_producer: i64) -> Convergence {
+    branch_bool(later_producer == earlier_artifact, () -> Convergence { Convergence::Compatible }, () -> Convergence { Convergence::ProducerMismatch })
+}
+pub fn byte_identity_matches(earlier_artifact_bytes: i64, later_artifact_bytes: i64) -> Convergence {
+    branch_bool(earlier_artifact_bytes == later_artifact_bytes, () -> Convergence { Convergence::Compatible }, () -> Convergence { Convergence::ArtifactBytesMismatch })
+}
+
+pub fn source_world_matches(earlier_source_world: i64, later_source_world: i64) -> Convergence {
+    branch_bool(earlier_source_world == later_source_world, () -> Convergence { Convergence::Compatible }, () -> Convergence { Convergence::SourceWorldMismatch })
+}
+
+pub fn codegen_input_matches(earlier_codegen_input: i64, later_codegen_input: i64) -> Convergence {
+    branch_bool(earlier_codegen_input == later_codegen_input, () -> Convergence { Convergence::Compatible }, () -> Convergence { Convergence::CodegenInputMismatch })
+}
+
+// A caller-supplied predecessor artifact is an exact digest commitment, not
+// a generation ordinal or a display string. This is the M29 side of the M05
+// expected-artifact request field.
+pub fn expected_artifact_matches(expected: Digest, actual: Digest) -> Convergence {
+    branch_bool(
+        equals(expected, actual),
+        () -> Convergence { Convergence::Compatible },
+        () -> Convergence { Convergence::ArtifactMismatch },
+    )
+}

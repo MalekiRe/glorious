@@ -6,6 +6,8 @@ use crate::{
         CallReferenceOrigin, CallReferenceShape, CaptureMode, CoreId, CoreKind, CorePattern,
         CorePlace, RefinementBrand, TypedBody,
     },
+    quantity::Quantity,
+    signature::ElaboratedInterface,
     source::Span,
     types::Type,
 };
@@ -394,7 +396,14 @@ pub struct PlaceFlow {
 }
 impl PlaceFlow {
     pub fn analyze(body: &TypedBody) -> Self {
-        Self::analyze_root(body, body.root, &body.parameters)
+        Self::analyze_root(body, body.root, &body.parameters, None)
+    }
+
+    /// Analyze against the sealed interface that determined each type's
+    /// principal `Use` interval.  A bare value occurrence copies only when
+    /// that interval is `[0, infinity]`; every other owned occurrence moves.
+    pub fn analyze_with_interface(body: &TypedBody, signatures: &ElaboratedInterface) -> Self {
+        Self::analyze_root(body, body.root, &body.parameters, Some(signatures))
     }
 
     /// Analyze one lifted callable body as an independent storage owner.
@@ -408,12 +417,27 @@ impl PlaceFlow {
         root: CoreId,
         parameters: &[(String, Type)],
     ) -> Self {
-        Self::analyze_root(body, root, parameters)
+        Self::analyze_root(body, root, parameters, None)
     }
 
-    fn analyze_root(body: &TypedBody, root: CoreId, parameters: &[(String, Type)]) -> Self {
+    pub fn analyze_lifted_with_interface(
+        body: &TypedBody,
+        root: CoreId,
+        parameters: &[(String, Type)],
+        signatures: &ElaboratedInterface,
+    ) -> Self {
+        Self::analyze_root(body, root, parameters, Some(signatures))
+    }
+
+    fn analyze_root(
+        body: &TypedBody,
+        root: CoreId,
+        parameters: &[(String, Type)],
+        signatures: Option<&ElaboratedInterface>,
+    ) -> Self {
         let mut a = Analyzer {
             body,
+            signatures,
             states: BTreeMap::new(),
             projection_loans: vec![],
             reborrow_parents: BTreeMap::new(),
@@ -432,6 +456,7 @@ impl PlaceFlow {
             binding_scopes: vec![],
             label_storage_exits: BTreeMap::new(),
             scope_refinement_starts: vec![0],
+            ephemeral_borrow_owner: None,
             next_shadow: 0,
             events: vec![],
             refinements: vec![],
@@ -512,6 +537,7 @@ impl PlaceFlow {
 }
 struct Analyzer<'a> {
     body: &'a TypedBody,
+    signatures: Option<&'a ElaboratedInterface>,
     states: BTreeMap<String, LocalState>,
     /// Every precise source loan, including a whole-local loan.  Whole-local
     /// entries are mirrored in `states` for the legacy compact summary.
@@ -529,6 +555,12 @@ struct Analyzer<'a> {
     /// name caller storage which the local move-path arena cannot represent.
     /// Only `*reference = value` may close this hole.
     open_referent_holes: BTreeMap<String, Span>,
+    /// A direct borrow used as an intrinsic operand has no lexical binding,
+    /// but it is still live while the intrinsic evaluates.  Keep a synthetic
+    /// owner for that short region so the ordinary loan-release path restores
+    /// the local immediately after an intrinsic whose result cannot retain a
+    /// Grandiose reference.
+    ephemeral_borrow_owner: Option<String>,
     /// Canonical paths that have been moved and have not since been
     /// reinitialized. Whole-local moves are mirrored in `states`; field moves
     /// deliberately are not, because their siblings remain usable.
@@ -783,7 +815,22 @@ impl Analyzer<'_> {
             CoreKind::Closure { environment, .. } => {
                 self.visit_closure_environment(&environment, e.span, None);
             }
-            CoreKind::Local(_) => self.read_place(id, e.span),
+            // Ordinary value occurrences are owned by default.  The sealed
+            // principal `Use` interval is the authority for whether that
+            // ownership transfer is a copy or a move; `[0, 0]` only permits
+            // discarding and must not accidentally make a value duplicable.
+            CoreKind::Local(_) => {
+                if self.is_duplicable(&e.ty) {
+                    self.read_place(id, e.span);
+                } else if self.ordinary_value_moves_place(&e.ty) {
+                    self.move_place(id, e.span);
+                } else {
+                    // Standalone PlaceFlow unit tests construct Core without
+                    // an interface. Preserve their observation-only legacy
+                    // mode; executable compilation always supplies one.
+                    self.read_place(id, e.span);
+                }
+            }
             CoreKind::Label { brand, body } => {
                 // Labels are control boundaries, but their body is also a
                 // lexical storage region. Capture that region at analysis
@@ -903,16 +950,38 @@ impl Analyzer<'_> {
                 }
             }
             CoreKind::IntrinsicCall { arguments, .. } => {
+                // Runtime intrinsics are manifest leaves: their values are
+                // scalar/aggregate Grandiose values, never a reference whose
+                // region could escape into later Core.  A direct `&mut local`
+                // operand therefore has precisely this call's lifetime.
+                // Model it as an ordinary owned loan, rather than leaving the
+                // compact LocalState permanently uniquely borrowed.
+                let owner = format!("<temporary-intrinsic-{}>", id.0);
+                let previous = self.ephemeral_borrow_owner.replace(owner.clone());
                 self.visit_sequence(&arguments, live_after);
+                self.release_owner_loans(&owner, e.span);
+                self.ephemeral_borrow_owner = previous;
             }
             CoreKind::Borrow { unique, value } => {
                 if self.projection(value).is_none() {
                     self.visit_with_live_after(value, live_after);
                 }
-                self.borrow_place(value, unique, e.span, None)
+                self.borrow_place(
+                    value,
+                    unique,
+                    e.span,
+                    self.ephemeral_borrow_owner.clone(),
+                )
             }
             CoreKind::Deref(value) => {
-                self.visit_with_live_after(value, live_after);
+                // Dereferencing uses a reference capability; it does not
+                // transfer ownership of that reference. In particular an
+                // `&mut T` remains usable for later reborrows.
+                if self.projection(value).is_some() {
+                    self.read_place(value, e.span);
+                } else {
+                    self.visit_with_live_after(value, live_after);
+                }
                 self.use_deref_reference(value, e.span, false);
             }
             CoreKind::Call {
@@ -938,7 +1007,19 @@ impl Analyzer<'_> {
                 } else {
                     let mut values = vec![callee];
                     values.extend(arguments);
-                    self.visit_sequence(&values, live_after);
+                    if matches!(reference_shape, CallReferenceShape::None) {
+                        // The sealed call result proves it cannot retain an
+                        // operand reference.  This covers manifest-bound
+                        // runtime leaves, which elaborate as ordinary Core
+                        // calls rather than CoreKind::IntrinsicCall.
+                        let owner = format!("<temporary-call-{}>", id.0);
+                        let previous = self.ephemeral_borrow_owner.replace(owner.clone());
+                        self.visit_sequence(&values, live_after);
+                        self.release_owner_loans(&owner, e.span);
+                        self.ephemeral_borrow_owner = previous;
+                    } else {
+                        self.visit_sequence(&values, live_after);
+                    }
                 }
             }
             CoreKind::Perform {
@@ -975,7 +1056,7 @@ impl Analyzer<'_> {
                 // dynamic handler boundary even though the source argument's
                 // spelling is not visible inside the arm.
                 self.collect_local_uses(computation, &mut inside_handler);
-                self.visit_with_live_after(computation, &inside_handler);
+                self.visit_pattern_subject(computation, &inside_handler, e.span);
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
                 let incoming_moves = self.moved_places.clone();
@@ -1055,7 +1136,7 @@ impl Analyzer<'_> {
                 // performed operation or call. Keep its source argument live
                 // while the result is structurally bound into the arm.
                 self.collect_local_uses(computation, &mut inside_completion);
-                self.visit_with_live_after(computation, &inside_completion);
+                self.visit_pattern_subject(computation, &inside_completion, e.span);
                 let incoming = self.states.clone();
                 let incoming_loans = self.projection_loans.clone();
                 let incoming_moves = self.moved_places.clone();
@@ -1126,13 +1207,28 @@ impl Analyzer<'_> {
             CoreKind::Enum { fields, .. } => {
                 self.visit_sequence(&fields, live_after);
             }
-            CoreKind::Field { .. } => self.read_place(id, e.span),
+            CoreKind::Field { .. } => {
+                if self.is_duplicable(&e.ty) {
+                    self.read_place(id, e.span);
+                } else if self.ordinary_value_moves_place(&e.ty) {
+                    self.move_place(id, e.span);
+                } else {
+                    self.read_place(id, e.span);
+                }
+            }
             CoreKind::PatternTest {
                 subject,
                 refinement,
                 ..
             } => {
-                self.visit_with_live_after(subject, live_after);
+                // A selector test observes its subject. Its branch arms may
+                // subsequently each own the value under RunsIn correlation,
+                // but the test itself is not a move.
+                if self.projection(subject).is_some() {
+                    self.read_place(subject, e.span);
+                } else {
+                    self.visit_with_live_after(subject, live_after);
+                }
                 // `is` produces a scoped positive proof. The expression
                 // itself cannot introduce ordinary locals, so retaining this
                 // only as a branded observation makes escape and join errors
@@ -1368,6 +1464,35 @@ impl Analyzer<'_> {
         }
     }
 
+    fn is_duplicable(&self, ty: &Type) -> bool {
+        self.signatures
+            .and_then(|signatures| signatures.principal_use_interval(ty))
+            .is_some_and(|quantity| quantity == Quantity::UNRESTRICTED)
+    }
+
+    fn visit_pattern_subject(
+        &mut self,
+        subject: CoreId,
+        live_after: &BTreeSet<String>,
+        span: Span,
+    ) {
+        if self.projection(subject).is_some() {
+            self.read_place(subject, span);
+        } else {
+            self.visit_with_live_after(subject, live_after);
+        }
+    }
+
+    fn ordinary_value_moves_place(&self, ty: &Type) -> bool {
+        // Callable invocation and reference capabilities have dedicated
+        // quantitative-use and loan analyses. Marking either as moved here
+        // would preempt those passes, losing their precise diagnostics and
+        // breaking reborrow regions. Ordinary aggregate values, meanwhile,
+        // have no separate capability tracker and are invalidated directly.
+        self.signatures.is_some()
+            && matches!(ty, Type::Nominal { .. } | Type::Tuple(_) | Type::Array(_))
+    }
+
     fn visit_closure_environment(
         &mut self,
         environment: &crate::core::CaptureEnvironment,
@@ -1408,6 +1533,11 @@ impl Analyzer<'_> {
                 }
                 CaptureMode::UniqueBorrow => {
                     self.capture_place_loan(&capture.name, true, span, owner);
+                }
+                CaptureMode::Copy => {
+                    // An owned copy is a value transfer into the environment,
+                    // not a loan on the source binding.
+                    self.read_place_by_name(&capture.name, span);
                 }
                 CaptureMode::Move => {
                     self.move_(&capture.name, span);
@@ -1579,6 +1709,36 @@ impl Analyzer<'_> {
             }
             Some(_) => self.error(s, "G5004", format!("cannot move borrowed local `{n}`")),
             None => self.error(s, "G5002", format!("unknown local `{n}` in PlaceFlow")),
+        }
+    }
+
+    fn read_place_by_name(&mut self, name: &str, span: Span) {
+        let name = self.resolve_name(name);
+        let place = Projection {
+            root: name.clone(),
+            fields: vec![],
+        };
+        if let Some(moved) = self.moved_place_overlapping(&place) {
+            self.error(span, "G5001", format!("use of moved place `{}`", moved.display()));
+            return;
+        }
+        match self.states.get(&name) {
+            Some(LocalState::Initialized) | Some(LocalState::SharedBorrowed(_)) => {
+                self.place_event(FlowEventKind::Read(name), place, span)
+            }
+            Some(LocalState::Moved) => {
+                self.error(span, "G5001", format!("use of moved local `{name}`"))
+            }
+            Some(LocalState::UniquelyBorrowed) => self.error(
+                span,
+                "G5008",
+                format!("cannot read uniquely borrowed local `{name}`"),
+            ),
+            None => self.error(
+                span,
+                "G5002",
+                format!("unknown local `{name}` in PlaceFlow"),
+            ),
         }
     }
     fn borrow(&mut self, n: &str, u: bool, s: Span) {

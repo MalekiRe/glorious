@@ -1,0 +1,1874 @@
+// M08 scaffold: scanner input is an immutable M07 source record. Full UTF-8
+// lexing, spans, and recovery land with the complete scanner corpus; this
+// leaf establishes the manifest-bound byte-read boundary without fallback.
+use compiler_support::branch_bool;
+use compiler_support::__g1_text_as_bytes;
+use compiler_support::__g1_int_wrapping_sub;
+use compiler_support::__g1_int_wrapping_add;
+use compiler_support::__g1_int_wrapping_mul;
+use compiler_support::__g1_int_convert_wrapping_to_u32;
+use source::SourceInput;
+use source::bytes;
+use source::FirstByte;
+use source::digest_matches_bytes;
+
+pub enum FirstByteClass { Empty, LineFeed, Whitespace, AsciiLetter, AsciiDigit, Underscore, Other }
+pub enum TokenKind { End, Identifier, Integer, Float, String, Character, Operator, Punctuation, Invalid, Other }
+pub struct TokenStart { start: usize, kind: TokenKind, end: usize }
+pub enum SourceToken { Value(TokenStart), Unadmitted }
+pub enum I64LiteralAdmission { Value(i64), NotI64Literal, Unadmitted }
+// A signed source literal spans either one Integer token or a `-` operator
+// followed by one.  Returning the final token keeps parser cursor ownership
+// explicit, rather than forcing each caller to rediscover whether a sign was
+// present.
+pub enum SignedI64LiteralAdmission { Value(i64, TokenStart), NotI64Literal, Unadmitted }
+pub enum U32LiteralAdmission { Value(u32, TokenStart), NotU32Literal, Unadmitted }
+pub enum BoolLiteralAdmission { Value(Bool), NotBoolLiteral, Unadmitted }
+pub enum ScannedArithmetic { Add, Subtract, Multiply, Divide }
+pub enum ArithmeticLiteralAdmission { Value(ScannedArithmetic, i64, i64), NotArithmeticLiteral, Unadmitted }
+pub enum ScannedComparison { Equal, Less, Greater }
+pub enum ComparisonLiteralAdmission { Value(ScannedComparison, i64, i64), NotComparisonLiteral, Unadmitted }
+pub enum TokenStreamAdmission { Valid, Invalid, Unadmitted }
+enum I64BinaryTokens { Value(TokenStart, i64, i64), Invalid }
+enum DecimalDigit { Value(i64), Separator, Invalid }
+enum SignedMagnitude { Value(i64), Minimum, Invalid }
+enum StringEnd { Closed(usize), Unterminated(usize), Invalid(usize) }
+enum NumberEnd { Integer(usize), Float(usize), Invalid(usize) }
+enum CharacterEnd { Valid(usize), Invalid(usize) }
+enum CharacterCount { Empty, One, Many }
+enum TriviaEnd { Value(usize), Invalid(usize, usize) }
+enum EscapeEnd { Valid(usize), Invalid(usize) }
+enum HexValue { Value(u32), Invalid }
+
+pub fn first_is_line_feed(input: SourceInput) -> Bool {
+    handle first_class(input) {
+        FirstByteClass::LineFeed => true,
+        FirstByteClass::Empty => false,
+        FirstByteClass::AsciiLetter => false,
+        FirstByteClass::AsciiDigit => false,
+        FirstByteClass::Underscore => false,
+        FirstByteClass::Other => false,
+        _ => false,
+    }
+}
+
+pub fn first_class(input: SourceInput) -> FirstByteClass {
+    class_at(bytes(input), 0)
+}
+
+pub fn class_at(input: Bytes, index: usize) -> FirstByteClass {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Empty => FirstByteClass::Empty,
+        FirstByte::Value(value) => classify(value),
+        _ => FirstByteClass::Empty,
+    }
+}
+
+pub fn can_start_identifier(input: SourceInput) -> Bool {
+    handle first_class(input) {
+        FirstByteClass::Empty => false,
+        FirstByteClass::AsciiLetter => true,
+        FirstByteClass::Underscore => true,
+        FirstByteClass::LineFeed => false,
+        FirstByteClass::Whitespace => false,
+        FirstByteClass::AsciiDigit => false,
+        FirstByteClass::Other => false,
+        _ => false,
+    }
+}
+
+pub fn identifier_end(input: Bytes) -> usize {
+    identifier_end_at(input, 0)
+}
+
+pub fn decimal_end(input: Bytes) -> usize {
+    decimal_end_at(input, 0)
+}
+
+pub fn first_token(input: Bytes) -> TokenStart {
+    token_from(input, 0)
+}
+
+// Scanner entry from a request-owned source validates the immutable source
+// identity first. Low-level byte entry points remain available to the parser
+// toolkit, but they cannot stand in for request admission.
+pub fn first_token_checked(input: SourceInput) -> SourceToken {
+    handle digest_matches_bytes(input) {
+        true => SourceToken::Value(first_token(bytes(input))),
+        false => SourceToken::Unadmitted,
+        _ => SourceToken::Unadmitted,
+    }
+}
+
+// Complete-file lexical admission walks the same cursor sequence used by
+// parsers. It rejects scanner-invalid tokens but deliberately leaves grammar
+// decisions to header/body parsing; valid lexical source need not yet be a
+// valid declaration or expression.
+pub fn token_stream_checked(input: SourceInput) -> TokenStreamAdmission {
+    handle digest_matches_bytes(input) {
+        true => token_stream_initial(bytes(input)),
+        false => TokenStreamAdmission::Unadmitted,
+        _ => TokenStreamAdmission::Unadmitted,
+    }
+}
+
+fn token_stream_initial(input: Bytes) -> TokenStreamAdmission {
+    token_stream_from(input, first_token(input))
+}
+
+fn token_stream_from(input: Bytes, token: TokenStart) -> TokenStreamAdmission {
+    handle token_kind(token) {
+        TokenKind::End => TokenStreamAdmission::Valid,
+        TokenKind::Invalid => TokenStreamAdmission::Invalid,
+        _ => token_stream_continue(input, token),
+    }
+}
+
+fn token_stream_continue(input: Bytes, token: TokenStart) -> TokenStreamAdmission {
+    let next = next_token(input, token);
+    token_stream_from(input, next)
+}
+
+// Decimal decoding stays in the scanner so token spelling, separators, and
+// immutable-source admission have one owner. Radix-prefixed and float tokens
+// remain separate lexical forms until their typed rules are added.
+pub fn first_i64_literal_checked(input: SourceInput) -> I64LiteralAdmission {
+    handle digest_matches_bytes(input) {
+        true => first_i64_literal(bytes(input)),
+        false => I64LiteralAdmission::Unadmitted,
+        _ => I64LiteralAdmission::Unadmitted,
+    }
+}
+
+// Body parsers advance a shared token cursor before reaching a literal. Keep
+// decimal decoding at the scanner boundary rather than re-slicing source in
+// each parser, while retaining the same immutable-input admission rule as the
+// first-token entry point.
+pub fn i64_literal_at_checked(input: SourceInput, token: TokenStart) -> I64LiteralAdmission {
+    handle digest_matches_bytes(input) {
+        true => i64_literal_at(bytes(input), token),
+        false => I64LiteralAdmission::Unadmitted,
+        _ => I64LiteralAdmission::Unadmitted,
+    }
+}
+
+pub fn signed_i64_literal_at_checked(input: SourceInput, token: TokenStart) -> SignedI64LiteralAdmission {
+    handle digest_matches_bytes(input) {
+        true => signed_i64_literal_at(bytes(input), token),
+        false => SignedI64LiteralAdmission::Unadmitted,
+        _ => SignedI64LiteralAdmission::Unadmitted,
+    }
+}
+
+pub fn u32_literal_at_checked(input: SourceInput, token: TokenStart) -> U32LiteralAdmission {
+    handle digest_matches_bytes(input) {
+        true => u32_literal_at(bytes(input), token),
+        false => U32LiteralAdmission::Unadmitted,
+        _ => U32LiteralAdmission::Unadmitted,
+    }
+}
+
+// Parser-internal cursor consumers have already crossed their request-owned
+// source admission boundary. Keep their literal decoding in the scanner
+// rather than making later phases reconstruct a synthetic SourceInput.
+pub fn i64_literal_at(input: Bytes, token: TokenStart) -> I64LiteralAdmission {
+    decimal_i64_token(input, token)
+}
+
+pub fn signed_i64_literal_at(input: Bytes, token: TokenStart) -> SignedI64LiteralAdmission {
+    handle token_matches(input, token, "-") {
+        true => signed_i64_literal_after_minus(input, token, next_token(input, token)),
+        false => signed_i64_literal_positive(input, token),
+        _ => SignedI64LiteralAdmission::NotI64Literal,
+    }
+}
+
+// Reuse the scanner's canonical decimal and separator validation, then admit
+// only values representable by u32 before conversion. This rejects negative
+// spellings and overflow rather than wrapping either into a different source
+// value.
+pub fn u32_literal_at(input: Bytes, token: TokenStart) -> U32LiteralAdmission {
+    handle signed_i64_literal_at(input, token) {
+        SignedI64LiteralAdmission::Value(value, last) => u32_literal_range(value, last),
+        SignedI64LiteralAdmission::NotI64Literal => U32LiteralAdmission::NotU32Literal,
+        SignedI64LiteralAdmission::Unadmitted => U32LiteralAdmission::Unadmitted,
+        _ => U32LiteralAdmission::NotU32Literal,
+    }
+}
+
+fn u32_literal_range(value: i64, last: TokenStart) -> U32LiteralAdmission {
+    handle value >= 0 {
+        true => handle value <= 4294967295 {
+            true => U32LiteralAdmission::Value(__g1_int_convert_wrapping_to_u32<i64>(value), last),
+            false => U32LiteralAdmission::NotU32Literal,
+            _ => U32LiteralAdmission::NotU32Literal,
+        },
+        false => U32LiteralAdmission::NotU32Literal,
+        _ => U32LiteralAdmission::NotU32Literal,
+    }
+}
+
+fn signed_i64_literal_positive(input: Bytes, token: TokenStart) -> SignedI64LiteralAdmission {
+    handle decimal_i64_token(input, token) {
+        I64LiteralAdmission::Value(value) => SignedI64LiteralAdmission::Value(value, token),
+        _ => SignedI64LiteralAdmission::NotI64Literal,
+    }
+}
+
+fn signed_i64_literal_after_minus(input: Bytes, minus: TokenStart, magnitude: TokenStart) -> SignedI64LiteralAdmission {
+    handle decimal_signed_magnitude_token(input, magnitude) {
+        SignedMagnitude::Value(value) => SignedI64LiteralAdmission::Value(__g1_int_wrapping_sub<i64>(0, value), magnitude),
+        SignedMagnitude::Minimum => SignedI64LiteralAdmission::Value(__g1_int_wrapping_sub<i64>(-9223372036854775807, 1), magnitude),
+        _ => SignedI64LiteralAdmission::NotI64Literal,
+    }
+}
+
+// Boolean spelling is a keyword-level literal, but it uses the same checked
+// source/token boundary as numeric literals. Keeping this in scanner prevents
+// later body lowering from interpreting arbitrary identifiers as booleans.
+pub fn first_bool_literal_checked(input: SourceInput) -> BoolLiteralAdmission {
+    handle digest_matches_bytes(input) {
+        true => first_bool_literal(bytes(input)),
+        false => BoolLiteralAdmission::Unadmitted,
+        _ => BoolLiteralAdmission::Unadmitted,
+    }
+}
+
+// A complete three-token arithmetic expression is admitted here as one
+// scanner product. This establishes token order and excludes trailing source
+// before typed Body lowering selects the operation semantics.
+pub fn first_i64_arithmetic_checked(input: SourceInput) -> ArithmeticLiteralAdmission {
+    handle digest_matches_bytes(input) {
+        true => first_i64_arithmetic(bytes(input)),
+        false => ArithmeticLiteralAdmission::Unadmitted,
+        _ => ArithmeticLiteralAdmission::Unadmitted,
+    }
+}
+
+pub fn first_i64_comparison_checked(input: SourceInput) -> ComparisonLiteralAdmission {
+    handle digest_matches_bytes(input) {
+        true => first_i64_comparison(bytes(input)),
+        false => ComparisonLiteralAdmission::Unadmitted,
+        _ => ComparisonLiteralAdmission::Unadmitted,
+    }
+}
+
+fn first_i64_comparison(input: Bytes) -> ComparisonLiteralAdmission {
+    handle first_i64_binary_tokens(input) {
+        I64BinaryTokens::Value(operator, left, right) => comparison_operator(input, operator, left, right),
+        _ => ComparisonLiteralAdmission::NotComparisonLiteral,
+    }
+}
+
+fn comparison_operator(input: Bytes, operator: TokenStart, left: i64, right: i64) -> ComparisonLiteralAdmission {
+    handle token_matches(input, operator, "==") {
+        true => ComparisonLiteralAdmission::Value(ScannedComparison::Equal, left, right),
+        false => comparison_operator_less(input, operator, left, right),
+        _ => ComparisonLiteralAdmission::NotComparisonLiteral,
+    }
+}
+
+fn comparison_operator_less(input: Bytes, operator: TokenStart, left: i64, right: i64) -> ComparisonLiteralAdmission {
+    handle token_matches(input, operator, "<") {
+        true => ComparisonLiteralAdmission::Value(ScannedComparison::Less, left, right),
+        false => handle token_matches(input, operator, ">") {
+            true => ComparisonLiteralAdmission::Value(ScannedComparison::Greater, left, right),
+            false => ComparisonLiteralAdmission::NotComparisonLiteral,
+            _ => ComparisonLiteralAdmission::NotComparisonLiteral,
+        },
+        _ => ComparisonLiteralAdmission::NotComparisonLiteral,
+    }
+}
+
+fn first_i64_arithmetic(input: Bytes) -> ArithmeticLiteralAdmission {
+    handle first_i64_binary_tokens(input) {
+        I64BinaryTokens::Value(operator, left, right) => arithmetic_operator(input, operator, left, right),
+        _ => ArithmeticLiteralAdmission::NotArithmeticLiteral,
+    }
+}
+
+// All two-operand infix forms share this cursor traversal. Reusing the token
+// record keeps each additional operator family to dispatch only, avoiding
+// repeated source scans and duplicated trailing-input checks.
+fn first_i64_binary_tokens(input: Bytes) -> I64BinaryTokens {
+    let first = first_token(input);
+    handle decimal_i64_token(input, first) {
+        I64LiteralAdmission::Value(left) => binary_tokens_after_left(input, first, left),
+        _ => I64BinaryTokens::Invalid,
+    }
+}
+
+fn binary_tokens_after_left(input: Bytes, first: TokenStart, left: i64) -> I64BinaryTokens {
+    let operator = next_token(input, first);
+    let right = next_token(input, operator);
+    handle decimal_i64_token(input, right) {
+        I64LiteralAdmission::Value(value) => binary_tokens_finish(input, operator, right, left, value),
+        _ => I64BinaryTokens::Invalid,
+    }
+}
+
+fn binary_tokens_finish(input: Bytes, operator: TokenStart, right: TokenStart, left: i64, value: i64) -> I64BinaryTokens {
+    handle token_kind(next_token(input, right)) {
+        TokenKind::End => I64BinaryTokens::Value(operator, left, value),
+        _ => I64BinaryTokens::Invalid,
+    }
+}
+
+fn arithmetic_operator(input: Bytes, operator: TokenStart, left: i64, right: i64) -> ArithmeticLiteralAdmission {
+    handle token_matches(input, operator, "+") {
+        true => ArithmeticLiteralAdmission::Value(ScannedArithmetic::Add, left, right),
+        false => arithmetic_operator_subtract(input, operator, left, right),
+        _ => ArithmeticLiteralAdmission::NotArithmeticLiteral,
+    }
+}
+
+fn arithmetic_operator_subtract(input: Bytes, operator: TokenStart, left: i64, right: i64) -> ArithmeticLiteralAdmission {
+    handle token_matches(input, operator, "-") {
+        true => ArithmeticLiteralAdmission::Value(ScannedArithmetic::Subtract, left, right),
+        false => arithmetic_operator_multiply(input, operator, left, right),
+        _ => ArithmeticLiteralAdmission::NotArithmeticLiteral,
+    }
+}
+
+fn arithmetic_operator_multiply(input: Bytes, operator: TokenStart, left: i64, right: i64) -> ArithmeticLiteralAdmission {
+    handle token_matches(input, operator, "*") {
+        true => ArithmeticLiteralAdmission::Value(ScannedArithmetic::Multiply, left, right),
+        false => handle token_matches(input, operator, "/") {
+            true => ArithmeticLiteralAdmission::Value(ScannedArithmetic::Divide, left, right),
+            false => ArithmeticLiteralAdmission::NotArithmeticLiteral,
+            _ => ArithmeticLiteralAdmission::NotArithmeticLiteral,
+        },
+        _ => ArithmeticLiteralAdmission::NotArithmeticLiteral,
+    }
+}
+
+fn first_bool_literal(input: Bytes) -> BoolLiteralAdmission {
+    let token = first_token(input);
+    handle token_matches(input, token, "true") {
+        true => BoolLiteralAdmission::Value(true),
+        false => handle token_matches(input, token, "false") {
+            true => BoolLiteralAdmission::Value(false),
+            false => BoolLiteralAdmission::NotBoolLiteral,
+            _ => BoolLiteralAdmission::NotBoolLiteral,
+        },
+        _ => BoolLiteralAdmission::NotBoolLiteral,
+    }
+}
+
+fn first_i64_literal(input: Bytes) -> I64LiteralAdmission {
+    let token = first_token(input);
+    decimal_i64_token(input, token)
+}
+
+fn decimal_i64_token(input: Bytes, token: TokenStart) -> I64LiteralAdmission {
+    handle token_kind(token) {
+        TokenKind::Integer => parse_decimal_i64(input, token_start(token), token_end(token), 0),
+        _ => I64LiteralAdmission::NotI64Literal,
+    }
+}
+
+// Negative i64::MIN has one more unit of magnitude than i64::MAX. Decode that
+// exceptional spelling without ever constructing its unrepresentable positive
+// counterpart; all larger magnitudes are rejected at the scanner boundary.
+fn decimal_signed_magnitude_token(input: Bytes, token: TokenStart) -> SignedMagnitude {
+    handle token_kind(token) {
+        TokenKind::Integer => parse_decimal_signed_magnitude(input, token_start(token), token_end(token), 0),
+        _ => SignedMagnitude::Invalid,
+    }
+}
+
+fn parse_decimal_signed_magnitude(input: Bytes, index: usize, end: usize, value: i64) -> SignedMagnitude {
+    handle index == end {
+        true => SignedMagnitude::Value(value),
+        false => parse_decimal_signed_magnitude_at(input, index, end, value),
+        _ => SignedMagnitude::Invalid,
+    }
+}
+
+fn parse_decimal_signed_magnitude_at(input: Bytes, index: usize, end: usize, value: i64) -> SignedMagnitude {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(byte) => parse_decimal_signed_magnitude_digit(input, index, end, value, decimal_digit(byte)),
+        _ => SignedMagnitude::Invalid,
+    }
+}
+
+fn parse_decimal_signed_magnitude_digit(input: Bytes, index: usize, end: usize, value: i64, digit: DecimalDigit) -> SignedMagnitude {
+    handle digit {
+        DecimalDigit::Value(next) => parse_decimal_signed_magnitude_append(input, index, end, value, next),
+        DecimalDigit::Separator => parse_decimal_signed_magnitude(input, source::next_index(index), end, value),
+        _ => SignedMagnitude::Invalid,
+    }
+}
+
+fn parse_decimal_signed_magnitude_append(input: Bytes, index: usize, end: usize, value: i64, digit: i64) -> SignedMagnitude {
+    handle value < 922337203685477580 {
+        true => parse_decimal_signed_magnitude(input, source::next_index(index), end, __g1_int_wrapping_add<i64>(__g1_int_wrapping_mul<i64>(value, 10), digit)),
+        false => handle value == 922337203685477580 {
+            true => handle digit <= 7 {
+                true => parse_decimal_signed_magnitude(input, source::next_index(index), end, __g1_int_wrapping_add<i64>(__g1_int_wrapping_mul<i64>(value, 10), digit)),
+                false => handle digit == 8 {
+                    true => parse_decimal_signed_minimum_tail(input, source::next_index(index), end),
+                    false => SignedMagnitude::Invalid,
+                    _ => SignedMagnitude::Invalid,
+                },
+                _ => SignedMagnitude::Invalid,
+            },
+            false => SignedMagnitude::Invalid,
+            _ => SignedMagnitude::Invalid,
+        },
+        _ => SignedMagnitude::Invalid,
+    }
+}
+
+fn parse_decimal_signed_minimum_tail(input: Bytes, index: usize, end: usize) -> SignedMagnitude {
+    handle index == end {
+        true => SignedMagnitude::Minimum,
+        false => handle source::byte_at_or_empty(input, index) {
+            FirstByte::Value(byte) => handle decimal_digit(byte) {
+                DecimalDigit::Separator => parse_decimal_signed_minimum_tail(input, source::next_index(index), end),
+                _ => SignedMagnitude::Invalid,
+            },
+            _ => SignedMagnitude::Invalid,
+        },
+        _ => SignedMagnitude::Invalid,
+    }
+}
+
+fn parse_decimal_i64(input: Bytes, index: usize, end: usize, value: i64) -> I64LiteralAdmission {
+    handle index == end {
+        true => I64LiteralAdmission::Value(value),
+        false => parse_decimal_i64_at(input, index, end, value),
+        _ => I64LiteralAdmission::NotI64Literal,
+    }
+}
+
+fn parse_decimal_i64_at(input: Bytes, index: usize, end: usize, value: i64) -> I64LiteralAdmission {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(byte) => parse_decimal_i64_digit(input, index, end, value, decimal_digit(byte)),
+        _ => I64LiteralAdmission::NotI64Literal,
+    }
+}
+
+fn parse_decimal_i64_digit(input: Bytes, index: usize, end: usize, value: i64, digit: DecimalDigit) -> I64LiteralAdmission {
+    handle digit {
+        DecimalDigit::Value(next) => parse_decimal_i64_checked_append(input, index, end, value, next),
+        DecimalDigit::Separator => parse_decimal_i64(input, source::next_index(index), end, value),
+        _ => I64LiteralAdmission::NotI64Literal,
+    }
+}
+
+// Decimal integer scanning must reject rather than wrap beyond i64::MAX.
+// Check the final multiplication boundary before constructing the next value;
+// this keeps every admitted literal representable in the source IR.
+fn parse_decimal_i64_checked_append(input: Bytes, index: usize, end: usize, value: i64, digit: i64) -> I64LiteralAdmission {
+    handle value < 922337203685477580 {
+        true => parse_decimal_i64(input, source::next_index(index), end, __g1_int_wrapping_add<i64>(__g1_int_wrapping_mul<i64>(value, 10), digit)),
+        false => handle value == 922337203685477580 {
+            true => handle digit <= 7 {
+                true => parse_decimal_i64(input, source::next_index(index), end, __g1_int_wrapping_add<i64>(__g1_int_wrapping_mul<i64>(value, 10), digit)),
+                false => I64LiteralAdmission::NotI64Literal,
+                _ => I64LiteralAdmission::NotI64Literal,
+            },
+            false => I64LiteralAdmission::NotI64Literal,
+            _ => I64LiteralAdmission::NotI64Literal,
+        },
+        _ => I64LiteralAdmission::NotI64Literal,
+    }
+}
+
+fn decimal_digit(value: u8) -> DecimalDigit {
+    handle value == 48 { true => DecimalDigit::Value(0), false => decimal_digit_one(value), _ => DecimalDigit::Invalid }
+}
+fn decimal_digit_one(value: u8) -> DecimalDigit {
+    handle value == 49 { true => DecimalDigit::Value(1), false => decimal_digit_two(value), _ => DecimalDigit::Invalid }
+}
+fn decimal_digit_two(value: u8) -> DecimalDigit {
+    handle value == 50 { true => DecimalDigit::Value(2), false => decimal_digit_three(value), _ => DecimalDigit::Invalid }
+}
+fn decimal_digit_three(value: u8) -> DecimalDigit {
+    handle value == 51 { true => DecimalDigit::Value(3), false => decimal_digit_four(value), _ => DecimalDigit::Invalid }
+}
+fn decimal_digit_four(value: u8) -> DecimalDigit {
+    handle value == 52 { true => DecimalDigit::Value(4), false => decimal_digit_five(value), _ => DecimalDigit::Invalid }
+}
+fn decimal_digit_five(value: u8) -> DecimalDigit {
+    handle value == 53 { true => DecimalDigit::Value(5), false => decimal_digit_six(value), _ => DecimalDigit::Invalid }
+}
+fn decimal_digit_six(value: u8) -> DecimalDigit {
+    handle value == 54 { true => DecimalDigit::Value(6), false => decimal_digit_seven(value), _ => DecimalDigit::Invalid }
+}
+fn decimal_digit_seven(value: u8) -> DecimalDigit {
+    handle value == 55 { true => DecimalDigit::Value(7), false => decimal_digit_eight(value), _ => DecimalDigit::Invalid }
+}
+fn decimal_digit_eight(value: u8) -> DecimalDigit {
+    handle value == 56 { true => DecimalDigit::Value(8), false => decimal_digit_nine(value), _ => DecimalDigit::Invalid }
+}
+fn decimal_digit_nine(value: u8) -> DecimalDigit {
+    handle value == 57 { true => DecimalDigit::Value(9), false => handle value == 95 { true => DecimalDigit::Separator, false => DecimalDigit::Invalid, _ => DecimalDigit::Invalid }, _ => DecimalDigit::Invalid }
+}
+
+// Cursor advancement has the same request-world authority requirement as the
+// first token. A caller must not validate one source blob and then advance a
+// cursor over substituted bytes carrying the old token boundary.
+pub fn next_token_checked(input: SourceInput, previous: TokenStart) -> SourceToken {
+    handle digest_matches_bytes(input) {
+        true => SourceToken::Value(next_token(bytes(input), previous)),
+        false => SourceToken::Unadmitted,
+        _ => SourceToken::Unadmitted,
+    }
+}
+
+// Cursor-based tokenization preserves the source byte index at each step.
+// The next token always starts at the prior token's end and skips only
+// whitespace, so callers cannot accidentally rescan an earlier token.
+pub fn next_token(input: Bytes, previous: TokenStart) -> TokenStart {
+    token_from(input, previous.end)
+}
+
+fn token_from(input: Bytes, cursor: usize) -> TokenStart {
+    handle skip_trivia_from(input, cursor) {
+        TriviaEnd::Value(start) => token_from_start(input, start),
+        TriviaEnd::Invalid(start, end) => TokenStart { start: start, kind: TokenKind::Invalid, end: end },
+        _ => TokenStart { start: cursor, kind: TokenKind::Invalid, end: cursor },
+    }
+}
+
+fn token_from_start(input: Bytes, start: usize) -> TokenStart {
+    handle class_at(input, start) {
+        FirstByteClass::AsciiLetter => TokenStart { start: start, kind: TokenKind::Identifier, end: identifier_end_at(input, start) },
+        FirstByteClass::Underscore => TokenStart { start: start, kind: TokenKind::Identifier, end: identifier_end_at(input, start) },
+        FirstByteClass::AsciiDigit => number_token(input, start),
+        FirstByteClass::Empty => TokenStart { start: start, kind: TokenKind::End, end: start },
+        FirstByteClass::LineFeed => TokenStart { start: start, kind: TokenKind::End, end: start },
+        FirstByteClass::Whitespace => TokenStart { start: start, kind: TokenKind::End, end: start },
+        FirstByteClass::Other => other_token(input, start),
+        _ => TokenStart { start: start, kind: TokenKind::Invalid, end: source::next_index(start) },
+    }
+}
+
+// Operators are maximal runs of the punctuation vocabulary used by the
+// stage0 prelude. Grouping the run here prevents `==`, `!=`, `<=`, and `>=`
+// from reaching fixity resolution as unrelated one-byte tokens.
+fn other_token(input: Bytes, start: usize) -> TokenStart {
+    handle source::byte_at_or_empty(input, start) {
+        FirstByte::Value(value) => handle is_operator_byte(value) {
+            true => TokenStart { start: start, kind: TokenKind::Operator, end: operator_end_at(input, start) },
+            false => other_punctuation_token(input, start, value),
+            _ => TokenStart { start: start, kind: TokenKind::Invalid, end: source::next_index(start) },
+        },
+        _ => TokenStart { start: start, kind: TokenKind::Invalid, end: start },
+    }
+}
+
+fn other_punctuation_token(input: Bytes, start: usize, value: u8) -> TokenStart {
+    handle value == 34 {
+        true => string_token(input, start),
+        false => handle value == 39 {
+            true => character_or_lifetime(input, start),
+            false => other_punctuation_or_other(start, value),
+            _ => TokenStart { start: start, kind: TokenKind::Invalid, end: source::next_index(start) },
+        },
+        _ => TokenStart { start: start, kind: TokenKind::Invalid, end: source::next_index(start) },
+    }
+}
+
+fn other_punctuation_or_other(start: usize, value: u8) -> TokenStart {
+    handle is_punctuation_byte(value) {
+        true => TokenStart { start: start, kind: TokenKind::Punctuation, end: source::next_index(start) },
+        false => TokenStart { start: start, kind: TokenKind::Invalid, end: source::next_index(start) },
+        _ => TokenStart { start: start, kind: TokenKind::Invalid, end: source::next_index(start) },
+    }
+}
+
+fn string_token(input: Bytes, start: usize) -> TokenStart {
+    string_token_end(start, scan_string(input, source::next_index(start)))
+}
+
+fn string_token_end(start: usize, end: StringEnd) -> TokenStart {
+    handle end {
+        StringEnd::Closed(index) => TokenStart { start: start, kind: TokenKind::String, end: index },
+        // An unterminated quote must remain a lexical failure.  Classifying it
+        // as `Other` made token_stream_checked accept malformed source and
+        // left later parser stages to mistake the opening quote for recoverable
+        // punctuation.
+        StringEnd::Unterminated(index) => TokenStart { start: start, kind: TokenKind::Invalid, end: index },
+        StringEnd::Invalid(index) => TokenStart { start: start, kind: TokenKind::Invalid, end: index },
+        _ => TokenStart { start: start, kind: TokenKind::Invalid, end: source::next_index(start) },
+    }
+}
+
+fn scan_string(input: Bytes, index: usize) -> StringEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => scan_string_byte(input, index, value),
+        FirstByte::Empty => StringEnd::Unterminated(index),
+        _ => StringEnd::Unterminated(index),
+    }
+}
+
+fn scan_string_byte(input: Bytes, index: usize, value: u8) -> StringEnd {
+    handle value == 34 {
+        true => StringEnd::Closed(source::next_index(index)),
+        false => handle value == 92 {
+            true => scan_string_escape(input, source::next_index(index)),
+            false => handle value == 10 {
+                true => StringEnd::Unterminated(index),
+                false => scan_string(input, source::next_index(index)),
+                _ => StringEnd::Unterminated(index),
+            },
+            _ => StringEnd::Unterminated(index),
+        },
+        _ => StringEnd::Unterminated(index),
+    }
+}
+
+fn scan_string_escape(input: Bytes, index: usize) -> StringEnd {
+    handle scan_scalar_escape(input, index) {
+        EscapeEnd::Valid(end) => scan_string(input, end),
+        EscapeEnd::Invalid(end) => StringEnd::Invalid(end),
+        _ => StringEnd::Invalid(index),
+    }
+}
+
+// A leading apostrophe shares character and lifetime spellings. Preserve the
+// lifetime as one identifier-shaped token unless its identifier payload has a
+// closing apostrophe; quoted escapes take the character path directly.
+fn character_or_lifetime(input: Bytes, start: usize) -> TokenStart {
+    let next = source::next_index(start);
+    handle class_at(input, next) {
+        FirstByteClass::AsciiLetter => identifier_or_character(input, start, next),
+        FirstByteClass::Underscore => identifier_or_character(input, start, next),
+        _ => character_token(input, start),
+    }
+}
+
+fn identifier_or_character(input: Bytes, start: usize, identifier_start: usize) -> TokenStart {
+    let end = identifier_end_at(input, identifier_start);
+    handle source::byte_at_or_empty(input, end) {
+        FirstByte::Value(value) => handle value == 39 {
+            true => character_token(input, start),
+            false => TokenStart { start: start, kind: TokenKind::Identifier, end: end },
+            _ => TokenStart { start: start, kind: TokenKind::Invalid, end: end },
+        },
+        FirstByte::Empty => TokenStart { start: start, kind: TokenKind::Identifier, end: end },
+        _ => TokenStart { start: start, kind: TokenKind::Invalid, end: end },
+    }
+}
+
+fn character_token(input: Bytes, start: usize) -> TokenStart {
+    character_token_end(start, scan_character(input, source::next_index(start), CharacterCount::Empty))
+}
+
+fn character_token_end(start: usize, end: CharacterEnd) -> TokenStart {
+    handle end {
+        CharacterEnd::Valid(index) => TokenStart { start: start, kind: TokenKind::Character, end: index },
+        CharacterEnd::Invalid(index) => TokenStart { start: start, kind: TokenKind::Invalid, end: index },
+        _ => TokenStart { start: start, kind: TokenKind::Invalid, end: source::next_index(start) },
+    }
+}
+
+fn scan_character(input: Bytes, index: usize, count: CharacterCount) -> CharacterEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => scan_character_byte(input, index, count, value),
+        FirstByte::Empty => CharacterEnd::Invalid(index),
+        _ => CharacterEnd::Invalid(index),
+    }
+}
+
+fn scan_character_byte(input: Bytes, index: usize, count: CharacterCount, value: u8) -> CharacterEnd {
+    handle value == 39 {
+        true => finish_character(index, count),
+        false => handle value == 92 {
+            true => scan_character_escape(input, source::next_index(index), count),
+            false => handle value == 10 {
+                true => CharacterEnd::Invalid(index),
+                false => scan_character(input, source::next_index(index), next_character_count(count)),
+                _ => CharacterEnd::Invalid(index),
+            },
+            _ => CharacterEnd::Invalid(index),
+        },
+        _ => CharacterEnd::Invalid(index),
+    }
+}
+
+fn scan_character_escape(input: Bytes, index: usize, count: CharacterCount) -> CharacterEnd {
+    handle scan_scalar_escape(input, index) {
+        EscapeEnd::Valid(end) => scan_character(input, end, next_character_count(count)),
+        EscapeEnd::Invalid(end) => CharacterEnd::Invalid(end),
+        _ => CharacterEnd::Invalid(index),
+    }
+}
+
+// Keep escape grammar at the lexical boundary.  The byte and braced-Unicode
+// forms deliberately validate their full bounded spelling and Unicode scalar
+// range here, so malformed escapes cannot become arbitrary source bytes in
+// body parsing.
+fn scan_scalar_escape(input: Bytes, index: usize) -> EscapeEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => scan_scalar_escape_selector(input, index, value),
+        FirstByte::Empty => EscapeEnd::Invalid(index),
+        _ => EscapeEnd::Invalid(index),
+    }
+}
+
+fn scan_scalar_escape_selector(input: Bytes, index: usize, value: u8) -> EscapeEnd {
+    handle is_simple_escape(value) {
+        true => EscapeEnd::Valid(source::next_index(index)),
+        false => handle value == 120 {
+            true => scan_byte_escape(input, source::next_index(index)),
+            false => handle value == 117 {
+                true => scan_unicode_escape_open(input, source::next_index(index)),
+                false => EscapeEnd::Invalid(source::next_index(index)),
+                _ => EscapeEnd::Invalid(source::next_index(index)),
+            },
+            _ => EscapeEnd::Invalid(source::next_index(index)),
+        },
+        _ => EscapeEnd::Invalid(source::next_index(index)),
+    }
+}
+
+fn is_simple_escape(value: u8) -> Bool {
+    handle value == 110 { true => true, false => is_simple_escape_return(value), _ => false }
+}
+fn is_simple_escape_return(value: u8) -> Bool {
+    handle value == 114 { true => true, false => is_simple_escape_tab(value), _ => false }
+}
+fn is_simple_escape_tab(value: u8) -> Bool {
+    handle value == 116 { true => true, false => is_simple_escape_zero(value), _ => false }
+}
+fn is_simple_escape_zero(value: u8) -> Bool {
+    handle value == 48 { true => true, false => is_simple_escape_quote(value), _ => false }
+}
+fn is_simple_escape_quote(value: u8) -> Bool {
+    handle value == 34 { true => true, false => is_simple_escape_apostrophe(value), _ => false }
+}
+fn is_simple_escape_apostrophe(value: u8) -> Bool {
+    handle value == 39 { true => true, false => value == 92, _ => false }
+}
+
+fn scan_byte_escape(input: Bytes, index: usize) -> EscapeEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(first) => scan_byte_escape_first(input, index, first),
+        _ => EscapeEnd::Invalid(index),
+    }
+}
+
+fn scan_byte_escape_first(input: Bytes, index: usize, first: u8) -> EscapeEnd {
+    handle is_ascii_hex_lead(first) {
+        true => scan_byte_escape_second(input, source::next_index(index)),
+        false => EscapeEnd::Invalid(source::next_index(index)),
+        _ => EscapeEnd::Invalid(source::next_index(index)),
+    }
+}
+
+fn scan_byte_escape_second(input: Bytes, index: usize) -> EscapeEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle is_hex_digit(value) {
+            true => EscapeEnd::Valid(source::next_index(index)),
+            false => EscapeEnd::Invalid(source::next_index(index)),
+            _ => EscapeEnd::Invalid(source::next_index(index)),
+        },
+        _ => EscapeEnd::Invalid(index),
+    }
+}
+
+fn scan_unicode_escape_open(input: Bytes, index: usize) -> EscapeEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle value == 123 {
+            true => scan_unicode_escape_digits(input, source::next_index(index), 0, 0),
+            false => EscapeEnd::Invalid(source::next_index(index)),
+            _ => EscapeEnd::Invalid(source::next_index(index)),
+        },
+        _ => EscapeEnd::Invalid(index),
+    }
+}
+
+fn scan_unicode_escape_digits(input: Bytes, index: usize, count: usize, scalar: u32) -> EscapeEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => scan_unicode_escape_byte(input, index, count, scalar, value),
+        _ => EscapeEnd::Invalid(index),
+    }
+}
+
+fn scan_unicode_escape_byte(input: Bytes, index: usize, count: usize, scalar: u32, value: u8) -> EscapeEnd {
+    handle value == 125 {
+        true => handle count == 0 {
+            true => EscapeEnd::Invalid(source::next_index(index)),
+            false => handle is_unicode_scalar(scalar) {
+                true => EscapeEnd::Valid(source::next_index(index)),
+                false => EscapeEnd::Invalid(source::next_index(index)),
+                _ => EscapeEnd::Invalid(source::next_index(index)),
+            },
+            _ => EscapeEnd::Invalid(source::next_index(index)),
+        },
+        false => handle hex_value(value) {
+            HexValue::Value(digit) => handle count == 6 {
+                true => EscapeEnd::Invalid(source::next_index(index)),
+                false => scan_unicode_escape_digits(input, source::next_index(index), source::next_index(count), __g1_int_wrapping_add<u32>(__g1_int_wrapping_mul<u32>(scalar, 16), digit)),
+                _ => EscapeEnd::Invalid(source::next_index(index)),
+            },
+            HexValue::Invalid => EscapeEnd::Invalid(source::next_index(index)),
+            _ => EscapeEnd::Invalid(source::next_index(index)),
+        },
+        _ => EscapeEnd::Invalid(source::next_index(index)),
+    }
+}
+
+fn is_unicode_scalar(value: u32) -> Bool {
+    handle value > 1114111 {
+        true => false,
+        false => unicode_scalar_not_surrogate(value),
+        _ => false,
+    }
+}
+
+fn unicode_scalar_not_surrogate(value: u32) -> Bool {
+    handle value >= 55296 {
+        true => handle value <= 57343 { true => false, false => true, _ => false },
+        false => true,
+        _ => false,
+    }
+}
+
+fn hex_value(value: u8) -> HexValue {
+    handle value == 48 { true => HexValue::Value(0), false => hex_value_one(value), _ => HexValue::Invalid }
+}
+fn hex_value_one(value: u8) -> HexValue {
+    handle value == 49 { true => HexValue::Value(1), false => hex_value_two(value), _ => HexValue::Invalid }
+}
+fn hex_value_two(value: u8) -> HexValue {
+    handle value == 50 { true => HexValue::Value(2), false => hex_value_three(value), _ => HexValue::Invalid }
+}
+fn hex_value_three(value: u8) -> HexValue {
+    handle value == 51 { true => HexValue::Value(3), false => hex_value_four(value), _ => HexValue::Invalid }
+}
+fn hex_value_four(value: u8) -> HexValue {
+    handle value == 52 { true => HexValue::Value(4), false => hex_value_five(value), _ => HexValue::Invalid }
+}
+fn hex_value_five(value: u8) -> HexValue {
+    handle value == 53 { true => HexValue::Value(5), false => hex_value_six(value), _ => HexValue::Invalid }
+}
+fn hex_value_six(value: u8) -> HexValue {
+    handle value == 54 { true => HexValue::Value(6), false => hex_value_seven(value), _ => HexValue::Invalid }
+}
+fn hex_value_seven(value: u8) -> HexValue {
+    handle value == 55 { true => HexValue::Value(7), false => hex_value_eight(value), _ => HexValue::Invalid }
+}
+fn hex_value_eight(value: u8) -> HexValue {
+    handle value == 56 { true => HexValue::Value(8), false => hex_value_nine(value), _ => HexValue::Invalid }
+}
+fn hex_value_nine(value: u8) -> HexValue {
+    handle value == 57 { true => HexValue::Value(9), false => hex_value_lower_a(value), _ => HexValue::Invalid }
+}
+fn hex_value_lower_a(value: u8) -> HexValue {
+    handle value == 97 { true => HexValue::Value(10), false => hex_value_lower_b(value), _ => HexValue::Invalid }
+}
+fn hex_value_lower_b(value: u8) -> HexValue {
+    handle value == 98 { true => HexValue::Value(11), false => hex_value_lower_c(value), _ => HexValue::Invalid }
+}
+fn hex_value_lower_c(value: u8) -> HexValue {
+    handle value == 99 { true => HexValue::Value(12), false => hex_value_lower_d(value), _ => HexValue::Invalid }
+}
+fn hex_value_lower_d(value: u8) -> HexValue {
+    handle value == 100 { true => HexValue::Value(13), false => hex_value_lower_e(value), _ => HexValue::Invalid }
+}
+fn hex_value_lower_e(value: u8) -> HexValue {
+    handle value == 101 { true => HexValue::Value(14), false => hex_value_lower_f(value), _ => HexValue::Invalid }
+}
+fn hex_value_lower_f(value: u8) -> HexValue {
+    handle value == 102 { true => HexValue::Value(15), false => hex_value_upper_a(value), _ => HexValue::Invalid }
+}
+fn hex_value_upper_a(value: u8) -> HexValue {
+    handle value == 65 { true => HexValue::Value(10), false => hex_value_upper_b(value), _ => HexValue::Invalid }
+}
+fn hex_value_upper_b(value: u8) -> HexValue {
+    handle value == 66 { true => HexValue::Value(11), false => hex_value_upper_c(value), _ => HexValue::Invalid }
+}
+fn hex_value_upper_c(value: u8) -> HexValue {
+    handle value == 67 { true => HexValue::Value(12), false => hex_value_upper_d(value), _ => HexValue::Invalid }
+}
+fn hex_value_upper_d(value: u8) -> HexValue {
+    handle value == 68 { true => HexValue::Value(13), false => hex_value_upper_e(value), _ => HexValue::Invalid }
+}
+fn hex_value_upper_e(value: u8) -> HexValue {
+    handle value == 69 { true => HexValue::Value(14), false => hex_value_upper_f(value), _ => HexValue::Invalid }
+}
+fn hex_value_upper_f(value: u8) -> HexValue {
+    handle value == 70 { true => HexValue::Value(15), false => HexValue::Invalid, _ => HexValue::Invalid }
+}
+
+fn is_ascii_hex_lead(value: u8) -> Bool {
+    handle value == 48 { true => true, false => is_ascii_hex_lead_one(value), _ => false }
+}
+fn is_ascii_hex_lead_one(value: u8) -> Bool {
+    handle value == 49 { true => true, false => is_ascii_hex_lead_two(value), _ => false }
+}
+fn is_ascii_hex_lead_two(value: u8) -> Bool {
+    handle value == 50 { true => true, false => is_ascii_hex_lead_three(value), _ => false }
+}
+fn is_ascii_hex_lead_three(value: u8) -> Bool {
+    handle value == 51 { true => true, false => is_ascii_hex_lead_four(value), _ => false }
+}
+fn is_ascii_hex_lead_four(value: u8) -> Bool {
+    handle value == 52 { true => true, false => is_ascii_hex_lead_five(value), _ => false }
+}
+fn is_ascii_hex_lead_five(value: u8) -> Bool {
+    handle value == 53 { true => true, false => is_ascii_hex_lead_six(value), _ => false }
+}
+fn is_ascii_hex_lead_six(value: u8) -> Bool {
+    handle value == 54 { true => true, false => value == 55, _ => false }
+}
+
+fn is_hex_digit(value: u8) -> Bool {
+    handle is_ascii_hex_lead(value) {
+        true => true,
+        false => is_hex_digit_eight(value),
+        _ => false,
+    }
+}
+fn is_hex_digit_eight(value: u8) -> Bool {
+    handle value == 56 { true => true, false => is_hex_digit_nine(value), _ => false }
+}
+fn is_hex_digit_nine(value: u8) -> Bool {
+    handle value == 57 { true => true, false => is_hex_digit_lower_a(value), _ => false }
+}
+fn is_hex_digit_lower_a(value: u8) -> Bool {
+    handle value == 97 { true => true, false => is_hex_digit_lower_b(value), _ => false }
+}
+fn is_hex_digit_lower_b(value: u8) -> Bool {
+    handle value == 98 { true => true, false => is_hex_digit_lower_c(value), _ => false }
+}
+fn is_hex_digit_lower_c(value: u8) -> Bool {
+    handle value == 99 { true => true, false => is_hex_digit_lower_d(value), _ => false }
+}
+fn is_hex_digit_lower_d(value: u8) -> Bool {
+    handle value == 100 { true => true, false => is_hex_digit_lower_e(value), _ => false }
+}
+fn is_hex_digit_lower_e(value: u8) -> Bool {
+    handle value == 101 { true => true, false => is_hex_digit_lower_f(value), _ => false }
+}
+fn is_hex_digit_lower_f(value: u8) -> Bool {
+    handle value == 102 { true => true, false => is_hex_digit_upper_a(value), _ => false }
+}
+fn is_hex_digit_upper_a(value: u8) -> Bool {
+    handle value == 65 { true => true, false => is_hex_digit_upper_b(value), _ => false }
+}
+fn is_hex_digit_upper_b(value: u8) -> Bool {
+    handle value == 66 { true => true, false => is_hex_digit_upper_c(value), _ => false }
+}
+fn is_hex_digit_upper_c(value: u8) -> Bool {
+    handle value == 67 { true => true, false => is_hex_digit_upper_d(value), _ => false }
+}
+fn is_hex_digit_upper_d(value: u8) -> Bool {
+    handle value == 68 { true => true, false => is_hex_digit_upper_e(value), _ => false }
+}
+fn is_hex_digit_upper_e(value: u8) -> Bool {
+    handle value == 69 { true => true, false => value == 70, _ => false }
+}
+
+fn next_character_count(count: CharacterCount) -> CharacterCount {
+    handle count {
+        CharacterCount::Empty => CharacterCount::One,
+        CharacterCount::One => CharacterCount::Many,
+        CharacterCount::Many => CharacterCount::Many,
+        _ => CharacterCount::Many,
+    }
+}
+
+fn finish_character(index: usize, count: CharacterCount) -> CharacterEnd {
+    handle count {
+        CharacterCount::One => CharacterEnd::Valid(source::next_index(index)),
+        CharacterCount::Empty => CharacterEnd::Invalid(source::next_index(index)),
+        CharacterCount::Many => CharacterEnd::Invalid(source::next_index(index)),
+        _ => CharacterEnd::Invalid(source::next_index(index)),
+    }
+}
+
+// Preserve the frozen lexer boundaries for compact terminal effect rows and
+// nested generic applications. These sequences are grammatical delimiters,
+// not overloaded maximal-munch operators: `!/`, `>>`, `<<`, `<&`, and `<!`.
+fn operator_end_at(input: Bytes, index: usize) -> usize {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => operator_end_after_first(input, index, value),
+        _ => index,
+    }
+}
+
+fn operator_end_after_first(input: Bytes, index: usize, first: u8) -> usize {
+    let next = source::next_index(index);
+    handle operator_has_forced_boundary(input, first, next) {
+        true => next,
+        false => operator_run_end(input, next),
+        _ => next,
+    }
+}
+
+fn operator_has_forced_boundary(input: Bytes, first: u8, next: usize) -> Bool {
+    handle source::byte_at_or_empty(input, next) {
+        FirstByte::Value(second) => operator_boundary_second(first, second),
+        _ => false,
+    }
+}
+
+fn operator_boundary_second(first: u8, second: u8) -> Bool {
+    handle first == 33 {
+        true => second == 47,
+        false => operator_boundary_less(first, second),
+        _ => false,
+    }
+}
+
+fn operator_boundary_less(first: u8, second: u8) -> Bool {
+    handle first == 60 {
+        true => handle second == 60 {
+            true => true,
+            false => handle second == 38 { true => true, false => second == 33, _ => false },
+            _ => false,
+        },
+        false => handle first == 62 { true => second == 62, false => false, _ => false },
+        _ => false,
+    }
+}
+
+fn operator_run_end(input: Bytes, index: usize) -> usize {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle is_operator_byte(value) {
+            true => operator_run_end(input, source::next_index(index)),
+            false => index,
+            _ => index,
+        },
+        _ => index,
+    }
+}
+
+fn is_operator_byte(value: u8) -> Bool {
+    handle value == 43 {
+        true => true,
+        false => is_operator_minus(value),
+        _ => false,
+    }
+}
+
+fn is_operator_minus(value: u8) -> Bool {
+    handle value == 45 {
+        true => true,
+        false => is_operator_multiply(value),
+        _ => false,
+    }
+}
+
+fn is_operator_multiply(value: u8) -> Bool {
+    handle value == 42 {
+        true => true,
+        false => is_operator_divide(value),
+        _ => false,
+    }
+}
+
+fn is_operator_divide(value: u8) -> Bool {
+    handle value == 47 {
+        true => true,
+        false => is_operator_remainder(value),
+        _ => false,
+    }
+}
+
+fn is_operator_remainder(value: u8) -> Bool {
+    handle value == 37 {
+        true => true,
+        false => is_operator_equal(value),
+        _ => false,
+    }
+}
+
+fn is_operator_equal(value: u8) -> Bool {
+    handle value == 61 {
+        true => true,
+        false => is_operator_not(value),
+        _ => false,
+    }
+}
+
+fn is_operator_not(value: u8) -> Bool {
+    handle value == 33 {
+        true => true,
+        false => is_operator_less(value),
+        _ => false,
+    }
+}
+
+fn is_operator_less(value: u8) -> Bool {
+    handle value == 60 {
+        true => true,
+        false => is_operator_greater(value),
+        _ => false,
+    }
+}
+
+fn is_operator_greater(value: u8) -> Bool {
+    handle value == 62 {
+        true => true,
+        false => is_operator_and(value),
+        _ => false,
+    }
+}
+
+fn is_operator_and(value: u8) -> Bool {
+    handle value == 38 {
+        true => true,
+        false => is_operator_or(value),
+        _ => false,
+    }
+}
+
+fn is_operator_or(value: u8) -> Bool {
+    handle value == 124 {
+        true => true,
+        false => value == 94,
+        _ => false,
+    }
+}
+
+fn is_punctuation_byte(value: u8) -> Bool {
+    handle value == 40 {
+        true => true,
+        false => is_punctuation_close_paren(value),
+        _ => false,
+    }
+}
+
+fn is_punctuation_close_paren(value: u8) -> Bool {
+    handle value == 41 {
+        true => true,
+        false => is_punctuation_open_square(value),
+        _ => false,
+    }
+}
+
+fn is_punctuation_open_square(value: u8) -> Bool {
+    handle value == 91 {
+        true => true,
+        false => is_punctuation_close_square(value),
+        _ => false,
+    }
+}
+
+fn is_punctuation_close_square(value: u8) -> Bool {
+    handle value == 93 {
+        true => true,
+        false => is_punctuation_open_brace(value),
+        _ => false,
+    }
+}
+
+fn is_punctuation_open_brace(value: u8) -> Bool {
+    handle value == 123 {
+        true => true,
+        false => is_punctuation_close_brace(value),
+        _ => false,
+    }
+}
+
+fn is_punctuation_close_brace(value: u8) -> Bool {
+    handle value == 125 {
+        true => true,
+        false => is_punctuation_comma(value),
+        _ => false,
+    }
+}
+
+fn is_punctuation_comma(value: u8) -> Bool {
+    handle value == 44 {
+        true => true,
+        false => is_punctuation_semicolon(value),
+        _ => false,
+    }
+}
+
+fn is_punctuation_semicolon(value: u8) -> Bool {
+    handle value == 59 {
+        true => true,
+        false => is_punctuation_colon(value),
+        _ => false,
+    }
+}
+
+fn is_punctuation_colon(value: u8) -> Bool {
+    handle value == 58 {
+        true => true,
+        false => value == 46,
+        _ => false,
+    }
+}
+
+pub fn token_kind(token: TokenStart) -> TokenKind { token.kind }
+pub fn token_start(token: TokenStart) -> usize { token.start }
+pub fn token_end(token: TokenStart) -> usize { token.end }
+
+// Compare source-defined identifiers, operators, and punctuation against
+// arbitrary source text using only the bounded byte cursor. This keeps parser
+// delimiters in the scanner vocabulary too, avoiding a second byte-level
+// parser path for braces, commas, or separators.
+pub fn token_matches(input: Bytes, token: TokenStart, expected: Text) -> Bool {
+    handle token.kind {
+        TokenKind::Identifier => token_bytes_match(input, __g1_text_as_bytes(expected), token.start, 0, token.end),
+        TokenKind::Operator => token_bytes_match(input, __g1_text_as_bytes(expected), token.start, 0, token.end),
+        TokenKind::Punctuation => token_bytes_match(input, __g1_text_as_bytes(expected), token.start, 0, token.end),
+        _ => false,
+    }
+}
+
+// Parser stages sometimes need to relate two source-owned identifiers (for
+// example, a parameter binder and a body reference) without materializing
+// either as host text. Compare their bounded spans directly in the scanner.
+pub fn token_equals(input: Bytes, left: TokenStart, right: TokenStart) -> Bool {
+    token_range_equals(input, token_start(left), token_end(left), token_start(right), token_end(right))
+}
+
+fn token_range_equals(input: Bytes, left: usize, left_end: usize, right: usize, right_end: usize) -> Bool {
+    handle left == left_end {
+        true => right == right_end,
+        false => handle right == right_end {
+            true => false,
+            false => handle source::byte_at_or_empty(input, left) {
+                FirstByte::Value(value) => handle source::byte_at_or_empty(input, right) {
+                FirstByte::Value(other) => handle value == other {
+                    true => token_range_equals(input, source::next_index(left), left_end, source::next_index(right), right_end),
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+            },
+        },
+        _ => false,
+    }
+}
+
+// Header, keyword, and fixity recognition consumes token offsets too, so this
+// source-owned form keeps the request admission check at that boundary rather
+// than relying on a caller to have used a checked cursor earlier.
+pub fn token_matches_checked(input: SourceInput, token: TokenStart, expected: Text) -> Bool {
+    handle digest_matches_bytes(input) {
+        true => token_matches(bytes(input), token, expected),
+        false => false,
+        _ => false,
+    }
+}
+
+fn token_bytes_match(input: Bytes, expected: Bytes, input_index: usize, expected_index: usize, end: usize) -> Bool {
+    handle input_index == end {
+        true => expected_ended(expected, expected_index),
+        false => token_bytes_match_at(input, expected, input_index, expected_index, end),
+        _ => false,
+    }
+}
+
+fn expected_ended(expected: Bytes, index: usize) -> Bool {
+    handle source::byte_at_or_empty(expected, index) {
+        FirstByte::Empty => true,
+        FirstByte::Value(_) => false,
+        _ => false,
+    }
+}
+
+fn token_bytes_match_at(input: Bytes, expected: Bytes, input_index: usize, expected_index: usize, end: usize) -> Bool {
+    handle source::byte_at_or_empty(input, input_index) {
+        FirstByte::Empty => false,
+        FirstByte::Value(actual) => token_bytes_match_expected(input, expected, input_index, expected_index, end, actual),
+        _ => false,
+    }
+}
+
+fn token_bytes_match_expected(input: Bytes, expected: Bytes, input_index: usize, expected_index: usize, end: usize, actual: u8) -> Bool {
+    handle source::byte_at_or_empty(expected, expected_index) {
+        FirstByte::Empty => false,
+        FirstByte::Value(wanted) => handle actual == wanted {
+            true => token_bytes_match(input, expected, source::next_index(input_index), source::next_index(expected_index), end),
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn skip_ascii_whitespace(input: Bytes) -> usize {
+    skip_ascii_whitespace_from(input, 0)
+}
+
+pub fn skip_ascii_whitespace_from(input: Bytes, index: usize) -> usize {
+    handle class_at(input, index) {
+        FirstByteClass::LineFeed => skip_ascii_whitespace_from(input, source::next_index(index)),
+        FirstByteClass::Whitespace => skip_ascii_whitespace_from(input, source::next_index(index)),
+        FirstByteClass::Empty => index,
+        FirstByteClass::AsciiLetter => index,
+        FirstByteClass::AsciiDigit => index,
+        FirstByteClass::Underscore => index,
+        FirstByteClass::Other => index,
+        _ => index,
+    }
+}
+
+// Comments are scanner trivia, never operator tokens. Line comments end at
+// the LF boundary; block comments retain nested-delimiter depth.
+// Unterminated blocks consume to the end here; diagnostic recovery is added
+// with the complete token/diagnostic stream rather than exposing a false
+// operator token to later header parsing.
+fn skip_trivia_from(input: Bytes, index: usize) -> TriviaEnd {
+    skip_comment_from(input, skip_ascii_whitespace_from(input, index))
+}
+
+fn skip_comment_from(input: Bytes, index: usize) -> TriviaEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => skip_comment_byte(input, index, value),
+        FirstByte::Empty => TriviaEnd::Value(index),
+        _ => TriviaEnd::Value(index),
+    }
+}
+
+fn skip_comment_byte(input: Bytes, index: usize, value: u8) -> TriviaEnd {
+    handle value == 47 {
+        true => skip_comment_after_slash(input, index),
+        false => TriviaEnd::Value(index),
+        _ => TriviaEnd::Value(index),
+    }
+}
+
+fn skip_comment_after_slash(input: Bytes, index: usize) -> TriviaEnd {
+    let next = source::next_index(index);
+    handle source::byte_at_or_empty(input, next) {
+        FirstByte::Value(value) => skip_comment_second_byte(input, index, next, value),
+        FirstByte::Empty => TriviaEnd::Value(index),
+        _ => TriviaEnd::Value(index),
+    }
+}
+
+fn skip_comment_second_byte(input: Bytes, index: usize, next: usize, value: u8) -> TriviaEnd {
+    handle value == 47 {
+        true => skip_line_comment(input, source::next_index(next)),
+        false => handle value == 42 {
+            true => skip_block_comment(input, source::next_index(next), 1, index),
+            false => TriviaEnd::Value(index),
+            _ => TriviaEnd::Value(index),
+        },
+        _ => TriviaEnd::Value(index),
+    }
+}
+
+fn skip_line_comment(input: Bytes, index: usize) -> TriviaEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => skip_line_comment_byte(input, index, value),
+        FirstByte::Empty => TriviaEnd::Value(index),
+        _ => TriviaEnd::Value(index),
+    }
+}
+
+fn skip_line_comment_byte(input: Bytes, index: usize, value: u8) -> TriviaEnd {
+    handle value == 10 {
+        true => skip_trivia_from(input, source::next_index(index)),
+        false => skip_line_comment(input, source::next_index(index)),
+        _ => TriviaEnd::Value(index),
+    }
+}
+
+fn skip_block_comment(input: Bytes, index: usize, depth: usize, comment_start: usize) -> TriviaEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => skip_block_comment_byte(input, index, depth, comment_start, value),
+        FirstByte::Empty => TriviaEnd::Invalid(comment_start, index),
+        _ => TriviaEnd::Invalid(comment_start, index),
+    }
+}
+
+fn skip_block_comment_byte(input: Bytes, index: usize, depth: usize, comment_start: usize, value: u8) -> TriviaEnd {
+    handle value == 47 {
+        true => skip_block_after_slash(input, index, depth, comment_start),
+        false => handle value == 42 {
+            true => skip_block_after_star(input, index, depth, comment_start),
+            false => skip_block_comment(input, source::next_index(index), depth, comment_start),
+            _ => TriviaEnd::Invalid(comment_start, index),
+        },
+        _ => TriviaEnd::Invalid(comment_start, index),
+    }
+}
+
+fn skip_block_after_slash(input: Bytes, index: usize, depth: usize, comment_start: usize) -> TriviaEnd {
+    let next = source::next_index(index);
+    handle source::byte_at_or_empty(input, next) {
+        FirstByte::Value(value) => handle value == 42 {
+            true => skip_block_comment(input, source::next_index(next), source::next_index(depth), comment_start),
+            false => skip_block_comment(input, next, depth, comment_start),
+            _ => TriviaEnd::Invalid(comment_start, next),
+        },
+        FirstByte::Empty => TriviaEnd::Invalid(comment_start, next),
+        _ => TriviaEnd::Invalid(comment_start, next),
+    }
+}
+
+fn skip_block_after_star(input: Bytes, index: usize, depth: usize, comment_start: usize) -> TriviaEnd {
+    let next = source::next_index(index);
+    handle source::byte_at_or_empty(input, next) {
+        FirstByte::Value(value) => skip_block_close(input, next, depth, comment_start, value),
+        FirstByte::Empty => TriviaEnd::Invalid(comment_start, next),
+        _ => TriviaEnd::Invalid(comment_start, next),
+    }
+}
+
+fn skip_block_close(input: Bytes, slash: usize, depth: usize, comment_start: usize, value: u8) -> TriviaEnd {
+    handle value == 47 {
+        true => finish_block_close(input, slash, depth, comment_start),
+        false => skip_block_comment(input, slash, depth, comment_start),
+        _ => TriviaEnd::Invalid(comment_start, slash),
+    }
+}
+
+fn finish_block_close(input: Bytes, slash: usize, depth: usize, comment_start: usize) -> TriviaEnd {
+    handle depth == 1 {
+        true => skip_trivia_from(input, source::next_index(slash)),
+        false => skip_block_comment(input, source::next_index(slash), __g1_int_wrapping_sub<usize>(depth, 1), comment_start),
+        _ => TriviaEnd::Invalid(comment_start, source::next_index(slash)),
+    }
+}
+
+fn decimal_end_at(input: Bytes, index: usize) -> usize {
+    handle class_at(input, index) {
+        FirstByteClass::AsciiDigit => decimal_end_at(input, source::next_index(index)),
+        FirstByteClass::Empty => index,
+        FirstByteClass::LineFeed => index,
+        FirstByteClass::AsciiLetter => index,
+        FirstByteClass::Underscore => index,
+        FirstByteClass::Other => index,
+        _ => index,
+    }
+}
+
+// Keep lexical numeric validity at the scanner boundary.  A malformed radix,
+// separator, fraction, or exponent is one Invalid token, so later phases do
+// not reinterpret its valid-looking prefix as an integer.
+fn number_token(input: Bytes, start: usize) -> TokenStart {
+    number_token_end(start, scan_number(input, start))
+}
+
+fn number_token_end(start: usize, value: NumberEnd) -> TokenStart {
+    handle value {
+        NumberEnd::Integer(end) => TokenStart { start: start, kind: TokenKind::Integer, end: end },
+        NumberEnd::Float(end) => TokenStart { start: start, kind: TokenKind::Float, end: end },
+        NumberEnd::Invalid(end) => TokenStart { start: start, kind: TokenKind::Invalid, end: end },
+        _ => TokenStart { start: start, kind: TokenKind::Invalid, end: start },
+    }
+}
+
+fn scan_number(input: Bytes, start: usize) -> NumberEnd {
+    handle source::byte_at_or_empty(input, source::next_index(start)) {
+        FirstByte::Value(value) => scan_number_prefix(input, start, value),
+        _ => scan_decimal_number(input, start),
+    }
+}
+
+fn scan_number_prefix(input: Bytes, start: usize, second: u8) -> NumberEnd {
+    handle source::byte_at_or_empty(input, start) {
+        FirstByte::Value(first) => handle first == 48 {
+            true => scan_radix_selector(input, start, second),
+            false => scan_decimal_number(input, start),
+            _ => scan_decimal_number(input, start),
+        },
+        _ => scan_decimal_number(input, start),
+    }
+}
+
+fn scan_radix_selector(input: Bytes, start: usize, value: u8) -> NumberEnd {
+    handle value == 98 {
+        true => scan_radix_number(input, source::next_index(source::next_index(start)), 2),
+        false => handle value == 111 {
+            true => scan_radix_number(input, source::next_index(source::next_index(start)), 8),
+            false => handle value == 120 {
+                true => scan_radix_number(input, source::next_index(source::next_index(start)), 16),
+                false => scan_decimal_number(input, start),
+                _ => scan_decimal_number(input, start),
+            },
+            _ => scan_decimal_number(input, start),
+        },
+        _ => scan_decimal_number(input, start),
+    }
+}
+
+fn scan_radix_number(input: Bytes, index: usize, base: u8) -> NumberEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle value == 95 {
+            true => scan_radix_digits(input, source::next_index(index), base, false, false),
+            false => scan_radix_digits(input, index, base, false, false),
+            _ => NumberEnd::Invalid(index),
+        },
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_radix_digits(input: Bytes, index: usize, base: u8, saw_digit: Bool, after_separator: Bool) -> NumberEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => scan_radix_digit_byte(input, index, base, saw_digit, after_separator, value),
+        FirstByte::Empty => finish_number(input, index, saw_digit, after_separator, false),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_radix_digit_byte(input: Bytes, index: usize, base: u8, saw_digit: Bool, after_separator: Bool, value: u8) -> NumberEnd {
+    handle is_digit_for_base(value, base) {
+        true => scan_radix_digits(input, source::next_index(index), base, true, false),
+        false => handle value == 95 {
+            true => scan_radix_separator(input, index, base, saw_digit, after_separator),
+            false => finish_number(input, index, saw_digit, after_separator, false),
+            _ => NumberEnd::Invalid(index),
+        },
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_radix_separator(input: Bytes, index: usize, base: u8, saw_digit: Bool, after_separator: Bool) -> NumberEnd {
+    handle saw_digit {
+        true => handle after_separator {
+            true => NumberEnd::Invalid(consume_numeric_tail(input, source::next_index(index))),
+            false => scan_radix_digits(input, source::next_index(index), base, true, true),
+            _ => NumberEnd::Invalid(index),
+        },
+        false => NumberEnd::Invalid(consume_numeric_tail(input, source::next_index(index))),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_decimal_number(input: Bytes, start: usize) -> NumberEnd {
+    scan_decimal_digits(input, start, false, false)
+}
+
+fn scan_decimal_digits(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool) -> NumberEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => scan_decimal_digit_byte(input, index, saw_digit, after_separator, value),
+        FirstByte::Empty => finish_number(input, index, saw_digit, after_separator, false),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_decimal_digit_byte(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool, value: u8) -> NumberEnd {
+    handle is_digit_for_base(value, 10) {
+        true => scan_decimal_digits(input, source::next_index(index), true, false),
+        false => handle value == 95 {
+            true => scan_decimal_separator(input, index, saw_digit, after_separator),
+            false => handle value == 46 {
+                true => scan_fraction(input, source::next_index(index), saw_digit, after_separator),
+                false => scan_exponent_or_finish(input, index, saw_digit, after_separator, false),
+                _ => NumberEnd::Invalid(index),
+            },
+            _ => NumberEnd::Invalid(index),
+        },
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_decimal_separator(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool) -> NumberEnd {
+    handle saw_digit {
+        true => handle after_separator {
+            true => NumberEnd::Invalid(consume_numeric_tail(input, source::next_index(index))),
+            false => scan_decimal_digits(input, source::next_index(index), true, true),
+            _ => NumberEnd::Invalid(index),
+        },
+        false => NumberEnd::Invalid(consume_numeric_tail(input, source::next_index(index))),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_fraction(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool) -> NumberEnd {
+    handle saw_digit {
+        true => handle after_separator {
+            true => NumberEnd::Invalid(consume_numeric_tail(input, index)),
+            false => scan_fraction_digits(input, index, false, false),
+            _ => NumberEnd::Invalid(index),
+        },
+        false => NumberEnd::Invalid(consume_numeric_tail(input, index)),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_fraction_digits(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool) -> NumberEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle is_digit_for_base(value, 10) {
+            true => scan_fraction_digits(input, source::next_index(index), true, false),
+            false => handle value == 95 {
+                true => scan_fraction_separator(input, index, saw_digit, after_separator),
+                false => scan_exponent_or_finish(input, index, saw_digit, after_separator, true),
+                _ => NumberEnd::Invalid(index),
+            },
+            _ => NumberEnd::Invalid(index),
+        },
+        FirstByte::Empty => finish_number(input, index, saw_digit, after_separator, true),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_fraction_separator(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool) -> NumberEnd {
+    handle saw_digit {
+        true => handle after_separator {
+            true => NumberEnd::Invalid(consume_numeric_tail(input, source::next_index(index))),
+            false => scan_fraction_digits(input, source::next_index(index), true, true),
+            _ => NumberEnd::Invalid(index),
+        },
+        false => NumberEnd::Invalid(consume_numeric_tail(input, source::next_index(index))),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_exponent_or_finish(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool, is_float: Bool) -> NumberEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle value == 101 {
+            true => scan_exponent_sign(input, source::next_index(index)),
+            false => handle value == 69 {
+                true => scan_exponent_sign(input, source::next_index(index)),
+                false => finish_number(input, index, saw_digit, after_separator, is_float),
+                _ => NumberEnd::Invalid(index),
+            },
+            _ => NumberEnd::Invalid(index),
+        },
+        FirstByte::Empty => finish_number(input, index, saw_digit, after_separator, is_float),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_exponent_sign(input: Bytes, index: usize) -> NumberEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle value == 43 {
+            true => scan_exponent_digits(input, source::next_index(index), false, false),
+            false => handle value == 45 {
+                true => scan_exponent_digits(input, source::next_index(index), false, false),
+                false => scan_exponent_digits(input, index, false, false),
+                _ => NumberEnd::Invalid(index),
+            },
+            _ => NumberEnd::Invalid(index),
+        },
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_exponent_digits(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool) -> NumberEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle is_digit_for_base(value, 10) {
+            true => scan_exponent_digits(input, source::next_index(index), true, false),
+            false => handle value == 95 {
+                true => scan_exponent_separator(input, index, saw_digit, after_separator),
+                false => finish_number(input, index, saw_digit, after_separator, true),
+                _ => NumberEnd::Invalid(index),
+            },
+            _ => NumberEnd::Invalid(index),
+        },
+        FirstByte::Empty => finish_number(input, index, saw_digit, after_separator, true),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn scan_exponent_separator(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool) -> NumberEnd {
+    handle saw_digit {
+        true => handle after_separator {
+            true => NumberEnd::Invalid(consume_numeric_tail(input, source::next_index(index))),
+            false => scan_exponent_digits(input, source::next_index(index), true, true),
+            _ => NumberEnd::Invalid(index),
+        },
+        false => NumberEnd::Invalid(consume_numeric_tail(input, source::next_index(index))),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn finish_number(input: Bytes, index: usize, saw_digit: Bool, after_separator: Bool, is_float: Bool) -> NumberEnd {
+    handle saw_digit {
+        true => handle after_separator {
+            true => NumberEnd::Invalid(consume_numeric_tail(input, index)),
+            false => finish_number_tail(input, index, is_float),
+            _ => NumberEnd::Invalid(index),
+        },
+        false => NumberEnd::Invalid(consume_numeric_tail(input, index)),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn finish_number_tail(input: Bytes, index: usize, is_float: Bool) -> NumberEnd {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle is_numeric_tail(value) {
+            true => NumberEnd::Invalid(consume_numeric_tail(input, source::next_index(index))),
+            false => number_kind_at(index, is_float),
+            _ => NumberEnd::Invalid(index),
+        },
+        FirstByte::Empty => number_kind_at(index, is_float),
+        _ => NumberEnd::Invalid(index),
+    }
+}
+
+fn number_kind_at(index: usize, is_float: Bool) -> NumberEnd {
+    handle is_float { true => NumberEnd::Float(index), false => NumberEnd::Integer(index), _ => NumberEnd::Invalid(index) }
+}
+
+fn consume_numeric_tail(input: Bytes, index: usize) -> usize {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => handle is_numeric_tail(value) {
+            true => consume_numeric_tail(input, source::next_index(index)),
+            false => index,
+            _ => index,
+        },
+        _ => index,
+    }
+}
+
+fn is_numeric_tail(value: u8) -> Bool {
+    handle is_digit_for_base(value, 10) {
+        true => true,
+        false => handle value == 95 {
+            true => true,
+            false => handle value >= 65 {
+                true => handle value <= 90 { true => true, false => is_numeric_tail_lower(value), _ => false },
+                false => is_numeric_tail_lower(value),
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn is_numeric_tail_lower(value: u8) -> Bool {
+    handle value >= 97 { true => value <= 122, false => false, _ => false }
+}
+
+fn is_digit_for_base(value: u8, base: u8) -> Bool {
+    handle value >= 48 {
+        true => is_digit_for_base_after_zero(value, base),
+        false => false,
+        _ => false,
+    }
+}
+
+fn is_digit_for_base_after_zero(value: u8, base: u8) -> Bool {
+    handle base == 2 {
+        true => handle value == 48 { true => true, false => value == 49, _ => false },
+        false => is_digit_for_base_octal(value, base),
+        _ => false,
+    }
+}
+
+fn is_digit_for_base_octal(value: u8, base: u8) -> Bool {
+    handle base == 8 {
+        true => value <= 55,
+        false => handle base == 10 {
+            true => value <= 57,
+            false => handle base == 16 { true => handle value <= 57 { true => true, false => is_hex_digit_for_base(value, base), _ => false }, false => false, _ => false },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn is_hex_digit_for_base(value: u8, base: u8) -> Bool {
+    handle base == 16 {
+        true => handle value >= 65 {
+            true => handle value <= 70 { true => true, false => hex_lower(value) },
+            false => hex_lower(value),
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn hex_lower(value: u8) -> Bool { handle value >= 97 { true => value <= 102, false => false, _ => false } }
+
+fn identifier_end_at(input: Bytes, index: usize) -> usize {
+    handle class_at(input, index) {
+        FirstByteClass::AsciiLetter => identifier_end_at(input, source::next_index(index)),
+        FirstByteClass::AsciiDigit => identifier_end_at(input, source::next_index(index)),
+        FirstByteClass::Underscore => identifier_end_at(input, source::next_index(index)),
+        FirstByteClass::Empty => index,
+        FirstByteClass::LineFeed => index,
+        FirstByteClass::Other => index,
+        _ => index,
+    }
+}
+
+fn classify(value: u8) -> FirstByteClass {
+    branch_bool(
+        value == 10,
+        () -> FirstByteClass { FirstByteClass::LineFeed },
+        () -> FirstByteClass { classify_upper_start(value) },
+    )
+}
+
+fn classify_upper_start(value: u8) -> FirstByteClass {
+    branch_bool(
+        value >= 65,
+        () -> FirstByteClass { classify_upper_end(value) },
+        () -> FirstByteClass { classify_lower_start(value) },
+    )
+}
+
+fn classify_upper_end(value: u8) -> FirstByteClass {
+    branch_bool(
+        value <= 90,
+        () -> FirstByteClass { FirstByteClass::AsciiLetter },
+        () -> FirstByteClass { classify_lower_start(value) },
+    )
+}
+
+fn classify_lower_start(value: u8) -> FirstByteClass {
+    branch_bool(
+        value >= 97,
+        () -> FirstByteClass { classify_lower_end(value) },
+        () -> FirstByteClass { classify_digit_start(value) },
+    )
+}
+
+fn classify_lower_end(value: u8) -> FirstByteClass {
+    branch_bool(
+        value <= 122,
+        () -> FirstByteClass { FirstByteClass::AsciiLetter },
+        () -> FirstByteClass { classify_digit_start(value) },
+    )
+}
+
+fn classify_digit_start(value: u8) -> FirstByteClass {
+    branch_bool(
+        value >= 48,
+        () -> FirstByteClass { classify_digit_end(value) },
+        () -> FirstByteClass { classify_underscore(value) },
+    )
+}
+
+fn classify_digit_end(value: u8) -> FirstByteClass {
+    branch_bool(
+        value <= 57,
+        () -> FirstByteClass { FirstByteClass::AsciiDigit },
+        () -> FirstByteClass { classify_underscore(value) },
+    )
+}
+
+fn classify_underscore(value: u8) -> FirstByteClass {
+    handle value == 95 {
+        true => FirstByteClass::Underscore,
+        false => classify_space(value),
+        _ => FirstByteClass::Other,
+    }
+}
+
+fn classify_space(value: u8) -> FirstByteClass {
+    handle value == 32 {
+        true => FirstByteClass::Whitespace,
+        false => classify_tab(value),
+        _ => FirstByteClass::Other,
+    }
+}
+
+fn classify_tab(value: u8) -> FirstByteClass {
+    handle value == 9 {
+        true => FirstByteClass::Whitespace,
+        false => classify_carriage_return(value),
+        _ => FirstByteClass::Other,
+    }
+}
+
+fn classify_carriage_return(value: u8) -> FirstByteClass {
+    handle value == 13 {
+        true => FirstByteClass::Whitespace,
+        false => FirstByteClass::Other,
+        _ => FirstByteClass::Other,
+    }
+}

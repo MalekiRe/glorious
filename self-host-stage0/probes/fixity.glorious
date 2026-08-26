@@ -1,0 +1,68 @@
+use fixity_library::fixity;
+use fixity_library::header;
+use compiler_support::__g1_text_as_bytes;
+
+pub fn score(decision: fixity::ReductionDecision) -> i64 {
+    handle decision {
+        fixity::ReductionDecision::Reduce => 1,
+        fixity::ReductionDecision::Shift => 2,
+        fixity::ReductionDecision::Ambiguous => 3,
+        _ => 0,
+    }
+}
+
+pub fn score_lookup(value: fixity::FixityLookup) -> i64 {
+    handle value {
+        fixity::FixityLookup::Found(_) => 1,
+        fixity::FixityLookup::Missing => 4,
+        _ => 0,
+    }
+}
+
+pub fn lookup_reduction(left: fixity::FixityLookup, right: fixity::FixityLookup) -> i64 {
+    handle left {
+        fixity::FixityLookup::Found(left_fixity) => handle right {
+            fixity::FixityLookup::Found(right_fixity) => score(fixity::reduction(left_fixity, right_fixity)),
+            fixity::FixityLookup::Missing => 0,
+            _ => 0,
+        },
+        fixity::FixityLookup::Missing => 0,
+        _ => 0,
+    }
+}
+
+pub fn main() -> i64 {
+    score(fixity::reduction(
+        fixity::fixity(fixity::FixityForm::InfixLeft, 40),
+        fixity::fixity(fixity::FixityForm::InfixLeft, 30),
+    )) + score(fixity::reduction(
+        fixity::fixity(fixity::FixityForm::InfixRight, 20),
+        fixity::fixity(fixity::FixityForm::InfixRight, 30),
+    )) + score(fixity::reduction(
+        fixity::fixity(fixity::FixityForm::InfixNonAssociative, 20),
+        fixity::fixity(fixity::FixityForm::InfixNonAssociative, 20),
+    )) + score(fixity::reduction(
+        fixity::fixity(fixity::FixityForm::InfixRight, 20),
+        fixity::fixity(fixity::FixityForm::InfixLeft, 20),
+    )) + score(fixity::reduction(
+        fixity::fixity(fixity::FixityForm::InfixLeft, 20),
+        fixity::fixity(fixity::FixityForm::InfixRight, 20),
+    )) + score(fixity::reduction(
+        fixity::fixity(fixity::FixityForm::InfixLeft, 20),
+        fixity::fixity(fixity::FixityForm::InfixNonAssociative, 20),
+    )) + score(fixity::reduction(
+        fixity::fixity(fixity::FixityForm::InfixNonAssociative, 20),
+        fixity::fixity(fixity::FixityForm::InfixRight, 20),
+    ))
+        + lookup_reduction(fixity::prelude_infix("+"), fixity::prelude_infix("*"))
+        + lookup_reduction(fixity::prelude_prefix("!"), fixity::prelude_infix("*"))
+        + score_lookup(fixity::prelude_infix("missing"))
+        + score_lookup(fixity::prelude_infix("+"))
+        + score_lookup(fixity::prelude_infix("*"))
+        + score_lookup(fixity::prelude_prefix("!"))
+        + lookup_reduction(fixity::declared(header::leading(__g1_text_as_bytes("infixr **")), 20), fixity::declared(header::leading(__g1_text_as_bytes("infixl +")), 20))
+        + score_lookup(fixity::declared(header::leading(__g1_text_as_bytes("prefix !")), 50))
+        + score_lookup(fixity::declared(header::leading(__g1_text_as_bytes("fn ordinary")), 50))
+        + score_lookup(fixity::declared(header::leading(__g1_text_as_bytes("infixl +")), -1))
+        + score_lookup(fixity::declared(header::leading(__g1_text_as_bytes("infixl +")), 256))
+}

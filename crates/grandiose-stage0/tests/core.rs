@@ -2869,7 +2869,7 @@ fn typed_closures_become_callable_core_values_with_explicit_capture_modes() {
     assert_eq!(parameters[0].0, "extra");
     assert_eq!(environment.captures.len(), 1);
     assert_eq!(environment.captures[0].name, "value");
-    assert_eq!(environment.captures[0].mode, CaptureMode::SharedBorrow);
+    assert_eq!(environment.captures[0].mode, CaptureMode::Copy);
 }
 
 #[test]
@@ -3711,7 +3711,7 @@ fn generic_associated_effect_rows_normalize_item_arguments() {
 }
 
 #[test]
-fn placeflow_applies_a_closure_move_capture_when_the_closure_is_created() {
+fn placeflow_copies_a_duplicable_closure_capture_when_the_closure_is_created() {
     let package = PackageKey("core-closure-move@0.1.0".into());
     let source = "pub fn main(value: i64) -> i64 { let consume = (extra: i64) -> i64 { move value + extra }; value }";
     let file = FileKey::new(
@@ -3730,13 +3730,10 @@ fn placeflow_applies_a_closure_move_capture_when_the_closure_is_created() {
         &DefinitionIndex::from_interface(&interface),
         &signatures,
     );
-    let flow = PlaceFlow::analyze(&core);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
     assert!(
-        flow.diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "G5001"),
-        "{:#?}",
-        flow.diagnostics
+        flow.diagnostics.is_empty(),
+        "{flow:#?}"
     );
 }
 
@@ -6839,7 +6836,7 @@ fn typed_core_rejects_runs_in_evidence_with_a_forged_effect_contract() {
 }
 
 #[test]
-fn partial_move_inside_a_closure_moves_the_aggregate_capture_root() {
+fn partial_move_inside_a_closure_copies_a_duplicable_aggregate_capture_root() {
     let mut core = core_for(
         "core-partial-move-capture@0.1.0",
         "pub struct Pair { value: i64, other: i64 } pub fn main(pair: Pair) -> i64 { let read = () -> i64 { let value = move pair.value; value }; read() }",
@@ -6856,8 +6853,8 @@ fn partial_move_inside_a_closure_moves_the_aggregate_capture_root() {
             .expect("closure environment");
         assert_eq!(environment.captures.len(), 1);
         assert_eq!(environment.captures[0].name, "pair");
-        assert_eq!(environment.captures[0].mode, CaptureMode::Move);
-        assert_eq!(environment.post_states[0].mode, CaptureMode::Move);
+        assert_eq!(environment.captures[0].mode, CaptureMode::Copy);
+        assert_eq!(environment.post_states[0].mode, CaptureMode::Copy);
     }
     assert!(core.validate().is_empty(), "{:#?}", core.validate());
     let flow = PlaceFlow::analyze(&core);

@@ -1,0 +1,63 @@
+// M25 bootstrap concrete instance identity. Generic substitutions, queueing,
+// SCC discovery, and summary fixed points extend this source-owned key.
+// Argument kind is identity-bearing: the same payload in a type, lifetime,
+// effect-row, or structural-constant slot must never share an instance.
+pub enum ArgumentKind { Type, Lifetime, EffectRow, ConstU32, Quantity }
+pub enum ArgumentValue { Concrete(i64), Open(i64), Inferred(i64) }
+pub struct Instance { definition: i64, argument: i64, kind: ArgumentKind }
+pub enum InstanceAdmission { Value(Instance), NonConcrete, InvalidValue }
+pub fn instance(definition: i64, argument: i64) -> Instance { Instance { definition: definition, argument: argument, kind: ArgumentKind::Type } }
+pub fn typed_instance(definition: i64, argument: i64, kind: ArgumentKind) -> Instance { Instance { definition: definition, argument: argument, kind: kind } }
+
+// Executable specializations cannot retain declaration-local generic or
+// inference variables.  The result keeps rejection explicit so worklist and
+// cache publication layers never invent an identity for an open term.
+pub fn admit(definition: i64, argument: ArgumentValue, kind: ArgumentKind) -> InstanceAdmission {
+    handle argument {
+        ArgumentValue::Concrete(value) => admit_concrete(definition, value, kind),
+        ArgumentValue::Open(_) => InstanceAdmission::NonConcrete,
+        ArgumentValue::Inferred(_) => InstanceAdmission::NonConcrete,
+        _ => InstanceAdmission::NonConcrete,
+    }
+}
+
+// Structural `u32` constants and quantities are nonnegative source values.
+// Keep that validation with concrete-instance admission so a negative payload
+// cannot acquire a stable specialization identity merely by being concrete.
+fn admit_concrete(definition: i64, value: i64, kind: ArgumentKind) -> InstanceAdmission {
+    handle kind {
+        ArgumentKind::ConstU32 => nonnegative_instance(definition, value, kind),
+        ArgumentKind::Quantity => nonnegative_instance(definition, value, kind),
+        _ => InstanceAdmission::Value(typed_instance(definition, value, kind)),
+    }
+}
+
+fn nonnegative_instance(definition: i64, value: i64, kind: ArgumentKind) -> InstanceAdmission {
+    handle value < 0 {
+        true => InstanceAdmission::InvalidValue,
+        false => InstanceAdmission::Value(typed_instance(definition, value, kind)),
+        _ => InstanceAdmission::InvalidValue,
+    }
+}
+pub fn same(left: Instance, right: Instance) -> Bool {
+    compiler_support::branch_bool(left.definition == right.definition,
+        () -> Bool { same_argument(left, right) },
+        () -> Bool { false })
+}
+
+fn same_argument(left: Instance, right: Instance) -> Bool {
+    compiler_support::branch_bool(left.argument == right.argument,
+        () -> Bool { same_kind(left.kind, right.kind) },
+        () -> Bool { false })
+}
+
+fn same_kind(left: ArgumentKind, right: ArgumentKind) -> Bool {
+    handle (left, right) {
+        (ArgumentKind::Type, ArgumentKind::Type) => true,
+        (ArgumentKind::Lifetime, ArgumentKind::Lifetime) => true,
+        (ArgumentKind::EffectRow, ArgumentKind::EffectRow) => true,
+        (ArgumentKind::ConstU32, ArgumentKind::ConstU32) => true,
+        (ArgumentKind::Quantity, ArgumentKind::Quantity) => true,
+        _ => false,
+    }
+}

@@ -1,0 +1,78 @@
+use operation_library::operation;
+
+pub fn main() -> i64 {
+    operation::commit(operation::rollback(operation::stage(operation::mark(operation::begin(1)), 99)))
+        + score(operation::commit_checked(operation::stage(operation::begin(1), 9), operation::active()))
+        + score(operation::commit_checked(operation::stage(operation::begin(1), 9), operation::cancel(operation::active())))
+        + child_rejection_preserves_parent()
+        + child_charge_records_local_spend()
+        + child_release_returns_capacity()
+        + invalid_release_preserves_charge()
+        + explicit_lease_returns_capacity()
+        + invalid_lease_is_rejected()
+        + child_lease_returns_hierarchical_capacity()
+}
+
+pub fn score(value: operation::CommitResult) -> i64 { handle value { operation::CommitResult::Value(value) => value, operation::CommitResult::Cancelled => 0, _ => 0 } }
+
+pub fn child_rejection_preserves_parent() -> i64 {
+    handle operation::charge_child(operation::child(operation::budget(10), 5), 6) {
+        operation::BudgetPairResult::Error(pair, _) => 10 + operation::parent_spent(pair),
+        _ => 0,
+    }
+}
+
+pub fn child_charge_records_local_spend() -> i64 {
+    handle operation::charge_child(operation::child(operation::budget(10), 5), 3) {
+        operation::BudgetPairResult::Value(pair) => operation::child_spent(pair),
+        _ => 0,
+    }
+}
+
+pub fn child_release_returns_capacity() -> i64 {
+    handle operation::charge_child(operation::child(operation::budget(10), 5), 3) {
+        operation::BudgetPairResult::Value(pair) => handle operation::release_child(pair, 3) {
+            operation::BudgetPairReleaseResult::Value(released) => 100 + operation::parent_spent(released),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+pub fn invalid_release_preserves_charge() -> i64 {
+    handle operation::charge_child(operation::child(operation::budget(10), 5), 3) {
+        operation::BudgetPairResult::Value(pair) => handle operation::release_child(pair, 4) {
+            operation::BudgetPairReleaseResult::Invalid(rejected) => 1000 + operation::parent_spent(rejected),
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+pub fn explicit_lease_returns_capacity() -> i64 {
+    handle operation::lease(operation::budget(10), 4) {
+        operation::BudgetLeaseResult::Value(lease) => 100 + operation::spent(operation::release_lease(lease)),
+        operation::BudgetLeaseResult::Error(_) => 0,
+        _ => 0,
+    }
+}
+
+pub fn invalid_lease_is_rejected() -> i64 {
+    handle operation::lease(operation::budget(3), 4) {
+        operation::BudgetLeaseResult::Value(_) => 0,
+        operation::BudgetLeaseResult::Error(_) => 100,
+        _ => 0,
+    }
+}
+
+pub fn child_lease_returns_hierarchical_capacity() -> i64 {
+    handle operation::lease_child(operation::child(operation::budget(10), 5), 3) {
+        operation::BudgetPairLeaseResult::Value(lease) => child_lease_released_score(operation::release_child_lease(lease)),
+        operation::BudgetPairLeaseResult::Error(_, _) => 0,
+        _ => 0,
+    }
+}
+
+pub fn child_lease_released_score(pair: operation::BudgetPair) -> i64 {
+    1000 + operation::parent_spent(pair) + operation::child_spent(pair)
+}

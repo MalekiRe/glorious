@@ -1,0 +1,74 @@
+// M18's bootstrap decision vocabulary: wildcard, identifier-binding, and
+// scalar literal patterns. Nominal, tuple, array, and borrow patterns extend
+// this same source-owned matching result in later slices.
+use compiler_support::branch_bool;
+pub enum Value {
+    Bool(Bool),
+    I64(i64),
+    U8(u8),
+    U32(u32),
+    U64(u64),
+    Usize(usize),
+    // Fixed-shape structural values are the bootstrap representation for the
+    // record/variant field-selection decisions used by later nominal layout
+    // lowering.
+    Pair(i64, i64),
+    Variant(i64, i64),
+}
+
+pub enum Pattern {
+    Any,
+    Bind(Text),
+    Bool(Bool),
+    I64(i64),
+    U8(u8),
+    U32(u32),
+    U64(u64),
+    Usize(usize),
+    Pair(i64, i64),
+    // Selecting only the first field models an implicit discard of the
+    // unmentioned second field. `match_detail` makes that ownership-relevant
+    // fact available to later lowering rather than erasing it at matching.
+    PairFirst(i64),
+    PairSecond(i64),
+    Variant(i64, i64),
+}
+
+pub enum StructuralMatch { No, Exact, FirstSelected, SecondSelected }
+
+pub fn matches(pattern: Pattern, value: Value) -> Bool {
+    handle (pattern, value) {
+        (Pattern::Any, _) => true,
+        (Pattern::Bind(_), _) => true,
+        (Pattern::Bool(true), Value::Bool(true)) => true,
+        (Pattern::Bool(false), Value::Bool(false)) => true,
+        (Pattern::I64(left), Value::I64(right)) => left == right,
+        (Pattern::U8(left), Value::U8(right)) => left == right,
+        (Pattern::U32(left), Value::U32(right)) => left == right,
+        (Pattern::U64(left), Value::U64(right)) => left == right,
+        (Pattern::Usize(left), Value::Usize(right)) => left == right,
+        (Pattern::Pair(left_first, left_second), Value::Pair(right_first, right_second)) => pair_matches(left_first, left_second, right_first, right_second),
+        (Pattern::PairFirst(left), Value::Pair(right, _)) => left == right,
+        (Pattern::PairSecond(left), Value::Pair(_, right)) => left == right,
+        (Pattern::Variant(left_tag, left_value), Value::Variant(right_tag, right_value)) => pair_matches(left_tag, left_value, right_tag, right_value),
+        _ => false,
+    }
+}
+
+pub fn match_detail(pattern: Pattern, value: Value) -> StructuralMatch {
+    handle (pattern, value) {
+        (Pattern::Pair(left_first, left_second), Value::Pair(right_first, right_second)) => detail_exact(pair_matches(left_first, left_second, right_first, right_second)),
+        (Pattern::PairFirst(left), Value::Pair(right, _)) => handle left == right { true => StructuralMatch::FirstSelected, false => StructuralMatch::No, _ => StructuralMatch::No },
+        (Pattern::PairSecond(left), Value::Pair(_, right)) => handle left == right { true => StructuralMatch::SecondSelected, false => StructuralMatch::No, _ => StructuralMatch::No },
+        (Pattern::Variant(left_tag, left_value), Value::Variant(right_tag, right_value)) => detail_exact(pair_matches(left_tag, left_value, right_tag, right_value)),
+        _ => StructuralMatch::No,
+    }
+}
+
+fn pair_matches(left_first: i64, left_second: i64, right_first: i64, right_second: i64) -> Bool {
+    branch_bool(left_first == right_first, () -> Bool { left_second == right_second }, () -> Bool { false })
+}
+
+fn detail_exact(value: Bool) -> StructuralMatch {
+    handle value { true => StructuralMatch::Exact, false => StructuralMatch::No, _ => StructuralMatch::No }
+}

@@ -1,0 +1,8 @@
+use compiler_support::__g1_int_wrapping_mul;
+
+// A non-overflowing u64 case proves the generic source-to-MIR-to-VM path;
+// the wrapping boundary proves this is the manifest leaf rather than normal
+// source multiplication.
+pub fn main() -> u64 {
+    __g1_int_wrapping_mul<u64>(6148914691236517206, 3)
+}

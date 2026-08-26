@@ -1,0 +1,45 @@
+use core_library::body;
+use core_library::core;
+use core_library::types;
+use core_library::signature;
+use core_library::pattern;
+pub fn score(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(_) => 1, core::CoreResult::TypeError => 0, _ => 0 } }
+pub fn score_call(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_call(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
+pub fn score_pattern(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_pattern_test(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
+pub fn score_parameter(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_parameter(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
+pub fn score_parameter_arithmetic(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_parameter_arithmetic(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
+pub fn score_parameter_boolean(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_parameter_boolean(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
+pub fn score_parameter_conditional(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_parameter_conditional(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
+pub fn score_arithmetic_operands(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::i64_arithmetic(value) { core::I64ArithmeticValue::Value(body::Arithmetic::Multiply, 6, 7) => 1, _ => 0 }, _ => 0 } }
+pub fn score_comparison_operands(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::i64_comparison(value) { core::I64ComparisonValue::Value(body::Comparison::Less, 6, 7) => 1, _ => 0 }, _ => 0 } }
+pub fn score_select_operands(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::i64_select(value) { core::I64SelectValue::Value(false, 6, 7) => 1, _ => 0 }, _ => 0 } }
+pub fn score_u32_literal(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::u32_literal(value) { core::U32LiteralValue::Value(42) => 1, _ => 0 }, _ => 0 } }
+pub fn score_u32_arithmetic(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::u32_arithmetic(value) { core::U32ArithmeticValue::Value(body::Arithmetic::Add, 20, 22) => 1, _ => 0 }, _ => 0 } }
+pub fn score_unary_call_contract(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::call(value) { core::CallValue::Unary(signature::Callable::Unary(types::Type::I64, types::Type::I64), types::Type::I64) => 1, _ => 0 }, _ => 0 } }
+pub fn score_binary_call_contract(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::call(value) { core::CallValue::Binary(signature::Callable::Binary(types::Type::I64, types::Type::I64, types::Type::I64), types::Type::I64, types::Type::I64) => 1, _ => 0 }, _ => 0 } }
+pub fn main() -> i64 {
+    score(core::lower(body::Expression::I64(1), types::Type::I64))
+        + score_parameter(core::lower(body::Expression::ParameterI64(1), types::Type::I64))
+        + score_parameter_boolean(core::lower(body::Expression::ParameterBoolNot(true), types::Type::Bool))
+        + score_parameter_conditional(core::lower(body::Expression::ParameterI64Select(true, 7, 9), types::Type::I64))
+        + score_parameter_arithmetic(core::lower(body::Expression::ParameterI64Arithmetic(body::Arithmetic::Add, 20, 22), types::Type::I64))
+        + score(core::lower(body::Expression::U8(1), types::Type::U8))
+        + score(core::lower(body::Expression::U32(1), types::Type::U32))
+        + score_parameter(core::lower(body::Expression::ParameterU32(42), types::Type::U32))
+        + score(core::lower(body::Expression::U64(1), types::Type::U64))
+        + score(core::lower(body::Expression::Usize(1), types::Type::Usize))
+        + score(core::lower(body::Expression::I64(1), types::Type::Bool))
+        + score(core::lower(body::Expression::U8(1), types::Type::Usize))
+        + score(core::lower(body::Expression::Call1(signature::callable(types::Type::I64, types::Type::Bool), types::Type::I64), types::Type::Bool))
+        + score(core::lower(body::Expression::Call2(signature::binary(types::Type::I64, types::Type::U8, types::Type::U64), types::Type::I64, types::Type::U8), types::Type::U64))
+        + score_call(core::lower(body::Expression::Call1(signature::callable(types::Type::I64, types::Type::Bool), types::Type::I64), types::Type::Bool))
+        + score(core::lower(body::Expression::PatternTest(pattern::Pattern::PairFirst(3), pattern::Value::Pair(3, 9)), types::Type::Bool))
+        + score_pattern(core::lower(body::Expression::PatternTest(pattern::Pattern::PairFirst(3), pattern::Value::Pair(3, 9)), types::Type::Bool))
+        + score_arithmetic_operands(core::lower(body::Expression::I64Arithmetic(body::Arithmetic::Multiply, 6, 7), types::Type::I64))
+        + score_comparison_operands(core::lower(body::Expression::I64Comparison(body::Comparison::Less, 6, 7), types::Type::Bool))
+        + score_select_operands(core::lower(body::Expression::I64Select(false, 6, 7), types::Type::I64))
+        + score_u32_literal(core::lower(body::Expression::U32(42), types::Type::U32))
+        + score_u32_arithmetic(core::lower(body::Expression::U32Arithmetic(body::Arithmetic::Add, 20, 22), types::Type::U32))
+        + score_unary_call_contract(core::lower(body::Expression::Call1(signature::callable(types::Type::I64, types::Type::I64), types::Type::I64), types::Type::I64))
+        + score_binary_call_contract(core::lower(body::Expression::Call2(signature::binary(types::Type::I64, types::Type::I64, types::Type::I64), types::Type::I64, types::Type::I64), types::Type::I64))
+}

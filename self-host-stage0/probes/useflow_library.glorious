@@ -1,0 +1,10 @@
+pub mod placeflow;
+pub mod useflow;
+use useflow_library::useflow;
+pub fn remains_permitted_after_one(state: useflow::UseState) -> Bool {
+    handle useflow::consume(state) {
+        useflow::ConsumeResult::Value(next) => useflow::permits_another(next),
+        useflow::ConsumeResult::Exhausted => false,
+        _ => false,
+    }
+}

@@ -1,0 +1,52 @@
+// These bodies are never interpreted. The runtime manifest seals these exact
+// declaration identities after validating their ABIs.
+pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T {
+    let ignored = on_true();
+    on_false()
+}
+pub fn __g1_blake3(value: Bytes) -> Bytes { () }
+pub fn __g1_text_as_bytes(value: Text) -> Bytes { () }
+pub fn __g1_bytes_len(value: Bytes) -> usize { () }
+pub fn __g1_bytes_get(value: Bytes, index: usize) -> u8 { () }
+pub fn __g1_bytes_slice(value: Bytes, start: usize, end: usize) -> Bytes { () }
+// Canonical byte-buffer composition is a manifest-bound runtime leaf. It is
+// required by source-owned identities and later wire/artifact encoders.
+pub fn __g1_bytes_concat(left: Bytes, right: Bytes) -> Bytes { () }
+// Move a source-owned byte array into its compact immutable wire form. This
+// keeps binary-header and section construction in the compiler source.
+pub fn __g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () }
+pub fn __g1_int_shr<T>(value: T, amount: u32) -> T { () }
+pub fn __g1_int_convert_wrapping_to_u32<T>(value: T) -> u32 { () }
+pub fn __g1_int_convert_wrapping_to_u64<T>(value: T) -> u64 { () }
+pub fn __g1_int_convert_wrapping_to_u8<T>(value: T) -> u8 { () }
+pub fn __g1_int_convert_checked_to_i64<T>(value: T) -> i64 { () }
+pub fn __g1_int_wrapping_add<T>(left: T, right: T) -> T { () }
+pub fn __g1_int_wrapping_sub<T>(left: T, right: T) -> T { () }
+pub fn __g1_int_wrapping_mul<T>(left: T, right: T) -> T { () }
+pub fn __g1_int_checked_div<T>(left: T, right: T) -> T { () }
+pub fn __g1_text_eq(left: Text, right: Text) -> u32 { 0 }
+pub fn __g1_array_empty<T>() -> Array<T> { [] }
+pub fn __g1_array_len<T>(value: &Array<T>) -> usize { 0 }
+pub fn __g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T { __g1_array_get_move<T>(value, index) }
+pub fn __g1_array_pop_move<T>(value: &mut Array<T>) -> T { __g1_array_pop_move<T>(value) }
+
+// This opaque body is selected only by an explicit runtime-host manifest
+// binding. It has no ambient authority when compiled as ordinary source.
+pub fn write_file_atomically(path: Text, bytes: Bytes) -> () { () }
+
+// Command-line input is an explicit host capability.  It remains opaque to
+// ordinary source execution and is linked only by the exact process_args
+// runtime-host declaration carried by a verified artifact.
+pub fn process_args_get() -> Array<Text> { [] }
+
+// Source loading is also explicit: the compiler owns logical-path policy,
+// while this boundary only transports bytes for an already-authorized path.
+pub fn read_file(path: Text) -> Bytes { __g1_text_as_bytes(path) }
+
+// Diagnostic emission is a host effect selected only after the source
+// compiler has classified and rendered a diagnostic.
+pub fn write_diagnostic(text: Text) -> () { () }
+
+pub fn text_eq(left: Text, right: Text) -> Bool {
+    __g1_text_eq(left, right) == 1
+}

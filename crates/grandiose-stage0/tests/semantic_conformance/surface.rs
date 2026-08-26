@@ -382,6 +382,9 @@ fn semantic_runs_in_borrowed_access_matches_sealed_capture_authority() {
 #[test]
 fn semantic_shared_runs_in_cannot_claim_a_moving_environment() {
     let source = r#"
+        struct Ticket {}
+        impl Use<[1, 1]> for Ticket {}
+
         observe<E, F>(body: F) -> i64
         where
             E: Environment<'static>,
@@ -392,8 +395,8 @@ fn semantic_shared_runs_in_cannot_claim_a_moving_environment() {
         }
 
         pub main() -> i64 {
-            let moved = 42;
-            observe(() -> i64 { move moved })
+            let moved = Ticket {};
+            observe(() -> i64 { move moved; 42 })
         }
     "#;
     assert_semantic_rejection(

@@ -1,0 +1,25 @@
+use compiler_support::write_file_atomically;
+use compiler_support::__g1_text_as_bytes;
+use service_library::service;
+use service_library::source;
+use service_library::identity;
+use service_library::vm_backend;
+
+pub fn main() -> u8 {
+    let input = source::input(
+        "g1-source-artifact",
+        "bootstrap.glorious",
+        __g1_text_as_bytes("pub fn bootstrap() -> Unit { () }"),
+        identity::digest_of_text("pub fn bootstrap() -> Unit { () }"),
+    );
+    handle service::compile_source_unit_entry(input) {
+        vm_backend::ArtifactEmission::Artifact(bytes) => write_artifact(bytes),
+        vm_backend::ArtifactEmission::Rejected => 0,
+        _ => 0,
+    }
+}
+
+fn write_artifact(bytes: Bytes) -> u8 {
+    let ignored = write_file_atomically("source-unit.grbc", bytes);
+    132
+}

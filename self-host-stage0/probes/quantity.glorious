@@ -1,0 +1,42 @@
+use quantity_library::quantity;
+
+pub fn score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+
+pub fn main() -> i64 {
+    score(quantity::lower(quantity::once()) == 1)
+        + score(quantity::has_finite_upper(quantity::zero(), 0))
+        + score(quantity::has_finite_upper(quantity::affine(), 1))
+        + score(quantity::has_infinite_upper(quantity::unrestricted()))
+        + score(quantity::contains(quantity::unrestricted(), quantity::once()))
+        + score_not(quantity::contains(quantity::once(), quantity::affine()))
+        + score(quantity::result_has_error(quantity::new(3, quantity::QuantityUpper::Finite(2)), quantity::QuantityError::EmptyInterval))
+        + score(quantity::result_has_bounds(quantity::intersection(quantity::affine(), quantity::once()), 1, quantity::QuantityUpper::Finite(1)))
+        + score(quantity::result_has_bounds(quantity::sequence(quantity::once(), quantity::affine()), 1, quantity::QuantityUpper::Finite(2)))
+        + score(quantity::has_bounds(quantity::branch_hull(quantity::once(), quantity::exact(3)), 1, quantity::QuantityUpper::Finite(3)))
+        + score(quantity::result_has_bounds(quantity::multiply(quantity::exact(2), quantity::exact(3)), 6, quantity::QuantityUpper::Finite(6)))
+        + score(quantity::result_has_bounds(quantity::multiply(quantity::zero(), quantity::unrestricted()), 0, quantity::QuantityUpper::Finite(0)))
+        + score(quantity::result_has_error(quantity::sequence(quantity::exact(18446744073709551615), quantity::once()), quantity::QuantityError::Overflow))
+        + score(quantity::result_has_error(quantity::multiply(quantity::exact(18446744073709551615), quantity::exact(2)), quantity::QuantityError::Overflow))
+        // Mirror the frozen Stage0 quantity corpus, not merely nearby
+        // examples.  These run through the public source facade and preserve
+        // the sequence/branch/replay distinction used by ownership checking.
+        + score(quantity::result_has_bounds(quantity::sequence(quantity::once(), quantity::once()), 2, quantity::QuantityUpper::Finite(2)))
+        + score(quantity::has_bounds(quantity::branch_hull(quantity::once(), quantity::zero()), 0, quantity::QuantityUpper::Finite(1)))
+        + score(quantity::result_has_bounds(quantity::multiply(quantity::once(), quantity::once()), 1, quantity::QuantityUpper::Finite(1)))
+        + score(quantity::result_has_bounds(quantity::multiply(quantity::unrestricted(), quantity::zero()), 0, quantity::QuantityUpper::Finite(0)))
+        + score(quantity::contains(quantity::affine(), quantity::zero()))
+        + score(quantity::contains(quantity::affine(), quantity::once()))
+        + score_not(affine_contains_twice())
+        + score(quantity::requires_positive_use(quantity::once()))
+        + score_not(quantity::requires_positive_use(quantity::zero()))
+}
+
+pub fn score_not(value: Bool) -> i64 { handle value { true => 0, false => 1, _ => 0 } }
+
+fn affine_contains_twice() -> Bool {
+    handle quantity::sequence(quantity::once(), quantity::once()) {
+        quantity::QuantityResult::Value(actual) => quantity::contains(quantity::affine(), actual),
+        quantity::QuantityResult::Error(_) => false,
+        _ => false,
+    }
+}

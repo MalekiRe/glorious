@@ -1,0 +1,58 @@
+use artifact_cache_library::artifact_cache;
+use artifact_cache_library::identity;
+use artifact_cache_library::bootstrap;
+use artifact_cache_library::request;
+use artifact_cache_library::source;
+use compiler_support::__g1_text_as_bytes;
+pub fn score(value: artifact_cache::CacheAdmission) -> i64 { handle value { artifact_cache::CacheAdmission::Hit => 1, artifact_cache::CacheAdmission::Miss => 10, artifact_cache::CacheAdmission::Rejected => 100, _ => 0 } }
+pub fn score_stats(value: artifact_cache::CacheStats) -> i64 { artifact_cache::hit_count(value) + 10 * artifact_cache::miss_count(value) + 100 * artifact_cache::rejection_count(value) }
+pub fn main() -> i64 {
+    score(artifact_cache::admit(artifact_cache::EntryEvidence::WorldCandidate(identity::digest_of_text("same"), identity::digest_of_text("same"), true)))
+        + score(artifact_cache::admit(artifact_cache::EntryEvidence::Missing))
+        + score(artifact_cache::admit(artifact_cache::EntryEvidence::Candidate(true, false)))
+        + score(artifact_cache::admit(artifact_cache::EntryEvidence::Candidate(false, true)))
+        + score(artifact_cache::admit(artifact_cache::EntryEvidence::WorldCandidate(identity::digest_of_text("expected"), identity::digest_of_text("other"), true)))
+        + score(artifact_cache::admit(artifact_cache::EntryEvidence::ArtifactCandidate(identity::digest_of_text("world"), identity::digest_of_text("world"), identity::digest_of_text("artifact"), identity::digest_of_text("artifact"), true)))
+        + score(artifact_cache::admit(artifact_cache::EntryEvidence::ArtifactCandidate(identity::digest_of_text("world"), identity::digest_of_text("world"), identity::digest_of_text("artifact"), identity::digest_of_text("corrupt"), true)))
+        + score(artifact_cache::admit_bootstrap(artifact_cache::bootstrap_entry(identity::digest_of_text("world"), identity::digest_of_text("world"), identity::digest_of_text("artifact"), identity::digest_of_text("artifact"), bootstrap::ArtifactAdmission::Verified)))
+        + score(artifact_cache::admit_bootstrap(artifact_cache::bootstrap_entry(identity::digest_of_text("world"), identity::digest_of_text("world"), identity::digest_of_text("artifact"), identity::digest_of_text("artifact"), bootstrap::ArtifactAdmission::Rejected)))
+        + score(artifact_cache::admit_build_bootstrap(artifact_cache::build_bootstrap_entry(request::stage0_build(identity::digest_of_text("seed")), request::stage0_build(identity::digest_of_text("seed")), identity::digest_of_text("world"), identity::digest_of_text("world"), identity::digest_of_text("artifact"), identity::digest_of_text("artifact"), bootstrap::ArtifactAdmission::Verified)))
+        + score(artifact_cache::admit_build_bootstrap(artifact_cache::build_bootstrap_entry(request::stage0_build(identity::digest_of_text("seed")), request::stage0_build(identity::digest_of_text("other-seed")), identity::digest_of_text("world"), identity::digest_of_text("world"), identity::digest_of_text("artifact"), identity::digest_of_text("artifact"), bootstrap::ArtifactAdmission::Verified)))
+        + score(artifact_cache::admit(artifact_cache::EntryEvidence::WorldCandidate(world_one_fingerprint(), world_one_fingerprint(), true)))
+        + score(artifact_cache::admit(artifact_cache::EntryEvidence::WorldCandidate(world_one_fingerprint(), world_changed_fingerprint(), true)))
+        + score(artifact_cache::admit_build_source_world(request::stage0_build(identity::digest_of_text("seed")), request::stage0_build(identity::digest_of_text("seed")), world_one_fingerprint(), world_one(), identity::digest_of_text("artifact"), identity::digest_of_text("artifact"), bootstrap::ArtifactAdmission::Verified))
+        + score(artifact_cache::admit_build_source_world(request::stage0_build(identity::digest_of_text("seed")), request::stage0_build(identity::digest_of_text("seed")), world_one_fingerprint(), world_changed(), identity::digest_of_text("artifact"), identity::digest_of_text("artifact"), bootstrap::ArtifactAdmission::Verified))
+        + score(artifact_cache::admit_build_source_bundle(request::stage0_build(identity::digest_of_text("seed")), request::stage0_build(identity::digest_of_text("seed")), bundle_fingerprint(), bundle_world(), identity::digest_of_text("artifact"), identity::digest_of_text("artifact"), bootstrap::ArtifactAdmission::Verified))
+        + score_stats(artifact_cache::counted_stats(artifact_cache::admit_counted(artifact_cache::record_admission(artifact_cache::record_admission(artifact_cache::empty_stats(), artifact_cache::CacheAdmission::Hit), artifact_cache::CacheAdmission::Miss), artifact_cache::EntryEvidence::Candidate(true, false))))
+}
+
+pub fn world_one_fingerprint() -> identity::Digest {
+    request::source_world2_fingerprint(world_one())
+}
+
+pub fn world_changed_fingerprint() -> identity::Digest {
+    request::source_world2_fingerprint(world_changed())
+}
+
+pub fn world_one() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("cache", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        source::input("cache", "src/two.glorious", __g1_text_as_bytes("two"), identity::digest_of_text("two")),
+        request::bootstrap_limits(2, 6),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => world_one() }
+}
+
+pub fn world_changed() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("cache", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        source::input("cache", "src/two.glorious", __g1_text_as_bytes("three"), identity::digest_of_text("three")),
+        request::bootstrap_limits(2, 8),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => world_changed() }
+}
+pub fn bundle_fingerprint() -> identity::Digest { request::source_bundle_fingerprint(bundle_world()) }
+pub fn bundle_world() -> request::SourceBundle {
+    handle request::source_bundle(request::source_sequence_one(source::input("cache", "src/bundle.glorious", __g1_text_as_bytes("bundle"), identity::digest_of_text("bundle"))), request::bootstrap_limits(1, 6)) {
+        request::SourceBundleAdmission::Value(value) => value,
+        _ => bundle_world(),
+    }
+}

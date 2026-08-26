@@ -77,6 +77,10 @@ pub enum CallableBrand {
 pub enum CaptureMode {
     SharedBorrow,
     UniqueBorrow,
+    /// An owned closure environment slot initialized by copying a
+    /// `[0, infinity]` value.  It is distinct from a borrow: the closure may
+    /// outlive the source binding without retaining a loan.
+    Copy,
     Move,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4199,6 +4203,16 @@ impl Elaborator<'_> {
                 crate::header::EffectRowHeader::default(),
                 body,
                 None,
+                None,
+                expression.span,
+            ),
+            ExprKind::MoveClosure { captures, body } => self.closure(
+                vec![],
+                None,
+                crate::header::EffectRowHeader::default(),
+                body,
+                None,
+                Some(captures),
                 expression.span,
             ),
             ExprKind::TypedClosure {
@@ -4206,7 +4220,7 @@ impl Elaborator<'_> {
                 result,
                 effects,
                 body,
-            } => self.closure(parameters, result, effects, body, None, expression.span),
+            } => self.closure(parameters, result, effects, body, None, None, expression.span),
             // Recovery is a first-class parser outcome, rather than an
             // unsupported source construct. Preserve it as the Core error
             // sentinel so every downstream semantic pass can remain total
@@ -4364,6 +4378,16 @@ impl Elaborator<'_> {
                 crate::header::EffectRowHeader::default(),
                 body,
                 expected,
+                None,
+                expression.span,
+            ),
+            ExprKind::MoveClosure { captures, body } => self.closure(
+                vec![],
+                None,
+                crate::header::EffectRowHeader::default(),
+                body,
+                expected,
+                Some(captures),
                 expression.span,
             ),
             // A qualified trait method is a genuine callable value, not only
@@ -4801,6 +4825,7 @@ impl Elaborator<'_> {
         effects: crate::header::EffectRowHeader,
         body: ExprId,
         expected: Option<Type>,
+        forced_move_captures: Option<Vec<String>>,
         span: Span,
     ) -> CoreId {
         // Compact closures deliberately omit a source signature.  A callable
@@ -4908,6 +4933,7 @@ impl Elaborator<'_> {
             self.recovered = true;
         }
         let captures = self.closure_captures(body, &parameters);
+        let captures = self.force_move_captures(captures, forced_move_captures, span);
         self.check_label_transfer_escape(body, span);
         let callable = CallableId(self.next_callable);
         self.next_callable += 1;
@@ -6539,6 +6565,73 @@ impl Elaborator<'_> {
             .map(|(name, (mode, ty))| ClosureCapture { name, mode, ty })
             .collect()
     }
+
+    fn owned_capture_mode(&self, ty: &Type) -> CaptureMode {
+        if self
+            .signatures
+            .principal_use_interval(ty)
+            .is_some_and(|quantity| quantity == crate::quantity::Quantity::UNRESTRICTED)
+        {
+            CaptureMode::Copy
+        } else {
+            CaptureMode::Move
+        }
+    }
+
+    fn inferred_capture_mode(&self, ty: &Type) -> CaptureMode {
+        // Callable and reference capabilities retain their established
+        // invocation/loan authorities when inferred. An explicit `move (...)`
+        // remains available when a closure must own such a value; ordinary
+        // data captures use the default copy-or-move rule below.
+        if matches!(
+            ty,
+            Type::Callable { .. }
+                | Type::Reference { .. }
+                | Type::Generic(_)
+                | Type::Projection { .. }
+                | Type::Infer(_)
+        ) {
+            CaptureMode::SharedBorrow
+        } else {
+            self.owned_capture_mode(ty)
+        }
+    }
+
+    /// Apply the optional `move (name, ...) { ... }` capture list after
+    /// ordinary body-driven capture inference. The list can retain a value
+    /// whose body only borrows it, which is what permits an escaping closure
+    /// to own its environment without forcing a body-level `move name`.
+    fn force_move_captures(
+        &mut self,
+        captures: Vec<ClosureCapture>,
+        forced: Option<Vec<String>>,
+        span: Span,
+    ) -> Vec<ClosureCapture> {
+        let Some(forced) = forced else {
+            return captures;
+        };
+        let mut captures = captures
+            .into_iter()
+            .map(|capture| (capture.name, (capture.mode, capture.ty)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        for name in forced {
+            let Some(ty) = self.locals.lookup(&name).cloned() else {
+                self.error(
+                    span,
+                    "G4120",
+                    &format!("closure move capture `{name}` does not name an outer local"),
+                );
+                self.recovered = true;
+                continue;
+            };
+            let mode = self.owned_capture_mode(&ty);
+            captures.insert(name, (mode, ty));
+        }
+        captures
+            .into_iter()
+            .map(|(name, (mode, ty))| ClosureCapture { name, mode, ty })
+            .collect()
+    }
     /// A continuation snapshot is valid only while its handler frame is
     /// active.  A closure may capture it when the complete enclosing clause
     /// proves that the closure is immediately invoked; returning, storing, or
@@ -6772,7 +6865,7 @@ impl Elaborator<'_> {
                 record_capture(
                     captures,
                     name,
-                    CaptureMode::SharedBorrow,
+                    self.inferred_capture_mode(&expression.ty),
                     expression.ty.clone(),
                 );
             }
@@ -6780,13 +6873,14 @@ impl Elaborator<'_> {
                 record_capture(
                     captures,
                     name,
-                    CaptureMode::SharedBorrow,
+                    self.inferred_capture_mode(&expression.ty),
                     expression.ty.clone(),
                 );
             }
             CoreKind::Move(value) => {
                 if let Some((name, ty)) = self.capture_root_local(*value) {
-                    record_capture(captures, &name, CaptureMode::Move, ty);
+                    let mode = self.owned_capture_mode(&ty);
+                    record_capture(captures, &name, mode, ty);
                 } else {
                     self.collect_captures(*value, locals, captures);
                 }
@@ -12359,7 +12453,12 @@ impl Elaborator<'_> {
                 (Some(RunsInAccess::Shared), Some(environment)) => environment
                     .captures
                     .iter()
-                    .all(|capture| capture.mode == CaptureMode::SharedBorrow),
+                    .all(|capture| {
+                        matches!(
+                            capture.mode,
+                            CaptureMode::SharedBorrow | CaptureMode::Copy
+                        )
+                    }),
                 (Some(RunsInAccess::Unique), Some(environment)) => environment
                     .captures
                     .iter()
@@ -14631,8 +14730,83 @@ fn reference_leaf_paths(
 }
 
 fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bool {
-    let mut leaves = vec![];
-    reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves).is_err() || !leaves.is_empty()
+    // Array elements are not projection paths, but the array branch still
+    // needs to reject a potentially reference-bearing element. Do that with
+    // a cycle-aware structural walk instead of re-entering the path walker:
+    // `enum Chain { Node(Array<Chain>) }` is heap-indirected and finite at
+    // runtime, whereas recursively opening its element layout here used to
+    // overflow the compiler stack.
+    fn visit(
+        signatures: &ElaboratedInterface,
+        ty: &Type,
+        active: &mut std::collections::BTreeSet<crate::DefKey>,
+    ) -> bool {
+        match ty {
+            Type::Reference { .. } => true,
+            Type::Tuple(fields) => fields.iter().any(|field| visit(signatures, field, active)),
+            Type::Array(element) => visit(signatures, element, active),
+            Type::Nominal {
+                definition,
+                arguments,
+            } => {
+                // A repeated nominal lies behind at least one array on this
+                // walk. Do not expand it again: every direct field of this
+                // application is visited during its first occurrence, while
+                // array elements never contribute a stable caller projection.
+                if !active.insert(*definition) {
+                    return false;
+                }
+                let result = match signatures.definitions.get(definition) {
+                    Some(ElaboratedHeader::Nominal {
+                        layout: ElaboratedNominalLayout::Struct(fields),
+                        ..
+                    }) => fields.iter().any(|field| {
+                        instantiate_nominal_field_type(&field.ty, arguments)
+                            .map_or(true, |field| visit(signatures, &field, active))
+                    }),
+                    Some(ElaboratedHeader::Nominal {
+                        layout: ElaboratedNominalLayout::Enum(variants),
+                        ..
+                    }) => variants.iter().any(|variant| match &variant.payload {
+                        crate::signature::ElaboratedEnumVariantPayload::Unit => false,
+                        crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => {
+                            fields.iter().any(|field| {
+                                instantiate_nominal_field_type(field, arguments).map_or(true, |field| {
+                                    visit(signatures, &field, active)
+                                })
+                            })
+                        }
+                        crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => {
+                            fields.iter().any(|field| {
+                                instantiate_nominal_field_type(&field.ty, arguments).map_or(true, |field| {
+                                    visit(signatures, &field, active)
+                                })
+                            })
+                        }
+                    }),
+                    Some(ElaboratedHeader::Nominal {
+                        layout: ElaboratedNominalLayout::Opaque,
+                        ..
+                    })
+                    | None => true,
+                    _ => true,
+                };
+                active.remove(definition);
+                result
+            }
+            Type::Projection { .. } | Type::Generic(_) | Type::Infer(_) => true,
+            Type::Callable { .. }
+            | Type::Unit
+            | Type::Never
+            | Type::Scalar(_)
+            | Type::ConstU32(_)
+            | Type::ConstQuantity(_)
+            | Type::ConstGeneric { .. }
+            | Type::Error => false,
+        }
+    }
+
+    visit(signatures, ty, &mut std::collections::BTreeSet::new())
 }
 
 pub(crate) fn instantiate_nominal_field_type(
@@ -14735,7 +14909,7 @@ fn record_capture(
     let rank = |mode| match mode {
         CaptureMode::SharedBorrow => 0,
         CaptureMode::UniqueBorrow => 1,
-        CaptureMode::Move => 2,
+        CaptureMode::Copy | CaptureMode::Move => 2,
     };
     match captures.get_mut(name) {
         Some((existing, _)) if rank(*existing) >= rank(mode) => {}

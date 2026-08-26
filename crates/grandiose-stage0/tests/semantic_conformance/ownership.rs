@@ -68,9 +68,7 @@ fn semantic_callable_brands_and_runs_in_evidence_are_fresh_and_sealed() {
         .iter()
         .flat_map(|environment| environment.captures.iter().map(|capture| capture.mode))
         .collect::<BTreeSet<_>>();
-    assert!(capture_modes.contains(&CaptureMode::SharedBorrow));
-    assert!(capture_modes.contains(&CaptureMode::UniqueBorrow));
-    assert!(capture_modes.contains(&CaptureMode::Move));
+    assert!(capture_modes.contains(&CaptureMode::Copy));
 
     let core_source = fs::read_to_string(crate_path("src/core.rs")).unwrap();
     let types_source = fs::read_to_string(crate_path("src/types.rs")).unwrap();
@@ -84,6 +82,131 @@ fn semantic_callable_brands_and_runs_in_evidence_are_fresh_and_sealed() {
             "found {forbidden} in types"
         );
     }
+}
+
+#[test]
+fn semantic_optional_move_capture_forces_an_owned_closure_environment() {
+    let source = r#"
+            pub fn main() -> i64 {
+                let configuration = 41;
+                let deferred = move (configuration) { configuration + 1 };
+                deferred()
+            }
+        "#;
+    let core = core_for("semantic-optional-move-capture@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let environment = core
+        .expressions
+        .iter()
+        .find_map(|expression| match &expression.kind {
+            CoreKind::Closure { environment, .. } => Some(environment),
+            _ => None,
+        })
+        .expect("move capture must elaborate to a closure");
+    assert_eq!(
+        environment.captures,
+        vec![grandiose_stage0::ClosureCapture {
+            name: "configuration".into(),
+            mode: CaptureMode::Copy,
+            ty: grandiose_stage0::Type::Scalar(grandiose_stage0::ScalarType::I64),
+        }],
+        "an explicit owned capture copies an unrestricted value into the closure environment",
+    );
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn semantic_optional_move_capture_copies_a_duplicable_source() {
+    let source = r#"
+        pub fn main() -> i64 {
+            let configuration = 41;
+            let deferred = move (configuration) { configuration + 1 };
+            configuration + deferred()
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 83);
+}
+
+#[test]
+fn semantic_inferred_closure_capture_moves_an_owned_nonduplicable_value() {
+    assert_semantic_rejection(
+        r#"
+            struct Ticket {}
+            impl Use<[1, 1]> for Ticket {}
+
+            pub fn main() -> i64 {
+                let ticket = Ticket {};
+                let deferred = () -> Ticket { ticket };
+                let again = ticket;
+                move deferred;
+                move again;
+                42
+            }
+        "#,
+        "an inferred owned closure capture moves a non-duplicable source",
+        &[&["move", "moved", "use"]],
+    );
+}
+
+#[test]
+fn semantic_optional_move_capture_rejects_nonlocal_names() {
+    assert_semantic_rejection(
+        r#"
+            pub fn main() -> i64 {
+                let deferred = move (missing) { 42 };
+                deferred()
+            }
+        "#,
+        "closure move captures must name an outer local",
+        &[&["closure", "capture"], &["missing", "outer", "local"]],
+    );
+}
+
+#[test]
+fn semantic_plain_owned_arguments_do_not_require_move_spelling() {
+    let source = r#"
+        struct Ticket {}
+        impl Use<[1, 1]> for Ticket {}
+
+        relay(ticket: Ticket) -> Ticket { ticket }
+
+        pub fn main() -> i64 {
+            let ticket = Ticket {};
+            let ticket = relay(ticket);
+            move ticket;
+            42
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn semantic_plain_owned_argument_cannot_be_used_after_implicit_move() {
+    assert_semantic_rejection(
+        r#"
+            struct Ticket {}
+            impl Use<[1, 1]> for Ticket {}
+
+            relay(ticket: Ticket) -> Ticket { ticket }
+
+            pub fn main() -> i64 {
+                let ticket = Ticket {};
+                let forwarded = relay(ticket);
+                let again = relay(ticket);
+                move forwarded;
+                move again;
+                42
+            }
+        "#,
+        "implicit owned argument moves its source",
+        &[&["move", "moved", "use"]],
+    );
 }
 
 #[test]

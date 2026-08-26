@@ -1,0 +1,189 @@
+// M33 scaffold: cache-hit admission. The persistent envelope codec, bounded
+// reads, filesystem effects, and atomic store follow the shared codec/effect
+// substrate; this boundary ensures unverified entries are never reused.
+use identity::Digest;
+use identity::equals;
+use bootstrap::ArtifactAdmission;
+use request::CompilerBuildIdentity;
+use request::same_build_identity;
+use request::SourceWorld2;
+use request::source_world2_fingerprint;
+use request::SourceBundle;
+use request::source_bundle_fingerprint;
+
+pub enum CacheAdmission { Hit, Miss, Rejected }
+
+// Cache accounting is immutable request-owned state.  The operational layer
+// threads the returned value through a build/session instead of relying on a
+// host-global counter whose ordering or lifetime could leak into results.
+pub struct CacheStats { hits: i64, misses: i64, rejections: i64 }
+pub struct CountedAdmission { admission: CacheAdmission, stats: CacheStats }
+// Identity and verification are coupled in one evidence record. A verified
+// artifact for another source/compiler world is a cache miss, never a hit.
+pub enum EntryEvidence {
+    Missing,
+    // Compatibility form for callers that have already established identity.
+    Candidate(Bool, Bool),
+    // Preferred form: the cache boundary establishes exact world identity.
+    WorldCandidate(Digest, Digest, Bool),
+    // A same-world entry also commits to the exact verified artifact. A
+    // mismatch here is corruption, not a harmless cache miss.
+    ArtifactCandidate(Digest, Digest, Digest, Digest, Bool),
+}
+
+// Bootstrap-originated entries carry verifier authority as an algebraic
+// result, not a caller-controlled Boolean. Cache reuse still checks both
+// world and artifact identities before consuming that authority.
+pub struct BootstrapEntry {
+    expected_world: Digest,
+    actual_world: Digest,
+    expected_artifact: Digest,
+    actual_artifact: Digest,
+    admission: ArtifactAdmission,
+}
+
+pub struct BuildBootstrapEntry {
+    expected_build: CompilerBuildIdentity,
+    actual_build: CompilerBuildIdentity,
+    bootstrap: BootstrapEntry,
+}
+
+
+pub fn bootstrap_entry(expected_world: Digest, actual_world: Digest, expected_artifact: Digest, actual_artifact: Digest, admission: ArtifactAdmission) -> BootstrapEntry {
+    BootstrapEntry { expected_world: expected_world, actual_world: actual_world, expected_artifact: expected_artifact, actual_artifact: actual_artifact, admission: admission }
+}
+
+pub fn build_bootstrap_entry(expected_build: CompilerBuildIdentity, actual_build: CompilerBuildIdentity, expected_world: Digest, actual_world: Digest, expected_artifact: Digest, actual_artifact: Digest, admission: ArtifactAdmission) -> BuildBootstrapEntry {
+    BuildBootstrapEntry { expected_build: expected_build, actual_build: actual_build, bootstrap: bootstrap_entry(expected_world, actual_world, expected_artifact, actual_artifact, admission) }
+}
+
+
+pub fn admit_bootstrap(entry: BootstrapEntry) -> CacheAdmission {
+    admit(EntryEvidence::ArtifactCandidate(entry.expected_world, entry.actual_world, entry.expected_artifact, entry.actual_artifact, bootstrap_verified(entry.admission)))
+}
+
+// Build identity gates reuse before any artifact bytes are consumed. A cache
+// entry from a different query/interface/verifier generation is a normal
+// miss, even if its world and artifact fingerprints happen to match.
+pub fn admit_build_bootstrap(entry: BuildBootstrapEntry) -> CacheAdmission {
+    handle same_build_identity(entry.expected_build, entry.actual_build) {
+        true => admit_bootstrap(entry.bootstrap),
+        false => CacheAdmission::Miss,
+        _ => CacheAdmission::Rejected,
+    }
+}
+
+// Service callers never manufacture the `actual_world` cache component. The
+// admitted immutable source world supplies it here, coupling build identity,
+// source-world commitment, artifact commitment, and verifier evidence at the
+// one cache reuse boundary.
+pub fn admit_build_source_world(
+    expected_build: CompilerBuildIdentity,
+    actual_build: CompilerBuildIdentity,
+    expected_world: Digest,
+    actual_world: SourceWorld2,
+    expected_artifact: Digest,
+    actual_artifact: Digest,
+    admission: ArtifactAdmission,
+) -> CacheAdmission {
+    admit_build_bootstrap(build_bootstrap_entry(
+        expected_build,
+        actual_build,
+        expected_world,
+        source_world2_fingerprint(actual_world),
+        expected_artifact,
+        actual_artifact,
+        admission,
+    ))
+}
+
+// The generalized request path retains the same build/artifact/verifier gate
+// as the legacy two-source facade, but derives the committed world directly
+// from the arbitrary admitted bundle.
+pub fn admit_build_source_bundle(
+    expected_build: CompilerBuildIdentity,
+    actual_build: CompilerBuildIdentity,
+    expected_world: Digest,
+    actual_bundle: SourceBundle,
+    expected_artifact: Digest,
+    actual_artifact: Digest,
+    admission: ArtifactAdmission,
+) -> CacheAdmission {
+    admit_build_bootstrap(build_bootstrap_entry(
+        expected_build,
+        actual_build,
+        expected_world,
+        source_bundle_fingerprint(actual_bundle),
+        expected_artifact,
+        actual_artifact,
+        admission,
+    ))
+}
+
+
+fn bootstrap_verified(admission: ArtifactAdmission) -> Bool {
+    handle admission {
+        ArtifactAdmission::Verified => true,
+        ArtifactAdmission::Rejected => false,
+        _ => false,
+    }
+}
+
+pub fn admit(evidence: EntryEvidence) -> CacheAdmission {
+    handle evidence {
+        EntryEvidence::Missing => CacheAdmission::Miss,
+        EntryEvidence::Candidate(false, _) => CacheAdmission::Miss,
+        EntryEvidence::Candidate(true, verified) => admit_verified(verified),
+        EntryEvidence::WorldCandidate(expected, actual, verified) => handle equals(expected, actual) {
+            true => admit_verified(verified),
+            false => CacheAdmission::Miss,
+            _ => CacheAdmission::Rejected,
+        },
+        EntryEvidence::ArtifactCandidate(expected_world, actual_world, expected_artifact, actual_artifact, verified) => handle equals(expected_world, actual_world) {
+            true => admit_artifact(expected_artifact, actual_artifact, verified),
+            false => CacheAdmission::Miss,
+            _ => CacheAdmission::Rejected,
+        },
+        _ => CacheAdmission::Rejected,
+    }
+}
+
+pub fn empty_stats() -> CacheStats {
+    CacheStats { hits: 0, misses: 0, rejections: 0 }
+}
+
+pub fn record_admission(stats: CacheStats, admission: CacheAdmission) -> CacheStats {
+    handle admission {
+        CacheAdmission::Hit => CacheStats { hits: stats.hits + 1, misses: stats.misses, rejections: stats.rejections },
+        CacheAdmission::Miss => CacheStats { hits: stats.hits, misses: stats.misses + 1, rejections: stats.rejections },
+        CacheAdmission::Rejected => CacheStats { hits: stats.hits, misses: stats.misses, rejections: stats.rejections + 1 },
+        _ => stats,
+    }
+}
+
+pub fn admit_counted(stats: CacheStats, evidence: EntryEvidence) -> CountedAdmission {
+    let admission = admit(evidence);
+    CountedAdmission { admission: admission, stats: record_admission(stats, admission) }
+}
+
+pub fn counted_admission(value: CountedAdmission) -> CacheAdmission { value.admission }
+pub fn counted_stats(value: CountedAdmission) -> CacheStats { value.stats }
+pub fn hit_count(stats: CacheStats) -> i64 { stats.hits }
+pub fn miss_count(stats: CacheStats) -> i64 { stats.misses }
+pub fn rejection_count(stats: CacheStats) -> i64 { stats.rejections }
+
+fn admit_artifact(expected: Digest, actual: Digest, verified: Bool) -> CacheAdmission {
+    handle equals(expected, actual) {
+        true => admit_verified(verified),
+        false => CacheAdmission::Rejected,
+        _ => CacheAdmission::Rejected,
+    }
+}
+
+fn admit_verified(verified: Bool) -> CacheAdmission {
+    handle verified {
+        true => CacheAdmission::Hit,
+        false => CacheAdmission::Rejected,
+        _ => CacheAdmission::Rejected,
+    }
+}

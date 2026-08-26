@@ -1,0 +1,216 @@
+// M19 bootstrap body typing for scalar literal expressions. Full lexical
+// scopes, calls, handlers, labels, and ownership facts extend this boundary.
+use types::Type;
+use signature::Callable;
+use signature::Arguments;
+use signature::accepts;
+use signature::result_matches;
+use compiler_support::branch_bool;
+use pattern::Pattern;
+use pattern::Value;
+use pattern::matches;
+use scanner::TokenKind;
+use scanner::TokenStart;
+use scanner::first_token;
+use scanner::next_token;
+use scanner::token_equals;
+use scanner::token_kind;
+use scanner::token_matches;
+
+pub enum Arithmetic { Add, Subtract, Multiply, Divide, Remainder }
+pub enum Comparison { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual }
+
+pub enum Expression {
+    Unit,
+    Bool(Bool),
+    BoolNot(Bool),
+    ParameterBoolNot(Bool),
+    I64(i64),
+    ParameterI64(i64),
+    I64Arithmetic(Arithmetic, i64, i64),
+    ParameterI64Arithmetic(Arithmetic, i64, i64),
+    I64Comparison(Comparison, i64, i64),
+    I64Select(Bool, i64, i64),
+    ParameterI64Select(Bool, i64, i64),
+    U8(u8),
+    U8Comparison(Comparison, u8, u8),
+    U32(u32),
+    ParameterU32(u32),
+    U32Arithmetic(Arithmetic, u32, u32),
+    ParameterU32Arithmetic(Arithmetic, u32, u32),
+    U64(u64),
+    U64Comparison(Comparison, u64, u64),
+    Usize(usize),
+    UsizeArithmetic(Arithmetic, usize, usize),
+    UsizeComparison(Comparison, usize, usize),
+    Call1(Callable, Type),
+    Call2(Callable, Type, Type),
+    PatternTest(Pattern, Value),
+}
+
+pub enum BodyKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, PatternTest }
+pub enum BodyAdmission { Value(BodyKind), TypeError }
+// A reusable, source-owned declaration parser for the first scalar function
+// family.  Service used to duplicate this state machine for every scalar
+// width.  Keeping the grammatical shape here makes new scalar lowerings a
+// type-directed choice rather than another handwritten parser.
+pub enum ScalarBinaryAdmission { Value(Arithmetic), Rejected }
+
+// Admit exactly `pub? fn name(left: T, right: T) -> T { return? left OP right ;? }`.
+// The returned operator is intentionally syntax-only: type checking and VM
+// selection remain in Core/MIR, while this layer proves binder identity,
+// declared scalar spelling, and complete source consumption once.
+pub fn scalar_binary_arithmetic(input: Bytes, scalar: Text) -> ScalarBinaryAdmission {
+    scalar_binary_first(input, first_token(input), scalar)
+}
+
+fn scalar_binary_first(input: Bytes, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, "pub") {
+        true => scalar_binary_fn(input, next_token(input, token), scalar),
+        false => scalar_binary_fn(input, token, scalar),
+        _ => ScalarBinaryAdmission::Rejected,
+    }
+}
+fn scalar_binary_fn(input: Bytes, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, "fn") { true => scalar_binary_name(input, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_name(input: Bytes, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_kind(token) { TokenKind::Identifier => scalar_binary_open(input, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_open(input: Bytes, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, "(") { true => scalar_binary_left(input, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_left(input: Bytes, left: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_kind(left) { TokenKind::Identifier => scalar_binary_left_colon(input, left, next_token(input, left), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_left_colon(input: Bytes, left: TokenStart, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, ":") { true => scalar_binary_left_type(input, left, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_left_type(input: Bytes, left: TokenStart, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle scalar_type_matches(input, token, scalar) { true => scalar_binary_comma(input, left, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_comma(input: Bytes, left: TokenStart, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, ",") { true => scalar_binary_right(input, left, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_right(input: Bytes, left: TokenStart, right: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_kind(right) { TokenKind::Identifier => scalar_binary_right_colon(input, left, right, next_token(input, right), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_right_colon(input: Bytes, left: TokenStart, right: TokenStart, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, ":") { true => scalar_binary_right_type(input, left, right, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_right_type(input: Bytes, left: TokenStart, right: TokenStart, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle scalar_type_matches(input, token, scalar) { true => scalar_binary_parameters_close(input, left, right, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_parameters_close(input: Bytes, left: TokenStart, right: TokenStart, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, ")") { true => scalar_binary_arrow(input, left, right, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_arrow(input: Bytes, left: TokenStart, right: TokenStart, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, "->") { true => scalar_binary_result(input, left, right, next_token(input, token), scalar), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_result(input: Bytes, left: TokenStart, right: TokenStart, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
+    handle scalar_type_matches(input, token, scalar) { true => scalar_binary_body_open(input, left, right, next_token(input, token)), _ => ScalarBinaryAdmission::Rejected }
+}
+// `token_matches` is intentionally called with literal source spellings.
+// This keeps the parser on the same direct scanner lowering path as the rest
+// of Stage0 while the facade selects which scalar grammar it admits.
+fn scalar_type_matches(input: Bytes, token: TokenStart, scalar: Text) -> Bool {
+    handle scalar == "usize" {
+        true => token_matches(input, token, "usize"),
+        false => handle scalar == "u32" { true => token_matches(input, token, "u32"), false => handle scalar == "i64" { true => token_matches(input, token, "i64"), _ => false }, _ => false },
+        _ => false,
+    }
+}
+fn scalar_binary_body_open(input: Bytes, left: TokenStart, right: TokenStart, token: TokenStart) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, "{") { true => scalar_binary_body(input, left, right, next_token(input, token), false), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_body(input: Bytes, left: TokenStart, right: TokenStart, token: TokenStart, explicit_return: Bool) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, "return") {
+        true => scalar_binary_body(input, left, right, next_token(input, token), true),
+        false => handle token_equals(input, left, token) { true => scalar_binary_operator(input, right, next_token(input, token), explicit_return), _ => ScalarBinaryAdmission::Rejected },
+        _ => ScalarBinaryAdmission::Rejected,
+    }
+}
+fn scalar_binary_operator(input: Bytes, right: TokenStart, token: TokenStart, explicit_return: Bool) -> ScalarBinaryAdmission {
+    handle scalar_arithmetic_operator(input, token) {
+        ScalarBinaryAdmission::Value(operation) => scalar_binary_right_reference(input, right, operation, next_token(input, token), explicit_return),
+        _ => ScalarBinaryAdmission::Rejected,
+    }
+}
+fn scalar_binary_right_reference(input: Bytes, right: TokenStart, operation: Arithmetic, token: TokenStart, explicit_return: Bool) -> ScalarBinaryAdmission {
+    handle token_equals(input, right, token) { true => scalar_binary_tail(input, operation, next_token(input, token), explicit_return), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_tail(input: Bytes, operation: Arithmetic, token: TokenStart, explicit_return: Bool) -> ScalarBinaryAdmission {
+    handle explicit_return { true => handle token_matches(input, token, ";") { true => scalar_binary_close(input, operation, next_token(input, token)), _ => ScalarBinaryAdmission::Rejected }, false => scalar_binary_close(input, operation, token), _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_binary_close(input: Bytes, operation: Arithmetic, token: TokenStart) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, "}") { true => handle token_kind(next_token(input, token)) { TokenKind::End => ScalarBinaryAdmission::Value(operation), _ => ScalarBinaryAdmission::Rejected }, _ => ScalarBinaryAdmission::Rejected }
+}
+fn scalar_arithmetic_operator(input: Bytes, token: TokenStart) -> ScalarBinaryAdmission {
+    handle token_matches(input, token, "+") { true => ScalarBinaryAdmission::Value(Arithmetic::Add), false => handle token_matches(input, token, "-") { true => ScalarBinaryAdmission::Value(Arithmetic::Subtract), false => handle token_matches(input, token, "*") { true => ScalarBinaryAdmission::Value(Arithmetic::Multiply), false => handle token_matches(input, token, "/") { true => ScalarBinaryAdmission::Value(Arithmetic::Divide), false => handle token_matches(input, token, "%") { true => ScalarBinaryAdmission::Value(Arithmetic::Remainder), _ => ScalarBinaryAdmission::Rejected }, _ => ScalarBinaryAdmission::Rejected }, _ => ScalarBinaryAdmission::Rejected }, _ => ScalarBinaryAdmission::Rejected }, _ => ScalarBinaryAdmission::Rejected }
+}
+
+pub fn has_type(expression: Expression, expected: Type) -> Bool {
+    handle admit(expression, expected) {
+        BodyAdmission::Value(_) => true,
+        BodyAdmission::TypeError => false,
+        _ => false,
+    }
+}
+
+// Admission retains the expression category as well as the type decision, so
+// later lowering cannot erase a call into an indistinguishable literal.
+pub fn admit(expression: Expression, expected: Type) -> BodyAdmission {
+    handle (expression, expected) {
+        (Expression::Unit, Type::Unit) => BodyAdmission::Value(BodyKind::Literal),
+        (Expression::Bool(_), Type::Bool) => BodyAdmission::Value(BodyKind::Literal),
+        (Expression::BoolNot(_), Type::Bool) => BodyAdmission::Value(BodyKind::Boolean),
+        (Expression::ParameterBoolNot(_), Type::Bool) => BodyAdmission::Value(BodyKind::ParameterBoolean),
+        (Expression::I64(_), Type::I64) => BodyAdmission::Value(BodyKind::Literal),
+        (Expression::ParameterI64(_), Type::I64) => BodyAdmission::Value(BodyKind::Parameter),
+        (Expression::I64Arithmetic(_, _, _), Type::I64) => BodyAdmission::Value(BodyKind::Arithmetic),
+        (Expression::ParameterI64Arithmetic(_, _, _), Type::I64) => BodyAdmission::Value(BodyKind::ParameterArithmetic),
+        (Expression::I64Comparison(_, _, _), Type::Bool) => BodyAdmission::Value(BodyKind::Comparison),
+        (Expression::I64Select(_, _, _), Type::I64) => BodyAdmission::Value(BodyKind::Conditional),
+        (Expression::ParameterI64Select(_, _, _), Type::I64) => BodyAdmission::Value(BodyKind::ParameterConditional),
+        (Expression::U8(_), Type::U8) => BodyAdmission::Value(BodyKind::Literal),
+        (Expression::U8Comparison(_, _, _), Type::Bool) => BodyAdmission::Value(BodyKind::Comparison),
+        (Expression::U32(_), Type::U32) => BodyAdmission::Value(BodyKind::Literal),
+        (Expression::ParameterU32(_), Type::U32) => BodyAdmission::Value(BodyKind::Parameter),
+        (Expression::U32Arithmetic(_, _, _), Type::U32) => BodyAdmission::Value(BodyKind::Arithmetic),
+        (Expression::ParameterU32Arithmetic(_, _, _), Type::U32) => BodyAdmission::Value(BodyKind::ParameterArithmetic),
+        (Expression::U64(_), Type::U64) => BodyAdmission::Value(BodyKind::Literal),
+        (Expression::U64Comparison(_, _, _), Type::Bool) => BodyAdmission::Value(BodyKind::Comparison),
+        (Expression::Usize(_), Type::Usize) => BodyAdmission::Value(BodyKind::Literal),
+        (Expression::UsizeArithmetic(_, _, _), Type::Usize) => BodyAdmission::Value(BodyKind::Arithmetic),
+        (Expression::UsizeComparison(_, _, _), Type::Bool) => BodyAdmission::Value(BodyKind::Comparison),
+        (Expression::Call1(callable, argument), result) => admit_call(callable, Arguments::One(argument), result),
+        (Expression::Call2(callable, first, second), result) => admit_call(callable, Arguments::Two(first, second), result),
+        (Expression::PatternTest(_, _), Type::Bool) => BodyAdmission::Value(BodyKind::PatternTest),
+        _ => BodyAdmission::TypeError,
+    }
+}
+
+// Pattern tests are always boolean expressions; their boolean result remains
+// source-owned and is not inferred from the admission result.
+pub fn evaluate_pattern_test(expression: Expression) -> Bool {
+    handle expression {
+        Expression::PatternTest(pattern, value) => matches(pattern, value),
+        _ => false,
+    }
+}
+
+fn admit_call(callable: Callable, arguments: Arguments, result: Type) -> BodyAdmission {
+    branch_bool(
+        accepts(callable, arguments),
+        () -> BodyAdmission { admit_call_result(callable, result) },
+        () -> BodyAdmission { BodyAdmission::TypeError },
+    )
+}
+
+fn admit_call_result(callable: Callable, result: Type) -> BodyAdmission {
+    handle result_matches(callable, result) {
+        true => BodyAdmission::Value(BodyKind::Call),
+        false => BodyAdmission::TypeError,
+        _ => BodyAdmission::TypeError,
+    }
+}

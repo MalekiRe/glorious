@@ -1,0 +1,115 @@
+use module_graph_library::module_graph;
+use module_graph_library::bootstrap_indirection;
+use module_graph_library::identity;
+use module_graph_library::request;
+use module_graph_library::source;
+use compiler_support::__g1_text_as_bytes;
+
+pub fn score(value: Bool) -> i64 {
+    handle value {
+        true => 1,
+        false => 0,
+        _ => 0,
+    }
+}
+
+pub fn main() -> i64 {
+    score(module_graph::contains(
+        module_graph::extend(module_graph::root("root"), "root.child"),
+        "root.child"))
+        + score(module_graph::contains(module_graph::root("root"), "missing"))
+        + score(module_graph::contains(
+            module_graph::extend(module_graph::extend(module_graph::root("root"), "root.child"), "root.child"),
+            "root.child"))
+        + module_graph::count(module_graph::extend(module_graph::extend(module_graph::root("root"), "root.child"), "root.child"))
+        + score(module_graph::contains(module_graph::merge(module_graph::extend(module_graph::root("root"), "root.child"), bootstrap_indirection::text_prepend("root.child", bootstrap_indirection::text_singleton("root.other"))), "root.other"))
+        + module_graph::count(module_graph::merge(module_graph::extend(module_graph::root("root"), "root.child"), bootstrap_indirection::text_prepend("root.child", bootstrap_indirection::text_singleton("root.other"))))
+        + module_graph::canonical_rank(module_graph::extend(module_graph::extend(module_graph::root("root"), "artifact"), "core"), "artifact")
+        + module_graph::canonical_rank(module_graph::extend(module_graph::extend(module_graph::root("root"), "artifact"), "core"), "core")
+        + module_graph::canonical_rank(module_graph::extend(module_graph::extend(module_graph::root("root"), "artifact"), "core"), "root")
+        + score_discovery(module_graph::discover(module_graph::root("root"), "root.child"))
+        + score_discovery(module_graph::discover(module_graph::root("root"), "root"))
+        + score_graph_contains(module_graph::from_source_world2_admission(request::source_world2(
+            source::input("graph", "src/one.glorious", __g1_text_as_bytes("fn one"), identity::digest_of_text("fn one")),
+            source::input("graph", "src/two.glorious", __g1_text_as_bytes("fn two"), identity::digest_of_text("fn two")),
+            request::bootstrap_limits(2, 12),
+        )), "src/two.glorious")
+        + score_graph_count(module_graph::from_source_world2_admission(request::source_world2(
+            source::input("graph", "src/one.glorious", __g1_text_as_bytes("fn one"), identity::digest_of_text("fn one")),
+            source::input("graph", "src/two.glorious", __g1_text_as_bytes("fn two"), identity::digest_of_text("fn two")),
+            request::bootstrap_limits(2, 12),
+        )))
+        + score_graph_unadmitted(module_graph::from_source_world2_admission(request::source_world2(
+            source::input("graph", "src/one.glorious", __g1_text_as_bytes("fn one"), identity::digest_of_text("forged")),
+            source::input("graph", "src/two.glorious", __g1_text_as_bytes("fn two"), identity::digest_of_text("fn two")),
+            request::bootstrap_limits(2, 12),
+        )))
+        + score_graph_unadmitted(module_graph::checked_root("../outside.glorious"))
+        + score_exact_contains(module_graph::exact_from_source_world2_admission(request::source_world2(
+            source::input("package-one", "src/lib.glorious", __g1_text_as_bytes("fn one"), identity::digest_of_text("fn one")),
+            source::input("package-two", "src/lib.glorious", __g1_text_as_bytes("fn two"), identity::digest_of_text("fn two")),
+            request::bootstrap_limits(2, 12),
+        )), source::input("package-two", "src/lib.glorious", __g1_text_as_bytes("different bytes are irrelevant to FileKey"), identity::digest_of_text("different bytes are irrelevant to FileKey")))
+        + score_exact_count(module_graph::exact_from_source_world2_admission(request::source_world2(
+            source::input("package-one", "src/lib.glorious", __g1_text_as_bytes("fn one"), identity::digest_of_text("fn one")),
+            source::input("package-two", "src/lib.glorious", __g1_text_as_bytes("fn two"), identity::digest_of_text("fn two")),
+            request::bootstrap_limits(2, 12),
+        )))
+        + score_graph_contains(module_graph::from_source_bundle_admission(bundle_graph()), "src/three.glorious")
+        + score_graph_count(module_graph::from_source_bundle_admission(bundle_graph()))
+        + score_bundle_exact_contains(module_graph::exact_from_source_bundle_admission(bundle_graph()), source::input("graph", "src/two.glorious", __g1_text_as_bytes("other bytes"), identity::digest_of_text("other bytes")))
+        + score_bundle_exact_count(module_graph::exact_from_source_bundle_admission(bundle_graph()))
+}
+
+pub fn score_discovery(value: module_graph::Discovery) -> i64 {
+    handle value {
+        module_graph::Discovery::Added => 1,
+        module_graph::Discovery::Duplicate => 10,
+        _ => 0,
+    }
+}
+
+pub fn score_graph_contains(value: module_graph::GraphAdmission, path: Text) -> i64 {
+    handle value {
+        module_graph::GraphAdmission::Value(graph) => score(module_graph::contains(graph, path)),
+        _ => 0,
+    }
+}
+
+pub fn score_graph_count(value: module_graph::GraphAdmission) -> i64 {
+    handle value {
+        module_graph::GraphAdmission::Value(graph) => module_graph::count(graph),
+        _ => 0,
+    }
+}
+
+pub fn score_graph_unadmitted(value: module_graph::GraphAdmission) -> i64 {
+    handle value { module_graph::GraphAdmission::Unadmitted => 10, _ => 0 }
+}
+
+pub fn score_exact_contains(value: module_graph::ExactGraphAdmission, input: source::SourceInput) -> i64 {
+    handle value { module_graph::ExactGraphAdmission::Value(graph) => score(module_graph::exact_contains(graph, input)), _ => 0 }
+}
+
+pub fn score_exact_count(value: module_graph::ExactGraphAdmission) -> i64 {
+    handle value { module_graph::ExactGraphAdmission::Value(graph) => module_graph::exact_count(graph), _ => 0 }
+}
+pub fn score_bundle_exact_contains(value: module_graph::BundleExactGraphAdmission, input: source::SourceInput) -> i64 {
+    handle value { module_graph::BundleExactGraphAdmission::Value(graph) => score(module_graph::bundle_exact_contains(graph, input)), _ => 0 }
+}
+pub fn score_bundle_exact_count(value: module_graph::BundleExactGraphAdmission) -> i64 {
+    handle value { module_graph::BundleExactGraphAdmission::Value(graph) => module_graph::bundle_exact_count(graph), _ => 0 }
+}
+
+pub fn bundle_graph() -> request::SourceBundleAdmission {
+    request::source_bundle(
+        request::source_sequence_prepend_public(
+            source::input("graph", "src/one.glorious", __g1_text_as_bytes("fn one"), identity::digest_of_text("fn one")),
+            request::source_sequence_prepend_public(
+                source::input("graph", "src/two.glorious", __g1_text_as_bytes("fn two"), identity::digest_of_text("fn two")),
+                request::source_sequence_one(source::input("graph", "src/three.glorious", __g1_text_as_bytes("fn three"), identity::digest_of_text("fn three"))),
+            ),
+        ),
+        request::bootstrap_limits(3, 20),
+    )
+}

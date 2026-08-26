@@ -1,0 +1,3281 @@
+// M28 bootstrap execution outcome. Candidate/verified artifacts, schemas,
+// encoding, decoding, limits, and full interpreter semantics extend this
+// source-owned return/trap boundary.
+use mir::Terminator;
+use mir::I64ArithmeticLowering;
+use mir::I64ComparisonLowering;
+use mir::I64SelectLowering;
+use mir::I64LiteralLowering;
+use mir::U32LiteralLowering;
+use mir::U32ArithmeticLowering;
+use mir::UsizeArithmeticLowering;
+use mir::U64ComparisonLowering;
+use mir::U8ComparisonLowering;
+use mir::UsizeComparisonLowering;
+use mir::BoolLiteralLowering;
+use mir::BoolNotLowering;
+use mir::ParameterI64Lowering;
+use mir::ParameterU32Lowering;
+use mir::CallLowering;
+use core::lower as lower_core;
+use body::Expression;
+use types::Type;
+use mir::StorageLowering;
+use mir_storage::Slot;
+use runtime_manifest::Primitive;
+use runtime_manifest::PrimitiveSignature;
+use runtime_manifest::DeclarationValidation;
+use runtime_manifest::validate_bound_declaration;
+use runtime_manifest::HostCapability;
+use runtime_manifest::HostSignature;
+use runtime_manifest::HostDeclarationValidation;
+use runtime_manifest::validate_bound_host_declaration;
+use identity::u32_le_bytes;
+use identity::u64_le_bytes;
+use identity::byte_pair;
+use compiler_support::__g1_int_wrapping_add;
+use compiler_support::__g1_int_wrapping_sub;
+use compiler_support::__g1_int_wrapping_mul;
+use compiler_support::__g1_int_checked_div;
+use compiler_support::__g1_int_shr;
+use compiler_support::__g1_int_convert_wrapping_to_u32;
+use compiler_support::__g1_int_convert_wrapping_to_u64;
+use compiler_support::__g1_int_convert_wrapping_to_u8;
+use compiler_support::__g1_bytes_from_array_move;
+use compiler_support::__g1_bytes_len;
+use compiler_support::__g1_bytes_get;
+use compiler_support::__g1_bytes_slice;
+use compiler_support::__g1_bytes_concat;
+use compiler_support::__g1_blake3;
+
+pub enum Execution { Returned(i64), ReturnedU32(u32), ReturnedUsize(usize), Faulted }
+pub enum BytesExecution { Bytes(Bytes), Faulted }
+// Host imports do not share the scalar execution result used by the current
+// bootstrap evaluator. Keep their ABI shapes explicit so a later launcher
+// binding cannot silently turn argv or file bytes into an integer proxy.
+pub enum HostResponse {
+    ProcessArgs(Array<Text>),
+    FileRead(Bytes),
+    FileWriteAtomic,
+    DiagnosticWrite,
+    Faulted,
+}
+
+pub enum HostExecution {
+    ProcessArgs(Array<Text>),
+    FileRead(Bytes),
+    Unit,
+    Faulted,
+}
+pub enum ArtifactEmission { Artifact(Bytes), Rejected }
+pub enum G1I64Arithmetic { Add, Subtract, Multiply, Divide }
+// These are checked source-language operations. A wrapping primitive is used
+// only internally to compute a candidate result before verification rejects
+// its overflow witness.
+pub enum U32ArithmeticInstruction { CheckedAdd(u32, u32), CheckedSub(u32, u32), CheckedMul(u32, u32), CheckedDiv(u32, u32), CheckedRem(u32, u32) }
+pub enum UsizeArithmeticInstruction { CheckedAdd(usize, usize) }
+
+// The container section vocabulary is source-owned and closed.  Directory
+// writers must not treat a raw numeric section ID as authority: this schema
+// gives the future encoder and verifier one stable definition to consume.
+pub enum G1Section {
+    Strings, Types, Constants, Signatures, Implementations, Protocols,
+    Handlers, Functions, Code, References, Cleanup, Resumption, Debug,
+    SourceMap, Unknown,
+}
+
+pub enum G1SectionAdmission { Value(G1Section), UnknownSection, Misaligned, InvalidFixedExtent }
+
+// A bounded reader reports truncation as source data. It proves the four
+// bytes exist before calling the manifest byte primitive, so malformed
+// artifacts cannot turn a verifier input into a host bounds trap.
+pub enum G1U32Read { Value(u32), Truncated }
+pub enum G1U64Read { Value(u64), Truncated }
+pub struct G1DirectoryRecord { section: G1Section, offset: u64, byte_length: u64, count: u32, width: u32 }
+pub enum G1DirectoryRead { Value(G1DirectoryRecord), Truncated, InvalidSection }
+
+// MIR is the only authority that may select a scalar operation.  Service
+// supplies an admitted lowering; the backend maps that value to its
+// candidate/verified instruction family and never reconstructs operands from
+// request-side state.
+pub fn execute_i64_comparison_lowering(lowering: I64ComparisonLowering) -> Execution {
+    handle lowering {
+        I64ComparisonLowering::Return(body::Comparison::Equal, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::EqualI64(left, right))),
+        I64ComparisonLowering::Return(body::Comparison::Less, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::LessI64(left, right))),
+        I64ComparisonLowering::Return(body::Comparison::Greater, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::GreaterI64(left, right))),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_u64_comparison_lowering(lowering: U64ComparisonLowering) -> Execution {
+    handle lowering {
+        U64ComparisonLowering::Return(body::Comparison::Equal, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::EqualU64(left, right))),
+        U64ComparisonLowering::Return(body::Comparison::NotEqual, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::NotEqualU64(left, right))),
+        U64ComparisonLowering::Return(body::Comparison::Less, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::LessU64(left, right))),
+        U64ComparisonLowering::Return(body::Comparison::LessEqual, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::LessEqualU64(left, right))),
+        U64ComparisonLowering::Return(body::Comparison::Greater, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::GreaterU64(left, right))),
+        U64ComparisonLowering::Return(body::Comparison::GreaterEqual, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::GreaterEqualU64(left, right))),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_u8_comparison_lowering(lowering: U8ComparisonLowering) -> Execution {
+    handle lowering {
+        U8ComparisonLowering::Return(body::Comparison::Equal, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::EqualU8(left, right))),
+        U8ComparisonLowering::Return(body::Comparison::NotEqual, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::NotEqualU8(left, right))),
+        U8ComparisonLowering::Return(body::Comparison::Less, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::LessU8(left, right))),
+        U8ComparisonLowering::Return(body::Comparison::LessEqual, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::LessEqualU8(left, right))),
+        U8ComparisonLowering::Return(body::Comparison::Greater, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::GreaterU8(left, right))),
+        U8ComparisonLowering::Return(body::Comparison::GreaterEqual, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::GreaterEqualU8(left, right))), _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_usize_comparison_lowering(lowering: UsizeComparisonLowering) -> Execution {
+    handle lowering {
+        UsizeComparisonLowering::Return(body::Comparison::Equal, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::EqualUsize(left, right))),
+        UsizeComparisonLowering::Return(body::Comparison::NotEqual, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::NotEqualUsize(left, right))),
+        UsizeComparisonLowering::Return(body::Comparison::Less, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::LessUsize(left, right))),
+        UsizeComparisonLowering::Return(body::Comparison::LessEqual, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::LessEqualUsize(left, right))),
+        UsizeComparisonLowering::Return(body::Comparison::Greater, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::GreaterUsize(left, right))),
+        UsizeComparisonLowering::Return(body::Comparison::GreaterEqual, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::GreaterEqualUsize(left, right))),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_i64_select_lowering(lowering: I64SelectLowering) -> Execution {
+    handle lowering {
+        I64SelectLowering::Return(condition, when_true, when_false) => execute_candidate(CandidateProgram::Conditional(ConditionalInstruction::SelectI64(condition, when_true, when_false))),
+        _ => Execution::Faulted,
+    }
+}
+
+// A literal-condition selection has no runtime branch input.  Preserve the
+// Body→Core→MIR admission, then encode the selected admitted i64 as the
+// existing verified callable artifact. Parameterized selections deliberately
+// stay rejected until their branch/control-flow artifact is implemented.
+pub fn emit_g1_for_i64_select_body(expression: Expression, expected: Type) -> ArtifactEmission {
+    handle mir::lower_i64_select(lower_core(expression, expected)) {
+        I64SelectLowering::Return(true, when_true, _) => emit_g1_i64_callable(when_true),
+        I64SelectLowering::Return(false, _, when_false) => emit_g1_i64_callable(when_false),
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+pub fn execute_i64_literal_lowering(lowering: I64LiteralLowering) -> Execution {
+    handle lowering {
+        I64LiteralLowering::Return(value) => execute_candidate(CandidateProgram::Terminal(Terminator::Return, value)),
+        _ => Execution::Faulted,
+    }
+}
+
+// Unsigned values retain a distinct terminal result all the way through the
+// candidate/verified boundary.  G1 byte encoding is intentionally deferred;
+// converting this payload to i64 here would erase the very type evidence a
+// later verifier needs to validate.
+pub fn execute_u32_literal_lowering(lowering: U32LiteralLowering) -> Execution {
+    handle lowering {
+        U32LiteralLowering::Return(value) => execute_candidate(CandidateProgram::U32Terminal(Terminator::Return, value)),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_u32_arithmetic_lowering(lowering: U32ArithmeticLowering) -> Execution {
+    handle lowering {
+        U32ArithmeticLowering::Return(body::Arithmetic::Add, left, right) => execute_candidate(CandidateProgram::U32Arithmetic(U32ArithmeticInstruction::CheckedAdd(left, right))),
+        U32ArithmeticLowering::Return(body::Arithmetic::Subtract, left, right) => execute_candidate(CandidateProgram::U32Arithmetic(U32ArithmeticInstruction::CheckedSub(left, right))),
+        U32ArithmeticLowering::Return(body::Arithmetic::Multiply, left, right) => execute_candidate(CandidateProgram::U32Arithmetic(U32ArithmeticInstruction::CheckedMul(left, right))),
+        U32ArithmeticLowering::Return(body::Arithmetic::Divide, left, right) => execute_candidate(CandidateProgram::U32Arithmetic(U32ArithmeticInstruction::CheckedDiv(left, right))),
+        U32ArithmeticLowering::Return(body::Arithmetic::Remainder, left, right) => execute_candidate(CandidateProgram::U32Arithmetic(U32ArithmeticInstruction::CheckedRem(left, right))),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_usize_arithmetic_lowering(lowering: UsizeArithmeticLowering) -> Execution {
+    handle lowering { UsizeArithmeticLowering::Return(body::Arithmetic::Add, left, right) => execute_candidate(CandidateProgram::UsizeArithmetic(UsizeArithmeticInstruction::CheckedAdd(left, right))), _ => Execution::Faulted }
+}
+
+pub fn execute_bool_literal_lowering(lowering: BoolLiteralLowering) -> Execution {
+    handle lowering {
+        BoolLiteralLowering::Return(true) => execute_candidate(CandidateProgram::Terminal(Terminator::Return, 1)),
+        BoolLiteralLowering::Return(false) => execute_candidate(CandidateProgram::Terminal(Terminator::Return, 0)),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_bool_not_lowering(lowering: BoolNotLowering) -> Execution {
+    handle lowering {
+        BoolNotLowering::Return(value) => execute_candidate(CandidateProgram::Boolean(BooleanInstruction::Not(value))),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_parameter_i64_lowering(lowering: ParameterI64Lowering) -> Execution {
+    handle lowering {
+        ParameterI64Lowering::Return(value) => execute_candidate(CandidateProgram::Terminal(Terminator::ParameterReturn, value)),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_parameter_u32_lowering(lowering: ParameterU32Lowering) -> Execution {
+    handle lowering {
+        ParameterU32Lowering::Return(value) => execute_candidate(CandidateProgram::U32Terminal(Terminator::ParameterReturn, value)),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_call_lowering(lowering: CallLowering, first: i64, second: i64) -> Execution {
+    handle lowering {
+        CallLowering::Unary(signature::Callable::Unary(Type::I64, Type::I64), Type::I64) => execute_candidate(CandidateProgram::Call(CallInstruction::IdentityI64(first))),
+        CallLowering::Binary(signature::Callable::Binary(Type::I64, Type::I64, Type::I64), Type::I64, Type::I64) => execute_candidate(CandidateProgram::Call(CallInstruction::AddI64(first, second))),
+        _ => Execution::Faulted,
+    }
+}
+
+// Value-carrying Body→Core→MIR→G1 bridge for the first executable MIR
+// instruction family.  It intentionally accepts only an admitted i64 binary
+// operation; all other bodies remain on their explicit unsupported paths.
+pub fn emit_g1_for_i64_arithmetic_body(expression: Expression, expected: Type) -> ArtifactEmission {
+    emit_g1_for_i64_arithmetic_lowering(mir::lower_i64_arithmetic(lower_core(expression, expected)))
+}
+
+fn emit_g1_for_i64_arithmetic_lowering(lowering: I64ArithmeticLowering) -> ArtifactEmission {
+    handle lowering {
+        I64ArithmeticLowering::Return(operation, left, right) => emit_g1_for_i64_arithmetic(operation, left, right),
+        I64ArithmeticLowering::Trap => ArtifactEmission::Rejected,
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+fn emit_g1_for_i64_arithmetic(operation: body::Arithmetic, left: i64, right: i64) -> ArtifactEmission {
+    handle operation {
+        body::Arithmetic::Add => emit_g1_i64_binary(G1I64Arithmetic::Add, left, right),
+        body::Arithmetic::Subtract => emit_g1_i64_binary(G1I64Arithmetic::Subtract, left, right),
+        body::Arithmetic::Multiply => emit_g1_i64_binary(G1I64Arithmetic::Multiply, left, right),
+        body::Arithmetic::Divide => handle right == 0 {
+            true => ArtifactEmission::Rejected,
+            false => emit_g1_i64_binary(G1I64Arithmetic::Divide, left, right),
+            _ => ArtifactEmission::Rejected,
+        },
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+// G1 stores directory offsets and extents as little-endian u64 values. The
+// source layout engine begins with bounded buffer lengths (`usize`), then
+// crosses this manifest-bound conversion once at the wire boundary.
+pub fn g1_usize_as_u64(value: usize) -> u64 {
+    __g1_int_convert_wrapping_to_u64<usize>(value)
+}
+
+pub fn g1_usize_as_u64_le_bytes(value: usize) -> Bytes {
+    u64_le_bytes(g1_usize_as_u64(value))
+}
+
+pub fn g1_usize_as_u64_encoding_is_canonical() -> Bool {
+    let encoded = g1_usize_as_u64_le_bytes(258);
+    handle __g1_bytes_len(encoded) == 8 {
+        true => handle __g1_bytes_get(encoded, 0) == 2 {
+            true => __g1_bytes_get(encoded, 1) == 1,
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// The independent G1 runtime accepts this exact container magic. Keep it in
+// the source backend—not in a launcher adapter—so every later source encoder
+// starts from the same wire identity as `grvm`.
+pub fn g1_magic() -> Bytes {
+    __g1_bytes_from_array_move([71, 82, 66, 67, 13, 10, 26, 10])
+}
+
+pub fn g1_magic_is_canonical() -> Bool {
+    handle __g1_bytes_len(g1_magic()) == 8 {
+        true => g1_magic_bytes_match(g1_magic()),
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn g1_read_u32_le(bytes: Bytes, offset: usize) -> G1U32Read {
+    let length = __g1_bytes_len(bytes);
+    handle offset <= length {
+        true => g1_read_u32_remaining(bytes, offset, __g1_int_wrapping_sub<usize>(length, offset)),
+        false => G1U32Read::Truncated,
+        _ => G1U32Read::Truncated,
+    }
+}
+
+fn g1_read_u32_remaining(bytes: Bytes, offset: usize, remaining: usize) -> G1U32Read {
+    handle remaining >= 4 {
+        true => G1U32Read::Value(g1_u32_at(bytes, offset)),
+        false => G1U32Read::Truncated,
+        _ => G1U32Read::Truncated,
+    }
+}
+
+fn g1_u32_at(bytes: Bytes, offset: usize) -> u32 {
+    __g1_int_wrapping_add<u32>(
+        __g1_int_wrapping_add<u32>(
+            __g1_int_wrapping_add<u32>(
+                __g1_int_convert_wrapping_to_u32<u8>(__g1_bytes_get(bytes, offset)),
+                __g1_int_wrapping_mul<u32>(__g1_int_convert_wrapping_to_u32<u8>(__g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 1))), 256),
+            ),
+            __g1_int_wrapping_mul<u32>(__g1_int_convert_wrapping_to_u32<u8>(__g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 2))), 65536),
+        ),
+        __g1_int_wrapping_mul<u32>(__g1_int_convert_wrapping_to_u32<u8>(__g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 3))), 16777216),
+    )
+}
+
+pub fn g1_read_u64_le(bytes: Bytes, offset: usize) -> G1U64Read {
+    handle g1_read_u32_le(bytes, offset) {
+        G1U32Read::Value(low) => g1_read_u64_high(bytes, offset, low),
+        G1U32Read::Truncated => G1U64Read::Truncated,
+        _ => G1U64Read::Truncated,
+    }
+}
+
+fn g1_read_u64_high(bytes: Bytes, offset: usize, low: u32) -> G1U64Read {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 4)) {
+        G1U32Read::Value(high) => G1U64Read::Value(__g1_int_wrapping_add<u64>(
+            __g1_int_convert_wrapping_to_u64<u32>(low),
+            __g1_int_wrapping_mul<u64>(__g1_int_convert_wrapping_to_u64<u32>(high), 4294967296),
+        )),
+        G1U32Read::Truncated => G1U64Read::Truncated,
+        _ => G1U64Read::Truncated,
+    }
+}
+
+// A G1 directory record is fixed at 32 bytes. Decode every field through the
+// bounded reader, then admit it through the same schema used by writers.
+pub fn g1_read_directory_record(bytes: Bytes, offset: usize) -> G1DirectoryRead {
+    handle g1_read_u32_le(bytes, offset) {
+        G1U32Read::Value(id) => g1_read_directory_kind(bytes, offset, id),
+        G1U32Read::Truncated => G1DirectoryRead::Truncated,
+        _ => G1DirectoryRead::Truncated,
+    }
+}
+
+fn g1_read_directory_kind(bytes: Bytes, offset: usize, id: u32) -> G1DirectoryRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 4)) {
+        G1U32Read::Value(1) => g1_read_directory_offset(bytes, offset, id),
+        G1U32Read::Value(_) => G1DirectoryRead::InvalidSection,
+        G1U32Read::Truncated => G1DirectoryRead::Truncated,
+        _ => G1DirectoryRead::Truncated,
+    }
+}
+
+fn g1_read_directory_offset(bytes: Bytes, offset: usize, id: u32) -> G1DirectoryRead {
+    handle g1_read_u64_le(bytes, __g1_int_wrapping_add<usize>(offset, 8)) {
+        G1U64Read::Value(section_offset) => g1_read_directory_length(bytes, offset, id, section_offset),
+        G1U64Read::Truncated => G1DirectoryRead::Truncated,
+        _ => G1DirectoryRead::Truncated,
+    }
+}
+
+fn g1_read_directory_length(bytes: Bytes, offset: usize, id: u32, section_offset: u64) -> G1DirectoryRead {
+    handle g1_read_u64_le(bytes, __g1_int_wrapping_add<usize>(offset, 16)) {
+        G1U64Read::Value(byte_length) => g1_read_directory_count(bytes, offset, id, section_offset, byte_length),
+        G1U64Read::Truncated => G1DirectoryRead::Truncated,
+        _ => G1DirectoryRead::Truncated,
+    }
+}
+
+fn g1_read_directory_count(bytes: Bytes, offset: usize, id: u32, section_offset: u64, byte_length: u64) -> G1DirectoryRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 24)) {
+        G1U32Read::Value(count) => g1_read_directory_width(bytes, offset, id, section_offset, byte_length, count),
+        G1U32Read::Truncated => G1DirectoryRead::Truncated,
+        _ => G1DirectoryRead::Truncated,
+    }
+}
+
+fn g1_read_directory_width(bytes: Bytes, offset: usize, id: u32, section_offset: u64, byte_length: u64, count: u32) -> G1DirectoryRead {
+    handle g1_read_u32_le(bytes, __g1_int_wrapping_add<usize>(offset, 28)) {
+        G1U32Read::Value(width) => g1_admit_directory_record(id, section_offset, byte_length, count, width),
+        G1U32Read::Truncated => G1DirectoryRead::Truncated,
+        _ => G1DirectoryRead::Truncated,
+    }
+}
+
+fn g1_admit_directory_record(id: u32, offset: u64, byte_length: u64, count: u32, width: u32) -> G1DirectoryRead {
+    handle admit_g1_directory_entry(id, offset, byte_length, count, width) {
+        G1SectionAdmission::Value(section) => G1DirectoryRead::Value(G1DirectoryRecord { section: section, offset: offset, byte_length: byte_length, count: count, width: width }),
+        _ => G1DirectoryRead::InvalidSection,
+    }
+}
+
+// The generic reader validates the fixed part of every G1 container before
+// section-specific verification consumes directory fields.
+pub fn g1_preamble_is_readable(bytes: Bytes) -> Bool {
+    handle g1_magic_bytes_match(bytes) {
+        true => g1_preamble_version_is_valid(bytes),
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_preamble_version_is_valid(bytes: Bytes) -> Bool {
+    handle g1_read_u32_le(bytes, 8) {
+        G1U32Read::Value(1) => g1_preamble_length_is_valid(bytes),
+        _ => false,
+    }
+}
+
+fn g1_preamble_length_is_valid(bytes: Bytes) -> Bool {
+    handle g1_read_u32_le(bytes, 12) {
+        G1U32Read::Value(64) => true,
+        _ => false,
+    }
+}
+
+// Current G1 schema has exactly fourteen ordered directory records.  Keep
+// the walk fixed after validating the count and width: malformed headers
+// cannot make verification recurse or allocate proportional to an attacker
+// supplied count.
+pub fn g1_directory_is_readable(bytes: Bytes) -> Bool {
+    handle g1_preamble_is_readable(bytes) {
+        true => g1_directory_count_is_current(bytes),
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_candidate_has_length_and_directory(bytes: Bytes, expected_length: usize) -> Bool {
+    handle __g1_bytes_len(bytes) == expected_length {
+        true => g1_directory_is_readable(bytes),
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_directory_count_is_current(bytes: Bytes) -> Bool {
+    handle g1_read_u32_le(bytes, 20) {
+        G1U32Read::Value(14) => g1_directory_width_is_current(bytes),
+        _ => false,
+    }
+}
+
+fn g1_directory_width_is_current(bytes: Bytes) -> Bool {
+    handle g1_read_u32_le(bytes, 24) {
+        G1U32Read::Value(32) => g1_declared_directory_base_is_current(bytes),
+        _ => false,
+    }
+}
+
+fn g1_declared_directory_base_is_current(bytes: Bytes) -> Bool {
+    handle g1_read_u64_le(bytes, 48) {
+        G1U64Read::Value(64) => handle g1_declared_total_matches_bytes(bytes) {
+            true => g1_directory_records_are_readable(bytes, 64, 1),
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn g1_declared_total_matches_bytes(bytes: Bytes) -> Bool {
+    handle g1_read_u64_le(bytes, 56) {
+        G1U64Read::Value(total) => total == g1_usize_as_u64(__g1_bytes_len(bytes)),
+        _ => false,
+    }
+}
+
+fn g1_directory_records_are_readable(bytes: Bytes, offset: usize, expected_id: u32) -> Bool {
+    handle expected_id == 15 {
+        true => true,
+        false => g1_directory_record_is_expected(bytes, offset, expected_id),
+        _ => false,
+    }
+}
+
+fn g1_directory_record_is_expected(bytes: Bytes, offset: usize, expected_id: u32) -> Bool {
+    handle g1_read_directory_record(bytes, offset) {
+        G1DirectoryRead::Value(record) => handle g1_section_same(record.section, g1_section(expected_id)) {
+            true => handle g1_directory_record_within_artifact(record, g1_usize_as_u64(__g1_bytes_len(bytes))) {
+                true => g1_directory_records_are_readable(bytes, __g1_int_wrapping_add<usize>(offset, 32), __g1_int_wrapping_add<u32>(expected_id, 1)),
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// Validate extents as `start <= total` and `length <= total - start`; this
+// rejects a section that runs past the image without constructing a possibly
+// overflowing `start + length` value from untrusted directory fields.
+pub fn g1_directory_record_within_artifact(record: G1DirectoryRecord, total_bytes: u64) -> Bool {
+    handle record.offset <= total_bytes {
+        true => record.byte_length <= __g1_int_wrapping_sub<u64>(total_bytes, record.offset),
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_section_same(left: G1Section, right: G1Section) -> Bool {
+    handle (left, right) {
+        (G1Section::Strings, G1Section::Strings) => true,
+        (G1Section::Types, G1Section::Types) => true,
+        (G1Section::Constants, G1Section::Constants) => true,
+        (G1Section::Signatures, G1Section::Signatures) => true,
+        (G1Section::Implementations, G1Section::Implementations) => true,
+        (G1Section::Protocols, G1Section::Protocols) => true,
+        (G1Section::Handlers, G1Section::Handlers) => true,
+        (G1Section::Functions, G1Section::Functions) => true,
+        (G1Section::Code, G1Section::Code) => true,
+        (G1Section::References, G1Section::References) => true,
+        (G1Section::Cleanup, G1Section::Cleanup) => true,
+        (G1Section::Resumption, G1Section::Resumption) => true,
+        (G1Section::Debug, G1Section::Debug) => true,
+        (G1Section::SourceMap, G1Section::SourceMap) => true,
+        (G1Section::Unknown, G1Section::Unknown) => true,
+        _ => false,
+    }
+}
+
+// This is the fixed 64-byte preamble of the canonical empty G1 image.  Build
+// it from source-owned fields rather than retaining a second opaque copy of
+// the wire format.  The subsequent directory is intentionally a separate
+// encoder step: a header by itself is not an artifact and must never be
+// handed to `grvm` as one.
+pub fn g1_empty_header() -> Bytes {
+    g1_header(4294967295, 0, 1, 512)
+}
+
+// The shared container preamble for all source-emitted G1 artifacts.  The
+// caller owns the resolved entry function, feature mask, and final aligned
+// image extent; this prevents the empty-library defaults from leaking into
+// executable artifact emission.
+pub fn g1_header(entry_function: u32, flags: u32, required_features: u64, total_bytes: u64) -> Bytes {
+    g1_concat3(
+        g1_concat8(
+            g1_magic(), u32_le_bytes(1), u32_le_bytes(64), u32_le_bytes(flags),
+            u32_le_bytes(14), u32_le_bytes(32), u32_le_bytes(entry_function), u64_le_bytes(required_features),
+        ),
+        u64_le_bytes(0),
+        g1_append_field(u64_le_bytes(64), u64_le_bytes(total_bytes)),
+    )
+}
+
+fn g1_append_field(prefix: Bytes, field: Bytes) -> Bytes {
+    __g1_bytes_concat(prefix, field)
+}
+
+// Binary concatenation necessarily copies both operands.  Keep fixed-schema
+// encoders balanced so their temporary-copy depth grows logarithmically with
+// field count, rather than repeatedly copying an ever-growing prefix.
+fn g1_concat3(first: Bytes, second: Bytes, third: Bytes) -> Bytes {
+    g1_append_field(first, g1_append_field(second, third))
+}
+fn g1_concat4(first: Bytes, second: Bytes, third: Bytes, fourth: Bytes) -> Bytes {
+    g1_append_field(g1_append_field(first, second), g1_append_field(third, fourth))
+}
+fn g1_concat8(first: Bytes, second: Bytes, third: Bytes, fourth: Bytes, fifth: Bytes, sixth: Bytes, seventh: Bytes, eighth: Bytes) -> Bytes {
+    g1_append_field(
+        g1_concat4(first, second, third, fourth),
+        g1_concat4(fifth, sixth, seventh, eighth),
+    )
+}
+
+pub fn g1_empty_header_is_canonical() -> Bool {
+    let header = g1_empty_header();
+    handle __g1_bytes_len(header) == 64 {
+        true => g1_empty_header_fields_match(header),
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn g1_empty_header_has_expected_length() -> Bool {
+    __g1_bytes_len(g1_empty_header()) == 64
+}
+
+// Every empty variable-record G1 table is encoded as `count = 0` followed by
+// its sole zero offset. This dynamic builder is shared by the strings,
+// constants, signatures, protocols, handlers, and reference-contract tables.
+pub fn g1_empty_variable_table() -> Bytes {
+    __g1_bytes_concat(u32_le_bytes(0), u32_le_bytes(0))
+}
+
+pub fn g1_empty_variable_table_is_canonical() -> Bool {
+    let table = g1_empty_variable_table();
+    handle __g1_bytes_len(table) == 8 {
+        true => handle __g1_bytes_get(table, 0) == 0 {
+            true => __g1_bytes_get(table, 4) == 0,
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_minimal_library_empty_variable_sections() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(g1_empty_variable_table(), g1_empty_variable_table()),
+            g1_empty_variable_table(),
+        ),
+        g1_append_field(g1_empty_variable_table(), g1_empty_variable_table()),
+    )
+}
+
+fn g1_minimal_library_directory() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_header(4294967295, 0, 1, 808), g1_directory_entry(1, 512, 12, 0, 0)),
+                            g1_directory_entry(2, 528, 236, 19, 0),
+                        ),
+                        g1_directory_entry(3, 768, 8, 0, 0),
+                    ),
+                    g1_directory_entry(4, 776, 8, 0, 0),
+                ),
+                g1_directory_entry(5, 784, 0, 0, 24),
+            ),
+            g1_directory_entry(6, 784, 8, 0, 0),
+        ),
+        g1_minimal_library_directory_tail(),
+    )
+}
+
+fn g1_minimal_library_directory_tail() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_directory_entry(7, 792, 8, 0, 0), g1_directory_entry(8, 800, 0, 0, 64)),
+                            g1_directory_entry(9, 800, 0, 0, 4),
+                        ),
+                        g1_directory_entry(10, 800, 0, 0, 4),
+                    ),
+                    g1_directory_entry(11, 800, 0, 0, 24),
+                ),
+                g1_directory_entry(12, 800, 0, 0, 16),
+            ),
+            g1_directory_entry(13, 800, 0, 0, 16),
+        ),
+        g1_directory_entry(14, 800, 8, 0, 0),
+    )
+}
+
+fn g1_four_zero_padding_bytes() -> Bytes {
+    __g1_bytes_from_array_move([0, 0, 0, 0])
+}
+
+// G1 strings are one variable-record section: record count, UTF-8 payload
+// byte count, the zero and end offsets, then the bytes themselves.  Unlike
+// the former static artifact oracle this derives the table extent directly
+// from source data, which is required before names from lowered programs can
+// become artifact strings.
+pub fn g1_single_string_table(value: Bytes) -> Bytes {
+    let byte_length = __g1_int_convert_wrapping_to_u32<usize>(__g1_bytes_len(value));
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(u32_le_bytes(1), u32_le_bytes(byte_length)),
+            g1_append_field(u32_le_bytes(0), u32_le_bytes(byte_length)),
+        ),
+        value,
+    )
+}
+
+pub fn g1_empty_string_table() -> Bytes {
+    g1_append_field(
+        g1_append_field(u32_le_bytes(0), u32_le_bytes(0)),
+        u32_le_bytes(0),
+    )
+}
+
+pub fn g1_empty_string_table_is_canonical() -> Bool {
+    let table = g1_empty_string_table();
+    handle __g1_bytes_len(table) == 12 {
+        true => handle __g1_bytes_get(table, 0) == 0 {
+            true => handle __g1_bytes_get(table, 4) == 0 {
+                true => __g1_bytes_get(table, 8) == 0,
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn g1_single_string_table_is_canonical() -> Bool {
+    let table = g1_single_string_table(byte_pair(109, 97));
+    handle __g1_bytes_len(table) == 18 {
+        true => handle __g1_bytes_get(table, 0) == 1 {
+            true => handle __g1_bytes_get(table, 4) == 2 {
+                true => handle __g1_bytes_get(table, 8) == 0 {
+                    true => handle __g1_bytes_get(table, 12) == 2 {
+                        true => handle __g1_bytes_get(table, 16) == 109 {
+                            true => __g1_bytes_get(table, 17) == 97,
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// Most metadata sections use the same variable-record envelope.  Keep the
+// record and its one-record section construction source-owned so later type,
+// signature, constant, protocol, and handler encoders differ only in their
+// payload builders.
+pub fn g1_variable_record(tag: u8, flags: u8, payload: Bytes) -> Bytes {
+    let byte_length = __g1_int_convert_wrapping_to_u32<usize>(__g1_bytes_len(payload));
+    g1_append_field(
+        __g1_bytes_from_array_move([tag, flags, 0, 0]),
+        g1_append_field(u32_le_bytes(byte_length), payload),
+    )
+}
+
+pub fn g1_single_variable_record_section(tag: u8, flags: u8, payload: Bytes) -> Bytes {
+    let record = g1_variable_record(tag, flags, payload);
+    let record_length = __g1_int_convert_wrapping_to_u32<usize>(__g1_bytes_len(record));
+    g1_append_field(
+        g1_append_field(u32_le_bytes(1), g1_append_field(u32_le_bytes(0), u32_le_bytes(record_length))),
+        record,
+    )
+}
+
+pub fn g1_single_variable_record_section_is_canonical() -> Bool {
+    let section = g1_single_variable_record_section(7, 2, byte_pair(9, 8));
+    handle __g1_bytes_len(section) == 22 {
+        true => handle __g1_bytes_get(section, 0) == 1 {
+            true => handle __g1_bytes_get(section, 4) == 0 {
+                true => handle __g1_bytes_get(section, 8) == 10 {
+                    true => handle __g1_bytes_get(section, 12) == 7 {
+                        true => handle __g1_bytes_get(section, 13) == 2 {
+                            true => handle __g1_bytes_get(section, 16) == 2 {
+                                true => handle __g1_bytes_get(section, 20) == 9 {
+                                    true => __g1_bytes_get(section, 21) == 8,
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// G1 constant section tag 10 is an i64 payload encoded as canonical
+// little-endian two's-complement bits. Keep this as a normal variable-record
+// table so literal codegen shares the same envelope as all later constants.
+pub fn g1_i64_constant_table(value: i64) -> Bytes {
+    g1_single_variable_record_section(10, 0, u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(value)))
+}
+
+pub fn g1_i64_constant_table_is_canonical() -> Bool {
+    let table = g1_i64_constant_table(-1);
+    handle __g1_bytes_len(table) == 28 {
+        true => handle __g1_bytes_get(table, 0) == 1 {
+            true => handle __g1_bytes_get(table, 8) == 16 {
+                true => handle __g1_bytes_get(table, 12) == 10 {
+                    true => handle __g1_bytes_get(table, 16) == 8 {
+                        true => handle __g1_bytes_get(table, 20) == 255 {
+                            true => __g1_bytes_get(table, 27) == 255,
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// The first 19 G1 type IDs are the mandatory scalar prelude.  They carry no
+// payload, but their tags, use-capability flags, and record offsets are part
+// of canonical artifact identity.  Generate the full table rather than
+// retaining the old 236-byte prelude as an artifact literal.
+pub fn g1_predefined_type_table() -> Bytes {
+    g1_append_field(
+        u32_le_bytes(19),
+        g1_append_field(g1_predefined_type_offsets(), g1_predefined_type_records()),
+    )
+}
+
+// The scalar prelude has a fixed schema size. Build its 20 offsets and 19
+// records as balanced four-entry blocks: this avoids the prior recursive
+// prefix chain, whose temporary byte copies grew quadratically.
+fn g1_predefined_type_offsets() -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_predefined_type_offsets_0_to_3(), g1_predefined_type_offsets_4_to_7(),
+            g1_predefined_type_offsets_8_to_11(), g1_predefined_type_offsets_12_to_15(),
+        ),
+        g1_predefined_type_offsets_16_to_19(),
+    )
+}
+
+fn g1_predefined_type_offsets_0_to_3() -> Bytes { g1_concat4(u32_le_bytes(0), u32_le_bytes(8), u32_le_bytes(16), u32_le_bytes(24)) }
+fn g1_predefined_type_offsets_4_to_7() -> Bytes { g1_concat4(u32_le_bytes(32), u32_le_bytes(40), u32_le_bytes(48), u32_le_bytes(56)) }
+fn g1_predefined_type_offsets_8_to_11() -> Bytes { g1_concat4(u32_le_bytes(64), u32_le_bytes(72), u32_le_bytes(80), u32_le_bytes(88)) }
+fn g1_predefined_type_offsets_12_to_15() -> Bytes { g1_concat4(u32_le_bytes(96), u32_le_bytes(104), u32_le_bytes(112), u32_le_bytes(120)) }
+fn g1_predefined_type_offsets_16_to_19() -> Bytes { g1_concat4(u32_le_bytes(128), u32_le_bytes(136), u32_le_bytes(144), u32_le_bytes(152)) }
+
+fn g1_predefined_type_records() -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_predefined_type_records_0_to_3(), g1_predefined_type_records_4_to_7(),
+            g1_predefined_type_records_8_to_11(), g1_predefined_type_records_12_to_15(),
+        ),
+        g1_predefined_type_records_16_to_18(),
+    )
+}
+
+fn g1_predefined_type_record(tag: u8) -> Bytes { g1_variable_record(tag, g1_scalar_type_flags(tag), __g1_bytes_from_array_move([])) }
+fn g1_predefined_type_records_0_to_3() -> Bytes { g1_concat4(g1_predefined_type_record(0), g1_predefined_type_record(1), g1_predefined_type_record(2), g1_predefined_type_record(3)) }
+fn g1_predefined_type_records_4_to_7() -> Bytes { g1_concat4(g1_predefined_type_record(4), g1_predefined_type_record(5), g1_predefined_type_record(6), g1_predefined_type_record(7)) }
+fn g1_predefined_type_records_8_to_11() -> Bytes { g1_concat4(g1_predefined_type_record(8), g1_predefined_type_record(9), g1_predefined_type_record(10), g1_predefined_type_record(11)) }
+fn g1_predefined_type_records_12_to_15() -> Bytes { g1_concat4(g1_predefined_type_record(12), g1_predefined_type_record(13), g1_predefined_type_record(14), g1_predefined_type_record(15)) }
+fn g1_predefined_type_records_16_to_18() -> Bytes { g1_concat3(g1_predefined_type_record(16), g1_predefined_type_record(17), g1_predefined_type_record(18)) }
+
+fn g1_scalar_type_flags(tag: u8) -> u8 {
+    handle tag == 0 {
+        true => 19,
+        false => handle tag == 1 {
+            true => 2,
+            false => 17,
+            _ => 0,
+        },
+        _ => 0,
+    }
+}
+
+pub fn g1_predefined_type_table_is_canonical() -> Bool {
+    let table = g1_predefined_type_table();
+    handle __g1_bytes_len(table) == 236 {
+        true => handle __g1_bytes_get(table, 0) == 19 {
+            true => handle __g1_bytes_get(table, 80) == 152 {
+                true => handle __g1_bytes_get(table, 84) == 0 {
+                    true => handle __g1_bytes_get(table, 85) == 19 {
+                        true => handle __g1_bytes_get(table, 92) == 1 {
+                            true => handle __g1_bytes_get(table, 93) == 2 {
+                                true => handle __g1_bytes_get(table, 228) == 18 {
+                                    true => __g1_bytes_get(table, 229) == 17,
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// The fixed directory skeleton: all fourteen mandatory entries and their
+// canonical widths. It is intentionally not a verified artifact yet: G1
+// requires the predefined type and string tables even for a library with no
+// user definitions. The later table encoder fills those section payloads.
+pub fn g1_empty_directory_skeleton() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_empty_header(), g1_empty_directory_entry(1, 0)),
+                            g1_empty_directory_entry(2, 0),
+                        ),
+                        g1_empty_directory_entry(3, 0),
+                    ),
+                    g1_empty_directory_entry(4, 0),
+                ),
+                g1_empty_directory_entry(5, 24),
+            ),
+            g1_empty_directory_entry(6, 0),
+        ),
+        g1_remaining_empty_directory_entries(),
+    )
+}
+
+fn g1_remaining_empty_directory_entries() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_empty_directory_entry(7, 0), g1_empty_directory_entry(8, 64)),
+                            g1_empty_directory_entry(9, 4),
+                        ),
+                        g1_empty_directory_entry(10, 4),
+                    ),
+                    g1_empty_directory_entry(11, 24),
+                ),
+                g1_empty_directory_entry(12, 16),
+            ),
+            g1_empty_directory_entry(13, 16),
+        ),
+        g1_empty_directory_entry(14, 0),
+    )
+}
+
+fn g1_empty_directory_entry(id: u32, width: u32) -> Bytes {
+    g1_directory_entry(id, 512, 0, 0, width)
+}
+
+// A directory entry is emitted from section metadata, not copied from a
+// template.  All G1 sections are critical in the current schema; payload
+// encoders determine the remaining four variable fields.
+pub fn g1_directory_entry(id: u32, offset: u64, byte_length: u64, count: u32, width: u32) -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(u32_le_bytes(id), u32_le_bytes(1)),
+            g1_append_field(u64_le_bytes(offset), u64_le_bytes(byte_length)),
+        ),
+        g1_append_field(u32_le_bytes(count), u32_le_bytes(width)),
+    )
+}
+
+pub fn g1_section(id: u32) -> G1Section {
+    handle id {
+        1 => G1Section::Strings,
+        2 => G1Section::Types,
+        3 => G1Section::Constants,
+        4 => G1Section::Signatures,
+        5 => G1Section::Implementations,
+        6 => G1Section::Protocols,
+        7 => G1Section::Handlers,
+        8 => G1Section::Functions,
+        9 => G1Section::Code,
+        10 => G1Section::References,
+        11 => G1Section::Cleanup,
+        12 => G1Section::Resumption,
+        13 => G1Section::Debug,
+        14 => G1Section::SourceMap,
+        _ => G1Section::Unknown,
+    }
+}
+
+// All current G1 sections start on the canonical eight-byte boundary.  A
+// width of zero denotes a variable-record section; otherwise count × width
+// is an exact structural obligation independent of payload semantics.
+pub fn admit_g1_directory_entry(id: u32, offset: u64, byte_length: u64, count: u32, width: u32) -> G1SectionAdmission {
+    handle g1_section(id) {
+        G1Section::Unknown => G1SectionAdmission::UnknownSection,
+        section => admit_known_g1_directory_entry(section, offset, byte_length, count, width),
+    }
+}
+
+fn admit_known_g1_directory_entry(section: G1Section, offset: u64, byte_length: u64, count: u32, width: u32) -> G1SectionAdmission {
+    handle g1_offset_is_aligned(offset) {
+        false => G1SectionAdmission::Misaligned,
+        true => admit_aligned_g1_directory_entry(section, byte_length, count, width),
+        _ => G1SectionAdmission::Misaligned,
+    }
+}
+
+fn g1_offset_is_aligned(offset: u64) -> Bool {
+    // An unsigned right shift floors division by eight.  Reconstructing the
+    // value through the manifest-bound u64 multiply avoids an unlowered `%`
+    // operator while preserving the exact alignment predicate.
+    __g1_int_wrapping_mul<u64>(
+        __g1_int_shr<u64>(offset, 3),
+        __g1_int_convert_wrapping_to_u64<u32>(8),
+    ) == offset
+}
+
+fn admit_aligned_g1_directory_entry(section: G1Section, byte_length: u64, count: u32, width: u32) -> G1SectionAdmission {
+    handle width == 0 {
+        true => G1SectionAdmission::Value(section),
+        false => admit_fixed_g1_directory_entry(section, byte_length, count, width),
+        _ => G1SectionAdmission::InvalidFixedExtent,
+    }
+}
+
+fn admit_fixed_g1_directory_entry(section: G1Section, byte_length: u64, count: u32, width: u32) -> G1SectionAdmission {
+    handle byte_length == __g1_int_wrapping_mul<u64>(__g1_int_convert_wrapping_to_u64<u32>(count), __g1_int_convert_wrapping_to_u64<u32>(width)) {
+        true => G1SectionAdmission::Value(section),
+        false => G1SectionAdmission::InvalidFixedExtent,
+        _ => G1SectionAdmission::InvalidFixedExtent,
+    }
+}
+
+pub fn g1_directory_entry_is_canonical() -> Bool {
+    let entry = g1_directory_entry(9, 600, 12, 3, 4);
+    handle __g1_bytes_len(entry) == 32 {
+        true => handle __g1_bytes_get(entry, 0) == 9 {
+            true => handle __g1_bytes_get(entry, 4) == 1 {
+                true => handle __g1_bytes_get(entry, 8) == 88 {
+                    true => handle __g1_bytes_get(entry, 9) == 2 {
+                        true => handle __g1_bytes_get(entry, 16) == 12 {
+                            true => handle __g1_bytes_get(entry, 24) == 3 {
+                                true => __g1_bytes_get(entry, 28) == 4,
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn g1_empty_directory_skeleton_has_expected_length() -> Bool {
+    __g1_bytes_len(g1_empty_directory_skeleton()) == 512
+}
+// Canonical default G1 library candidate with every empty variable table's
+// required record header and all predefined scalar types.
+// The minimal library is constructed entirely from source-owned G1 fields and
+// payload encoders.  It is independently verified by the artifact gate.
+pub fn g1_minimal_library_candidate() -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_minimal_library_directory(), g1_empty_string_table(),
+            g1_four_zero_padding_bytes(), g1_predefined_type_table(),
+        ),
+        g1_append_field(g1_four_zero_padding_bytes(), g1_minimal_library_empty_variable_sections()),
+    )
+}
+
+pub fn g1_minimal_library_candidate_has_expected_length() -> Bool {
+    __g1_bytes_len(g1_minimal_library_candidate()) == 808
+}
+fn g1_unit_entry_directory(name: Bytes) -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_header(0, 1, 1, 936), g1_directory_entry(1, 512, g1_usize_as_u64(__g1_int_wrapping_add<usize>(16, __g1_bytes_len(name))), 1, 0)),
+                            g1_directory_entry(2, 536, 236, 19, 0),
+                        ),
+                        g1_directory_entry(3, 776, 8, 0, 0),
+                    ),
+                    g1_directory_entry(4, 784, 32, 1, 0),
+                ),
+                g1_directory_entry(5, 816, 0, 0, 24),
+            ),
+            g1_directory_entry(6, 816, 8, 0, 0),
+        ),
+        g1_unit_entry_directory_tail(),
+    )
+}
+
+fn g1_unit_entry_directory_tail() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_directory_entry(7, 824, 8, 0, 0), g1_directory_entry(8, 832, 64, 1, 64)),
+                            g1_directory_entry(9, 896, 8, 2, 4),
+                        ),
+                        g1_directory_entry(10, 904, 0, 0, 4),
+                    ),
+                    g1_directory_entry(11, 904, 24, 1, 24),
+                ),
+                g1_directory_entry(12, 928, 0, 0, 16),
+            ),
+            g1_directory_entry(13, 928, 0, 0, 16),
+        ),
+        g1_directory_entry(14, 928, 8, 0, 0),
+    )
+}
+
+
+fn g1_unit_entry_name_table(name: Bytes) -> Bytes { g1_single_string_table(name) }
+
+fn g1_unit_entry_name_slot(name: Bytes) -> Bytes {
+    g1_append_field(g1_unit_entry_name_table(name), g1_unit_entry_name_padding(name))
+}
+
+fn g1_unit_entry_name_padding(name: Bytes) -> Bytes {
+    g1_zero_bytes(g1_name_padding_length(__g1_bytes_len(name)))
+}
+
+fn g1_zero_bytes(count: usize) -> Bytes {
+    handle count == 0 {
+        true => __g1_bytes_from_array_move([]),
+        false => __g1_bytes_concat(__g1_bytes_from_array_move([0]), g1_zero_bytes(__g1_int_wrapping_sub<usize>(count, 1))),
+        _ => __g1_bytes_from_array_move([]),
+    }
+}
+
+// Variable record sections begin on an eight-byte boundary.  The string
+// table has a fixed sixteen-byte record prefix, so only the name payload's
+// remainder determines the required canonical zero padding.
+fn g1_name_padding_length(length: usize) -> usize {
+    handle length < 8 {
+        true => g1_name_padding_remainder(length),
+        false => g1_name_padding_length(__g1_int_wrapping_sub<usize>(length, 8)),
+        _ => 0,
+    }
+}
+
+fn g1_name_padding_remainder(remainder: usize) -> usize {
+    handle remainder == 0 { true => 0, false => g1_name_padding_one(remainder), _ => 0 }
+}
+fn g1_name_padding_one(remainder: usize) -> usize {
+    handle remainder == 1 { true => 7, false => g1_name_padding_two(remainder), _ => 0 }
+}
+fn g1_name_padding_two(remainder: usize) -> usize {
+    handle remainder == 2 { true => 6, false => g1_name_padding_three(remainder), _ => 0 }
+}
+fn g1_name_padding_three(remainder: usize) -> usize {
+    handle remainder == 3 { true => 5, false => g1_name_padding_four(remainder), _ => 0 }
+}
+fn g1_name_padding_four(remainder: usize) -> usize {
+    handle remainder == 4 { true => 4, false => g1_name_padding_five(remainder), _ => 0 }
+}
+fn g1_name_padding_five(remainder: usize) -> usize {
+    handle remainder == 5 { true => 3, false => g1_name_padding_six(remainder), _ => 0 }
+}
+fn g1_name_padding_six(remainder: usize) -> usize {
+    handle remainder == 6 { true => 2, false => 1, _ => 0 }
+}
+
+fn g1_unit_entry_signature_table() -> Bytes {
+    g1_single_variable_record_section(
+        0,
+        0,
+        g1_append_field(g1_append_field(u32_le_bytes(0), u32_le_bytes(0)), u32_le_bytes(0)),
+    )
+}
+
+fn g1_unit_entry_function_table() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(
+                                g1_append_field(
+                                    g1_append_field(
+                                        g1_append_field(
+                                            g1_append_field(g1_append_field(u32_le_bytes(0), u32_le_bytes(0)), u32_le_bytes(0)),
+                                            u32_le_bytes(1),
+                                        ),
+                                        u32_le_bytes(0),
+                                    ),
+                                    u32_le_bytes(2),
+                                ),
+                                u32_le_bytes(1),
+                            ),
+                            u32_le_bytes(0),
+                        ),
+                        u32_le_bytes(1),
+                    ),
+                    u32_le_bytes(0),
+                ),
+                u32_le_bytes(0),
+            ),
+            u32_le_bytes(4294967295),
+        ),
+        g1_append_field(u64_le_bytes(0), u64_le_bytes(0)),
+    )
+}
+
+fn g1_unit_entry_code() -> Bytes {
+    g1_append_field(u32_le_bytes(4134), u32_le_bytes(4294967295))
+}
+
+fn g1_unit_entry_cleanup_table() -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(u32_le_bytes(0), u32_le_bytes(0)),
+            u32_le_bytes(1),
+        ),
+        g1_append_field(g1_append_field(u32_le_bytes(0), u32_le_bytes(0)), u32_le_bytes(0)),
+    )
+}
+
+fn g1_i64_entry_directory() -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_header(0, 1, 1, 1008), g1_directory_entry(1, 512, 20, 1, 0),
+            g1_directory_entry(2, 536, 236, 19, 0), g1_directory_entry(3, 776, 28, 1, 0),
+        ),
+        g1_concat4(
+            g1_directory_entry(4, 808, 32, 1, 0), g1_directory_entry(5, 840, 0, 0, 24),
+            g1_directory_entry(6, 840, 8, 0, 0), g1_i64_entry_directory_tail(),
+        ),
+    )
+}
+
+fn g1_i64_entry_directory_tail() -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_directory_entry(7, 848, 8, 0, 0), g1_directory_entry(8, 856, 64, 1, 64),
+            g1_directory_entry(9, 920, 20, 5, 4), g1_directory_entry(10, 944, 4, 1, 4),
+        ),
+        g1_concat4(
+            g1_directory_entry(11, 952, 48, 2, 24), g1_directory_entry(12, 1000, 0, 0, 16),
+            g1_directory_entry(13, 1000, 0, 0, 16), g1_directory_entry(14, 1000, 8, 0, 0),
+        ),
+    )
+}
+
+fn g1_i64_entry_signature_table() -> Bytes {
+    g1_single_variable_record_section(0, 0, g1_concat3(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0)))
+}
+
+fn g1_i64_entry_function_table() -> Bytes {
+    g1_concat4(
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(2)),
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(5), u32_le_bytes(2), u32_le_bytes(0)),
+        g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)),
+        g1_append_field(u64_le_bytes(0), u64_le_bytes(0)),
+    )
+}
+
+fn g1_i64_entry_code() -> Bytes {
+    // Const r1, constant[0]; Return Unit. Instruction words carry an operand
+    // count in bits 12 through 19, followed by their fixed operands.
+    g1_concat4(
+        g1_append_field(u32_le_bytes(8193), u32_le_bytes(1)),
+        g1_append_field(u32_le_bytes(0), u32_le_bytes(4134)),
+        u32_le_bytes(4294967295),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+fn g1_i64_entry_cleanup_table() -> Bytes {
+    // The return boundary owns the scalar loaded into r1.
+    g1_append_field(
+        g1_append_field(
+            g1_concat4(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(1), u32_le_bytes(0)),
+            g1_append_field(u32_le_bytes(0), u32_le_bytes(0)),
+        ),
+        g1_append_field(
+            g1_concat4(u32_le_bytes(0), u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(0)),
+            g1_append_field(u32_le_bytes(1), u32_le_bytes(0)),
+        ),
+    )
+}
+
+// The first scalar executable uses the common G1 constant envelope plus a
+// register-backed return. It is intentionally separate from the unit seed
+// until arbitrary MIR layout is encoded.
+pub fn g1_i64_entry_candidate(value: i64) -> Bytes {
+    g1_concat3(
+        g1_concat8(
+            g1_i64_entry_directory(), g1_unit_entry_name_table(__g1_bytes_from_array_move([109, 97, 105, 110])),
+            g1_four_zero_padding_bytes(), g1_predefined_type_table(),
+            g1_four_zero_padding_bytes(), g1_i64_constant_table(value),
+            g1_four_zero_padding_bytes(), g1_i64_entry_signature_table(),
+        ),
+        g1_append_field(g1_append_field(g1_empty_variable_table(), g1_empty_variable_table()), g1_i64_entry_function_table()),
+        g1_concat4(
+            g1_i64_entry_code(), g1_four_zero_padding_bytes(),
+            g1_append_field(u32_le_bytes(1), g1_four_zero_padding_bytes()),
+            g1_append_field(g1_i64_entry_cleanup_table(), g1_empty_variable_table()),
+        ),
+    )
+}
+
+pub fn g1_i64_entry_candidate_has_expected_length() -> Bool { __g1_bytes_len(g1_i64_entry_candidate(42)) == 1008 }
+
+// An executable G1 image must enter through a zero-argument Unit function.
+// Scalar source declarations therefore become a private i64 callee behind
+// that entry instead of pretending that the scalar function itself is an
+// executable entrypoint.  Keeping both functions in one artifact is the
+// first real call edge emitted by the source backend.
+fn g1_i64_callable_directory() -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_header(0, 1, 1, 1168), g1_directory_entry(1, 512, 20, 1, 0),
+            g1_directory_entry(2, 536, 236, 19, 0), g1_directory_entry(3, 776, 28, 1, 0),
+        ),
+        g1_concat4(
+            g1_directory_entry(4, 808, 56, 2, 0), g1_directory_entry(5, 864, 0, 0, 24),
+            g1_directory_entry(6, 864, 8, 0, 0), g1_i64_callable_directory_tail(),
+        ),
+    )
+}
+
+fn g1_i64_callable_directory_tail() -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_directory_entry(7, 872, 8, 0, 0), g1_directory_entry(8, 880, 128, 2, 64),
+            g1_directory_entry(9, 1008, 48, 12, 4), g1_directory_entry(10, 1056, 4, 1, 4),
+        ),
+        g1_concat4(
+            g1_directory_entry(11, 1064, 96, 4, 24), g1_directory_entry(12, 1160, 0, 0, 16),
+            g1_directory_entry(13, 1160, 0, 0, 16), g1_directory_entry(14, 1160, 8, 0, 0),
+        ),
+    )
+}
+
+fn g1_i64_callable_signature_table() -> Bytes {
+    let unit = g1_variable_record(0, 0, g1_concat3(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0)));
+    let scalar = g1_variable_record(0, 0, g1_concat3(u32_le_bytes(0), u32_le_bytes(10), u32_le_bytes(0)));
+    g1_append_field(
+        g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(20), u32_le_bytes(40)),
+        g1_append_field(unit, scalar),
+    )
+}
+
+fn g1_i64_callable_function_table() -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_concat4(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(2)),
+            g1_concat4(u32_le_bytes(0), u32_le_bytes(7), u32_le_bytes(2), u32_le_bytes(0)),
+            g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)),
+            g1_append_field(u64_le_bytes(0), u64_le_bytes(0)),
+        ),
+        g1_concat4(
+            g1_concat4(u32_le_bytes(0), u32_le_bytes(1), u32_le_bytes(0), u32_le_bytes(2)),
+            g1_concat4(u32_le_bytes(7), u32_le_bytes(5), u32_le_bytes(2), u32_le_bytes(2)),
+            g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)),
+            g1_append_field(u64_le_bytes(0), u64_le_bytes(0)),
+        ),
+    )
+}
+
+fn g1_i64_callable_code() -> Bytes {
+    // Call function[1] into r1, then return Unit from the executable entry.
+    // The callee loads constant[0] and returns its r1.
+    g1_concat4(
+        g1_concat4(u32_le_bytes(16418), u32_le_bytes(1), u32_le_bytes(1), u32_le_bytes(0)),
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(4134), u32_le_bytes(4294967295), u32_le_bytes(8193)),
+        g1_append_field(u32_le_bytes(1), u32_le_bytes(0)),
+        g1_append_field(u32_le_bytes(4134), u32_le_bytes(1)),
+    )
+}
+
+fn g1_i64_callable_cleanup_table() -> Bytes {
+    // Two contiguous plans per function cover every instruction boundary.
+    g1_append_field(
+        g1_i64_callable_cleanup_plan(0, 0, 1, 0, 0),
+        g1_i64_callable_cleanup_plan(0, 1, 2, 0, 1),
+    )
+}
+
+fn g1_i64_callable_cleanup_tail() -> Bytes {
+    g1_append_field(
+        g1_i64_callable_cleanup_plan(1, 0, 1, 0, 0),
+        g1_i64_callable_cleanup_plan(1, 1, 2, 0, 1),
+    )
+}
+
+fn g1_i64_callable_cleanup_plan(function: u32, first: u32, end: u32, operand_start: u32, operand_count: u32) -> Bytes {
+    g1_concat3(
+        g1_concat4(u32_le_bytes(function), u32_le_bytes(first), u32_le_bytes(end), u32_le_bytes(operand_start)),
+        g1_append_field(u32_le_bytes(operand_count), u32_le_bytes(0)),
+        __g1_bytes_from_array_move([]),
+    )
+}
+
+pub fn g1_i64_callable_candidate(value: i64) -> Bytes {
+    g1_concat3(
+        g1_concat8(
+            g1_i64_callable_directory(), g1_unit_entry_name_table(__g1_bytes_from_array_move([109, 97, 105, 110])),
+            g1_four_zero_padding_bytes(), g1_predefined_type_table(),
+            g1_four_zero_padding_bytes(), g1_i64_constant_table(value),
+            g1_four_zero_padding_bytes(), g1_i64_callable_signature_table(),
+        ),
+        g1_append_field(g1_append_field(g1_empty_variable_table(), g1_empty_variable_table()), g1_i64_callable_function_table()),
+        g1_concat4(
+            g1_i64_callable_code(), g1_append_field(u32_le_bytes(1), g1_four_zero_padding_bytes()),
+            g1_append_field(g1_i64_callable_cleanup_table(), g1_i64_callable_cleanup_tail()),
+            g1_empty_variable_table(),
+        ),
+    )
+}
+
+pub fn g1_i64_callable_candidate_has_expected_length() -> Bool { __g1_bytes_len(g1_i64_callable_candidate(42)) == 1168 }
+
+pub fn g1_i64_callable_candidate_passes_source_verification() -> Bool {
+    verify_g1_i64_callable_candidate(g1_i64_callable_candidate(42), 42)
+}
+
+fn verify_g1_i64_callable_candidate(bytes: Bytes, value: i64) -> Bool {
+    handle verify_g1_i64_callable_artifact(bytes) {
+        true => g1_i64_entry_payload_matches(bytes, u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(value))),
+        false => false,
+        _ => false,
+    }
+}
+
+// Every eight-byte i64 payload is a valid two's-complement scalar. This
+// verifier therefore validates the complete fixed callable shape independently
+// of its value; the value-sensitive candidate path above additionally checks
+// that a requested source value occupies that payload.
+pub fn verify_g1_i64_callable_artifact(bytes: Bytes) -> Bool {
+    handle g1_candidate_has_length_and_directory(bytes, 1168) {
+        true => handle g1_magic_bytes_match(bytes) {
+            true => handle __g1_bytes_get(bytes, 56) == 144 {
+                true => handle __g1_bytes_get(bytes, 57) == 4 {
+                    true => verify_g1_i64_callable_code_and_cleanup(bytes),
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_callable_code_and_cleanup(bytes: Bytes) -> Bool {
+    handle __g1_bytes_get(bytes, 1008) == 34 {
+        true => handle __g1_bytes_get(bytes, 1009) == 64 {
+            true => handle __g1_bytes_get(bytes, 1012) == 1 {
+                true => handle __g1_bytes_get(bytes, 1016) == 1 {
+                    true => handle __g1_bytes_get(bytes, 1036) == 1 {
+                        true => handle __g1_bytes_get(bytes, 1037) == 32 {
+                            true => handle __g1_bytes_get(bytes, 1040) == 1 {
+                                true => handle __g1_bytes_get(bytes, 1052) == 1 {
+                                    true => handle __g1_bytes_get(bytes, 1056) == 1 {
+                                        true => __g1_bytes_get(bytes, 1120) == 1,
+                                        false => false,
+                                        _ => false,
+                                    },
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// Publication stays behind a source-owned shape check; the conformance probe
+// additionally sends this result through the independent Rust G1 verifier.
+pub fn emit_g1_i64_callable(value: i64) -> ArtifactEmission {
+    let candidate = g1_i64_callable_candidate(value);
+    handle verify_g1_i64_callable_candidate(candidate, value) {
+        true => ArtifactEmission::Artifact(candidate),
+        false => ArtifactEmission::Rejected,
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+fn g1_i64_binary_constant_table(first: i64, second: i64) -> Bytes {
+    let first_record = g1_variable_record(10, 0, u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(first)));
+    let second_record = g1_variable_record(10, 0, u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(second)));
+    g1_append_field(
+        g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(16), u32_le_bytes(32)),
+        g1_append_field(first_record, second_record),
+    )
+}
+
+fn g1_i64_wire_less_or_equal(left: i64, right: i64) -> Bool {
+    g1_i64_wire_less_or_equal_at(u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(left)), u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(right)), 0)
+}
+
+fn g1_i64_wire_less_or_equal_at(left: Bytes, right: Bytes, index: usize) -> Bool {
+    handle index == 8 {
+        true => true,
+        false => {
+            let left_byte = __g1_int_convert_wrapping_to_u32<u8>(__g1_bytes_get(left, index));
+            let right_byte = __g1_int_convert_wrapping_to_u32<u8>(__g1_bytes_get(right, index));
+            handle left_byte < right_byte {
+                true => true,
+                false => handle left_byte > right_byte {
+                    true => false,
+                    false => g1_i64_wire_less_or_equal_at(left, right, __g1_int_wrapping_add<usize>(index, 1)),
+                    _ => false,
+                },
+                _ => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_directory() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_header(0, 1, 1, 1280), g1_directory_entry(1, 512, 20, 1, 0), g1_directory_entry(2, 536, 236, 19, 0), g1_directory_entry(3, 776, 48, 2, 0)),
+        g1_concat4(g1_directory_entry(4, 824, 56, 2, 0), g1_directory_entry(5, 880, 0, 0, 24), g1_directory_entry(6, 880, 8, 0, 0), g1_i64_binary_directory_tail()),
+    )
+}
+
+fn g1_i64_binary_directory_tail() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_directory_entry(7, 888, 8, 0, 0), g1_directory_entry(8, 896, 128, 2, 64), g1_directory_entry(9, 1024, 80, 20, 4), g1_directory_entry(10, 1104, 24, 6, 4)),
+        g1_concat4(g1_directory_entry(11, 1128, 144, 6, 24), g1_directory_entry(12, 1272, 0, 0, 16), g1_directory_entry(13, 1272, 0, 0, 16), g1_directory_entry(14, 1272, 8, 0, 0)),
+    )
+}
+
+fn g1_i64_binary_duplicate_directory() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_header(0, 1, 1, 1264), g1_directory_entry(1, 512, 20, 1, 0), g1_directory_entry(2, 536, 236, 19, 0), g1_directory_entry(3, 776, 28, 1, 0)),
+        g1_concat4(g1_directory_entry(4, 808, 56, 2, 0), g1_directory_entry(5, 864, 0, 0, 24), g1_directory_entry(6, 864, 8, 0, 0), g1_i64_binary_duplicate_directory_tail()),
+    )
+}
+
+fn g1_i64_binary_duplicate_directory_tail() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_directory_entry(7, 872, 8, 0, 0), g1_directory_entry(8, 880, 128, 2, 64), g1_directory_entry(9, 1008, 80, 20, 4), g1_directory_entry(10, 1088, 24, 6, 4)),
+        g1_concat4(g1_directory_entry(11, 1112, 144, 6, 24), g1_directory_entry(12, 1256, 0, 0, 16), g1_directory_entry(13, 1256, 0, 0, 16), g1_directory_entry(14, 1256, 8, 0, 0)),
+    )
+}
+
+// A binary source function is represented as a genuine two-argument callee:
+// the Unit entry materializes the requested invocation values, passes r1/r2,
+// and the callee applies the primitive to its parameter registers. Keeping
+// that call boundary in the artifact is required for later general function
+// lowering; it is not a folded-expression shortcut.
+fn g1_i64_binary_call_directory() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_header(0, 1, 1, 1288), g1_directory_entry(1, 512, 20, 1, 0), g1_directory_entry(2, 536, 236, 19, 0), g1_directory_entry(3, 776, 48, 2, 0)),
+        g1_concat4(g1_directory_entry(4, 824, 64, 2, 0), g1_directory_entry(5, 888, 0, 0, 24), g1_directory_entry(6, 888, 8, 0, 0), g1_i64_binary_call_directory_tail()),
+    )
+}
+
+fn g1_i64_binary_call_directory_tail() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_directory_entry(7, 896, 8, 0, 0), g1_directory_entry(8, 904, 128, 2, 64), g1_directory_entry(9, 1032, 80, 20, 4), g1_directory_entry(10, 1112, 24, 6, 4)),
+        g1_concat4(g1_directory_entry(11, 1136, 144, 6, 24), g1_directory_entry(12, 1280, 0, 0, 16), g1_directory_entry(13, 1280, 0, 0, 16), g1_directory_entry(14, 1280, 8, 0, 0)),
+    )
+}
+
+fn g1_i64_binary_call_signature_table() -> Bytes {
+    let unit = g1_variable_record(0, 0, g1_concat3(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0)));
+    let binary = g1_variable_record(0, 0, g1_append_field(g1_concat4(u32_le_bytes(2), u32_le_bytes(10), u32_le_bytes(0), u32_le_bytes(10)), u32_le_bytes(10)));
+    g1_append_field(g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(20), u32_le_bytes(48)), g1_append_field(unit, binary))
+}
+
+fn g1_i64_binary_call_function_table() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_concat4(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4)), g1_concat4(u32_le_bytes(0), u32_le_bytes(13), u32_le_bytes(4), u32_le_bytes(0)), g1_concat4(u32_le_bytes(4), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)), g1_append_field(u64_le_bytes(0), u64_le_bytes(0))),
+        g1_concat4(g1_concat4(u32_le_bytes(0), u32_le_bytes(1), u32_le_bytes(0), u32_le_bytes(4)), g1_concat4(u32_le_bytes(13), u32_le_bytes(7), u32_le_bytes(2), u32_le_bytes(4)), g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)), g1_append_field(u64_le_bytes(0), u64_le_bytes(0))),
+    )
+}
+
+fn g1_i64_binary_call_code(operation: G1I64Arithmetic, left_constant: u32, right_constant: u32) -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_concat4(u32_le_bytes(8193), u32_le_bytes(1), u32_le_bytes(left_constant), u32_le_bytes(8193)),
+            g1_concat4(u32_le_bytes(2), u32_le_bytes(right_constant), u32_le_bytes(16418), u32_le_bytes(3)),
+            g1_concat4(u32_le_bytes(1), u32_le_bytes(0), u32_le_bytes(2), u32_le_bytes(4134)),
+            g1_concat4(u32_le_bytes(4294967295), u32_le_bytes(16453), u32_le_bytes(3), u32_le_bytes(g1_i64_binary_primitive(operation))),
+        ),
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(2), u32_le_bytes(4134), u32_le_bytes(3)),
+    )
+}
+
+fn g1_i64_binary_call_cleanup_table() -> Bytes {
+    g1_concat3(
+        g1_append_field(g1_i64_binary_cleanup_plan(0, 0, 1, 2, 0), g1_i64_binary_cleanup_plan(0, 1, 2, 2, 1)),
+        g1_append_field(g1_i64_binary_cleanup_plan(0, 2, 3, 3, 2), g1_i64_binary_cleanup_plan(0, 3, 4, 5, 1)),
+        g1_append_field(g1_i64_binary_cleanup_plan(1, 0, 1, 3, 2), g1_i64_binary_cleanup_plan(1, 1, 2, 5, 1)),
+    )
+}
+
+pub fn g1_i64_binary_call_candidate(operation: G1I64Arithmetic, left: i64, right: i64) -> Bytes {
+    handle g1_i64_wire_less_or_equal(left, right) {
+        true => g1_i64_binary_call_candidate_ordered(operation, left, right, 0, 1),
+        false => g1_i64_binary_call_candidate_ordered(operation, right, left, 1, 0),
+        _ => __g1_bytes_from_array_move([]),
+    }
+}
+
+pub fn g1_i64_binary_call_candidate_passes_source_verification() -> Bool {
+    verify_g1_i64_binary_call_candidate(g1_i64_binary_call_candidate(G1I64Arithmetic::Add, 20, 22), G1I64Arithmetic::Add, 20, 22)
+}
+
+fn verify_g1_i64_binary_call_candidate(bytes: Bytes, operation: G1I64Arithmetic, left: i64, right: i64) -> Bool {
+    handle g1_candidate_has_length_and_directory(bytes, 1288) {
+        true => handle g1_magic_bytes_match(bytes) {
+            true => handle __g1_bytes_get(bytes, 56) == 8 {
+                true => handle __g1_bytes_get(bytes, 57) == 5 {
+                    true => verify_g1_i64_binary_call_constants_and_signature(bytes, operation, left, right),
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// The generic file verifier validates the two-constant call layout without
+// requiring caller-supplied values. It retains canonical wire ordering and
+// permits only the two operand-reference permutations that encode a source
+// binary expression over that ordered pool.
+pub fn verify_g1_i64_binary_call_artifact(bytes: Bytes) -> Bool {
+    handle g1_candidate_has_length_and_directory(bytes, 1288) {
+        true => handle g1_magic_bytes_match(bytes) {
+            true => handle __g1_bytes_get(bytes, 56) == 8 {
+                true => handle __g1_bytes_get(bytes, 57) == 5 {
+                    true => verify_g1_i64_binary_call_generic_constants_and_code(bytes),
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_binary_call_generic_constants_and_code(bytes: Bytes) -> Bool {
+    handle g1_i64_wire_payload_less_or_equal(bytes, 800, 816, 0) {
+        true => handle g1_read_u32_le(bytes, 1040) {
+            G1U32Read::Value(left) => handle g1_read_u32_le(bytes, 1052) {
+                G1U32Read::Value(right) => handle g1_binary_operand_pair_is_valid(left, right) {
+                    true => verify_g1_i64_binary_call_generic_operation(bytes),
+                    false => false,
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_i64_wire_payload_less_or_equal(bytes: Bytes, left_offset: usize, right_offset: usize, index: usize) -> Bool {
+    handle index == 8 {
+        true => true,
+        false => {
+            let left = __g1_int_convert_wrapping_to_u32<u8>(__g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(left_offset, index)));
+            let right = __g1_int_convert_wrapping_to_u32<u8>(__g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(right_offset, index)));
+            handle left < right {
+                true => true,
+                false => handle left > right {
+                    true => false,
+                    false => g1_i64_wire_payload_less_or_equal(bytes, left_offset, right_offset, __g1_int_wrapping_add<usize>(index, 1)),
+                    _ => false,
+                },
+                _ => false,
+            }
+        },
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_binary_call_generic_operation(bytes: Bytes) -> Bool {
+    handle g1_read_u32_le(bytes, 1092) {
+        G1U32Read::Value(value) => handle value == 3 {
+            true => verify_g1_i64_binary_call_signature_and_code(bytes, G1I64Arithmetic::Divide),
+            false => handle value == 5 {
+                true => verify_g1_i64_binary_call_signature_and_code(bytes, G1I64Arithmetic::Add),
+                false => handle value == 6 {
+                    true => verify_g1_i64_binary_call_signature_and_code(bytes, G1I64Arithmetic::Subtract),
+                    false => handle value == 7 {
+                        true => verify_g1_i64_binary_call_signature_and_code(bytes, G1I64Arithmetic::Multiply),
+                        false => false,
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_binary_call_constants_and_signature(bytes: Bytes, operation: G1I64Arithmetic, left: i64, right: i64) -> Bool {
+    handle g1_i64_wire_less_or_equal(left, right) {
+        true => verify_g1_i64_binary_call_constant_order(bytes, left, right, operation),
+        false => verify_g1_i64_binary_call_constant_order(bytes, right, left, operation),
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_binary_call_constant_order(bytes: Bytes, first: i64, second: i64, operation: G1I64Arithmetic) -> Bool {
+    handle g1_i64_binary_first_payload_matches(bytes, u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(first))) {
+        true => handle g1_i64_binary_second_payload_matches(bytes, u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(second))) {
+            true => verify_g1_i64_binary_call_signature_and_code(bytes, operation),
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_first_payload_matches(bytes: Bytes, payload: Bytes) -> Bool {
+    g1_i64_binary_payload_matches_at(bytes, payload, 800)
+}
+
+fn g1_i64_binary_second_payload_matches(bytes: Bytes, payload: Bytes) -> Bool {
+    g1_i64_binary_payload_matches_at(bytes, payload, 816)
+}
+
+fn g1_i64_binary_payload_matches_at(bytes: Bytes, payload: Bytes, offset: usize) -> Bool {
+    handle __g1_bytes_get(bytes, offset) == __g1_bytes_get(payload, 0) {
+        true => handle __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 1)) == __g1_bytes_get(payload, 1) {
+            true => handle __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 2)) == __g1_bytes_get(payload, 2) {
+                true => handle __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 3)) == __g1_bytes_get(payload, 3) {
+                    true => handle __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 4)) == __g1_bytes_get(payload, 4) {
+                        true => handle __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 5)) == __g1_bytes_get(payload, 5) {
+                            true => handle __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 6)) == __g1_bytes_get(payload, 6) {
+                                true => __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(offset, 7)) == __g1_bytes_get(payload, 7),
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_binary_call_signature_and_code(bytes: Bytes, operation: G1I64Arithmetic) -> Bool {
+    handle __g1_bytes_get(bytes, 824) == 2 {
+        true => handle __g1_bytes_get(bytes, 868) == 2 {
+            true => handle __g1_bytes_get(bytes, 872) == 10 {
+                true => handle __g1_bytes_get(bytes, 876) == 0 {
+                    true => handle __g1_bytes_get(bytes, 880) == 10 {
+                        true => handle __g1_bytes_get(bytes, 884) == 10 {
+                            true => verify_g1_i64_binary_call_code_and_cleanup(bytes, operation),
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_binary_call_code_and_cleanup(bytes: Bytes, operation: G1I64Arithmetic) -> Bool {
+    handle __g1_bytes_get(bytes, 1032) == 1 {
+        true => handle __g1_bytes_get(bytes, 1033) == 32 {
+            true => handle __g1_bytes_get(bytes, 1056) == 34 {
+                true => handle __g1_bytes_get(bytes, 1057) == 64 {
+                    true => handle __g1_bytes_get(bytes, 1060) == 3 {
+                        true => handle __g1_bytes_get(bytes, 1064) == 1 {
+                            true => handle __g1_bytes_get(bytes, 1072) == 2 {
+                                true => handle __g1_bytes_get(bytes, 1084) == 69 {
+                                    true => handle __g1_bytes_get(bytes, 1085) == 64 {
+                                        true => handle __g1_bytes_get(bytes, 1092) == __g1_int_convert_wrapping_to_u8<u32>(g1_i64_binary_primitive(operation)) {
+                                            true => handle __g1_bytes_get(bytes, 1112) == 1 {
+                                                true => handle __g1_bytes_get(bytes, 1232) == 1 {
+                                                    true => __g1_bytes_get(bytes, 1248) == 2,
+                                                    false => false,
+                                                    _ => false,
+                                                },
+                                                false => false,
+                                                _ => false,
+                                            },
+                                            false => false,
+                                            _ => false,
+                                        },
+                                        false => false,
+                                        _ => false,
+                                    },
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_call_candidate_ordered(operation: G1I64Arithmetic, first: i64, second: i64, left_constant: u32, right_constant: u32) -> Bytes {
+    g1_concat3(
+        g1_concat8(g1_i64_binary_call_directory(), g1_unit_entry_name_table(__g1_bytes_from_array_move([109, 97, 105, 110])), g1_four_zero_padding_bytes(), g1_predefined_type_table(), g1_four_zero_padding_bytes(), g1_i64_binary_constant_table(first, second), g1_i64_binary_call_signature_table(), g1_append_field(g1_empty_variable_table(), g1_empty_variable_table())),
+        g1_i64_binary_call_function_table(),
+        g1_concat4(g1_i64_binary_call_code(operation, left_constant, right_constant), g1_append_field(g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(2)), g1_append_field(u32_le_bytes(1), u32_le_bytes(3))), g1_i64_binary_call_cleanup_table(), g1_empty_variable_table()),
+    )
+}
+
+pub fn emit_g1_i64_binary_call(operation: G1I64Arithmetic, left: i64, right: i64) -> ArtifactEmission {
+    let candidate = g1_i64_binary_call_candidate(operation, left, right);
+    handle verify_g1_i64_binary_call_candidate(candidate, operation, left, right) {
+        true => ArtifactEmission::Artifact(candidate),
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+// First parameterized callee: the executable entry loads a scalar argument,
+// calls `fn(i64) -> i64`, and discards its result at the Unit boundary.
+fn g1_i64_identity_call_directory() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_header(0, 1, 1, 1176), g1_directory_entry(1, 512, 20, 1, 0), g1_directory_entry(2, 536, 236, 19, 0), g1_directory_entry(3, 776, 28, 1, 0)),
+        g1_concat4(g1_directory_entry(4, 808, 60, 2, 0), g1_directory_entry(5, 872, 0, 0, 24), g1_directory_entry(6, 872, 8, 0, 0), g1_i64_identity_call_directory_tail()),
+    )
+}
+
+fn g1_i64_identity_call_directory_tail() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_directory_entry(7, 880, 8, 0, 0), g1_directory_entry(8, 888, 128, 2, 64), g1_directory_entry(9, 1016, 48, 12, 4), g1_directory_entry(10, 1064, 8, 2, 4)),
+        g1_concat4(g1_directory_entry(11, 1072, 96, 4, 24), g1_directory_entry(12, 1168, 0, 0, 16), g1_directory_entry(13, 1168, 0, 0, 16), g1_directory_entry(14, 1168, 8, 0, 0)),
+    )
+}
+
+fn g1_i64_identity_call_signature_table() -> Bytes {
+    let unit = g1_variable_record(0, 0, g1_concat3(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0)));
+    let identity = g1_variable_record(0, 0, g1_concat4(u32_le_bytes(1), u32_le_bytes(10), u32_le_bytes(0), u32_le_bytes(10)));
+    g1_append_field(g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(20), u32_le_bytes(44)), g1_append_field(unit, identity))
+}
+
+fn g1_i64_identity_call_function_table() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_concat4(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(3)), g1_concat4(u32_le_bytes(0), u32_le_bytes(10), u32_le_bytes(3), u32_le_bytes(0)), g1_concat4(u32_le_bytes(3), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)), g1_append_field(u64_le_bytes(0), u64_le_bytes(0))),
+        g1_concat4(g1_concat4(u32_le_bytes(0), u32_le_bytes(1), u32_le_bytes(0), u32_le_bytes(2)), g1_concat4(u32_le_bytes(10), u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(3)), g1_concat4(u32_le_bytes(1), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)), g1_append_field(u64_le_bytes(0), u64_le_bytes(0))),
+    )
+}
+
+fn g1_i64_identity_call_code() -> Bytes {
+    g1_concat3(
+        g1_concat4(u32_le_bytes(8193), u32_le_bytes(1), u32_le_bytes(0), u32_le_bytes(16418)),
+        g1_concat4(u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(0), u32_le_bytes(1)),
+        g1_concat4(u32_le_bytes(4134), u32_le_bytes(4294967295), u32_le_bytes(4134), u32_le_bytes(1)),
+    )
+}
+
+fn g1_i64_identity_call_cleanup_table() -> Bytes {
+    g1_concat4(
+        g1_i64_binary_cleanup_plan(0, 0, 1, 0, 0), g1_i64_binary_cleanup_plan(0, 1, 2, 0, 1),
+        g1_i64_binary_cleanup_plan(0, 2, 3, 1, 1), g1_i64_binary_cleanup_plan(1, 0, 1, 0, 1),
+    )
+}
+
+pub fn g1_i64_identity_call_candidate(value: i64) -> Bytes {
+    g1_concat3(
+        g1_concat8(g1_i64_identity_call_directory(), g1_unit_entry_name_table(__g1_bytes_from_array_move([109, 97, 105, 110])), g1_four_zero_padding_bytes(), g1_predefined_type_table(), g1_four_zero_padding_bytes(), g1_i64_constant_table(value), g1_four_zero_padding_bytes(), g1_i64_identity_call_signature_table()),
+        g1_append_field(g1_four_zero_padding_bytes(), g1_append_field(g1_append_field(g1_empty_variable_table(), g1_empty_variable_table()), g1_i64_identity_call_function_table())),
+        g1_concat4(g1_i64_identity_call_code(), g1_append_field(u32_le_bytes(1), u32_le_bytes(2)), g1_i64_identity_call_cleanup_table(), g1_empty_variable_table()),
+    )
+}
+
+pub fn g1_i64_identity_call_candidate_passes_source_verification() -> Bool {
+    verify_g1_i64_identity_call_candidate(g1_i64_identity_call_candidate(42), 42)
+}
+
+fn verify_g1_i64_identity_call_candidate(bytes: Bytes, value: i64) -> Bool {
+    handle verify_g1_i64_identity_call_artifact(bytes) {
+        true => g1_i64_entry_payload_matches(bytes, u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(value))),
+        false => false,
+        _ => false,
+    }
+}
+
+// Identity-call payloads are unrestricted i64 bits; the fixed call ABI,
+// function table, code, and cleanup structure are what require verification.
+pub fn verify_g1_i64_identity_call_artifact(bytes: Bytes) -> Bool {
+    handle g1_candidate_has_length_and_directory(bytes, 1176) {
+        true => handle g1_magic_bytes_match(bytes) {
+            true => handle __g1_bytes_get(bytes, 56) == 152 {
+                true => handle __g1_bytes_get(bytes, 57) == 4 {
+                    true => verify_g1_i64_identity_call_code_and_cleanup(bytes),
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_identity_call_code_and_cleanup(bytes: Bytes) -> Bool {
+    handle __g1_bytes_get(bytes, 808) == 2 {
+        true => handle __g1_bytes_get(bytes, 844) == 0 {
+            true => handle __g1_bytes_get(bytes, 852) == 1 {
+                true => handle __g1_bytes_get(bytes, 1016) == 1 {
+                    true => handle __g1_bytes_get(bytes, 1017) == 32 {
+                        true => handle __g1_bytes_get(bytes, 1028) == 34 {
+                            true => handle __g1_bytes_get(bytes, 1029) == 64 {
+                                true => handle __g1_bytes_get(bytes, 1032) == 2 {
+                                    true => handle __g1_bytes_get(bytes, 1036) == 1 {
+                                        true => handle __g1_bytes_get(bytes, 1064) == 1 {
+                                            true => __g1_bytes_get(bytes, 1152) == 1,
+                                            false => false,
+                                            _ => false,
+                                        },
+                                        false => false,
+                                        _ => false,
+                                    },
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn emit_g1_i64_identity_call(value: i64) -> ArtifactEmission {
+    let candidate = g1_i64_identity_call_candidate(value);
+    handle verify_g1_i64_identity_call_candidate(candidate, value) {
+        true => ArtifactEmission::Artifact(candidate),
+        false => ArtifactEmission::Rejected,
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+fn g1_i64_binary_function_table() -> Bytes {
+    g1_append_field(
+        g1_concat4(g1_concat4(u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(2)), g1_concat4(u32_le_bytes(0), u32_le_bytes(7), u32_le_bytes(2), u32_le_bytes(0)), g1_concat4(u32_le_bytes(2), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)), g1_append_field(u64_le_bytes(0), u64_le_bytes(0))),
+        g1_concat4(g1_concat4(u32_le_bytes(0), u32_le_bytes(1), u32_le_bytes(0), u32_le_bytes(4)), g1_concat4(u32_le_bytes(7), u32_le_bytes(13), u32_le_bytes(4), u32_le_bytes(2)), g1_concat4(u32_le_bytes(4), u32_le_bytes(0), u32_le_bytes(0), u32_le_bytes(4294967295)), g1_append_field(u64_le_bytes(0), u64_le_bytes(0))),
+    )
+}
+
+fn g1_i64_binary_primitive(operation: G1I64Arithmetic) -> u32 {
+    handle operation {
+        G1I64Arithmetic::Add => 5,
+        G1I64Arithmetic::Subtract => 6,
+        G1I64Arithmetic::Multiply => 7,
+        G1I64Arithmetic::Divide => 3,
+        _ => 4294967295,
+    }
+}
+
+fn g1_i64_binary_code(operation: G1I64Arithmetic, left_constant: u32, right_constant: u32) -> Bytes {
+    g1_append_field(
+        g1_concat4(
+            g1_concat4(u32_le_bytes(16418), u32_le_bytes(1), u32_le_bytes(1), u32_le_bytes(0)),
+            g1_concat4(u32_le_bytes(0), u32_le_bytes(4134), u32_le_bytes(4294967295), u32_le_bytes(8193)),
+            g1_concat4(u32_le_bytes(1), u32_le_bytes(left_constant), u32_le_bytes(8193), u32_le_bytes(2)),
+            g1_concat4(u32_le_bytes(right_constant), u32_le_bytes(16453), u32_le_bytes(3), u32_le_bytes(g1_i64_binary_primitive(operation))),
+        ),
+        g1_concat4(u32_le_bytes(0), u32_le_bytes(2), u32_le_bytes(4134), u32_le_bytes(3)),
+    )
+}
+
+fn g1_i64_binary_cleanup_plan(function: u32, first: u32, end: u32, operand_start: u32, operand_count: u32) -> Bytes {
+    g1_concat3(g1_concat4(u32_le_bytes(function), u32_le_bytes(first), u32_le_bytes(end), u32_le_bytes(operand_start)), g1_append_field(u32_le_bytes(operand_count), u32_le_bytes(0)), __g1_bytes_from_array_move([]))
+}
+
+fn g1_i64_binary_cleanup_table() -> Bytes {
+    g1_concat3(
+        g1_append_field(g1_i64_binary_cleanup_plan(0, 0, 1, 0, 0), g1_i64_binary_cleanup_plan(0, 1, 2, 2, 1)),
+        g1_append_field(g1_i64_binary_cleanup_plan(1, 0, 1, 0, 0), g1_i64_binary_cleanup_plan(1, 1, 2, 2, 1)),
+        g1_append_field(g1_i64_binary_cleanup_plan(1, 2, 3, 3, 2), g1_i64_binary_cleanup_plan(1, 3, 4, 5, 1)),
+    )
+}
+
+pub fn g1_i64_binary_candidate(operation: G1I64Arithmetic, left: i64, right: i64) -> Bytes {
+    handle left == right {
+        true => g1_i64_binary_duplicate_candidate(operation, left),
+        false => handle g1_i64_wire_less_or_equal(left, right) {
+            true => g1_i64_binary_candidate_ordered(operation, left, right, 0, 1),
+            false => g1_i64_binary_candidate_ordered(operation, right, left, 1, 0),
+            _ => __g1_bytes_from_array_move([]),
+        },
+        _ => __g1_bytes_from_array_move([]),
+    }
+}
+
+fn g1_i64_binary_duplicate_candidate(operation: G1I64Arithmetic, value: i64) -> Bytes {
+    g1_concat3(
+        g1_concat8(g1_i64_binary_duplicate_directory(), g1_unit_entry_name_table(__g1_bytes_from_array_move([109, 97, 105, 110])), g1_four_zero_padding_bytes(), g1_predefined_type_table(), g1_four_zero_padding_bytes(), g1_i64_constant_table(value), g1_four_zero_padding_bytes(), g1_i64_callable_signature_table()),
+        g1_append_field(g1_append_field(g1_empty_variable_table(), g1_empty_variable_table()), g1_i64_binary_function_table()),
+        g1_concat4(g1_i64_binary_code(operation, 0, 0), g1_append_field(g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(2)), g1_append_field(u32_le_bytes(1), u32_le_bytes(3))), g1_i64_binary_cleanup_table(), g1_empty_variable_table()),
+    )
+}
+
+// The caller supplies an already canonical two-constant pool. General source
+// publication will grow this into a deduplicating wire-key pool builder.
+pub fn emit_g1_i64_binary(operation: G1I64Arithmetic, left: i64, right: i64) -> ArtifactEmission {
+    let candidate = g1_i64_binary_candidate(operation, left, right);
+    handle g1_directory_is_readable(candidate) {
+        true => handle __g1_bytes_len(candidate) == 1280 {
+            true => ArtifactEmission::Artifact(candidate),
+            false => handle __g1_bytes_len(candidate) == 1264 {
+                true => ArtifactEmission::Artifact(candidate),
+                false => ArtifactEmission::Rejected,
+                _ => ArtifactEmission::Rejected,
+            },
+            _ => ArtifactEmission::Rejected,
+        },
+        false => ArtifactEmission::Rejected,
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+// File verification accepts the two canonical binary layouts emitted above.
+// Constant payload bytes are intentionally value-agnostic (every eight-byte
+// sequence is an i64), while every non-payload byte must match the canonical
+// template and the operand references/opcode are checked independently.
+pub fn verify_g1_i64_binary_artifact(bytes: Bytes) -> Bool {
+    handle __g1_bytes_len(bytes) == 1280 {
+        true => verify_g1_i64_binary_nonduplicate_artifact(bytes),
+        false => handle __g1_bytes_len(bytes) == 1264 {
+            true => verify_g1_i64_binary_duplicate_artifact(bytes),
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_binary_nonduplicate_artifact(bytes: Bytes) -> Bool {
+    let template = g1_i64_binary_candidate(G1I64Arithmetic::Add, 0, 1);
+    handle g1_candidate_has_length_and_directory(bytes, 1280) {
+        true => handle g1_i64_binary_nonduplicate_template_matches(bytes, template, 0) {
+            true => verify_g1_i64_binary_nonduplicate_operands(bytes),
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_nonduplicate_template_matches(bytes: Bytes, template: Bytes, index: usize) -> Bool {
+    handle index == 1280 {
+        true => true,
+        false => handle g1_i64_binary_nonduplicate_dynamic_byte(index) {
+            true => g1_i64_binary_nonduplicate_template_matches(bytes, template, __g1_int_wrapping_add<usize>(index, 1)),
+            false => handle __g1_bytes_get(bytes, index) == __g1_bytes_get(template, index) {
+                true => g1_i64_binary_nonduplicate_template_matches(bytes, template, __g1_int_wrapping_add<usize>(index, 1)),
+                false => false,
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_nonduplicate_dynamic_byte(index: usize) -> Bool {
+    handle index >= 800 {
+        true => handle index < 824 { true => true, false => g1_i64_binary_nonduplicate_code_byte(index), _ => false },
+        false => g1_i64_binary_nonduplicate_code_byte(index),
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_nonduplicate_code_byte(index: usize) -> Bool {
+    handle index >= 1060 {
+        true => handle index < 1064 { true => true, false => g1_i64_binary_nonduplicate_second_code_byte(index), _ => false },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_nonduplicate_second_code_byte(index: usize) -> Bool {
+    handle index >= 1072 {
+        true => handle index < 1076 { true => true, false => handle index >= 1084 { true => index < 1088, false => false, _ => false }, _ => false },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_binary_nonduplicate_operands(bytes: Bytes) -> Bool {
+    handle g1_read_u32_le(bytes, 1060) {
+        G1U32Read::Value(left) => handle g1_read_u32_le(bytes, 1072) {
+            G1U32Read::Value(right) => handle g1_binary_operand_pair_is_valid(left, right) {
+                true => verify_g1_i64_binary_opcode(bytes, 1084),
+                false => false,
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_binary_operand_pair_is_valid(left: u32, right: u32) -> Bool {
+    handle left == 0 { true => right == 1, false => handle left == 1 { true => right == 0, false => false, _ => false }, _ => false }
+}
+
+fn verify_g1_i64_binary_opcode(bytes: Bytes, offset: usize) -> Bool {
+    handle g1_read_u32_le(bytes, offset) {
+        G1U32Read::Value(value) => handle value == 3 { true => true, false => handle value == 5 { true => true, false => handle value == 6 { true => true, false => value == 7, _ => false }, _ => false }, _ => false },
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_binary_duplicate_artifact(bytes: Bytes) -> Bool {
+    let template = g1_i64_binary_duplicate_candidate(G1I64Arithmetic::Add, 0);
+    handle g1_candidate_has_length_and_directory(bytes, 1264) {
+        true => handle g1_i64_binary_duplicate_template_matches(bytes, template, 0) {
+            true => handle g1_read_u32_le(bytes, 1044) {
+                G1U32Read::Value(left) => handle g1_read_u32_le(bytes, 1056) {
+                    G1U32Read::Value(right) => handle left == 0 { true => handle right == 0 { true => verify_g1_i64_binary_opcode(bytes, 1068), false => false, _ => false }, false => false, _ => false },
+                    _ => false,
+                },
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_duplicate_template_matches(bytes: Bytes, template: Bytes, index: usize) -> Bool {
+    handle index == 1264 {
+        true => true,
+        false => handle g1_i64_binary_duplicate_dynamic_byte(index) {
+            true => g1_i64_binary_duplicate_template_matches(bytes, template, __g1_int_wrapping_add<usize>(index, 1)),
+            false => handle __g1_bytes_get(bytes, index) == __g1_bytes_get(template, index) {
+                true => g1_i64_binary_duplicate_template_matches(bytes, template, __g1_int_wrapping_add<usize>(index, 1)),
+                false => false,
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_duplicate_dynamic_byte(index: usize) -> Bool {
+    handle index >= 800 {
+        true => handle index < 808 { true => true, false => g1_i64_binary_duplicate_code_byte(index), _ => false },
+        false => g1_i64_binary_duplicate_code_byte(index),
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_duplicate_code_byte(index: usize) -> Bool {
+    handle index >= 1044 {
+        true => handle index < 1048 { true => true, false => handle index >= 1056 { true => handle index < 1060 { true => true, false => handle index >= 1068 { true => index < 1072, false => false, _ => false }, _ => false }, _ => false }, _ => false },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_i64_binary_candidate_ordered(operation: G1I64Arithmetic, first: i64, second: i64, left_constant: u32, right_constant: u32) -> Bytes {
+    g1_concat3(
+        g1_concat8(g1_i64_binary_directory(), g1_unit_entry_name_table(__g1_bytes_from_array_move([109, 97, 105, 110])), g1_four_zero_padding_bytes(), g1_predefined_type_table(), g1_four_zero_padding_bytes(), g1_i64_binary_constant_table(first, second), g1_i64_callable_signature_table(), g1_append_field(g1_empty_variable_table(), g1_empty_variable_table())),
+        g1_i64_binary_function_table(),
+        g1_concat4(g1_i64_binary_code(operation, left_constant, right_constant), g1_append_field(g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(2)), g1_append_field(u32_le_bytes(1), u32_le_bytes(3))), g1_i64_binary_cleanup_table(), g1_empty_variable_table()),
+    )
+}
+
+
+// Keep the scalar seed behind a source-owned structural gate as well as the
+// independent VM verifier.  This checks the distinct i64 constant, Const,
+// Return, operand, and two-PC cleanup shapes rather than treating a byte
+// count as proof that the new executable family was encoded correctly.
+pub fn g1_i64_entry_candidate_passes_source_verification() -> Bool {
+    verify_g1_i64_entry_candidate(g1_i64_entry_candidate(42), 42)
+}
+
+pub fn g1_negative_i64_entry_candidate_passes_source_verification() -> Bool {
+    verify_g1_i64_entry_candidate(g1_i64_entry_candidate(-1), -1)
+}
+
+fn verify_g1_i64_entry_candidate(bytes: Bytes, value: i64) -> Bool {
+    handle verify_g1_i64_entry_artifact(bytes) {
+        true => g1_i64_entry_payload_matches(bytes, u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(value))),
+        false => false,
+        _ => false,
+    }
+}
+
+// The terminal i64 entry has an unrestricted fixed-width scalar payload; all
+// directory, type, instruction, and cleanup bytes remain fixed and are
+// checked below for file-backed verification.
+pub fn verify_g1_i64_entry_artifact(bytes: Bytes) -> Bool {
+    handle g1_candidate_has_length_and_directory(bytes, 1008) {
+        true => handle g1_magic_bytes_match(bytes) {
+            true => handle __g1_bytes_get(bytes, 56) == 240 {
+                true => handle __g1_bytes_get(bytes, 57) == 3 {
+                    true => verify_g1_i64_entry_constant_and_code_shape(bytes),
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_entry_constant_and_code(bytes: Bytes, value: i64) -> Bool {
+    handle verify_g1_i64_entry_constant_and_code_shape(bytes) {
+        true => g1_i64_entry_payload_matches(bytes, u64_le_bytes(__g1_int_convert_wrapping_to_u64<i64>(value))),
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_entry_constant_and_code_shape(bytes: Bytes) -> Bool {
+    handle __g1_bytes_get(bytes, 776) == 1 {
+        true => handle __g1_bytes_get(bytes, 784) == 16 {
+            true => handle __g1_bytes_get(bytes, 788) == 10 {
+                true => handle __g1_bytes_get(bytes, 792) == 8 {
+                    true => verify_g1_i64_entry_code_and_cleanup(bytes),
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_i64_entry_payload_matches(bytes: Bytes, payload: Bytes) -> Bool {
+    handle __g1_bytes_get(bytes, 796) == __g1_bytes_get(payload, 0) {
+        true => handle __g1_bytes_get(bytes, 797) == __g1_bytes_get(payload, 1) {
+            true => handle __g1_bytes_get(bytes, 798) == __g1_bytes_get(payload, 2) {
+                true => handle __g1_bytes_get(bytes, 799) == __g1_bytes_get(payload, 3) {
+                    true => handle __g1_bytes_get(bytes, 800) == __g1_bytes_get(payload, 4) {
+                        true => handle __g1_bytes_get(bytes, 801) == __g1_bytes_get(payload, 5) {
+                            true => handle __g1_bytes_get(bytes, 802) == __g1_bytes_get(payload, 6) {
+                                true => __g1_bytes_get(bytes, 803) == __g1_bytes_get(payload, 7),
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_i64_entry_code_and_cleanup(bytes: Bytes) -> Bool {
+    handle __g1_bytes_get(bytes, 920) == 1 {
+        true => handle __g1_bytes_get(bytes, 921) == 32 {
+            true => handle __g1_bytes_get(bytes, 924) == 1 {
+                true => handle __g1_bytes_get(bytes, 932) == 38 {
+                    true => handle __g1_bytes_get(bytes, 933) == 16 {
+                        true => handle __g1_bytes_get(bytes, 944) == 1 {
+                            true => handle __g1_bytes_get(bytes, 960) == 1 {
+                                true => handle __g1_bytes_get(bytes, 984) == 2 {
+                                    true => __g1_bytes_get(bytes, 992) == 1,
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// The smallest executable artifact is composed from the same source-owned
+// table encoders as later MIR-driven emission.  Its fixed unit-return words
+// are a bootstrap seed, not a host-side compiler fallback.
+pub fn g1_unit_entry_candidate() -> Bytes {
+    g1_unit_entry_candidate_named_four_bytes(__g1_bytes_from_array_move([109, 97, 105, 110]))
+}
+
+// This seed layout deliberately accepts exactly four-byte names. A general
+// encoder must shift every later section when the string table grows; it must
+// not be approximated with trailing bytes inside the variable table.
+pub fn g1_unit_entry_candidate_named_four_bytes(name: Bytes) -> Bytes {
+    g1_concat3(
+        g1_concat8(
+            g1_unit_entry_directory(name), g1_unit_entry_name_slot(name),
+            g1_predefined_type_table(), g1_four_zero_padding_bytes(),
+            g1_empty_variable_table(), g1_unit_entry_signature_table(),
+            g1_append_field(g1_empty_variable_table(), g1_empty_variable_table()), __g1_bytes_from_array_move([]),
+        ),
+        g1_append_field(g1_unit_entry_function_table(), g1_unit_entry_code()),
+        g1_append_field(g1_unit_entry_cleanup_table(), g1_empty_variable_table()),
+    )
+}
+
+// A name occupies the only variable-size section in this minimal executable.
+// Every later directory entry therefore derives from the same byte length;
+// this is a real layout encoder, not padding appended after a fixed image.
+fn g1_unit_entry_candidate_named(name: Bytes) -> Bytes {
+    g1_concat3(
+        g1_concat8(
+            g1_unit_entry_directory_named(name), g1_unit_entry_name_slot(name),
+            g1_predefined_type_table(), g1_four_zero_padding_bytes(),
+            g1_empty_variable_table(), g1_unit_entry_signature_table(),
+            g1_append_field(g1_empty_variable_table(), g1_empty_variable_table()), __g1_bytes_from_array_move([]),
+        ),
+        g1_append_field(g1_unit_entry_function_table(), g1_unit_entry_code()),
+        g1_append_field(g1_unit_entry_cleanup_table(), g1_empty_variable_table()),
+    )
+}
+
+fn g1_unit_entry_sections_start(name: Bytes) -> usize {
+    __g1_int_wrapping_add<usize>(
+        __g1_int_wrapping_add<usize>(528, __g1_bytes_len(name)),
+        g1_name_padding_length(__g1_bytes_len(name)),
+    )
+}
+
+fn g1_unit_entry_offset(name: Bytes, relative: usize) -> usize {
+    __g1_int_wrapping_add<usize>(g1_unit_entry_sections_start(name), relative)
+}
+
+fn g1_unit_entry_offset_u64(name: Bytes, relative: usize) -> u64 {
+    g1_usize_as_u64(g1_unit_entry_offset(name, relative))
+}
+
+fn g1_unit_entry_directory_named(name: Bytes) -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_header(0, 1, 1, g1_usize_as_u64(g1_unit_entry_offset(name, 400))), g1_directory_entry(1, 512, g1_usize_as_u64(__g1_int_wrapping_add<usize>(16, __g1_bytes_len(name))), 1, 0)),
+                            g1_directory_entry(2, g1_unit_entry_offset_u64(name, 0), 236, 19, 0),
+                        ),
+                        g1_directory_entry(3, g1_unit_entry_offset_u64(name, 240), 8, 0, 0),
+                    ),
+                    g1_directory_entry(4, g1_unit_entry_offset_u64(name, 248), 32, 1, 0),
+                ),
+                g1_directory_entry(5, g1_unit_entry_offset_u64(name, 280), 0, 0, 24),
+            ),
+            g1_directory_entry(6, g1_unit_entry_offset_u64(name, 280), 8, 0, 0),
+        ),
+        g1_unit_entry_directory_tail_named(name),
+    )
+}
+
+fn g1_unit_entry_directory_tail_named(name: Bytes) -> Bytes {
+    g1_append_field(
+        g1_append_field(
+            g1_append_field(
+                g1_append_field(
+                    g1_append_field(
+                        g1_append_field(
+                            g1_append_field(g1_directory_entry(7, g1_unit_entry_offset_u64(name, 288), 8, 0, 0), g1_directory_entry(8, g1_unit_entry_offset_u64(name, 296), 64, 1, 64)),
+                            g1_directory_entry(9, g1_unit_entry_offset_u64(name, 360), 8, 2, 4),
+                        ),
+                        g1_directory_entry(10, g1_unit_entry_offset_u64(name, 368), 0, 0, 4),
+                    ),
+                    g1_directory_entry(11, g1_unit_entry_offset_u64(name, 368), 24, 1, 24),
+                ),
+                g1_directory_entry(12, g1_unit_entry_offset_u64(name, 392), 0, 0, 16),
+            ),
+            g1_directory_entry(13, g1_unit_entry_offset_u64(name, 392), 0, 0, 16),
+        ),
+        g1_directory_entry(14, g1_unit_entry_offset_u64(name, 392), 8, 0, 0),
+    )
+}
+
+pub fn g1_unit_entry_candidate_has_expected_length() -> Bool {
+    __g1_bytes_len(g1_unit_entry_candidate()) == 936
+}
+
+// This source-side gate verifies the complete fixed-schema executable shape
+// currently emitted by the bootstrap backend. It intentionally precedes the
+// independent Rust VM verification: malformed source emission must not gain
+// publication authority merely because it originated inside this module.
+pub fn verify_g1_unit_entry_artifact(bytes: Bytes) -> Bool {
+    verify_g1_unit_entry_artifact_named_four_bytes(bytes, __g1_bytes_from_array_move([109, 97, 105, 110]))
+}
+
+pub fn verify_g1_unit_entry_artifact_named_four_bytes(bytes: Bytes, name: Bytes) -> Bool {
+    handle __g1_bytes_len(bytes) == 936 {
+        true => handle __g1_bytes_len(name) == 4 {
+            true => verify_g1_unit_entry_header(bytes, name),
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_unit_entry_header(bytes: Bytes, name: Bytes) -> Bool {
+    handle g1_directory_is_readable(bytes) {
+        true => handle g1_magic_bytes_match(bytes) {
+        true => handle __g1_bytes_get(bytes, 8) == 1 {
+            true => handle __g1_bytes_get(bytes, 12) == 64 {
+                true => handle __g1_bytes_get(bytes, 16) == 1 {
+                    true => handle __g1_bytes_get(bytes, 28) == 0 {
+                        true => handle __g1_bytes_get(bytes, 32) == 1 {
+                            true => verify_g1_unit_entry_directory(bytes, name),
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_unit_entry_directory(bytes: Bytes, name: Bytes) -> Bool {
+    handle __g1_bytes_get(bytes, 48) == 64 {
+        true => handle __g1_bytes_get(bytes, 56) == 168 {
+            true => handle __g1_bytes_get(bytes, 57) == 3 {
+                true => handle __g1_bytes_get(bytes, 64) == 1 {
+                    true => handle __g1_bytes_get(bytes, 73) == 2 {
+                        true => handle __g1_bytes_get(bytes, 80) == 20 {
+                            true => handle __g1_bytes_get(bytes, 81) == 0 {
+                                true => handle __g1_bytes_get(bytes, 96) == 2 {
+                                true => handle __g1_bytes_get(bytes, 105) == 2 {
+                                    true => verify_g1_unit_entry_name_and_types(bytes, name),
+                                    false => false,
+                                    _ => false,
+                                },
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn verify_g1_unit_entry_name_and_types(bytes: Bytes, name: Bytes) -> Bool {
+    handle __g1_bytes_get(bytes, 512) == 1 {
+        true => handle __g1_bytes_get(bytes, 516) == 4 {
+            true => handle __g1_bytes_get(bytes, 528) == __g1_bytes_get(name, 0) {
+                true => handle __g1_bytes_get(bytes, 529) == __g1_bytes_get(name, 1) {
+                    true => handle __g1_bytes_get(bytes, 530) == __g1_bytes_get(name, 2) {
+                        true => handle __g1_bytes_get(bytes, 531) == __g1_bytes_get(name, 3) {
+                            true => handle __g1_bytes_get(bytes, 536) == 19 {
+                                true => verify_g1_unit_entry_code(bytes),
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_unit_entry_directory_name_length_matches(bytes: Bytes, name: Bytes) -> Bool {
+    __g1_bytes_get(bytes, 80) == __g1_bytes_get(g1_unit_entry_name_table(name), 4)
+}
+
+fn g1_unit_entry_name_length_matches(bytes: Bytes, name: Bytes) -> Bool {
+    __g1_bytes_get(bytes, 516) == __g1_bytes_get(g1_unit_entry_name_table(name), 4)
+}
+
+fn g1_unit_entry_name_matches(bytes: Bytes, name: Bytes, index: usize) -> Bool {
+    handle index == __g1_bytes_len(name) {
+        true => true,
+        false => handle __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(528, index)) == __g1_bytes_get(name, index) {
+            true => g1_unit_entry_name_matches(bytes, name, __g1_int_wrapping_add<usize>(index, 1)),
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn verify_g1_unit_entry_code(bytes: Bytes) -> Bool {
+    handle __g1_bytes_get(bytes, 896) == 38 {
+        true => handle __g1_bytes_get(bytes, 897) == 16 {
+            true => handle __g1_bytes_get(bytes, 900) == 255 {
+                true => __g1_bytes_get(bytes, 903) == 255,
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// This is the first MIR-selected G1 emission boundary.  It intentionally
+// accepts only the unit-return lowering represented by the generated entry
+// artifact; every other terminator remains an explicit rejection until its
+// instruction and metadata encoders are implemented.
+pub fn emit_g1_for_terminator(terminator: Terminator) -> ArtifactEmission {
+    handle terminator {
+        Terminator::Return => emit_verified_g1_unit_entry(),
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+fn emit_verified_g1_unit_entry() -> ArtifactEmission {
+    let candidate = g1_unit_entry_candidate();
+    handle verify_g1_unit_entry_artifact(candidate) {
+        true => ArtifactEmission::Artifact(candidate),
+        false => ArtifactEmission::Rejected,
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+pub fn emit_g1_named_unit_entry(name: Bytes) -> ArtifactEmission {
+    handle __g1_bytes_len(name) == 0 {
+        true => ArtifactEmission::Rejected,
+        false => handle __g1_bytes_len(name) > 255 {
+            true => ArtifactEmission::Rejected,
+            false => emit_verified_named_g1_unit_entry(name),
+            _ => ArtifactEmission::Rejected,
+        },
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+fn emit_verified_named_g1_unit_entry(name: Bytes) -> ArtifactEmission {
+    let candidate = g1_unit_entry_candidate_named(name);
+    handle verify_g1_unit_entry_artifact_named(candidate, name) {
+        true => ArtifactEmission::Artifact(candidate),
+        false => ArtifactEmission::Rejected,
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+// The source verifier recomputes the complete canonical layout for the exact
+// requested name. This checks every length-sensitive directory offset at once
+// and remains independent of the Rust VM's later artifact verification.
+fn verify_g1_unit_entry_artifact_named(bytes: Bytes, name: Bytes) -> Bool {
+    handle g1_directory_is_readable(bytes) {
+        true => handle __g1_bytes_len(name) == 0 {
+        true => false,
+        false => handle __g1_bytes_len(name) > 255 {
+            true => false,
+            false => g1_bytes_equal(bytes, g1_unit_entry_candidate_named(name), 0),
+            _ => false,
+        },
+        _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_bytes_equal(left: Bytes, right: Bytes, index: usize) -> Bool {
+    handle __g1_bytes_len(left) == __g1_bytes_len(right) {
+        true => g1_bytes_equal_same_length(left, right, index),
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_bytes_equal_same_length(left: Bytes, right: Bytes, index: usize) -> Bool {
+    handle index == __g1_bytes_len(left) {
+        true => true,
+        false => handle __g1_bytes_get(left, index) == __g1_bytes_get(right, index) {
+            true => g1_bytes_equal_same_length(left, right, __g1_int_wrapping_add<usize>(index, 1)),
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// The public bootstrap codegen entrypoint accepts typed source Body IR and
+// owns the complete Body→Core→MIR transition before artifact selection.
+// Callers cannot manufacture a return terminator that does not follow a
+// successful source-level admission.
+pub fn emit_g1_for_body(expression: Expression, expected: Type) -> ArtifactEmission {
+    emit_g1_for_terminator(mir::lower(lower_core(expression, expected)))
+}
+
+pub fn emit_g1_for_return_has_expected_length() -> Bool {
+    handle emit_g1_for_terminator(Terminator::Return) {
+        ArtifactEmission::Artifact(bytes) => __g1_bytes_len(bytes) == 936,
+        ArtifactEmission::Rejected => false,
+        _ => false,
+    }
+}
+
+pub fn g1_unit_entry_candidate_passes_source_verification() -> Bool {
+    verify_g1_unit_entry_artifact(g1_unit_entry_candidate())
+}
+
+pub fn g1_four_byte_named_entry_passes_source_verification() -> Bool {
+    let name = __g1_bytes_from_array_move([98, 111, 111, 116]);
+    verify_g1_unit_entry_artifact_named_four_bytes(g1_unit_entry_candidate_named_four_bytes(name), name)
+}
+
+
+pub fn g1_unit_entry_source_verifier_rejects_header_only() -> Bool {
+    verify_g1_unit_entry_artifact(g1_empty_header()) == false
+}
+
+pub fn emit_g1_rejects_unimplemented_terminator() -> Bool {
+    handle emit_g1_for_terminator(Terminator::Trap) {
+        ArtifactEmission::Artifact(_) => false,
+        ArtifactEmission::Rejected => true,
+        _ => false,
+    }
+}
+
+pub fn emit_g1_for_return_has_expected_length_from_unit_lowering() -> Bool {
+    handle emit_g1_for_body(Expression::Unit, Type::Unit) {
+        ArtifactEmission::Artifact(bytes) => __g1_bytes_len(bytes) == 936,
+        ArtifactEmission::Rejected => false,
+        _ => false,
+    }
+}
+
+pub fn emit_g1_rejects_body_type_mismatch() -> Bool {
+    handle emit_g1_for_body(Expression::I64(1), Type::Unit) {
+        ArtifactEmission::Artifact(_) => false,
+        ArtifactEmission::Rejected => true,
+        _ => false,
+    }
+}
+
+fn g1_empty_header_fields_match(header: Bytes) -> Bool {
+    // Check one or more bytes from every fixed header field. Together with
+    // the exact magic check above, these distinguish the canonical G1.0 empty
+    // image preamble from the old Stage0 envelope and common endian mistakes.
+    handle __g1_bytes_get(header, 8) == 1 {
+        true => handle __g1_bytes_get(header, 12) == 64 {
+            true => handle __g1_bytes_get(header, 20) == 14 {
+                true => handle __g1_bytes_get(header, 24) == 32 {
+                    true => handle __g1_bytes_get(header, 28) == 255 {
+                        true => handle __g1_bytes_get(header, 32) == 1 {
+                            true => handle __g1_bytes_get(header, 48) == 64 {
+                                true => __g1_bytes_get(header, 57) == 2,
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+fn g1_magic_bytes_match(value: Bytes) -> Bool {
+    handle __g1_bytes_get(value, 0) == 71 {
+        true => handle __g1_bytes_get(value, 1) == 82 {
+            true => handle __g1_bytes_get(value, 2) == 66 {
+                true => handle __g1_bytes_get(value, 3) == 67 {
+                    true => handle __g1_bytes_get(value, 4) == 13 {
+                        true => handle __g1_bytes_get(value, 5) == 10 {
+                            true => handle __g1_bytes_get(value, 6) == 26 {
+                                true => __g1_bytes_get(value, 7) == 10,
+                                false => false,
+                                _ => false,
+                            },
+                            false => false,
+                            _ => false,
+                        },
+                        false => false,
+                        _ => false,
+                    },
+                    false => false,
+                    _ => false,
+                },
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+// This is the first executable instruction family in the source backend. A
+// divisor is checked at the semantic boundary before the manifest-bound leaf
+// is invoked, so a malformed candidate cannot turn a zero divisor into a
+// host failure. Additional VM instruction families extend this explicit
+// outcome model rather than bypassing it through a host-side evaluator.
+pub enum ArithmeticInstruction {
+    Constant(i64),
+    WrappingAdd(i64, i64),
+    WrappingSub(i64, i64),
+    WrappingMul(i64, i64),
+    CheckedDiv(i64, i64),
+}
+pub enum ComparisonInstruction { EqualI64(i64, i64), LessI64(i64, i64), GreaterI64(i64, i64), EqualU64(u64, u64), NotEqualU64(u64, u64), LessU64(u64, u64), LessEqualU64(u64, u64), GreaterU64(u64, u64), GreaterEqualU64(u64, u64), EqualU8(u8, u8), NotEqualU8(u8, u8), LessU8(u8, u8), LessEqualU8(u8, u8), GreaterU8(u8, u8), GreaterEqualU8(u8, u8), EqualUsize(usize, usize), NotEqualUsize(usize, usize), LessUsize(usize, usize), LessEqualUsize(usize, usize), GreaterUsize(usize, usize), GreaterEqualUsize(usize, usize) }
+pub enum ConditionalInstruction { SelectI64(Bool, i64, i64) }
+pub enum BooleanInstruction { Not(Bool) }
+
+// Calls stay separate from terminal returns so a typed call-shaped body cannot
+// bypass future callee verification by attaching an arbitrary return payload.
+// IdentityI64 is the bootstrap callable contract; later call targets extend
+// this instruction family with the same candidate/verified split.
+pub enum CallInstruction { IdentityI64(i64), AddI64(i64, i64) }
+
+// Candidate programs are untrusted input to the backend. Only a successful
+// verification produces this separate type, keeping execution authority out
+// of decoding and construction paths.
+pub enum CandidateProgram { Arithmetic(ArithmeticInstruction), U32Arithmetic(U32ArithmeticInstruction), UsizeArithmetic(UsizeArithmeticInstruction), Boolean(BooleanInstruction), Comparison(ComparisonInstruction), Conditional(ConditionalInstruction), Call(CallInstruction), Terminal(Terminator, i64), U32Terminal(Terminator, u32), Storage(StorageLowering), RuntimeImport(Text, Text, PrimitiveSignature), HostImport(Text, Text, HostSignature) }
+pub enum VerifiedProgram { Arithmetic(ArithmeticInstruction), U32Arithmetic(U32ArithmeticInstruction), UsizeArithmetic(UsizeArithmeticInstruction), Boolean(BooleanInstruction), Comparison(ComparisonInstruction), Conditional(ConditionalInstruction), Call(CallInstruction), Terminal(Terminator, i64), U32Terminal(Terminator, u32), Storage(StorageLowering), RuntimeImport(Primitive), HostImport(HostCapability) }
+pub enum Verification { Verified(VerifiedProgram), Rejected }
+
+// The terminal tag remains a verifier boundary, while the return payload is
+// kept explicit for the later candidate/verified interpreter path.
+pub fn execute(terminator: Terminator) -> Execution { execute_value(terminator, 0) }
+pub fn execute_value(terminator: Terminator, value: i64) -> Execution {
+    handle terminator {
+        Terminator::Return => Execution::Returned(value),
+        Terminator::ParameterReturn => Execution::Returned(value),
+        Terminator::BooleanReturn => Execution::Returned(value),
+        Terminator::ArithmeticReturn => Execution::Returned(value),
+        Terminator::ComparisonReturn => Execution::Returned(value),
+        Terminator::ConditionalReturn => Execution::Returned(value),
+        Terminator::CallReturn => Execution::Returned(value),
+        Terminator::PatternReturn => Execution::Returned(value),
+        Terminator::Trap => Execution::Faulted,
+        _ => Execution::Faulted,
+    }
+}
+
+// The backend consumes MIR's frozen ownership result. It deliberately has no
+// dependency on storage-slot representations, so only MIR determines whether
+// an ownership-consuming read reaches execution.
+pub fn execute_storage(lowering: StorageLowering) -> Execution {
+    handle lowering {
+        StorageLowering::ReturnValue(value, _) => Execution::Returned(value),
+        StorageLowering::Trap(_) => Execution::Faulted,
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_arithmetic(instruction: ArithmeticInstruction) -> Execution {
+    handle instruction {
+        ArithmeticInstruction::Constant(value) => Execution::Returned(value),
+        ArithmeticInstruction::WrappingAdd(left, right) => Execution::Returned(__g1_int_wrapping_add<i64>(left, right)),
+        ArithmeticInstruction::WrappingSub(left, right) => Execution::Returned(__g1_int_wrapping_sub<i64>(left, right)),
+        ArithmeticInstruction::WrappingMul(left, right) => Execution::Returned(__g1_int_wrapping_mul<i64>(left, right)),
+        ArithmeticInstruction::CheckedDiv(left, right) => execute_checked_div(left, right),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_u32_arithmetic(instruction: U32ArithmeticInstruction) -> Execution {
+    handle instruction {
+        U32ArithmeticInstruction::CheckedAdd(left, right) => Execution::ReturnedU32(__g1_int_wrapping_add<u32>(left, right)),
+        U32ArithmeticInstruction::CheckedSub(left, right) => Execution::ReturnedU32(__g1_int_wrapping_sub<u32>(left, right)),
+        U32ArithmeticInstruction::CheckedMul(left, right) => Execution::ReturnedU32(__g1_int_wrapping_mul<u32>(left, right)),
+        U32ArithmeticInstruction::CheckedDiv(left, right) => handle right == 0 { true => Execution::Faulted, false => Execution::ReturnedU32(__g1_int_checked_div<u32>(left, right)), _ => Execution::Faulted },
+        U32ArithmeticInstruction::CheckedRem(left, right) => execute_u32_checked_remainder(left, right),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_usize_arithmetic(instruction: UsizeArithmeticInstruction) -> Execution { handle instruction { UsizeArithmeticInstruction::CheckedAdd(left, right) => Execution::ReturnedUsize(__g1_int_wrapping_add<usize>(left, right)), _ => Execution::Faulted } }
+
+fn execute_u32_checked_remainder(left: u32, right: u32) -> Execution {
+    handle right == 0 {
+        true => Execution::Faulted,
+        false => {
+            let quotient = __g1_int_checked_div<u32>(left, right);
+            Execution::ReturnedU32(__g1_int_wrapping_sub<u32>(left, __g1_int_wrapping_mul<u32>(quotient, right)))
+        },
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_call(instruction: CallInstruction) -> Execution {
+    handle instruction {
+        CallInstruction::IdentityI64(value) => Execution::Returned(value),
+        CallInstruction::AddI64(left, right) => Execution::Returned(__g1_int_wrapping_add<i64>(left, right)),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_comparison(instruction: ComparisonInstruction) -> Execution {
+    handle instruction {
+        ComparisonInstruction::EqualI64(left, right) => bool_execution(left == right),
+        ComparisonInstruction::LessI64(left, right) => bool_execution(left < right),
+        ComparisonInstruction::GreaterI64(left, right) => bool_execution(left > right),
+        ComparisonInstruction::EqualU64(left, right) => bool_execution(left == right),
+        ComparisonInstruction::NotEqualU64(left, right) => bool_execution(left != right),
+        ComparisonInstruction::LessU64(left, right) => bool_execution(left < right),
+        ComparisonInstruction::LessEqualU64(left, right) => bool_execution(left <= right),
+        ComparisonInstruction::GreaterU64(left, right) => bool_execution(left > right),
+        ComparisonInstruction::GreaterEqualU64(left, right) => bool_execution(left >= right),
+        ComparisonInstruction::EqualU8(left, right) => bool_execution(left == right),
+        ComparisonInstruction::NotEqualU8(left, right) => bool_execution(left != right),
+        ComparisonInstruction::LessU8(left, right) => bool_execution(left < right),
+        ComparisonInstruction::LessEqualU8(left, right) => bool_execution(left <= right),
+        ComparisonInstruction::GreaterU8(left, right) => bool_execution(left > right),
+        ComparisonInstruction::GreaterEqualU8(left, right) => bool_execution(left >= right),
+        ComparisonInstruction::EqualUsize(left, right) => bool_execution(left == right),
+        ComparisonInstruction::NotEqualUsize(left, right) => bool_execution(left != right),
+        ComparisonInstruction::LessUsize(left, right) => bool_execution(left < right),
+        ComparisonInstruction::LessEqualUsize(left, right) => bool_execution(left <= right),
+        ComparisonInstruction::GreaterUsize(left, right) => bool_execution(left > right),
+        ComparisonInstruction::GreaterEqualUsize(left, right) => bool_execution(left >= right),
+        _ => Execution::Faulted,
+    }
+}
+
+// A digest call is executable only after the candidate's package, selector,
+// and exact Bytes -> Bytes signature have all passed manifest verification.
+// This keeps a same-named user import from acquiring hashing authority.
+pub fn execute_candidate_blake3(candidate: CandidateProgram, input: Bytes) -> BytesExecution {
+    handle verify(candidate) {
+        Verification::Verified(VerifiedProgram::RuntimeImport(Primitive::Blake3)) => BytesExecution::Bytes(__g1_blake3(input)),
+        _ => BytesExecution::Faulted,
+    }
+}
+
+pub fn execute_conditional(instruction: ConditionalInstruction) -> Execution {
+    handle instruction {
+        ConditionalInstruction::SelectI64(condition, when_true, when_false) => handle condition {
+            true => Execution::Returned(when_true),
+            false => Execution::Returned(when_false),
+            _ => Execution::Faulted,
+        },
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_boolean(instruction: BooleanInstruction) -> Execution {
+    handle instruction {
+        BooleanInstruction::Not(value) => handle value { true => Execution::Returned(0), false => Execution::Returned(1), _ => Execution::Faulted },
+        _ => Execution::Faulted,
+    }
+}
+
+fn bool_execution(value: Bool) -> Execution { handle value { true => Execution::Returned(1), false => Execution::Returned(0), _ => Execution::Faulted } }
+
+pub fn verify(candidate: CandidateProgram) -> Verification {
+    handle candidate {
+        CandidateProgram::Arithmetic(instruction) => verify_arithmetic(instruction),
+        CandidateProgram::U32Arithmetic(instruction) => verify_u32_arithmetic(instruction),
+        CandidateProgram::UsizeArithmetic(instruction) => verify_usize_arithmetic(instruction),
+        CandidateProgram::Boolean(instruction) => Verification::Verified(VerifiedProgram::Boolean(instruction)),
+        CandidateProgram::Comparison(instruction) => Verification::Verified(VerifiedProgram::Comparison(instruction)),
+        CandidateProgram::Conditional(instruction) => Verification::Verified(VerifiedProgram::Conditional(instruction)),
+        CandidateProgram::Call(instruction) => Verification::Verified(VerifiedProgram::Call(instruction)),
+        CandidateProgram::Terminal(terminator, value) => Verification::Verified(VerifiedProgram::Terminal(terminator, value)),
+        CandidateProgram::U32Terminal(terminator, value) => verify_u32_terminal(terminator, value),
+        CandidateProgram::Storage(lowering) => verify_storage(lowering),
+        CandidateProgram::RuntimeImport(package, name, signature) => verify_runtime_import(package, name, signature),
+        CandidateProgram::HostImport(package, name, signature) => verify_host_import(package, name, signature),
+        _ => Verification::Rejected,
+    }
+}
+
+fn verify_usize_arithmetic(instruction: UsizeArithmeticInstruction) -> Verification { handle instruction { UsizeArithmeticInstruction::CheckedAdd(left, right) => { let result = __g1_int_wrapping_add<usize>(left, right); handle result < left { true => Verification::Rejected, false => Verification::Verified(VerifiedProgram::UsizeArithmetic(instruction)), _ => Verification::Rejected } }, _ => Verification::Rejected } }
+
+fn verify_u32_arithmetic(instruction: U32ArithmeticInstruction) -> Verification {
+    handle instruction {
+        U32ArithmeticInstruction::CheckedAdd(left, right) => verify_u32_addition(left, right, instruction),
+        U32ArithmeticInstruction::CheckedSub(left, right) => verify_u32_subtraction(left, right, instruction),
+        U32ArithmeticInstruction::CheckedMul(left, right) => verify_u32_multiplication(left, right, instruction),
+        U32ArithmeticInstruction::CheckedDiv(_, right) => handle right == 0 { true => Verification::Rejected, false => Verification::Verified(VerifiedProgram::U32Arithmetic(instruction)), _ => Verification::Rejected },
+        U32ArithmeticInstruction::CheckedRem(_, right) => handle right == 0 { true => Verification::Rejected, false => Verification::Verified(VerifiedProgram::U32Arithmetic(instruction)), _ => Verification::Rejected },
+        _ => Verification::Verified(VerifiedProgram::U32Arithmetic(instruction)),
+    }
+}
+
+fn verify_u32_addition(left: u32, right: u32, instruction: U32ArithmeticInstruction) -> Verification {
+    let result = __g1_int_wrapping_add<u32>(left, right);
+    handle result < left {
+        true => Verification::Rejected,
+        false => Verification::Verified(VerifiedProgram::U32Arithmetic(instruction)),
+        _ => Verification::Rejected,
+    }
+}
+
+fn verify_u32_subtraction(left: u32, right: u32, instruction: U32ArithmeticInstruction) -> Verification {
+    handle right > left {
+        true => Verification::Rejected,
+        false => Verification::Verified(VerifiedProgram::U32Arithmetic(instruction)),
+        _ => Verification::Rejected,
+    }
+}
+
+fn verify_u32_multiplication(left: u32, right: u32, instruction: U32ArithmeticInstruction) -> Verification {
+    handle left == 0 {
+        true => Verification::Verified(VerifiedProgram::U32Arithmetic(instruction)),
+        false => verify_u32_multiplication_nonzero_left(left, right, instruction),
+        _ => Verification::Rejected,
+    }
+}
+
+fn verify_u32_multiplication_nonzero_left(left: u32, right: u32, instruction: U32ArithmeticInstruction) -> Verification {
+    let result = __g1_int_wrapping_mul<u32>(left, right);
+    handle __g1_int_checked_div<u32>(result, left) == right {
+        true => Verification::Verified(VerifiedProgram::U32Arithmetic(instruction)),
+        false => Verification::Rejected,
+        _ => Verification::Rejected,
+    }
+}
+
+fn verify_u32_terminal(terminator: Terminator, value: u32) -> Verification {
+    handle terminator {
+        Terminator::Return => Verification::Verified(VerifiedProgram::U32Terminal(terminator, value)),
+        Terminator::ParameterReturn => Verification::Verified(VerifiedProgram::U32Terminal(terminator, value)),
+        _ => Verification::Rejected,
+    }
+}
+
+// Host-import candidates pass through the same manifest-bound declaration
+// check as source declarations.  A verified import has authority but no
+// executable value on its own; dispatch remains an explicit later opcode.
+fn verify_runtime_import(package: Text, name: Text, signature: PrimitiveSignature) -> Verification {
+    handle validate_bound_declaration(package, name, signature) {
+        DeclarationValidation::Value(primitive) => Verification::Verified(VerifiedProgram::RuntimeImport(primitive)),
+        DeclarationValidation::UnknownSelector => Verification::Rejected,
+        DeclarationValidation::PackageMismatch => Verification::Rejected,
+        DeclarationValidation::SignatureMismatch => Verification::Rejected,
+        _ => Verification::Rejected,
+    }
+}
+
+// Host capability imports are verified separately from VM primitives. The
+// resulting value represents authority only; execution still requires a
+// later explicit host-call instruction and launcher-installed handler.
+fn verify_host_import(package: Text, name: Text, signature: HostSignature) -> Verification {
+    handle validate_bound_host_declaration(package, name, signature) {
+        HostDeclarationValidation::Value(capability) => Verification::Verified(VerifiedProgram::HostImport(capability)),
+        HostDeclarationValidation::UnknownSelector => Verification::Rejected,
+        HostDeclarationValidation::PackageMismatch => Verification::Rejected,
+        HostDeclarationValidation::SignatureMismatch => Verification::Rejected,
+        _ => Verification::Rejected,
+    }
+}
+
+// A storage return is executable only when its payload came from an explicit
+// move.  This preserves MIR's post-move proof across the candidate/verified
+// boundary instead of allowing a hand-built candidate to claim a live slot.
+fn verify_storage(lowering: StorageLowering) -> Verification {
+    handle lowering {
+        StorageLowering::ReturnValue(value, Slot::Moved) => Verification::Verified(VerifiedProgram::Storage(StorageLowering::ReturnValue(value, Slot::Moved))),
+        StorageLowering::Trap(slot) => Verification::Verified(VerifiedProgram::Storage(StorageLowering::Trap(slot))),
+        _ => Verification::Rejected,
+    }
+}
+
+fn verify_arithmetic(instruction: ArithmeticInstruction) -> Verification {
+    handle instruction {
+        ArithmeticInstruction::CheckedDiv(left, right) => verify_checked_division(left, right, instruction),
+        _ => Verification::Verified(VerifiedProgram::Arithmetic(instruction)),
+    }
+}
+
+fn verify_checked_division(left: i64, right: i64, instruction: ArithmeticInstruction) -> Verification {
+    handle right == 0 {
+        true => Verification::Rejected,
+        false => handle left == i64_minimum() {
+            true => handle right == -1 {
+                true => Verification::Rejected,
+                false => Verification::Verified(VerifiedProgram::Arithmetic(instruction)),
+                _ => Verification::Rejected,
+            },
+            false => Verification::Verified(VerifiedProgram::Arithmetic(instruction)),
+            _ => Verification::Rejected,
+        },
+        _ => Verification::Rejected,
+    }
+}
+
+fn i64_minimum() -> i64 {
+    __g1_int_wrapping_add<i64>(-9223372036854775807, -1)
+}
+
+pub fn execute_verified(program: VerifiedProgram) -> Execution {
+    handle program {
+        VerifiedProgram::Arithmetic(instruction) => execute_arithmetic(instruction),
+        VerifiedProgram::U32Arithmetic(instruction) => execute_u32_arithmetic(instruction),
+        VerifiedProgram::UsizeArithmetic(instruction) => execute_usize_arithmetic(instruction),
+        VerifiedProgram::Boolean(instruction) => execute_boolean(instruction),
+        VerifiedProgram::Comparison(instruction) => execute_comparison(instruction),
+        VerifiedProgram::Conditional(instruction) => execute_conditional(instruction),
+        VerifiedProgram::Call(instruction) => execute_call(instruction),
+        VerifiedProgram::Terminal(terminator, value) => execute_value(terminator, value),
+        VerifiedProgram::U32Terminal(terminator, value) => execute_u32_value(terminator, value),
+        VerifiedProgram::Storage(lowering) => execute_storage(lowering),
+        VerifiedProgram::RuntimeImport(_) => Execution::Faulted,
+        VerifiedProgram::HostImport(_) => Execution::Faulted,
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_u32_value(terminator: Terminator, value: u32) -> Execution {
+    handle terminator {
+        Terminator::Return => Execution::ReturnedU32(value),
+        Terminator::ParameterReturn => Execution::ReturnedU32(value),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_verified_host_import(program: VerifiedProgram, response: HostResponse) -> HostExecution {
+    handle program {
+        VerifiedProgram::HostImport(capability) => execute_host_import(capability, response),
+        _ => HostExecution::Faulted,
+    }
+}
+
+fn execute_host_import(capability: HostCapability, response: HostResponse) -> HostExecution {
+    handle (capability, response) {
+        (HostCapability::ProcessArgs, HostResponse::ProcessArgs(values)) => HostExecution::ProcessArgs(values),
+        (HostCapability::FileRead, HostResponse::FileRead(bytes)) => HostExecution::FileRead(bytes),
+        (HostCapability::FileWriteAtomic, HostResponse::FileWriteAtomic) => HostExecution::Unit,
+        (HostCapability::DiagnosticWrite, HostResponse::DiagnosticWrite) => HostExecution::Unit,
+        _ => HostExecution::Faulted,
+    }
+}
+
+pub fn execute_candidate(candidate: CandidateProgram) -> Execution {
+    handle verify(candidate) {
+        Verification::Verified(program) => execute_verified(program),
+        Verification::Rejected => Execution::Faulted,
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_candidate_host_import(candidate: CandidateProgram, response: HostResponse) -> HostExecution {
+    handle verify(candidate) {
+        Verification::Verified(program) => execute_verified_host_import(program, response),
+        Verification::Rejected => HostExecution::Faulted,
+        _ => HostExecution::Faulted,
+    }
+}
+
+fn execute_checked_div(left: i64, right: i64) -> Execution {
+    handle right == 0 {
+        true => Execution::Faulted,
+        false => Execution::Returned(__g1_int_checked_div<i64>(left, right)),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn returned_value(execution: Execution) -> i64 {
+    handle execution {
+        Execution::Returned(value) => value,
+        Execution::ReturnedU32(_) => 0,
+        Execution::Faulted => 0,
+        _ => 0,
+    }
+}

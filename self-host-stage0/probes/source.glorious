@@ -1,0 +1,66 @@
+use compiler_support::__g1_bytes_get;
+use compiler_support::__g1_bytes_from_array_move;
+use compiler_support::__g1_text_as_bytes;
+use source_library::identity;
+use source_library::source;
+
+pub fn score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn byte_score(value: u8) -> i64 { score(value == 66) }
+pub fn read_score(value: source::FirstByte) -> i64 { handle value { source::FirstByte::Value(byte) => byte_score(byte), source::FirstByte::Empty => 1, _ => 0 } }
+
+pub fn main() -> i64 {
+    byte_score(__g1_bytes_get(
+        source::byte_slice(source::input(
+            "package",
+            "src/main.glorious",
+            __g1_text_as_bytes("AB"),
+            identity::digest_of_text("AB"),
+        ), 1, 2),
+        0,
+    )) + score(source::is_empty(source::input("package", "src/empty.glorious", __g1_text_as_bytes(""), identity::digest_of_text("")))) + score(source::digest_matches_bytes(source::input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")))) + read_score(source::byte_at_or_empty(__g1_text_as_bytes("AB"), source::next_index(0))) + read_score(source::byte_at_or_empty(__g1_text_as_bytes("AB"), 2))
+        + score_admission(source::checked_input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")))
+        + score_admission(source::checked_input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("wrong")))
+        + score_slice(source::checked_byte_slice(source::input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")), 0, 2))
+        + score_slice(source::checked_byte_slice(source::input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")), 2, 1))
+        + score_byte_admission(source::checked_byte_at(source::input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")), 1))
+        + score_byte_admission(source::checked_byte_at(source::input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")), 2))
+        + score_same(source::input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")), source::input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")))
+        + score_not_same(source::input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")), source::input("other", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")))
+        + score_not_same(source::input("a", "bc", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")), source::input("ab", "c", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")))
+        + line_score(source::line_count(source::input("package", "src/main.glorious", __g1_text_as_bytes("A\nB\r\n"), identity::digest_of_text("A\nB\r\n"))))
+        + line_admission_score(source::line_count_checked(source::input("package", "src/main.glorious", __g1_text_as_bytes("A\nB\r\n"), identity::digest_of_text("A\nB\r\n"))))
+        + line_admission_score(source::line_count_checked(source::input("package", "src/main.glorious", __g1_text_as_bytes("A\nB\r\n"), identity::digest_of_text("wrong"))))
+        + score(identity::same_package(source::package(source::input("package", "src/main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB"))), identity::package_key("package")))
+        + score_path(source::checked_logical_path("src/main.glorious"))
+        + score_path(source::checked_logical_path("../main.glorious"))
+        + score_invalid_path_shape(source::checked_logical_path(""))
+        + score_invalid_path_shape(source::checked_logical_path("/absolute.glorious"))
+        + score_invalid_path_shape(source::checked_logical_path("src\\main.glorious"))
+        + score_invalid_path_shape(source::checked_logical_path("src//main.glorious"))
+        + score_invalid_path_shape(source::checked_logical_path("./main.glorious"))
+        + score_invalid_path_shape(source::checked_logical_path("src/../main.glorious"))
+        + score_invalid_path(source::checked_input("package", "../main.glorious", __g1_text_as_bytes("AB"), identity::digest_of_text("AB")))
+        + position_score(source::position(source::input("package", "src/position.glorious", __g1_text_as_bytes("A\nB"), identity::digest_of_text("A\nB")), 2))
+        + emoji_position_score(source::position(source::input("package", "src/emoji.glorious", __g1_text_as_bytes("A😀"), identity::digest_of_text("A😀")), 5))
+        + invalid_position_score(source::position(source::input("package", "src/emoji.glorious", __g1_text_as_bytes("A😀"), identity::digest_of_text("A😀")), 2))
+        + checked_position_score(source::position_checked(source::input("package", "src/position.glorious", __g1_text_as_bytes("A\nB"), identity::digest_of_text("A\nB")), 2))
+        + checked_position_score(source::position_checked(source::input("package", "src/position.glorious", __g1_text_as_bytes("A\nB"), identity::digest_of_text("forged")), 2))
+        + invalid_position_score(source::position(source::input("package", "src/invalid.glorious", __g1_bytes_from_array_move([192, 128]), identity::digest_of_bytes(__g1_bytes_from_array_move([192, 128]))), 2))
+        + invalid_position_score(source::position(source::input("package", "src/invalid.glorious", __g1_bytes_from_array_move([237, 160, 128]), identity::digest_of_bytes(__g1_bytes_from_array_move([237, 160, 128]))), 3))
+        + invalid_position_score(source::position(source::input("package", "src/invalid.glorious", __g1_bytes_from_array_move([244, 144, 128, 128]), identity::digest_of_bytes(__g1_bytes_from_array_move([244, 144, 128, 128]))), 4))
+}
+
+pub fn score_admission(value: source::SourceAdmission) -> i64 { handle value { source::SourceAdmission::Value(_) => 1, source::SourceAdmission::DigestMismatch => 0, _ => 0 } }
+pub fn score_slice(value: source::SliceAdmission) -> i64 { handle value { source::SliceAdmission::Value(_) => 1, source::SliceAdmission::OutOfBounds => 10, _ => 0 } }
+pub fn score_byte_admission(value: source::ByteAdmission) -> i64 { handle value { source::ByteAdmission::Value(byte) => score(byte == 66), source::ByteAdmission::OutOfBounds => 1, _ => 0 } }
+pub fn score_same(left: source::SourceInput, right: source::SourceInput) -> i64 { handle source::same_identity(left, right) { true => 100, false => 0, _ => 0 } }
+pub fn score_not_same(left: source::SourceInput, right: source::SourceInput) -> i64 { handle source::same_identity(left, right) { true => 0, false => 1000, _ => 0 } }
+pub fn line_score(value: usize) -> i64 { handle value == 3 { true => 10000, false => 0, _ => 0 } }
+pub fn line_admission_score(value: source::LineCountAdmission) -> i64 { handle value { source::LineCountAdmission::Value(count) => line_score(count), source::LineCountAdmission::DigestMismatch => 100000, _ => 0 } }
+pub fn score_path(value: source::LogicalPathAdmission) -> i64 { handle value { source::LogicalPathAdmission::Value(_) => 1, source::LogicalPathAdmission::Invalid => 0, _ => 0 } }
+pub fn score_invalid_path_shape(value: source::LogicalPathAdmission) -> i64 { handle value { source::LogicalPathAdmission::Invalid => 10, _ => 0 } }
+pub fn score_invalid_path(value: source::SourceAdmission) -> i64 { handle value { source::SourceAdmission::InvalidLogicalPath => 10, _ => 0 } }
+pub fn position_score(value: source::PositionAdmission) -> i64 { handle value { source::PositionAdmission::Value(position) => handle source::position_line(position) == 1 { true => handle source::position_utf16_column(position) == 0 { true => 1, _ => 0 }, _ => 0 }, _ => 0 } }
+pub fn emoji_position_score(value: source::PositionAdmission) -> i64 { handle value { source::PositionAdmission::Value(position) => handle source::position_line(position) == 0 { true => handle source::position_utf16_column(position) == 3 { true => 10, _ => 0 }, _ => 0 }, _ => 0 } }
+pub fn invalid_position_score(value: source::PositionAdmission) -> i64 { handle value { source::PositionAdmission::InvalidOffset => 100, _ => 0 } }
+pub fn checked_position_score(value: source::CheckedPositionAdmission) -> i64 { handle value { source::CheckedPositionAdmission::Value(position) => handle source::position_line(position) == 1 { true => 1, _ => 0 }, source::CheckedPositionAdmission::DigestMismatch => 1000, source::CheckedPositionAdmission::InvalidOffset => 0, _ => 0 } }

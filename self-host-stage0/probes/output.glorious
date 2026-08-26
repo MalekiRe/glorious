@@ -1,0 +1,27 @@
+use compiler_support::__g1_bytes_get;
+use compiler_support::__g1_text_as_bytes;
+use output_library::output;
+
+pub fn main() -> u8 {
+    handle output::targets(output::stage("out", __g1_text_as_bytes("A")), "out") {
+        true => handle output::targets(output::stage("out", __g1_text_as_bytes("A")), "other") {
+            false => handle output::commit_to(output::stage("out", __g1_text_as_bytes("A")), "out") {
+                output::TargetCommitResult::Value(bytes) => handle output::commit_to(output::stage("out", __g1_text_as_bytes("B")), "other") {
+                    output::TargetCommitResult::Value(_) => 0,
+                    output::TargetCommitResult::TargetMismatch => handle output::commit(output::discard(output::stage("out", __g1_text_as_bytes("B")))) {
+                        output::CommitResult::Value(_) => 0,
+                        output::CommitResult::NotStaged => __g1_bytes_get(bytes, 0),
+                        _ => 0,
+                    },
+                    output::TargetCommitResult::NotStaged => 0,
+                    _ => 0,
+                },
+                output::TargetCommitResult::NotStaged => 0,
+                output::TargetCommitResult::TargetMismatch => 0,
+                _ => 0,
+            },
+            _ => 0,
+        },
+        _ => 0,
+    }
+}

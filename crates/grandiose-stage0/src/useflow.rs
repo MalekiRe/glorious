@@ -593,7 +593,7 @@ impl Analyzer<'_> {
                     if let Some(place) = self.closure_place_fact(
                         expression.span,
                         &capture.name,
-                        matches!(capture.mode, crate::core::CaptureMode::Move),
+                        capture.mode,
                     ) {
                         match capture.mode {
                             crate::core::CaptureMode::Move => {
@@ -602,6 +602,12 @@ impl Analyzer<'_> {
                             }
                             crate::core::CaptureMode::SharedBorrow
                             | crate::core::CaptureMode::UniqueBorrow => {
+                                self.record_borrow(&binding, place, expression.span);
+                            }
+                            crate::core::CaptureMode::Copy => {
+                                // A copy is an owned environment entry but
+                                // leaves its unrestricted source binding
+                                // available for later ordinary uses.
                                 self.record_borrow(&binding, place, expression.span);
                             }
                         }
@@ -1494,15 +1500,20 @@ impl Analyzer<'_> {
         })
     }
 
-    fn closure_place_fact(&self, span: Span, root: &str, moved: bool) -> Option<MoveFact> {
+    fn closure_place_fact(
+        &self,
+        span: Span,
+        root: &str,
+        mode: crate::core::CaptureMode,
+    ) -> Option<MoveFact> {
         self.ownership.events.iter().find_map(|event| {
-            let matches_kind = matches!(
-                (&event.kind, moved),
-                (FlowEventKind::Move(name), true)
-                    | (FlowEventKind::BorrowShared(name), false)
-                    | (FlowEventKind::BorrowUnique(name), false)
-                    if name == root
-            );
+            let matches_kind = match (&event.kind, mode) {
+                (FlowEventKind::Move(name), crate::core::CaptureMode::Move)
+                | (FlowEventKind::BorrowShared(name), crate::core::CaptureMode::SharedBorrow)
+                | (FlowEventKind::BorrowUnique(name), crate::core::CaptureMode::UniqueBorrow)
+                | (FlowEventKind::Read(name), crate::core::CaptureMode::Copy) => name == root,
+                _ => false,
+            };
             matches_kind
                 .then_some(())
                 .filter(|_| event.span == span)

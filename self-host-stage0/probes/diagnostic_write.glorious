@@ -1,0 +1,6 @@
+use compiler_support::write_diagnostic;
+
+pub fn main() -> i64 {
+    write_diagnostic("self-host-diagnostic\n");
+    7
+}

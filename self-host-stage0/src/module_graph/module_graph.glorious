@@ -1,0 +1,234 @@
+// M11 starts with the immutable supplied-module set. Path canonicalization,
+// inline/external child discovery, and diagnostics build on this source-owned
+// membership boundary rather than on a host filesystem walk.
+use bootstrap_indirection::TextSequence;
+use bootstrap_indirection::text_contains;
+use bootstrap_indirection::text_prepend;
+use bootstrap_indirection::text_singleton;
+use bootstrap_indirection::text_insert_sorted_unique;
+use bootstrap_indirection::text_length;
+use bootstrap_indirection::text_rank;
+use compiler_support::__g1_array_pop_move;
+use request::SourceWorld2;
+use request::SourceWorldAdmission;
+use request::source_world2_first;
+use request::source_world2_second;
+use request::SourceBundle;
+use request::SourceBundleAdmission;
+use request::SourceSequence;
+use request::source_bundle_sources;
+use source::logical_path;
+use source::SourceInput;
+use source::same_file_identity;
+use source::checked_logical_path;
+use source::LogicalPathAdmission;
+
+pub struct ModuleGraph {
+    modules: TextSequence,
+}
+
+pub enum Discovery { Added, Duplicate }
+pub enum GraphAdmission { Value(ModuleGraph), Unadmitted }
+pub struct SourceWorldGraph2 { first: SourceInput, second: SourceInput }
+pub enum ExactGraphAdmission { Value(SourceWorldGraph2), Unadmitted }
+// General exact topology retains each admitted SourceInput/FileKey rather
+// than collapsing package-qualified membership to a logical-path-only graph.
+pub struct SourceBundleGraph { sources: SourceSequence }
+pub enum BundleExactGraphAdmission { Value(SourceBundleGraph), Unadmitted }
+
+
+pub fn root(path: Text) -> ModuleGraph {
+    ModuleGraph { modules: text_singleton(path) }
+}
+
+fn empty() -> ModuleGraph { ModuleGraph { modules: TextSequence::Empty } }
+
+// Direct graph construction is retained for compiler-owned static paths.
+// Externally supplied roots must cross the same logical-path admission as a
+// request source before they become discoverable graph members.
+pub fn checked_root(path: Text) -> GraphAdmission {
+    handle checked_logical_path(path) {
+        LogicalPathAdmission::Value(_) => GraphAdmission::Value(root(path)),
+        LogicalPathAdmission::Invalid => GraphAdmission::Unadmitted,
+        _ => GraphAdmission::Unadmitted,
+    }
+}
+
+// The bootstrap world is currently bounded to two sources, but its topology
+// is derived from those admitted records rather than a second caller-supplied
+// list of paths. This keeps package/module membership tied to the exact bytes
+// and file identities that request admission already validated.
+pub fn from_source_world2(world: SourceWorld2) -> ModuleGraph {
+    let first_path = logical_path(source_world2_first(world));
+    extend(root(first_path), logical_path(source_world2_second(world)))
+}
+
+pub fn from_source_world2_admission(world: SourceWorldAdmission) -> GraphAdmission {
+    handle world {
+        SourceWorldAdmission::Value(value) => GraphAdmission::Value(from_source_world2(value)),
+        _ => GraphAdmission::Unadmitted,
+    }
+}
+
+// The scalable topology path derives every module path from the admitted
+// request bundle. `extend` is already sorted and duplicate-safe, so source
+// argument ordering has no influence on graph membership or rank.
+pub fn from_source_bundle(bundle: SourceBundle) -> ModuleGraph {
+    from_source_sequence(empty(), source_bundle_sources(bundle))
+}
+
+pub fn from_source_bundle_admission(bundle: SourceBundleAdmission) -> GraphAdmission {
+    handle bundle {
+        SourceBundleAdmission::Value(value) => GraphAdmission::Value(from_source_bundle(value)),
+        _ => GraphAdmission::Unadmitted,
+    }
+}
+
+fn from_source_sequence(graph: ModuleGraph, sources: SourceSequence) -> ModuleGraph {
+    handle sources {
+        SourceSequence::Empty => graph,
+        SourceSequence::Node(input, has_tail, tail) => from_source_sequence_node(graph, logical_path(input), has_tail, tail),
+        _ => graph,
+    }
+}
+
+fn from_source_sequence_node(graph: ModuleGraph, path: Text, has_tail: Bool, tail: Array<SourceSequence>) -> ModuleGraph {
+    handle has_tail {
+        true => from_source_sequence(extend(graph, path), __g1_array_pop_move<SourceSequence>(&mut tail)),
+        false => extend(graph, path),
+        _ => graph,
+    }
+}
+
+// Path-only membership remains useful for discovery presentation, but it is
+// not sufficient as the authoritative topology: separate packages may both
+// own `src/lib.glorious`. This exact view retains SourceInput FileKeys and is
+// the graph form compiler service uses for request-world admission.
+pub fn exact_from_source_world2(world: SourceWorld2) -> SourceWorldGraph2 {
+    SourceWorldGraph2 {
+        first: source_world2_first(world),
+        second: source_world2_second(world),
+    }
+}
+
+pub fn exact_from_source_world2_admission(world: SourceWorldAdmission) -> ExactGraphAdmission {
+    handle world {
+        SourceWorldAdmission::Value(value) => ExactGraphAdmission::Value(exact_from_source_world2(value)),
+        _ => ExactGraphAdmission::Unadmitted,
+    }
+}
+
+pub fn exact_from_source_bundle(bundle: SourceBundle) -> SourceBundleGraph {
+    SourceBundleGraph { sources: source_bundle_sources(bundle) }
+}
+
+pub fn exact_from_source_bundle_admission(bundle: SourceBundleAdmission) -> BundleExactGraphAdmission {
+    handle bundle {
+        SourceBundleAdmission::Value(value) => BundleExactGraphAdmission::Value(exact_from_source_bundle(value)),
+        _ => BundleExactGraphAdmission::Unadmitted,
+    }
+}
+
+pub fn bundle_exact_count(graph: SourceBundleGraph) -> i64 {
+    bundle_exact_count_sequence(graph.sources)
+}
+
+fn bundle_exact_count_sequence(sources: SourceSequence) -> i64 {
+    handle sources {
+        SourceSequence::Empty => 0,
+        SourceSequence::Node(_, has_tail, tail) => bundle_exact_count_node(has_tail, tail),
+        _ => 0,
+    }
+}
+
+fn bundle_exact_count_node(has_tail: Bool, tail: Array<SourceSequence>) -> i64 {
+    handle has_tail {
+        true => 1 + bundle_exact_count_sequence(__g1_array_pop_move<SourceSequence>(&mut tail)),
+        false => 1,
+        _ => 0,
+    }
+}
+
+pub fn bundle_exact_contains(graph: SourceBundleGraph, input: SourceInput) -> Bool {
+    bundle_exact_contains_sequence(graph.sources, input)
+}
+
+fn bundle_exact_contains_sequence(sources: SourceSequence, input: SourceInput) -> Bool {
+    handle sources {
+        SourceSequence::Empty => false,
+        SourceSequence::Node(head, has_tail, tail) => bundle_exact_contains_node(head, has_tail, tail, input),
+        _ => false,
+    }
+}
+
+fn bundle_exact_contains_node(head: SourceInput, has_tail: Bool, tail: Array<SourceSequence>, input: SourceInput) -> Bool {
+    handle same_file_identity(head, input) {
+        true => true,
+        false => handle has_tail {
+            true => bundle_exact_contains_sequence(__g1_array_pop_move<SourceSequence>(&mut tail), input),
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn exact_count(graph: SourceWorldGraph2) -> i64 { 2 }
+
+pub fn exact_contains(graph: SourceWorldGraph2, input: SourceInput) -> Bool {
+    handle same_file_identity(graph.first, input) {
+        true => true,
+        false => same_file_identity(graph.second, input),
+        _ => false,
+    }
+}
+
+pub fn extend(graph: ModuleGraph, path: Text) -> ModuleGraph {
+    ModuleGraph { modules: text_insert_sorted_unique(graph.modules, path) }
+}
+
+// Preserve whether a discovery edge is new. Callers retain the immutable
+// graph transition explicitly, avoiding a second parse/cache task for a
+// duplicate path.
+pub fn discover(graph: ModuleGraph, path: Text) -> Discovery {
+    handle contains(graph, path) {
+        true => Discovery::Duplicate,
+        false => Discovery::Added,
+        _ => Discovery::Duplicate,
+    }
+}
+
+
+pub fn contains(graph: ModuleGraph, path: Text) -> Bool {
+    text_contains(graph.modules, path)
+}
+
+pub fn count(graph: ModuleGraph) -> i64 {
+    text_length(graph.modules)
+}
+
+// Canonical rank is the deterministic traversal order shared by dependency
+// and module discovery. It is independent of the order in which imports were
+// encountered, while preserving duplicate suppression at the graph boundary.
+pub fn canonical_rank(graph: ModuleGraph, path: Text) -> i64 {
+    text_rank(graph.modules, path)
+}
+
+// Discovery may reach the same logical child through more than one import
+// edge. Fold every supplied path through the one immutable membership set so
+// discovery order cannot duplicate a module or alter its cardinality.
+pub fn merge(graph: ModuleGraph, discovered: TextSequence) -> ModuleGraph {
+    handle discovered {
+        TextSequence::Empty => graph,
+        TextSequence::Node(path, has_tail, tail) => merge_node(graph, path, has_tail, tail),
+        _ => graph,
+    }
+}
+
+fn merge_node(graph: ModuleGraph, path: Text, has_tail: Bool, tail: Array<TextSequence>) -> ModuleGraph {
+    handle has_tail {
+        true => merge(extend(graph, path), __g1_array_pop_move<TextSequence>(&mut tail)),
+        false => extend(graph, path),
+        _ => graph,
+    }
+}

@@ -1,0 +1,19 @@
+use instance_library::instance;
+pub fn score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn main() -> i64 {
+    score(instance::same(instance::instance(1, 2), instance::instance(1, 2)))
+        + score(instance::same(instance::instance(1, 2), instance::instance(1, 3)))
+        + score(instance::same(
+            instance::typed_instance(1, 2, instance::ArgumentKind::ConstU32),
+            instance::typed_instance(1, 2, instance::ArgumentKind::ConstU32)))
+        + score(instance::same(
+            instance::typed_instance(1, 2, instance::ArgumentKind::Type),
+            instance::typed_instance(1, 2, instance::ArgumentKind::Lifetime)))
+        + handle instance::admit(1, instance::ArgumentValue::Concrete(2), instance::ArgumentKind::Type) { instance::InstanceAdmission::Value(value) => score(instance::same(value, instance::instance(1, 2))), instance::InstanceAdmission::NonConcrete => 0, _ => 0 }
+        + handle instance::admit(1, instance::ArgumentValue::Open(2), instance::ArgumentKind::Type) { instance::InstanceAdmission::NonConcrete => 1, instance::InstanceAdmission::Value(_) => 0, _ => 0 }
+        + handle instance::admit(1, instance::ArgumentValue::Inferred(2), instance::ArgumentKind::EffectRow) { instance::InstanceAdmission::NonConcrete => 1, instance::InstanceAdmission::Value(_) => 0, _ => 0 }
+        + score_invalid(instance::admit(1, instance::ArgumentValue::Concrete(-1), instance::ArgumentKind::ConstU32))
+        + score_invalid(instance::admit(1, instance::ArgumentValue::Concrete(-1), instance::ArgumentKind::Quantity))
+}
+
+pub fn score_invalid(value: instance::InstanceAdmission) -> i64 { handle value { instance::InstanceAdmission::InvalidValue => 10, instance::InstanceAdmission::Value(_) => 0, instance::InstanceAdmission::NonConcrete => 0, _ => 0 } }

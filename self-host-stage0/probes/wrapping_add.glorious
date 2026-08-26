@@ -1,0 +1,5 @@
+use compiler_support::__g1_int_wrapping_add;
+
+pub fn main() -> u64 {
+    __g1_int_wrapping_add<u64>(18446744073709551615, 1)
+}

@@ -1,0 +1,163 @@
+// M17's bootstrap solver answers a concrete trait/self goal against one
+// concrete implementation. Candidate sets, recursion, projections, and
+// explanations extend this deterministic source-owned answer shape.
+use compiler_support::branch_bool;
+use compiler_support::text_eq;
+use types::Type;
+use types::same;
+use coherence::ImplementationPolarity;
+use operation::Budget;
+use operation::BudgetResult;
+use operation::budget;
+use operation::charge;
+
+pub struct Implementation {
+    evidence: i64,
+    trait_name: Text,
+    self_type: Type,
+    polarity: ImplementationPolarity,
+}
+
+pub struct Goal {
+    trait_name: Text,
+    self_type: Type,
+}
+
+pub enum Answer {
+    Satisfied(i64),
+    Refuted(i64),
+    Unsatisfied,
+    Ambiguous,
+    // Resource exhaustion is distinct from an ordinary absent candidate.
+    // Callers must not cache a partial candidate scan as a negative answer.
+    Overflow,
+}
+
+pub fn implementation(trait_name: Text, self_type: Type) -> Implementation {
+    identified_implementation(0, trait_name, self_type)
+}
+
+pub fn negative_implementation(trait_name: Text, self_type: Type) -> Implementation {
+    identified_negative_implementation(0, trait_name, self_type)
+}
+
+// Evidence is a stable declaration identity in the complete solver.  The
+// bootstrap form keeps it as an integer so candidate-set selection cannot
+// accidentally turn two distinct applicable implementations into one answer.
+pub fn identified_implementation(evidence: i64, trait_name: Text, self_type: Type) -> Implementation {
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Positive }
+}
+
+pub fn identified_negative_implementation(evidence: i64, trait_name: Text, self_type: Type) -> Implementation {
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Negative }
+}
+
+pub fn goal(trait_name: Text, self_type: Type) -> Goal {
+    Goal { trait_name: trait_name, self_type: self_type }
+}
+
+pub fn solve(candidate: Implementation, goal: Goal) -> Answer {
+    branch_bool(
+        text_eq(candidate.trait_name, goal.trait_name),
+        () -> Answer { solve_same_trait(candidate, goal) },
+        () -> Answer { Answer::Unsatisfied },
+    )
+}
+
+// The full tabled solver shares request-scoped step accounting with parsing,
+// query execution, and MIR worklists.  This bootstrap slice makes that
+// authority explicit before candidate enumeration: every inspected candidate
+// consumes one unit, and an exhausted budget has a terminal answer distinct
+// from `Unsatisfied`.
+pub fn solve_with_step_limit(limit: i64, candidate: Implementation, goal: Goal) -> Answer {
+    solve_with_budget(budget(limit), candidate, goal)
+}
+
+fn solve_with_budget(steps: Budget, candidate: Implementation, goal: Goal) -> Answer {
+    handle charge(steps, 1) {
+        BudgetResult::Value(_) => solve(candidate, goal),
+        BudgetResult::Error(_) => Answer::Overflow,
+        _ => Answer::Overflow,
+    }
+}
+
+// Candidate sets cannot silently choose a positive implementation over an
+// equally applicable negative one. The compact two-candidate form is the
+// bootstrap predecessor of the full worklist and explanation engine.
+pub fn solve_pair(first: Implementation, second: Implementation, goal: Goal) -> Answer {
+    combine_answers(solve(first, goal), solve(second, goal))
+}
+
+// Preserve evaluation order under a finite budget.  A later candidate is not
+// silently skipped when the budget runs out: the terminal resource outcome
+// wins over a partial selection, matching the stage0 solver's step-limit
+// contract.
+pub fn solve_pair_with_step_limit(limit: i64, first: Implementation, second: Implementation, goal: Goal) -> Answer {
+    solve_pair_with_budget(budget(limit), first, second, goal)
+}
+
+fn solve_pair_with_budget(steps: Budget, first: Implementation, second: Implementation, goal: Goal) -> Answer {
+    handle charge(steps, 1) {
+        BudgetResult::Value(after_first) => solve_second_with_budget(after_first, first, second, goal),
+        BudgetResult::Error(_) => Answer::Overflow,
+        _ => Answer::Overflow,
+    }
+}
+
+fn solve_second_with_budget(steps: Budget, first: Implementation, second: Implementation, goal: Goal) -> Answer {
+    handle charge(steps, 1) {
+        BudgetResult::Value(_) => combine_answers(solve(first, goal), solve(second, goal)),
+        BudgetResult::Error(_) => Answer::Overflow,
+        _ => Answer::Overflow,
+    }
+}
+
+// This fold is deliberately expressed through the same combination boundary
+// as two candidates.  It is the bounded bootstrap form of the tabled
+// worklist: adding an irrelevant candidate cannot erase ambiguity, while a
+// contradictory negative candidate cannot be hidden behind it.
+pub fn solve_three(first: Implementation, second: Implementation, third: Implementation, goal: Goal) -> Answer {
+    combine_answers(combine_answers(solve(first, goal), solve(second, goal)), solve(third, goal))
+}
+
+fn combine_answers(first: Answer, second: Answer) -> Answer {
+    handle (first, second) {
+        (Answer::Ambiguous, Answer::Refuted(_)) => Answer::Unsatisfied,
+        (Answer::Refuted(_), Answer::Ambiguous) => Answer::Unsatisfied,
+        (Answer::Ambiguous, _) => Answer::Ambiguous,
+        (_, Answer::Ambiguous) => Answer::Ambiguous,
+        (Answer::Satisfied(_), Answer::Refuted(_)) => Answer::Unsatisfied,
+        (Answer::Refuted(_), Answer::Satisfied(_)) => Answer::Unsatisfied,
+        (Answer::Satisfied(first_evidence), Answer::Satisfied(second_evidence)) => combine_satisfied(first_evidence, second_evidence),
+        (Answer::Refuted(first_evidence), Answer::Refuted(second_evidence)) => Answer::Refuted(first_evidence),
+        (Answer::Satisfied(first_evidence), _) => Answer::Satisfied(first_evidence),
+        (_, Answer::Satisfied(second_evidence)) => Answer::Satisfied(second_evidence),
+        (Answer::Refuted(first_evidence), _) => Answer::Refuted(first_evidence),
+        (_, Answer::Refuted(second_evidence)) => Answer::Refuted(second_evidence),
+        _ => Answer::Unsatisfied,
+    }
+}
+
+fn combine_satisfied(first_evidence: i64, second_evidence: i64) -> Answer {
+    branch_bool(
+        first_evidence == second_evidence,
+        () -> Answer { Answer::Satisfied(first_evidence) },
+        () -> Answer { Answer::Ambiguous },
+    )
+}
+
+fn solve_same_trait(candidate: Implementation, goal: Goal) -> Answer {
+    branch_bool(
+        same(candidate.self_type, goal.self_type),
+        () -> Answer { answer_for_polarity(candidate.polarity, candidate.evidence) },
+        () -> Answer { Answer::Unsatisfied },
+    )
+}
+
+fn answer_for_polarity(polarity: ImplementationPolarity, evidence: i64) -> Answer {
+    handle polarity {
+        ImplementationPolarity::Positive => Answer::Satisfied(evidence),
+        ImplementationPolarity::Negative => Answer::Refuted(evidence),
+        _ => Answer::Unsatisfied,
+    }
+}

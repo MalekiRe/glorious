@@ -1,0 +1,66 @@
+// M21 bootstrap place state. Projection paths, unique loans, and cleanup
+// later enrich this source-owned available/shared-borrowed/moved transition.
+pub enum PlaceState { Available, SharedBorrowed, UniqueBorrowed, Moved }
+pub enum ArgumentMode { Move, Borrow, UniqueBorrow }
+pub enum CallAdmission { Value(PlaceState), Rejected }
+pub enum MoveAdmission { Value(PlaceState), BorrowConflict, AlreadyMoved }
+pub fn available() -> PlaceState { PlaceState::Available }
+pub fn move_out(state: PlaceState) -> PlaceState { handle state { PlaceState::Available => PlaceState::Moved, PlaceState::SharedBorrowed => PlaceState::SharedBorrowed, PlaceState::UniqueBorrowed => PlaceState::UniqueBorrowed, PlaceState::Moved => PlaceState::Moved, _ => PlaceState::Moved } }
+
+pub fn borrow_shared(state: PlaceState) -> PlaceState { handle state { PlaceState::Available => PlaceState::SharedBorrowed, PlaceState::SharedBorrowed => PlaceState::SharedBorrowed, PlaceState::UniqueBorrowed => PlaceState::UniqueBorrowed, PlaceState::Moved => PlaceState::Moved, _ => PlaceState::Moved } }
+pub fn borrow_unique(state: PlaceState) -> PlaceState { handle state { PlaceState::Available => PlaceState::UniqueBorrowed, PlaceState::SharedBorrowed => PlaceState::SharedBorrowed, PlaceState::UniqueBorrowed => PlaceState::UniqueBorrowed, PlaceState::Moved => PlaceState::Moved, _ => PlaceState::Moved } }
+pub fn release_borrow(state: PlaceState) -> PlaceState { handle state { PlaceState::SharedBorrowed => PlaceState::Available, PlaceState::UniqueBorrowed => PlaceState::Available, PlaceState::Available => PlaceState::Available, PlaceState::Moved => PlaceState::Moved, _ => PlaceState::Moved } }
+
+pub fn move_checked(state: PlaceState) -> MoveAdmission {
+    handle state {
+        PlaceState::Available => MoveAdmission::Value(PlaceState::Moved),
+        PlaceState::SharedBorrowed => MoveAdmission::BorrowConflict,
+        PlaceState::UniqueBorrowed => MoveAdmission::BorrowConflict,
+        PlaceState::Moved => MoveAdmission::AlreadyMoved,
+        _ => MoveAdmission::AlreadyMoved,
+    }
+}
+// Assignment establishes a new initialized value even when an earlier value
+// was moved. Later projection-aware flow refines this whole-place transition.
+pub fn initialize(state: PlaceState) -> PlaceState { PlaceState::Available }
+pub fn can_read(state: PlaceState) -> Bool { handle state { PlaceState::Available => true, PlaceState::SharedBorrowed => true, PlaceState::UniqueBorrowed => true, PlaceState::Moved => false, _ => false } }
+
+// Reading through a live loan is valid, but returning ownership across a
+// boundary is not. EscapeFlow consumes this stronger predicate rather than
+// mistaking loan readability for ownership availability.
+pub fn can_escape_owned(state: PlaceState) -> Bool { handle state { PlaceState::Available => true, PlaceState::SharedBorrowed => false, PlaceState::UniqueBorrowed => false, PlaceState::Moved => false, _ => false } }
+
+// A call boundary consumes an owned argument but only observes a borrowed
+// one. Both modes require a live source place, so an already moved value
+// cannot be reintroduced by passing it through a call expression.
+pub fn call_argument(state: PlaceState, mode: ArgumentMode) -> CallAdmission {
+    handle state {
+        PlaceState::Available => handle mode {
+            ArgumentMode::Move => CallAdmission::Value(PlaceState::Moved),
+            ArgumentMode::Borrow => CallAdmission::Value(PlaceState::SharedBorrowed),
+            ArgumentMode::UniqueBorrow => CallAdmission::Value(PlaceState::UniqueBorrowed),
+            _ => CallAdmission::Rejected,
+        },
+        PlaceState::SharedBorrowed => handle mode {
+            ArgumentMode::Move => CallAdmission::Rejected,
+            ArgumentMode::Borrow => CallAdmission::Value(PlaceState::SharedBorrowed),
+            ArgumentMode::UniqueBorrow => CallAdmission::Rejected,
+            _ => CallAdmission::Rejected,
+        },
+        PlaceState::UniqueBorrowed => CallAdmission::Rejected,
+        PlaceState::Moved => CallAdmission::Rejected,
+        _ => CallAdmission::Rejected,
+    }
+}
+
+// A path remains available after a control-flow merge only if every incoming
+// path retained it. This is the conservative base of later projection and
+// loan-state joins.
+pub fn join(left: PlaceState, right: PlaceState) -> PlaceState {
+    handle (left, right) {
+        (PlaceState::Available, PlaceState::Available) => PlaceState::Available,
+        (PlaceState::SharedBorrowed, PlaceState::SharedBorrowed) => PlaceState::SharedBorrowed,
+        (PlaceState::UniqueBorrowed, PlaceState::UniqueBorrowed) => PlaceState::UniqueBorrowed,
+        _ => PlaceState::Moved,
+    }
+}

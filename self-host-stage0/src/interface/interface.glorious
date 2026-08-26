@@ -1,0 +1,129 @@
+// M10 begins the canonical interface boundary. Later collector/cache layers
+// attach stable identities, header fingerprints, diagnostics, and transactional
+// publication to these declaration facts.
+use compiler_support::branch_bool;
+use header::HeaderLead;
+use header::HeaderPrefix;
+
+pub enum DefinitionNamespace {
+    Type,
+    Value,
+    Trait,
+    Effect,
+    Module,
+    Operator,
+    None,
+}
+
+pub enum DefinitionKind {
+    Function,
+    HostImport,
+    Constant,
+    ValueAlias,
+    Struct,
+    Enum,
+    TypeAlias,
+    Trait,
+    AutoTrait,
+    Effect,
+    Module,
+    Fixity,
+    Implementation,
+    Import,
+}
+
+pub struct Definition {
+    kind: DefinitionKind,
+    public: Bool,
+}
+
+pub enum DefinitionAdmission {
+    Value(Definition),
+    NotDeclaration,
+}
+
+pub fn definition(kind: DefinitionKind, public: Bool) -> Definition {
+    Definition { kind: kind, public: public }
+}
+
+// Interface collection consumes the header-owned declaration lead rather than
+// duplicating keyword interpretation. The full header later supplies names,
+// spans, signatures, and fingerprints through this same admission boundary.
+pub fn definition_from_lead(lead: HeaderLead, public: Bool) -> DefinitionAdmission {
+    handle lead {
+        HeaderLead::Function => DefinitionAdmission::Value(definition(DefinitionKind::Function, public)),
+        HeaderLead::Struct => DefinitionAdmission::Value(definition(DefinitionKind::Struct, public)),
+        HeaderLead::Enum => DefinitionAdmission::Value(definition(DefinitionKind::Enum, public)),
+        HeaderLead::Trait => DefinitionAdmission::Value(definition(DefinitionKind::Trait, public)),
+        HeaderLead::Effect => DefinitionAdmission::Value(definition(DefinitionKind::Effect, public)),
+        HeaderLead::Type => DefinitionAdmission::Value(definition(DefinitionKind::TypeAlias, public)),
+        HeaderLead::Constant => DefinitionAdmission::Value(definition(DefinitionKind::Constant, public)),
+        HeaderLead::Implementation => DefinitionAdmission::Value(definition(DefinitionKind::Implementation, public)),
+        HeaderLead::Import => DefinitionAdmission::Value(definition(DefinitionKind::Import, public)),
+        HeaderLead::Module => DefinitionAdmission::Value(definition(DefinitionKind::Module, public)),
+        HeaderLead::Prefix => DefinitionAdmission::Value(definition(DefinitionKind::Fixity, public)),
+        HeaderLead::InfixLeft => DefinitionAdmission::Value(definition(DefinitionKind::Fixity, public)),
+        HeaderLead::InfixRight => DefinitionAdmission::Value(definition(DefinitionKind::Fixity, public)),
+        HeaderLead::InfixNonAssociative => DefinitionAdmission::Value(definition(DefinitionKind::Fixity, public)),
+        HeaderLead::HostImport => DefinitionAdmission::Value(definition(DefinitionKind::HostImport, public)),
+        HeaderLead::ValueAlias => DefinitionAdmission::Value(definition(DefinitionKind::ValueAlias, public)),
+        HeaderLead::AutoTrait => DefinitionAdmission::Value(definition(DefinitionKind::AutoTrait, public)),
+        HeaderLead::Identifier => DefinitionAdmission::NotDeclaration,
+        HeaderLead::NotDeclaration => DefinitionAdmission::NotDeclaration,
+        _ => DefinitionAdmission::NotDeclaration,
+    }
+}
+
+// This is the normal scanner/header/interface handoff. Keep
+// `definition_from_lead` as the representation-level adapter used by later
+// collectors, but take visibility from the parsed prefix at the source edge.
+pub fn definition_from_header(input: Bytes) -> DefinitionAdmission {
+    definition_from_prefix(header::declaration(input))
+}
+
+pub fn definition_from_prefix(prefix: HeaderPrefix) -> DefinitionAdmission {
+    definition_from_lead(header::lead(prefix), header::is_public(prefix))
+}
+
+pub fn namespace(definition: Definition) -> DefinitionNamespace {
+    handle definition.kind {
+        DefinitionKind::Function => DefinitionNamespace::Value,
+        DefinitionKind::HostImport => DefinitionNamespace::Value,
+        DefinitionKind::Constant => DefinitionNamespace::Value,
+        DefinitionKind::ValueAlias => DefinitionNamespace::Value,
+        DefinitionKind::Struct => DefinitionNamespace::Type,
+        DefinitionKind::Enum => DefinitionNamespace::Type,
+        DefinitionKind::TypeAlias => DefinitionNamespace::Type,
+        DefinitionKind::Trait => DefinitionNamespace::Trait,
+        DefinitionKind::AutoTrait => DefinitionNamespace::Trait,
+        DefinitionKind::Effect => DefinitionNamespace::Effect,
+        DefinitionKind::Module => DefinitionNamespace::Module,
+        DefinitionKind::Fixity => DefinitionNamespace::Operator,
+        DefinitionKind::Implementation => DefinitionNamespace::None,
+        DefinitionKind::Import => DefinitionNamespace::None,
+        _ => DefinitionNamespace::None,
+    }
+}
+
+pub fn is_auto_trait(definition: Definition) -> Bool {
+    handle definition.kind {
+        DefinitionKind::AutoTrait => true,
+        _ => false,
+    }
+}
+
+pub fn is_exported(definition: Definition) -> Bool {
+    branch_bool(
+        definition.public,
+        () -> Bool { has_namespace(definition.kind) },
+        () -> Bool { false },
+    )
+}
+
+fn has_namespace(kind: DefinitionKind) -> Bool {
+    handle kind {
+        DefinitionKind::Implementation => false,
+        DefinitionKind::Import => false,
+        _ => true,
+    }
+}

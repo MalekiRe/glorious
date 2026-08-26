@@ -1,0 +1,229 @@
+// M20 bootstrap Core admission. The complete Core IR later carries places,
+// calls, effects, handlers, labels, and ownership evidence; this first gate
+// ensures only a body expression matching its expected type is admitted.
+use body::Expression;
+use body::Arithmetic;
+use body::Comparison;
+use signature::Callable;
+use body::BodyKind;
+use body::BodyAdmission;
+use body::admit;
+use types::Type;
+
+pub enum CoreKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, PatternTest }
+
+pub struct CoreValue {
+    result: Type,
+    kind: CoreKind,
+    // Keep the admitted expression available to the next lowering stage.  A
+    // category alone is not enough to encode value-carrying instructions.
+    body_value: Expression
+}
+
+pub enum CoreResult {
+    Value(CoreValue),
+    TypeError,
+}
+
+pub fn lower(expression: Expression, expected: Type) -> CoreResult {
+    if_matches(expression, expected)
+}
+
+fn if_matches(expression: Expression, expected: Type) -> CoreResult {
+    handle admit(expression, expected) {
+        BodyAdmission::Value(kind) => CoreResult::Value(CoreValue { result: expected, kind: core_kind(kind), body_value: expression }),
+        BodyAdmission::TypeError => CoreResult::TypeError,
+        _ => CoreResult::TypeError,
+    }
+}
+
+// This is deliberately a small value-carrying Core projection.  The complete
+// Core IR will use operands/places; retaining this exact admitted source form
+// prevents the bootstrap arithmetic path from reconstructing operands from a
+// scanner side channel after Core has accepted it.
+pub enum I64ArithmeticValue { Value(Arithmetic, i64, i64), NotArithmetic }
+pub enum U32ArithmeticValue { Value(Arithmetic, u32, u32), NotU32Arithmetic }
+pub enum UsizeArithmeticValue { Value(Arithmetic, usize, usize), NotUsizeArithmetic }
+pub enum U64ComparisonValue { Value(Comparison, u64, u64), NotU64Comparison }
+pub enum U8ComparisonValue { Value(Comparison, u8, u8), NotU8Comparison }
+pub enum UsizeComparisonValue { Value(Comparison, usize, usize), NotUsizeComparison }
+pub enum I64ComparisonValue { Value(Comparison, i64, i64), NotComparison }
+pub enum I64SelectValue { Value(Bool, i64, i64), NotConditional }
+pub enum CallValue { Unary(Callable, Type), Binary(Callable, Type, Type), NotCall }
+pub enum I64LiteralValue { Value(i64), NotI64Literal }
+pub enum U32LiteralValue { Value(u32), NotU32Literal }
+pub enum BoolLiteralValue { Value(Bool), NotBoolLiteral }
+pub enum BoolNotValue { Value(Bool), NotBoolNot }
+pub enum ParameterI64Value { Value(i64), NotParameter }
+pub enum ParameterU32Value { Value(u32), NotParameter }
+
+pub fn i64_arithmetic(value: CoreValue) -> I64ArithmeticValue {
+    handle value.body_value {
+        Expression::I64Arithmetic(operation, left, right) => I64ArithmeticValue::Value(operation, left, right),
+        Expression::ParameterI64Arithmetic(operation, left, right) => I64ArithmeticValue::Value(operation, left, right),
+        _ => I64ArithmeticValue::NotArithmetic,
+    }
+}
+
+pub fn u32_arithmetic(value: CoreValue) -> U32ArithmeticValue {
+    handle value.body_value {
+        Expression::U32Arithmetic(operation, left, right) => U32ArithmeticValue::Value(operation, left, right),
+        Expression::ParameterU32Arithmetic(operation, left, right) => U32ArithmeticValue::Value(operation, left, right),
+        _ => U32ArithmeticValue::NotU32Arithmetic,
+    }
+}
+pub fn usize_arithmetic(value: CoreValue) -> UsizeArithmeticValue {
+    handle value.body_value { Expression::UsizeArithmetic(operation, left, right) => UsizeArithmeticValue::Value(operation, left, right), _ => UsizeArithmeticValue::NotUsizeArithmetic }
+}
+
+pub fn u64_comparison(value: CoreValue) -> U64ComparisonValue {
+    handle value.body_value { Expression::U64Comparison(operation, left, right) => U64ComparisonValue::Value(operation, left, right), _ => U64ComparisonValue::NotU64Comparison }
+}
+pub fn u8_comparison(value: CoreValue) -> U8ComparisonValue {
+    handle value.body_value { Expression::U8Comparison(operation, left, right) => U8ComparisonValue::Value(operation, left, right), _ => U8ComparisonValue::NotU8Comparison }
+}
+pub fn usize_comparison(value: CoreValue) -> UsizeComparisonValue { handle value.body_value { Expression::UsizeComparison(operation, left, right) => UsizeComparisonValue::Value(operation, left, right), _ => UsizeComparisonValue::NotUsizeComparison } }
+
+pub fn i64_comparison(value: CoreValue) -> I64ComparisonValue {
+    handle value.body_value {
+        Expression::I64Comparison(operation, left, right) => I64ComparisonValue::Value(operation, left, right),
+        _ => I64ComparisonValue::NotComparison,
+    }
+}
+
+pub fn i64_select(value: CoreValue) -> I64SelectValue {
+    handle value.body_value {
+        Expression::I64Select(condition, when_true, when_false) => I64SelectValue::Value(condition, when_true, when_false),
+        Expression::ParameterI64Select(condition, when_true, when_false) => I64SelectValue::Value(condition, when_true, when_false),
+        _ => I64SelectValue::NotConditional,
+    }
+}
+
+// Calls retain their admitted callable and argument-type contract. Runtime
+// argument values belong to invocation, but codegen must not recover the
+// declaration shape from a terminal tag alone.
+pub fn call(value: CoreValue) -> CallValue {
+    handle value.body_value {
+        Expression::Call1(callable, argument) => CallValue::Unary(callable, argument),
+        Expression::Call2(callable, first, second) => CallValue::Binary(callable, first, second),
+        _ => CallValue::NotCall,
+    }
+}
+
+pub fn i64_literal(value: CoreValue) -> I64LiteralValue {
+    handle value.body_value { Expression::I64(number) => I64LiteralValue::Value(number), _ => I64LiteralValue::NotI64Literal }
+}
+
+// Keep unsigned payloads distinct from i64 at the Core boundary.  The later
+// VM schema chooses its own typed constant/instruction encoding; no caller
+// may erase this distinction by reusing the signed literal projection.
+pub fn u32_literal(value: CoreValue) -> U32LiteralValue {
+    handle value.body_value { Expression::U32(number) => U32LiteralValue::Value(number), _ => U32LiteralValue::NotU32Literal }
+}
+
+pub fn bool_literal(value: CoreValue) -> BoolLiteralValue {
+    handle value.body_value { Expression::Bool(boolean) => BoolLiteralValue::Value(boolean), _ => BoolLiteralValue::NotBoolLiteral }
+}
+
+pub fn bool_not(value: CoreValue) -> BoolNotValue {
+    handle value.body_value {
+        Expression::BoolNot(boolean) => BoolNotValue::Value(boolean),
+        Expression::ParameterBoolNot(boolean) => BoolNotValue::Value(boolean),
+        _ => BoolNotValue::NotBoolNot,
+    }
+}
+
+pub fn parameter_i64(value: CoreValue) -> ParameterI64Value {
+    handle value.body_value { Expression::ParameterI64(number) => ParameterI64Value::Value(number), _ => ParameterI64Value::NotParameter }
+}
+
+pub fn parameter_u32(value: CoreValue) -> ParameterU32Value {
+    handle value.body_value { Expression::ParameterU32(number) => ParameterU32Value::Value(number), _ => ParameterU32Value::NotParameter }
+}
+
+fn core_kind(kind: BodyKind) -> CoreKind {
+    handle kind {
+        BodyKind::Literal => CoreKind::Literal,
+        BodyKind::Parameter => CoreKind::Parameter,
+        BodyKind::Boolean => CoreKind::Boolean,
+        BodyKind::ParameterBoolean => CoreKind::ParameterBoolean,
+        BodyKind::Arithmetic => CoreKind::Arithmetic,
+        BodyKind::ParameterArithmetic => CoreKind::ParameterArithmetic,
+        BodyKind::Comparison => CoreKind::Comparison,
+        BodyKind::Conditional => CoreKind::Conditional,
+        BodyKind::ParameterConditional => CoreKind::ParameterConditional,
+        BodyKind::Call => CoreKind::Call,
+        BodyKind::PatternTest => CoreKind::PatternTest,
+        _ => CoreKind::Literal,
+    }
+}
+
+pub fn is_pattern_test(value: CoreValue) -> Bool {
+    handle value.kind {
+        CoreKind::PatternTest => true,
+        CoreKind::Literal => false,
+        CoreKind::Call => false,
+        _ => false,
+    }
+}
+
+pub fn result_is(value: CoreValue, expected: Type) -> Bool {
+    types::same(value.result, expected)
+}
+
+pub fn is_call(value: CoreValue) -> Bool {
+    handle value.kind {
+        CoreKind::Literal => false,
+        CoreKind::Call => true,
+        _ => false,
+    }
+}
+
+pub fn is_parameter(value: CoreValue) -> Bool {
+    handle value.kind {
+        CoreKind::Parameter => true,
+        _ => false,
+    }
+}
+
+pub fn is_arithmetic(value: CoreValue) -> Bool {
+    handle value.kind {
+        CoreKind::Arithmetic => true,
+        CoreKind::ParameterArithmetic => true,
+        _ => false,
+    }
+}
+
+pub fn is_parameter_arithmetic(value: CoreValue) -> Bool {
+    handle value.kind {
+        CoreKind::ParameterArithmetic => true,
+        _ => false,
+    }
+}
+
+pub fn is_comparison(value: CoreValue) -> Bool {
+    handle value.kind {
+        CoreKind::Comparison => true,
+        _ => false,
+    }
+}
+
+pub fn is_conditional(value: CoreValue) -> Bool {
+    handle value.kind {
+        CoreKind::Conditional => true,
+        CoreKind::ParameterConditional => true,
+        _ => false,
+    }
+}
+
+pub fn is_parameter_conditional(value: CoreValue) -> Bool {
+    handle value.kind { CoreKind::ParameterConditional => true, _ => false }
+}
+
+pub fn is_boolean(value: CoreValue) -> Bool {
+    handle value.kind { CoreKind::Boolean => true, CoreKind::ParameterBoolean => true, _ => false }
+}
+
+pub fn is_parameter_boolean(value: CoreValue) -> Bool {
+    handle value.kind { CoreKind::ParameterBoolean => true, _ => false }
+}

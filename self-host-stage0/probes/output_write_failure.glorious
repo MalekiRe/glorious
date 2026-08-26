@@ -1,0 +1,13 @@
+use compiler_support::__g1_text_as_bytes;
+use output_library::output;
+
+// The harness creates this path as a directory. The manifest-bound atomic
+// host write must fail before replacing that visible state.
+pub fn main() -> u8 {
+    handle output::write_to(output::stage("rejected-target.grbc", __g1_text_as_bytes("new artifact")), "rejected-target.grbc") {
+        output::WriteResult::Written => 65,
+        output::WriteResult::NotStaged => 0,
+        output::WriteResult::TargetMismatch => 0,
+        _ => 0,
+    }
+}

@@ -1,0 +1,15 @@
+use quantity_library::quantity;
+
+pub fn score(result: quantity::QuantityResult) -> i64 {
+    handle result {
+        quantity::QuantityResult::Value(_) => 1,
+        quantity::QuantityResult::Error(_) => 0,
+        _ => 0,
+    }
+}
+
+pub fn main() -> i64 {
+    score(quantity::multiply(quantity::once(), quantity::once()))
+        + score(quantity::multiply(quantity::unrestricted(), quantity::zero()))
+        + score(quantity::multiply(quantity::exact(18446744073709551615), quantity::exact(2)))
+}

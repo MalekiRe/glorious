@@ -1,0 +1,25 @@
+use placeflow_library::placeflow;
+pub fn score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn score_call(value: placeflow::CallAdmission) -> i64 { handle value { placeflow::CallAdmission::Value(state) => score(placeflow::can_read(state)), placeflow::CallAdmission::Rejected => 1, _ => 0 } }
+pub fn score_move(value: placeflow::MoveAdmission) -> i64 { handle value { placeflow::MoveAdmission::Value(_) => 1, placeflow::MoveAdmission::BorrowConflict => 10, placeflow::MoveAdmission::AlreadyMoved => 100, _ => 0 } }
+pub fn main() -> i64 {
+    score(placeflow::can_read(placeflow::available()))
+        + score(placeflow::can_read(placeflow::move_out(placeflow::available())))
+        + score(placeflow::can_read(placeflow::join(placeflow::available(), placeflow::available())))
+        + score(placeflow::can_read(placeflow::join(placeflow::available(), placeflow::move_out(placeflow::available()))))
+        + score(placeflow::can_read(placeflow::initialize(placeflow::move_out(placeflow::available()))))
+        + score_call(placeflow::call_argument(placeflow::available(), placeflow::ArgumentMode::Move))
+        + score_call(placeflow::call_argument(placeflow::available(), placeflow::ArgumentMode::Borrow))
+        + score_call(placeflow::call_argument(placeflow::available(), placeflow::ArgumentMode::UniqueBorrow))
+        + score_call(placeflow::call_argument(placeflow::move_out(placeflow::available()), placeflow::ArgumentMode::Move))
+        + score_call(placeflow::call_argument(placeflow::move_out(placeflow::available()), placeflow::ArgumentMode::Borrow))
+        + score_call(placeflow::call_argument(placeflow::borrow_shared(placeflow::available()), placeflow::ArgumentMode::UniqueBorrow))
+        + score(placeflow::can_read(placeflow::borrow_shared(placeflow::available())))
+        + score(placeflow::can_read(placeflow::release_borrow(placeflow::borrow_shared(placeflow::available()))))
+        + score(placeflow::can_read(placeflow::borrow_unique(placeflow::available())))
+        + score(placeflow::can_read(placeflow::release_borrow(placeflow::borrow_unique(placeflow::available()))))
+        + score_move(placeflow::move_checked(placeflow::available()))
+        + score_move(placeflow::move_checked(placeflow::borrow_shared(placeflow::available())))
+        + score_move(placeflow::move_checked(placeflow::borrow_unique(placeflow::available())))
+        + score_move(placeflow::move_checked(placeflow::move_out(placeflow::available())))
+}

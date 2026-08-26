@@ -410,6 +410,9 @@ pub enum PrimitiveRole {
     BytesFromArrayMove,
     BytesToArray,
     BytesUtf8ValidUpTo,
+    /// Unkeyed BLAKE3 over an immutable byte snapshot. Domain separation
+    /// belongs to ordinary source code; this sealed leaf returns raw bytes.
+    Blake3,
     U32CheckedAdd,
     U32CheckedSub,
     U32CheckedMul,
@@ -430,6 +433,9 @@ pub enum PrimitiveRole {
     /// Exact generic declaration `__g1_int_checked_add<T>` in distributed std.
     /// Lowering may specialize it only after the frozen type argument is i64.
     IntCheckedAdd,
+    /// Exact generic declaration `__g1_int_checked_div<T>` in distributed
+    /// std. Division by zero is a checked arithmetic failure.
+    IntCheckedDiv,
     /// Exact generic declaration `__g1_int_wrapping_add<T>` in distributed
     /// std. Its i64 specialization has wrapping, not checked, overflow.
     IntWrappingAdd,
@@ -555,9 +561,10 @@ impl PrimitiveRole {
             Self::ArrayReserve => return 159,
             Self::ArrayFinishDrained => return 160,
             Self::IntWrappingNeg => return 161,
+            Self::Blake3 => return 162,
             _ => {}
         }
-        const LEGACY: [&str; 69] = [
+        const LEGACY: [&str; 70] = [
             "branch-bool",
             "text-byte-len",
             "text-concat",
@@ -627,6 +634,7 @@ impl PrimitiveRole {
             "int-convert-wrapping-to-u128",
             "int-convert-checked-to-i128",
             "int-convert-wrapping-to-i128",
+            "int-checked-div",
         ];
         LEGACY
             .iter()
@@ -666,6 +674,7 @@ impl PrimitiveRole {
         let binary = vec![scalar, scalar];
         Some(match self {
             Self::IntCheckedAdd
+            | Self::IntCheckedDiv
             | Self::IntWrappingAdd
             | Self::IntWrappingSub
             | Self::IntWrappingMul
@@ -735,6 +744,7 @@ impl PrimitiveRole {
             Self::BytesFromArrayMove => "bytes-from-array-move",
             Self::BytesToArray => "bytes-to-array",
             Self::BytesUtf8ValidUpTo => "bytes-utf8-valid-up-to",
+            Self::Blake3 => "blake3",
             Self::U32CheckedAdd => "u32-checked-add",
             Self::U32CheckedSub => "u32-checked-sub",
             Self::U32CheckedMul => "u32-checked-mul",
@@ -753,6 +763,7 @@ impl PrimitiveRole {
             Self::U32ToUsize => "u32-to-usize",
             Self::UsizeToU32Checked => "usize-to-u32-checked",
             Self::IntCheckedAdd => "int-checked-add",
+            Self::IntCheckedDiv => "int-checked-div",
             Self::IntWrappingAdd => "int-wrapping-add",
             Self::IntConvertCheckedToI64 => "int-convert-checked-to-i64",
             Self::IntConvertWrappingToI64 => "int-convert-wrapping-to-i64",
@@ -831,6 +842,7 @@ impl PrimitiveRole {
             "bytes-from-array-move" => Self::BytesFromArrayMove,
             "bytes-to-array" => Self::BytesToArray,
             "bytes-utf8-valid-up-to" => Self::BytesUtf8ValidUpTo,
+            "blake3" => Self::Blake3,
             "u32-checked-add" => Self::U32CheckedAdd,
             "u32-checked-sub" => Self::U32CheckedSub,
             "u32-checked-mul" => Self::U32CheckedMul,
@@ -849,6 +861,7 @@ impl PrimitiveRole {
             "u32-to-usize" => Self::U32ToUsize,
             "usize-to-u32-checked" => Self::UsizeToU32Checked,
             "int-checked-add" => Self::IntCheckedAdd,
+            "int-checked-div" => Self::IntCheckedDiv,
             "int-wrapping-add" => Self::IntWrappingAdd,
             "int-convert-checked-to-i64" => Self::IntConvertCheckedToI64,
             "int-convert-wrapping-to-i64" => Self::IntConvertWrappingToI64,
@@ -1259,6 +1272,17 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
+        PrimitiveRole::Blake3 => crate::CallableSignature {
+            generics: 0,
+            generic_kinds: vec![],
+            parameters: vec![Type::Scalar(ScalarType::Bytes)],
+            result: Type::Scalar(ScalarType::Bytes),
+            effects: EffectRow::empty(),
+            invocation: Quantity::ONCE,
+            where_bounds: vec![],
+            where_associated_type_bindings: vec![],
+            where_associated_effect_bindings: vec![],
+        },
         PrimitiveRole::BytesConcat => crate::CallableSignature {
             generics: 0,
             generic_kinds: vec![],
@@ -1382,6 +1406,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_effect_bindings: vec![],
         },
         PrimitiveRole::IntCheckedAdd
+        | PrimitiveRole::IntCheckedDiv
         | PrimitiveRole::IntWrappingAdd
         | PrimitiveRole::IntWrappingSub
         | PrimitiveRole::IntWrappingMul

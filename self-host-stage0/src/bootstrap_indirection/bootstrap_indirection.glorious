@@ -1,0 +1,271 @@
+// A VM array is an explicit heap boundary, so recursive compiler structures
+// can be represented without recursive owned layouts. Every tail contains at
+// most one chain node; the explicit length check keeps the partial pop leaf
+// off the empty path.
+use compiler_support::branch_bool;
+use compiler_support::__g1_array_pop_move;
+use compiler_support::__g1_int_wrapping_add;
+use compiler_support::__g1_bytes_concat;
+use compiler_support::__g1_bytes_get;
+use compiler_support::__g1_bytes_len;
+use compiler_support::__g1_bytes_from_array_move;
+use compiler_support::__g1_text_as_bytes;
+use compiler_support::text_eq;
+pub enum Chain {
+    Empty,
+    Node(i64, Bool, Array<Chain>),
+}
+
+pub enum TextSequence {
+    Empty,
+    Node(Text, Bool, Array<TextSequence>),
+}
+
+// Compiler identities are canonicalized by their UTF-8 byte spelling.  This
+// is an explicit deterministic order, rather than relying on map iteration
+// or locale-sensitive host text behavior.
+pub enum TextOrder { Less, Equal, Greater }
+
+pub fn empty() -> Chain {
+    Chain::Empty
+}
+
+pub fn singleton(value: i64) -> Chain {
+    Chain::Node(value, false, [])
+}
+
+pub fn prepend(value: i64, tail: Chain) -> Chain {
+    Chain::Node(value, true, [tail])
+}
+
+pub fn node_tag(value: Chain) -> i64 {
+    handle value {
+        Chain::Empty => 0,
+        Chain::Node(_, _, _) => 1,
+        _ => 0,
+    }
+}
+
+pub fn length(value: Chain) -> i64 {
+    handle value {
+        Chain::Empty => 0,
+        Chain::Node(_, has_tail, tail) => length_tail(has_tail, tail),
+        _ => 0,
+    }
+}
+
+fn length_tail(has_tail: Bool, tail: Array<Chain>) -> i64 {
+    branch_bool(
+        has_tail,
+        () -> i64 { __g1_int_wrapping_add<i64>(1, length(__g1_array_pop_move<Chain>(&mut tail))) },
+        () -> i64 { 1 },
+    )
+}
+
+pub fn contains(value: Chain, wanted: i64) -> Bool {
+    handle value {
+        Chain::Empty => false,
+        Chain::Node(item, has_tail, tail) => contains_node(item, has_tail, tail, wanted),
+        _ => false,
+    }
+}
+
+fn contains_node(item: i64, has_tail: Bool, tail: Array<Chain>, wanted: i64) -> Bool {
+    branch_bool(
+        item == wanted,
+        () -> Bool { true },
+        () -> Bool { contains_tail(has_tail, tail, wanted) },
+    )
+}
+
+fn contains_tail(has_tail: Bool, tail: Array<Chain>, wanted: i64) -> Bool {
+    branch_bool(
+        has_tail,
+        () -> Bool { contains(__g1_array_pop_move<Chain>(&mut tail), wanted) },
+        () -> Bool { false },
+    )
+}
+
+pub fn text_same(left: Text, right: Text) -> Bool {
+    text_eq(left, right)
+}
+
+pub fn text_compare(left: Text, right: Text) -> TextOrder {
+    text_compare_at(__g1_text_as_bytes(left), __g1_text_as_bytes(right), 0)
+}
+
+fn text_compare_at(left: Bytes, right: Bytes, index: usize) -> TextOrder {
+    handle index == __g1_bytes_len(left) {
+        true => text_compare_left_end(right, index),
+        false => text_compare_left_present(left, right, index),
+        _ => TextOrder::Equal,
+    }
+}
+
+fn text_compare_left_end(right: Bytes, index: usize) -> TextOrder {
+    handle index == __g1_bytes_len(right) {
+        true => TextOrder::Equal,
+        false => TextOrder::Less,
+        _ => TextOrder::Equal,
+    }
+}
+
+fn text_compare_left_present(left: Bytes, right: Bytes, index: usize) -> TextOrder {
+    handle index == __g1_bytes_len(right) {
+        true => TextOrder::Greater,
+        false => text_compare_bytes_present(left, right, index),
+        _ => TextOrder::Equal,
+    }
+}
+
+fn text_compare_bytes_present(left: Bytes, right: Bytes, index: usize) -> TextOrder {
+    handle __g1_bytes_get(left, index) < __g1_bytes_get(right, index) {
+        true => TextOrder::Less,
+        false => text_compare_not_less(left, right, index),
+        _ => TextOrder::Equal,
+    }
+}
+
+fn text_compare_not_less(left: Bytes, right: Bytes, index: usize) -> TextOrder {
+    handle __g1_bytes_get(left, index) > __g1_bytes_get(right, index) {
+        true => TextOrder::Greater,
+        false => text_compare_at(left, right, __g1_int_wrapping_add<usize>(index, 1)),
+        _ => TextOrder::Equal,
+    }
+}
+
+pub fn text_empty() -> TextSequence {
+    TextSequence::Empty
+}
+
+pub fn text_prepend(value: Text, tail: TextSequence) -> TextSequence {
+    TextSequence::Node(value, true, [tail])
+}
+
+pub fn text_singleton(value: Text) -> TextSequence {
+    TextSequence::Node(value, false, [])
+}
+
+pub fn text_contains(sequence: TextSequence, wanted: Text) -> Bool {
+    handle sequence {
+        TextSequence::Empty => false,
+        TextSequence::Node(value, has_tail, tail) => text_contains_node(value, has_tail, tail, wanted),
+        _ => false,
+    }
+}
+
+pub fn text_length(sequence: TextSequence) -> i64 {
+    handle sequence {
+        TextSequence::Empty => 0,
+        TextSequence::Node(_, has_tail, tail) => text_length_tail(has_tail, tail),
+        _ => 0,
+    }
+}
+
+fn text_length_tail(has_tail: Bool, tail: Array<TextSequence>) -> i64 {
+    handle has_tail {
+        true => __g1_int_wrapping_add<i64>(1, text_length(__g1_array_pop_move<TextSequence>(&mut tail))),
+        false => 1,
+        _ => 0,
+    }
+}
+
+fn text_contains_node(value: Text, has_tail: Bool, tail: Array<TextSequence>, wanted: Text) -> Bool {
+    branch_bool(
+        text_eq(value, wanted),
+        () -> Bool { true },
+        () -> Bool { text_contains_tail(has_tail, tail, wanted) },
+    )
+}
+
+fn text_contains_tail(has_tail: Bool, tail: Array<TextSequence>, wanted: Text) -> Bool {
+    branch_bool(
+        has_tail,
+        () -> Bool { text_contains(__g1_array_pop_move<TextSequence>(&mut tail), wanted) },
+        () -> Bool { false },
+    )
+}
+
+// `handle` branches directly on the Bool result and therefore preserves the
+// affine tail in exactly one selected arm. This avoids materializing two
+// `branch_bool` closure environments for a node that must be rebuilt.
+pub fn text_insert_unique(sequence: TextSequence, wanted: Text) -> TextSequence {
+    handle sequence {
+        TextSequence::Empty => text_singleton(wanted),
+        TextSequence::Node(value, has_tail, tail) => text_insert_unique_node(value, has_tail, tail, wanted),
+        _ => text_singleton(wanted),
+    }
+}
+
+fn text_insert_unique_node(value: Text, has_tail: Bool, tail: Array<TextSequence>, wanted: Text) -> TextSequence {
+    let compared = value;
+    handle text_eq(compared, wanted) {
+        true => TextSequence::Node(value, has_tail, tail),
+        false => text_insert_unique_tail(value, has_tail, tail, wanted),
+        _ => TextSequence::Node(value, has_tail, tail),
+    }
+}
+
+fn text_insert_unique_tail(value: Text, has_tail: Bool, tail: Array<TextSequence>, wanted: Text) -> TextSequence {
+    handle has_tail {
+        true => text_insert_unique_rebuild(value, __g1_array_pop_move<TextSequence>(&mut tail), wanted),
+        false => TextSequence::Node(value, true, [text_singleton(wanted)]),
+        _ => TextSequence::Node(value, has_tail, tail),
+    }
+}
+
+fn text_insert_unique_rebuild(value: Text, tail: TextSequence, wanted: Text) -> TextSequence {
+    TextSequence::Node(value, true, [text_insert_unique(tail, wanted)])
+}
+
+// Sorted insertion centralizes canonical dependency and cache-key ordering.
+// Duplicate entries are retained only once, and no caller can accidentally
+// leak traversal/insertion order into an observable fingerprint.
+pub fn text_insert_sorted_unique(sequence: TextSequence, wanted: Text) -> TextSequence {
+    handle sequence {
+        TextSequence::Empty => text_singleton(wanted),
+        TextSequence::Node(value, has_tail, tail) => text_insert_sorted_unique_node(value, has_tail, tail, wanted),
+        _ => text_singleton(wanted),
+    }
+}
+
+fn text_insert_sorted_unique_node(value: Text, has_tail: Bool, tail: Array<TextSequence>, wanted: Text) -> TextSequence {
+    handle text_compare(wanted, value) {
+        TextOrder::Less => text_prepend(wanted, TextSequence::Node(value, has_tail, tail)),
+        TextOrder::Equal => TextSequence::Node(value, has_tail, tail),
+        TextOrder::Greater => text_insert_sorted_unique_tail(value, has_tail, tail, wanted),
+        _ => TextSequence::Node(value, has_tail, tail),
+    }
+}
+
+fn text_insert_sorted_unique_tail(value: Text, has_tail: Bool, tail: Array<TextSequence>, wanted: Text) -> TextSequence {
+    handle has_tail {
+        true => TextSequence::Node(value, true, [text_insert_sorted_unique(__g1_array_pop_move<TextSequence>(&mut tail), wanted)]),
+        false => TextSequence::Node(value, true, [text_singleton(wanted)]),
+        _ => TextSequence::Node(value, has_tail, tail),
+    }
+}
+
+pub fn text_rank(sequence: TextSequence, wanted: Text) -> i64 {
+    text_rank_at(sequence, wanted, 0)
+}
+
+fn text_rank_at(sequence: TextSequence, wanted: Text, index: i64) -> i64 {
+    handle sequence {
+        TextSequence::Empty => -1,
+        TextSequence::Node(value, has_tail, tail) => handle text_eq(value, wanted) {
+            true => index,
+            false => text_rank_tail(has_tail, tail, wanted, index),
+            _ => -1,
+        },
+        _ => -1,
+    }
+}
+
+fn text_rank_tail(has_tail: Bool, tail: Array<TextSequence>, wanted: Text, index: i64) -> i64 {
+    handle has_tail {
+        true => text_rank_at(__g1_array_pop_move<TextSequence>(&mut tail), wanted, __g1_int_wrapping_add<i64>(index, 1)),
+        false => -1,
+        _ => -1,
+    }
+}

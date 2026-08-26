@@ -96,6 +96,7 @@ pub enum VmType {
 pub enum VmCaptureMode {
     SharedBorrow,
     UniqueBorrow,
+    Copy,
     Move,
 }
 
@@ -411,6 +412,11 @@ pub enum VmInstruction {
         value: u32,
     },
     BytesUtf8ValidUpTo {
+        dst: u32,
+        value: u32,
+    },
+    /// Manifest-bound unkeyed BLAKE3 over immutable bytes.
+    Blake3 {
         dst: u32,
         value: u32,
     },
@@ -1791,6 +1797,11 @@ pub trait VmHost {
     fn process_args(&mut self) -> Result<Vec<String>, String>;
     fn read_file(&mut self, path: &str) -> Result<Vec<u8>, String>;
     fn write_file(&mut self, path: &str, bytes: &[u8]) -> Result<(), String>;
+    /// Atomically replace one final path through a same-directory staging
+    /// file. Hosts that do not explicitly expose this authority fail closed.
+    fn write_file_atomically(&mut self, _path: &str, _bytes: &[u8]) -> Result<(), String> {
+        Err("atomic file write capability is unavailable".into())
+    }
     fn write_diagnostic(&mut self, text: &str) -> Result<(), String>;
 }
 
@@ -1821,6 +1832,10 @@ impl VmHost for SystemVmHost {
         std::fs::write(path, bytes).map_err(|error| error.to_string())
     }
 
+    fn write_file_atomically(&mut self, path: &str, bytes: &[u8]) -> Result<(), String> {
+        crate::output::write_atomically(path, bytes).map_err(|error| error.to_string())
+    }
+
     fn write_diagnostic(&mut self, text: &str) -> Result<(), String> {
         eprint!("{text}");
         Ok(())
@@ -1841,10 +1856,18 @@ pub struct VmExecutionLimits {
 impl Default for VmExecutionLimits {
     fn default() -> Self {
         Self {
-            max_call_depth: 4_096,
+            // The source compiler's cursor-based frontend is deliberately
+            // recursive until source-defined loops/tail-call lowering land.
+            // Keep a finite hostile-program boundary, but leave enough headroom
+            // for the compiler to lex and compile its own complete source tree.
+            max_call_depth: 16_384,
             max_handler_depth: 4_096,
             max_retained_continuations: 4_096,
-            max_instructions: 10_000_000,
+            // Compiler-scale source traversal can legitimately execute more
+            // than ten million bounded cursor operations before it emits an
+            // artifact. The execution budget remains finite and callers can
+            // still choose a tighter explicit limit for untrusted programs.
+            max_instructions: 100_000_000,
             max_value_elements: 1 << 20,
             max_allocation_elements: 1 << 24,
         }
@@ -1941,7 +1964,7 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// closure descriptor cannot redirect to an ABI-compatible sibling body.
 /// Schema 83 makes all generic and frozen integer shifts reject a count at or
 /// beyond the operand width instead of silently masking it.
-pub const STAGE0_VM_SCHEMA: u32 = 88;
+pub const STAGE0_VM_SCHEMA: u32 = 90;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2882,7 +2905,11 @@ fn emit_edge(
 ) {
     for transfer in parallel_edge_transfers(arguments, target) {
         match transfer {
-            EdgeTransfer::Direct { dst, src } => instructions.push(VmInstruction::Copy {
+            // An edge argument transfers ownership from its predecessor into
+            // the target block parameter. The predecessor terminates here, so
+            // emitting Copy is both unnecessary and invalid for affine values
+            // such as source bundles or diagnostic buffers.
+            EdgeTransfer::Direct { dst, src } => instructions.push(VmInstruction::Move {
                 dst: dst.0,
                 src: src.0,
             }),
@@ -2890,17 +2917,17 @@ fn emit_edge(
                 let (first_destination, first_source) = transfers[0];
                 let temporary = registers.len() as u32;
                 registers.push(registers[first_source.0 as usize].clone());
-                instructions.push(VmInstruction::Copy {
+                instructions.push(VmInstruction::Move {
                     dst: temporary,
                     src: first_source.0,
                 });
                 for &(destination, source) in transfers.iter().skip(1) {
-                    instructions.push(VmInstruction::Copy {
+                    instructions.push(VmInstruction::Move {
                         dst: destination.0,
                         src: source.0,
                     });
                 }
-                instructions.push(VmInstruction::Copy {
+                instructions.push(VmInstruction::Move {
                     dst: first_destination.0,
                     src: temporary,
                 });
@@ -2984,11 +3011,24 @@ pub fn verify(artifact: CandidateVmArtifact) -> Result<VerifiedVmArtifact, VmArt
     Ok(VerifiedVmArtifact { artifact })
 }
 pub fn emit_program(program: &MirProgram) -> Result<CandidateVmProgram, VmArtifactError> {
-    program
-        .validate()
-        .map_err(|_| VmArtifactError::MissingFunction {
-            definition: program.entry,
-        })?;
+    if let Err(message) = program.validate() {
+        // Keep the exact failed invariant visible to the seed compiler while
+        // porting new self-hosted source shapes. The artifact API below still
+        // returns stable public categories once this diagnostic has been
+        // classified.
+        eprintln!("stage0 MIR program validation: {message}");
+        return Err(VmArtifactError::MalformedEncoding {
+            // The public artifact format intentionally has stable error
+            // categories; service retains the detailed lowering diagnostic.
+            message: if message.contains("call targets missing function") {
+                "MIR program has an unstaged call target"
+            } else if message.contains("dead/uninitialized") {
+                "MIR program has invalid source-storage liveness"
+            } else {
+                "MIR program failed structural validation"
+            },
+        });
+    }
     let specialized_lifted_target_owners =
         program.specialized_lifted_target_owners().map_err(|_| {
             VmArtifactError::MissingFunction {
@@ -3579,7 +3619,8 @@ fn encode_capture_environment(value: Option<&VmCaptureEnvironment>, output: &mut
                 output.push(match capture.mode {
                     VmCaptureMode::SharedBorrow => 0,
                     VmCaptureMode::UniqueBorrow => 1,
-                    VmCaptureMode::Move => 2,
+                    VmCaptureMode::Copy => 2,
+                    VmCaptureMode::Move => 3,
                 });
                 encode_type(&capture.ty, output);
             }
@@ -3862,7 +3903,8 @@ impl<'a> Decoder<'a> {
                     let mode = match self.byte()? {
                         0 => VmCaptureMode::SharedBorrow,
                         1 => VmCaptureMode::UniqueBorrow,
-                        2 => VmCaptureMode::Move,
+                        2 => VmCaptureMode::Copy,
+                        3 => VmCaptureMode::Move,
                         _ => {
                             return Err(VmArtifactError::MalformedEncoding {
                                 message: "invalid callable capture mode",
@@ -5015,6 +5057,10 @@ impl<'a> Decoder<'a> {
                 value: self.u32()?,
             }),
             86 => Ok(VmInstruction::BytesUtf8ValidUpTo {
+                dst: self.u32()?,
+                value: self.u32()?,
+            }),
+            173 => Ok(VmInstruction::Blake3 {
                 dst: self.u32()?,
                 value: self.u32()?,
             }),
@@ -6417,6 +6463,10 @@ fn lower_instruction(
             dst: dst.0,
             value: value.0,
         },
+        MirInstruction::Blake3 { dst, value } => VmInstruction::Blake3 {
+            dst: dst.0,
+            value: value.0,
+        },
         MirInstruction::ArrayNew {
             dst,
             length,
@@ -7213,6 +7263,7 @@ fn lower_instruction(
                                     mode: match capture.mode {
                                         CaptureMode::SharedBorrow => VmCaptureMode::SharedBorrow,
                                         CaptureMode::UniqueBorrow => VmCaptureMode::UniqueBorrow,
+                                        CaptureMode::Copy => VmCaptureMode::Copy,
                                         CaptureMode::Move => VmCaptureMode::Move,
                                     },
                                     // The corresponding value register is
@@ -7358,6 +7409,9 @@ fn verify_pattern(pattern: &VmPattern, subject: &VmType) -> Result<(), VmArtifac
     match pattern {
         VmPattern::Any => Ok(()),
         VmPattern::Literal(value) => {
+            if numeric_literal_matches_vm_type(value, subject) {
+                return Ok(());
+            }
             let expected = literal_vm_type(value).ok_or(VmArtifactError::MalformedEncoding {
                 message: "invalid scalar literal pattern",
             })?;
@@ -7461,6 +7515,29 @@ fn literal_vm_type(value: &str) -> Option<VmType> {
         TokenKind::Character if parse_pattern_char(value).is_some() => Some(VmType::Char),
         TokenKind::String if parse_pattern_text(value).is_some() => Some(VmType::Text),
         _ => None,
+    }
+}
+
+// Integer pattern syntax is contextually typed by the enum/record payload.
+// The compact VM pattern keeps only its canonical spelling, so recover that
+// context during verification rather than forcing every u32/u64 arm to use
+// an artificial i64 representation.
+fn numeric_literal_matches_vm_type(value: &str, subject: &VmType) -> bool {
+    let signed = || parse_pattern_i64(value);
+    let unsigned = || parse_pattern_u64(value);
+    match subject {
+        VmType::I64 => signed().is_some(),
+        VmType::I32 => signed().and_then(|value| i32::try_from(value).ok()).is_some(),
+        VmType::I16 => signed().and_then(|value| i16::try_from(value).ok()).is_some(),
+        VmType::I8 => signed().and_then(|value| i8::try_from(value).ok()).is_some(),
+        VmType::Isize => signed().is_some(),
+        VmType::I128 => parse_pattern_i128(value).is_some(),
+        VmType::U64 | VmType::Usize => unsigned().is_some(),
+        VmType::U128 => parse_pattern_u128(value).is_some(),
+        VmType::U32 => unsigned().and_then(|value| u32::try_from(value).ok()).is_some(),
+        VmType::U16 => unsigned().and_then(|value| u16::try_from(value).ok()).is_some(),
+        VmType::U8 => unsigned().and_then(|value| u8::try_from(value).ok()).is_some(),
+        _ => false,
     }
 }
 
@@ -7944,6 +8021,12 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
             VmInstruction::BytesLen { dst, value }
             | VmInstruction::BytesUtf8ValidUpTo { dst, value } => {
                 expect_type(function, *dst, VmType::Usize)?;
+                expect_type(function, *value, VmType::Bytes)?;
+                read(&states, *value)?;
+                write(&mut states, *dst)?
+            }
+            VmInstruction::Blake3 { dst, value } => {
+                expect_type(function, *dst, VmType::Bytes)?;
                 expect_type(function, *value, VmType::Bytes)?;
                 read(&states, *value)?;
                 write(&mut states, *dst)?
@@ -11961,6 +12044,9 @@ macro_rules! execute_integer_binary {
             PrimitiveRole::IntCheckedAdd => left
                 .checked_add(right)
                 .ok_or(VmArtifactError::ArithmeticOverflow)?,
+            PrimitiveRole::IntCheckedDiv => left
+                .checked_div(right)
+                .ok_or(VmArtifactError::ArithmeticOverflow)?,
             PrimitiveRole::IntWrappingAdd => left.wrapping_add(right),
             PrimitiveRole::IntWrappingSub => left.wrapping_sub(right),
             PrimitiveRole::IntWrappingMul => left.wrapping_mul(right),
@@ -12016,6 +12102,7 @@ macro_rules! execute_integer_for_scalar {
     ($primitive:expr, $arguments:expr, $registers:expr, $expect:ident, $variant:ident) => {{
         match $primitive {
             PrimitiveRole::IntCheckedAdd
+            | PrimitiveRole::IntCheckedDiv
             | PrimitiveRole::IntWrappingAdd
             | PrimitiveRole::IntWrappingSub
             | PrimitiveRole::IntWrappingMul
@@ -12680,6 +12767,16 @@ fn literal_matches(value: &VmValue, literal: &str) -> bool {
     match value {
         VmValue::Bool(value) => matches!((literal, value), ("true", true) | ("false", false)),
         VmValue::I64(value) => parse_pattern_i64(literal).is_some_and(|literal| literal == *value),
+        VmValue::U8(value) => parse_pattern_u64(literal).is_some_and(|literal| literal == u64::from(*value)),
+        VmValue::U16(value) => parse_pattern_u64(literal).is_some_and(|literal| literal == u64::from(*value)),
+        VmValue::U32(value) => parse_pattern_u64(literal).is_some_and(|literal| literal == u64::from(*value)),
+        VmValue::U64(value) | VmValue::Usize(value) => parse_pattern_u64(literal).is_some_and(|literal| literal == *value),
+        VmValue::U128(value) => parse_pattern_u128(literal).is_some_and(|literal| literal == *value),
+        VmValue::I8(value) => parse_pattern_i64(literal).is_some_and(|literal| literal == i64::from(*value)),
+        VmValue::I16(value) => parse_pattern_i64(literal).is_some_and(|literal| literal == i64::from(*value)),
+        VmValue::I32(value) => parse_pattern_i64(literal).is_some_and(|literal| literal == i64::from(*value)),
+        VmValue::Isize(value) => parse_pattern_i64(literal).is_some_and(|literal| literal == *value),
+        VmValue::I128(value) => parse_pattern_i128(literal).is_some_and(|literal| literal == *value),
         VmValue::F64(value) => parse_pattern_f64(literal).is_some_and(|literal| literal == *value),
         VmValue::F32(value) => {
             parse_pattern_f64(literal).is_some_and(|literal| literal as f32 == *value)
@@ -12705,6 +12802,45 @@ fn parse_pattern_i64(text: &str) -> Option<i64> {
         (10, digits.as_str())
     };
     i64::from_str_radix(digits, radix).ok()
+}
+fn parse_pattern_u64(text: &str) -> Option<u64> {
+    let digits = text.replace('_', "");
+    let (radix, digits) = if let Some(value) = digits.strip_prefix("0b") {
+        (2, value)
+    } else if let Some(value) = digits.strip_prefix("0o") {
+        (8, value)
+    } else if let Some(value) = digits.strip_prefix("0x") {
+        (16, value)
+    } else {
+        (10, digits.as_str())
+    };
+    u64::from_str_radix(digits, radix).ok()
+}
+fn parse_pattern_u128(text: &str) -> Option<u128> {
+    let digits = text.replace('_', "");
+    let (radix, digits) = if let Some(value) = digits.strip_prefix("0b") {
+        (2, value)
+    } else if let Some(value) = digits.strip_prefix("0o") {
+        (8, value)
+    } else if let Some(value) = digits.strip_prefix("0x") {
+        (16, value)
+    } else {
+        (10, digits.as_str())
+    };
+    u128::from_str_radix(digits, radix).ok()
+}
+fn parse_pattern_i128(text: &str) -> Option<i128> {
+    let digits = text.replace('_', "");
+    let (radix, digits) = if let Some(value) = digits.strip_prefix("0b") {
+        (2, value)
+    } else if let Some(value) = digits.strip_prefix("0o") {
+        (8, value)
+    } else if let Some(value) = digits.strip_prefix("0x") {
+        (16, value)
+    } else {
+        (10, digits.as_str())
+    };
+    i128::from_str_radix(digits, radix).ok()
 }
 fn parse_pattern_f64(text: &str) -> Option<f64> {
     parse_f64_literal(text).ok()
@@ -13100,6 +13236,15 @@ fn execute(
                         .expect("verified register"),
                 )?;
                 registers[dst as usize] = Some(VmValue::Usize(valid_utf8_prefix(&bytes) as u64));
+            }
+            VmInstruction::Blake3 { dst, value } => {
+                let bytes = expect_bytes(
+                    registers[value as usize].as_ref().expect("verified register"),
+                )?;
+                budget.reserve_value("bytes", blake3::OUT_LEN)?;
+                registers[dst as usize] = Some(VmValue::Bytes(Arc::from(
+                    blake3::hash(&bytes).as_bytes().as_slice(),
+                )));
             }
             instruction @ (VmInstruction::ArrayNew { .. }
             | VmInstruction::ArrayLen { .. }
@@ -15370,6 +15515,11 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&value.to_le_bytes());
         }
+        VmInstruction::Blake3 { dst, value } => {
+            output.push(173);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.extend_from_slice(&value.to_le_bytes());
+        }
         VmInstruction::ArrayNew {
             dst,
             length,
@@ -16234,6 +16384,17 @@ fn execute_with_arguments_with_host(
                         .expect("verified register"),
                 )?;
                 registers[*dst as usize] = Some(VmValue::Usize(valid_utf8_prefix(&bytes) as u64));
+            }
+            VmInstruction::Blake3 { dst, value } => {
+                let bytes = expect_bytes(
+                    registers[*value as usize]
+                        .as_ref()
+                        .expect("verified register"),
+                )?;
+                budget.reserve_value("bytes", blake3::OUT_LEN)?;
+                registers[*dst as usize] = Some(VmValue::Bytes(Arc::from(
+                    blake3::hash(&bytes).as_bytes().as_slice(),
+                )));
             }
             instruction @ (VmInstruction::ArrayNew { .. }
             | VmInstruction::ArrayLen { .. }
@@ -18098,6 +18259,12 @@ fn execute_host_call(
             host.write_file(&path, &bytes).map_err(failed)?;
             Ok(VmValue::Unit)
         }
+        ("file_write_atomic", "__g1_fs_write_atomic", [path, bytes]) => {
+            let path = expect_text(path)?.to_owned();
+            let bytes = expect_bytes(bytes)?;
+            host.write_file_atomically(&path, &bytes).map_err(failed)?;
+            Ok(VmValue::Unit)
+        }
         ("diagnostic", "__g1_diagnostic_write", [text]) => {
             let text = expect_text(text)?.to_owned();
             host.write_diagnostic(&text).map_err(failed)?;
@@ -18232,10 +18399,10 @@ mod tests {
         assert_eq!(
             instructions,
             vec![
-                VmInstruction::Copy { dst: 3, src: 1 },
-                VmInstruction::Copy { dst: 1, src: 2 },
-                VmInstruction::Copy { dst: 2, src: 0 },
-                VmInstruction::Copy { dst: 0, src: 3 },
+                VmInstruction::Move { dst: 3, src: 1 },
+                VmInstruction::Move { dst: 1, src: 2 },
+                VmInstruction::Move { dst: 2, src: 0 },
+                VmInstruction::Move { dst: 0, src: 3 },
                 VmInstruction::Jump { target: 17 },
             ]
         );
@@ -18258,6 +18425,42 @@ mod tests {
         };
         artifact.fingerprint = artifact.computed_fingerprint();
         artifact
+    }
+
+    #[test]
+    fn manifest_bound_blake3_round_trips_through_encoding_and_verification() {
+        let artifact = artifact(
+            vec![VmType::Text, VmType::Bytes, VmType::Bytes],
+            vec![
+                VmInstruction::ConstText {
+                    dst: 0,
+                    value: "abc".into(),
+                },
+                VmInstruction::TextAsBytes { dst: 1, value: 0 },
+                VmInstruction::Blake3 { dst: 2, value: 1 },
+                VmInstruction::Return { value: 2 },
+            ],
+        );
+        let bytes = encode_artifact(&artifact);
+        let decoded = decode_artifact(&bytes).expect("BLAKE3 artifact decodes");
+        let expected = blake3::hash(b"abc");
+        let candidate = expect_bytes(
+            execute(
+                &decoded.function,
+                &mut ExecutionBudget {
+                    limits: VmExecutionLimits::default(),
+                    instructions: 0,
+                    allocated_elements: 0,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let verified = verify(decoded).unwrap();
+        let verified_value = expect_bytes(verified.execute_with_limits(VmExecutionLimits::default()).unwrap())
+            .unwrap();
+        assert_eq!(candidate.as_ref(), expected.as_bytes());
+        assert_eq!(verified_value.as_ref(), expected.as_bytes());
     }
 
     #[test]

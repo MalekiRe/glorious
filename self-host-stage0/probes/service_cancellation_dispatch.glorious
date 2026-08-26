@@ -1,0 +1,35 @@
+use service_library::service;
+use service_library::query;
+use service_library::revision;
+use service_library::dependency;
+use service_library::operation;
+
+pub fn score(value: service::ServiceDispatch) -> i64 {
+    handle value {
+        service::ServiceDispatch::Reuse => 1,
+        service::ServiceDispatch::Recompute => 10,
+        service::ServiceDispatch::Rejected => 100,
+        _ => 0,
+    }
+}
+
+pub fn ready(snapshot: revision::Snapshot) -> query::QuerySlot {
+    query::begin_at(query::slot(snapshot))
+}
+
+pub fn complete(snapshot: revision::Snapshot) -> query::QuerySlot {
+    handle query::publish_at(ready(snapshot), snapshot, query::QueryCompleteness::Complete) {
+        query::QueryPublication::Value(slot) => slot,
+        _ => query::slot(snapshot),
+    }
+}
+
+pub fn main() -> i64 {
+    score(service::dispatch_query_with_cancellation(
+        query::RecoveryPolicy::Allow, complete(revision::root(1)), revision::root(1), dependency::DependencyStatus::Green, operation::active(),
+    )) + score(service::dispatch_query_with_cancellation(
+        query::RecoveryPolicy::Allow, complete(revision::root(1)), revision::root(1), dependency::DependencyStatus::Green, operation::cancel(operation::active()),
+    )) + score(service::dispatch_query_with_cancellation(
+        query::RecoveryPolicy::Allow, ready(revision::root(1)), revision::root(1), dependency::DependencyStatus::Green, operation::cancel(operation::active()),
+    ))
+}

@@ -1,0 +1,18 @@
+use useflow_library::useflow;
+use useflow_library::placeflow;
+pub fn score(value: useflow::ConsumeResult) -> i64 { handle value { useflow::ConsumeResult::Value(state) => useflow::remaining(state), useflow::ConsumeResult::Exhausted => 0, _ => 0 } }
+pub fn main() -> i64 {
+    score(useflow::consume(useflow::uses(2)))
+        + score(useflow::consume(useflow::uses(0)))
+        + useflow::remaining(useflow::join(useflow::uses(2), useflow::uses(5)))
+        + useflow::remaining(useflow::join(useflow::uses(0), useflow::uses(2)))
+        + handle useflow::remaining(useflow::uses(-1)) == 0 { true => 1, false => 0, _ => 0 }
+        + handle useflow::bounded(1, 3) { useflow::UseConstruction::Value(_) => 1, useflow::UseConstruction::Invalid => 0, _ => 0 }
+        + handle useflow::bounded(3, 1) { useflow::UseConstruction::Invalid => 1, useflow::UseConstruction::Value(_) => 0, _ => 0 }
+        + handle useflow_library::remains_permitted_after_one(useflow::at_least(1)) { true => 1, false => 0, _ => 0 }
+        + score_place_consume(useflow::consume_from_place(placeflow::available(), useflow::uses(1)))
+        + score_place_consume(useflow::consume_from_place(placeflow::move_out(placeflow::available()), useflow::uses(1)))
+        + score_place_consume(useflow::consume_from_place(placeflow::available(), useflow::uses(0)))
+}
+
+pub fn score_place_consume(value: useflow::PlaceConsume) -> i64 { handle value { useflow::PlaceConsume::Value(_) => 1, useflow::PlaceConsume::PlaceUnavailable => 10, useflow::PlaceConsume::Exhausted => 100, _ => 0 } }

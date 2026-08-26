@@ -1,0 +1,42 @@
+use dependency_library::dependency;
+use dependency_library::revision;
+pub fn score(value: dependency::DependencyStatus) -> i64 {
+    handle value {
+        dependency::DependencyStatus::Cold => 1,
+        dependency::DependencyStatus::Green => 10,
+        dependency::DependencyStatus::Red(dependency::DependencyNode::Core) => 100,
+        _ => 0,
+    }
+}
+pub fn score_bool(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn score_publication(value: dependency::JournalPublication) -> i64 {
+    handle value {
+        dependency::JournalPublication::Value(journal) => dependency::revision_recorded_count(journal),
+        dependency::JournalPublication::CrossRevision => 1000,
+        dependency::JournalPublication::Inactive => 10000,
+        _ => 0,
+    }
+}
+pub fn main() -> i64 {
+    score(dependency::validate_value(false, true, dependency::DependencyNode::Input))
+        + score(dependency::validate_value(true, true, dependency::DependencyNode::Input))
+        + score(dependency::validate_value(true, false, dependency::DependencyNode::Core))
+        + dependency::recorded_count(dependency::record(dependency::record(dependency::record(dependency::journal(), "source"), "core"), "source"))
+        + score_bool(dependency::recorded(dependency::record(dependency::journal(), "source"), "source"))
+        + score_bool(dependency::recorded(dependency::record(dependency::journal(), "source"), "missing"))
+        + dependency::recorded_rank(dependency::record(dependency::record(dependency::record(dependency::journal(), "source"), "artifact"), "core"), "artifact")
+        + dependency::recorded_rank(dependency::record(dependency::record(dependency::record(dependency::journal(), "source"), "artifact"), "core"), "core")
+        + dependency::recorded_rank(dependency::record(dependency::record(dependency::record(dependency::journal(), "source"), "artifact"), "core"), "source")
+        + score_publication(dependency::record_at(dependency::revision_journal(revision::root(1)), revision::root(1), "source"))
+        + score_publication(dependency::record_at(dependency::revision_journal(revision::root(1)), revision::root(2), "source"))
+        + score_publication(dependency::record_at(dependency::revision_journal(revision::root(1)), revision::apply(revision::root(1), revision::RevisionEvent::Supersede), "source"))
+        + score_reuse(dependency::reuse_decision(dependency::validate_value(true, true, dependency::DependencyNode::Input)))
+        + score_reuse(dependency::reuse_decision(dependency::validate_value(true, false, dependency::DependencyNode::Core)))
+        + score_bool(dependency::is_cycle(dependency::validate_with_dependency(true, true, dependency::DependencyStatus::Cycle(dependency::DependencyNode::Mir), dependency::DependencyNode::Core)))
+        + score_bool(dependency::is_incomplete(dependency::validate_with_dependency(true, true, dependency::DependencyStatus::Incomplete(dependency::DependencyNode::Body), dependency::DependencyNode::Core)))
+        + score_bool(dependency::is_incomplete(dependency::validate_with_dependency(true, true, dependency::DependencyStatus::Incomplete(dependency::DependencyNode::Artifact), dependency::DependencyNode::Core)))
+        + score_bool(dependency::is_cycle(dependency::validate_with_dependency(true, true, dependency::DependencyStatus::Cycle(dependency::DependencyNode::Mir), dependency::DependencyNode::Core)))
+        + score(dependency::validate_with_dependency(true, true, dependency::DependencyStatus::Red(dependency::DependencyNode::Input), dependency::DependencyNode::Core))
+}
+
+pub fn score_reuse(value: dependency::ReuseDecision) -> i64 { handle value { dependency::ReuseDecision::Reuse => 1, dependency::ReuseDecision::Recompute => 0, _ => 0 } }

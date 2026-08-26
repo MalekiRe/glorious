@@ -1,12 +1,12 @@
 //! Thin host adapter for the independent stage-zero compiler service.
 
-use std::{collections::BTreeMap, env, fs, process::ExitCode};
+use std::{collections::BTreeMap, env, fs, process::ExitCode, thread};
 
 use grandiose_stage0::{
-    BootstrapLimits, BootstrapManifest, BootstrapStage, CompilationMode, CompilationRequest,
-    CompileDiagnostic, CompilerBuildIdentity, Digest, HostImportSelector, LogicalPath, PackageKey,
-    PrimitiveRole, PrimitiveSelector, RuntimeManifestInput, SourceInput, StageZeroCompiler,
-    decode_and_verify_program, write_atomically,
+    decode_and_verify_program, write_atomically, BootstrapLimits, BootstrapManifest,
+    BootstrapStage, CompilationMode, CompilationRequest, CompileDiagnostic, CompilerBuildIdentity,
+    Digest, HostImportSelector, LogicalPath, PackageKey, PrimitiveRole, PrimitiveSelector,
+    RuntimeManifestInput, SourceInput, StageZeroCompiler, SystemVmHost,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -30,7 +30,34 @@ struct CliOptions {
     positional: Vec<String>,
 }
 
+// Source-defined compiler worlds are intentionally large: linking all
+// compiler modules and their nominal layouts can exceed a platform's small
+// default main-thread stack even though the VM itself is bounded. Keep that
+// implementation detail out of callers and test scripts by giving the driver
+// one explicit, finite stack budget. The compiler does not create unbounded
+// recursive worker stacks; every CLI command runs in this single thread.
 fn main() -> ExitCode {
+    const DRIVER_STACK_BYTES: usize = 64 * 1024 * 1024;
+    match thread::Builder::new()
+        .name("grc-stage0-driver".into())
+        .stack_size(DRIVER_STACK_BYTES)
+        .spawn(run_cli)
+    {
+        Ok(worker) => match worker.join() {
+            Ok(code) => code,
+            Err(_) => {
+                eprintln!("grc-stage0: compiler driver panicked");
+                ExitCode::from(1)
+            }
+        },
+        Err(error) => {
+            eprintln!("grc-stage0: cannot start compiler driver: {error}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+fn run_cli() -> ExitCode {
     let CliOptions {
         diagnostic_format,
         capability_manifest,
@@ -61,6 +88,15 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
         return verify_program(&path);
+    }
+    if command == "run-vm" {
+        let Some(path) = arguments.next() else {
+            eprintln!("grc-stage0: run-vm requires a PROGRAM file");
+            return ExitCode::from(2);
+        };
+        let mut guest_arguments = vec!["grc".to_owned()];
+        guest_arguments.extend(arguments);
+        return run_program(&path, guest_arguments);
     }
     if command == "verify-bootstrap" {
         let Some(earlier_program) = arguments.next() else {
@@ -186,10 +222,15 @@ fn main() -> ExitCode {
         Ok(outcome) => {
             render_diagnostics(&outcome.diagnostics, diagnostic_format);
             if command == "run" {
+                // Host capability is never implicit in compilation or VM
+                // execution. The CLI is the explicit outer adapter that
+                // installs the process/filesystem host for an artifact whose
+                // manifest has already frozen the permitted imports.
+                let mut host = SystemVmHost::new(env::args().collect());
                 match outcome
                     .artifact
                     .expect("successful build has verified artifact")
-                    .run_display()
+                    .run_display_with_host(&mut host)
                 {
                     Ok(value) => println!("{value}"),
                     Err(error) => {
@@ -243,6 +284,12 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
     let mut positional = Vec::new();
     let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
+        // Everything after this separator is guest argv for `run-vm`. It is
+        // data for the verified program, not seed-launcher configuration.
+        if argument == "--" {
+            positional.extend(arguments);
+            break;
+        }
         if argument != "--diagnostics" {
             if argument == "--capability" {
                 let Some(capability) = arguments.next() else {
@@ -461,6 +508,37 @@ fn verify_program(path: &str) -> ExitCode {
     }
 }
 
+// Keep artifact execution behind the same decode-and-verify boundary as the
+// ordinary source `run` command.  Bootstrap tooling uses this to prove that a
+// seed-emitted stage artifact is executable, rather than merely well-formed.
+fn run_program(path: &str, guest_arguments: Vec<String>) -> ExitCode {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            eprintln!("grc-stage0: cannot read {path}: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let program = match decode_and_verify_program(&bytes) {
+        Ok(program) => program,
+        Err(error) => {
+            eprintln!("grc-stage0: program verification failed: {error:?}");
+            return ExitCode::from(1);
+        }
+    };
+    let mut host = SystemVmHost::new(guest_arguments);
+    match program.run_display_with_host(&mut host) {
+        Ok(value) => {
+            println!("{value}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("grc-stage0: verified VM execution failed: {error:?}");
+            ExitCode::from(1)
+        }
+    }
+}
+
 fn verify_bootstrap(
     earlier_program_path: &str,
     earlier_manifest_path: &str,
@@ -528,6 +606,7 @@ fn usage() {
         "       grc-stage0 [--diagnostics text|json] [RUNTIME] emit-bootstrap-vm SOURCE OUTPUT MANIFEST"
     );
     eprintln!("       grc-stage0 [--diagnostics text|json] verify-vm PROGRAM");
+    eprintln!("       grc-stage0 [--diagnostics text|json] run-vm PROGRAM [-- GUEST_ARGS...]");
     eprintln!(
         "       grc-stage0 [--diagnostics text|json] verify-bootstrap EARLIER_PROGRAM EARLIER_MANIFEST LATER_PROGRAM LATER_MANIFEST"
     );

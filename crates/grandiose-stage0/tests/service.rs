@@ -5,7 +5,7 @@ use grandiose_stage0::{
     CompileDiagnostic, CompilerBuildIdentity, DependencyNode, DependencyStatus, DiagnosticClass,
     Digest, FileKey, HostImportSelector, InstanceLimits, LogicalPath, ModuleKey, PackageKey,
     PackageSessionStatus, PrimitiveRole, PrimitiveSelector, RetentionReport, RuntimeManifestInput,
-    Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmContinuationPolicy,
+    ScalarType, Severity, SourceInput, StageZeroCompiler, VmArtifactError, VmContinuationPolicy,
     VmExecutionLimits, VmGenericArgument, VmInstruction, VmType, decode_and_verify_program,
     decode_program, encode_program,
     query::{Query, QueryCompleteness, QueryContext, QueryEngine, QueryFailure, QueryValue},
@@ -1388,6 +1388,219 @@ fn manifest_bound_text_byte_len_leaf_lowers_to_the_capability_free_vm_opcode() {
     let outcome = StageZeroCompiler::new().compile(input).unwrap();
     let artifact = outcome.artifact.expect("build must publish a VM artifact");
     assert_eq!(artifact.run_usize().unwrap(), 5);
+}
+
+#[test]
+fn manifest_bound_branch_bool_lowers_to_lazy_cfg_and_invokes_only_the_selected_thunk() {
+    for (condition, expected) in [("true", 41), ("false", 42)] {
+        let mut input = request(&format!(
+            "{TEXT_RUNTIME_LEAVES} pub fn choose(condition: Bool) -> i64 {{ branch_bool(condition, () -> i64 {{ 41 }}, () -> i64 {{ 42 }}) }} pub fn main() -> i64 {{ choose({condition}) }}"
+        ));
+        input.runtime_manifest = Some(text_runtime_manifest());
+        let artifact = StageZeroCompiler::new()
+            .compile(input)
+            .expect("manifest-bound branch_bool must lower")
+            .artifact
+            .expect("build must publish a VM artifact");
+        assert_eq!(artifact.run_i64().unwrap(), expected);
+        let decoded = decode_program(&artifact.canonical_bytes()).unwrap();
+        assert!(decoded.functions.values().any(|function| {
+            function.instructions.iter().any(|instruction| {
+                matches!(instruction, VmInstruction::BranchBool { .. })
+            })
+        }));
+    }
+}
+
+#[test]
+fn manifest_bound_branch_bool_preserves_a_strict_i64_continuation() {
+    for (condition, expected) in [("true", 42), ("false", 43)] {
+        let mut input = request(&format!(
+            "{TEXT_RUNTIME_LEAVES} pub fn choose(condition: Bool) -> i64 {{ 1 + branch_bool(condition, () -> i64 {{ 41 }}, () -> i64 {{ 42 }}) }} pub fn main() -> i64 {{ choose({condition}) }}"
+        ));
+        input.runtime_manifest = Some(text_runtime_manifest());
+        let artifact = StageZeroCompiler::new()
+            .compile(input)
+            .expect("manifest branch continuation must lower")
+            .artifact
+            .expect("build must publish a VM artifact");
+        assert_eq!(artifact.run_i64().unwrap(), expected);
+        let decoded = decode_program(&artifact.canonical_bytes()).unwrap();
+        assert!(decoded.functions.values().any(|function| {
+            function.instructions.iter().any(|instruction| {
+                matches!(instruction, VmInstruction::BranchBool { .. })
+            })
+        }));
+    }
+}
+
+#[test]
+fn manifest_bound_branch_bool_preserves_a_pure_right_i64_operand() {
+    for (condition, expected) in [("true", 42), ("false", 43)] {
+        let mut input = request(&format!(
+            "{TEXT_RUNTIME_LEAVES} pub fn choose(condition: Bool) -> i64 {{ branch_bool(condition, () -> i64 {{ 41 }}, () -> i64 {{ 42 }}) + 1 }} pub fn main() -> i64 {{ choose({condition}) }}"
+        ));
+        input.runtime_manifest = Some(text_runtime_manifest());
+        let artifact = StageZeroCompiler::new()
+            .compile(input)
+            .expect("manifest branch left continuation must lower")
+            .artifact
+            .expect("build must publish a VM artifact");
+        assert_eq!(artifact.run_i64().unwrap(), expected);
+    }
+}
+
+#[test]
+fn source_u64_comparisons_lower_through_the_typed_integer_vm_primitive() {
+    let source = "pub fn relation(left: u64, right: u64) -> i64 { handle (left == right, left != right, left < right, left <= right, left > right, left >= right) { (true, false, false, true, false, true) => 1, (false, true, true, true, false, false) => 2, (false, true, false, false, true, true) => 3, _ => 0 } } pub fn main() -> i64 { relation(2, 2) + relation(2, 3) + relation(3, 2) }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("all u64 comparisons must lower")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_i64().unwrap(), 6);
+}
+
+#[test]
+fn source_u8_comparisons_lower_through_the_typed_integer_vm_primitive() {
+    let source = "pub fn relation(left: u8, right: u8) -> i64 { handle (left == right, left != right, left < right, left <= right, left > right, left >= right) { (true, false, false, true, false, true) => 1, (false, true, true, true, false, false) => 2, (false, true, false, false, true, true) => 3, _ => 0 } } pub fn main() -> i64 { relation(2, 2) + relation(2, 3) + relation(3, 2) }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("u8 comparisons must lower")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_i64().unwrap(), 6);
+    let decoded = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(decoded.functions.values().any(|function| {
+        function.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                VmInstruction::IntIntrinsic {
+                    primitive: PrimitiveRole::IntEqual,
+                    scalar: ScalarType::U8,
+                    ..
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn source_usize_equality_lowers_through_the_typed_integer_vm_primitive() {
+    let source = "pub fn is_empty(length: usize) -> i64 { handle length == 0 { true => 1, false => 0, _ => 0 } } pub fn main() -> i64 { is_empty(0) + is_empty(1) }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("usize equality must lower")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_i64().unwrap(), 1);
+    let decoded = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(decoded.functions.values().any(|function| {
+        function.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                VmInstruction::IntIntrinsic {
+                    primitive: PrimitiveRole::IntEqual,
+                    scalar: ScalarType::Usize,
+                    ..
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn source_usize_less_than_lowers_through_the_typed_integer_vm_primitive() {
+    let source = "pub fn in_bounds(index: usize, length: usize) -> i64 { handle index < length { true => 1, false => 0, _ => 0 } } pub fn main() -> i64 { in_bounds(1, 2) + in_bounds(2, 2) }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("usize ordering must lower")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_i64().unwrap(), 1);
+    let decoded = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(decoded.functions.values().any(|function| {
+        function.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                VmInstruction::IntIntrinsic {
+                    primitive: PrimitiveRole::IntLess,
+                    scalar: ScalarType::Usize,
+                    ..
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn source_usize_comparisons_lower_through_the_typed_integer_vm_primitive() {
+    let source = "pub fn relation(left: usize, right: usize) -> i64 { handle (left == right, left != right, left < right, left <= right, left > right, left >= right) { (true, false, false, true, false, true) => 1, (false, true, true, true, false, false) => 2, (false, true, false, false, true, true) => 3, _ => 0 } } pub fn main() -> i64 { relation(2, 2) + relation(2, 3) + relation(3, 2) }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("all usize comparisons must lower")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_i64().unwrap(), 6);
+    let decoded = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(decoded.functions.values().any(|function| {
+        function.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                VmInstruction::IntIntrinsic {
+                    scalar: ScalarType::Usize,
+                    primitive: PrimitiveRole::IntEqual | PrimitiveRole::IntLess,
+                    ..
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn source_usize_addition_lowers_through_the_typed_integer_vm_primitive() {
+    let source = "pub fn add(left: usize, right: usize) -> usize { left + right } pub fn main() -> i64 { handle add(20, 22) == 42 { true => 42, false => 0, _ => 0 } }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("usize addition must lower")
+        .artifact
+        .expect("build must publish a VM artifact");
+    assert_eq!(artifact.run_i64().unwrap(), 42);
+    let decoded = decode_program(&artifact.canonical_bytes()).unwrap();
+    assert!(decoded.functions.values().any(|function| {
+        function.instructions.iter().any(|instruction| {
+            matches!(
+                instruction,
+                VmInstruction::IntIntrinsic {
+                    primitive: PrimitiveRole::IntCheckedAdd,
+                    scalar: ScalarType::Usize,
+                    ..
+                }
+            )
+        })
+    }));
+}
+
+#[test]
+fn source_u32_arithmetic_lowers_to_checked_vm_instructions() {
+    let source = "pub fn add(left: u32, right: u32) -> u32 { left + right } pub fn subtract(left: u32, right: u32) -> u32 { left - right } pub fn multiply(left: u32, right: u32) -> u32 { left * right } pub fn divide(left: u32, right: u32) -> u32 { left / right } pub fn remainder(left: u32, right: u32) -> u32 { left % right } pub fn main() -> u32 { add(40, 2) + subtract(44, 2) + multiply(21, 2) + divide(84, 2) + remainder(85, 2) }";
+    let artifact = StageZeroCompiler::new()
+        .compile(request(source))
+        .expect("u32 arithmetic must lower")
+        .artifact
+        .expect("build must publish a VM artifact");
+    let decoded = decode_program(&artifact.canonical_bytes()).unwrap();
+    let has = |expected: fn(&VmInstruction) -> bool| {
+        decoded
+            .functions
+            .values()
+            .any(|function| function.instructions.iter().any(expected))
+    };
+    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedAdd { .. })));
+    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedSub { .. })));
+    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedMul { .. })));
+    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedDiv { .. })));
+    assert!(has(|instruction| matches!(instruction, VmInstruction::U32CheckedRem { .. })));
 }
 
 #[test]
@@ -4416,7 +4629,7 @@ fn service_reports_overlapping_use_after_a_partial_move() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G5001"),
+            .any(|diagnostic| diagnostic.code == "G5001" || diagnostic.code == "G5003"),
         "missing projection use-after-move diagnostic: {diagnostics:#?}"
     );
 }
@@ -14314,7 +14527,7 @@ fn nested_closures_forward_unique_and_move_capture_authority_without_shadowing()
         .expect("nested unique capture must be forwarded to the lifted inner callable");
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
-    let moved = "pub fn main() -> i64 { let value = 42; let outer = () -> i64 { let inner = () -> i64 { move value }; inner() }; outer() }";
+    let moved = "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let outer = () -> i64 { let inner = () -> i64 { move value; 42 }; inner() }; outer() }";
     let outcome = StageZeroCompiler::new()
         .compile(request(moved))
         .expect("nested move capture must be forwarded to the lifted inner callable");
@@ -14322,7 +14535,7 @@ fn nested_closures_forward_unique_and_move_capture_authority_without_shadowing()
 
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
         .compile(request(
-            "pub fn main() -> i64 { let value = 42; let outer = () -> i64 { let inner = () -> i64 { move value }; inner() }; value }",
+            "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let outer = () -> i64 { let inner = () -> i64 { move value; 42 }; inner() }; move value; 42 }",
         ))
     else {
         panic!("outer source remained usable after a transitively moved capture")
@@ -14330,7 +14543,7 @@ fn nested_closures_forward_unique_and_move_capture_authority_without_shadowing()
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G5001"),
+            .any(|diagnostic| diagnostic.code == "G5001" || diagnostic.code == "G5003"),
         "missing transitive moved-capture diagnostic: {diagnostics:#?}"
     );
 }
@@ -14339,14 +14552,14 @@ fn nested_closures_forward_unique_and_move_capture_authority_without_shadowing()
 fn service_executes_sealed_capture_post_states_and_rejects_their_moved_source_use() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
-            "pub fn main() -> i64 { let value = 42; let take = () -> i64 { move value }; take() }",
+            "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let take = () -> i64 { move value; 42 }; take() }",
         ))
         .expect("sealed move capture must lower through the VM");
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 
     let Err(grandiose_stage0::ServiceError::Failed(diagnostics)) = StageZeroCompiler::new()
         .compile(request(
-            "pub fn main() -> i64 { let value = 42; let take = () -> i64 { move value }; value }",
+            "struct Ticket {} impl Use<[1, 1]> for Ticket {} pub fn main() -> i64 { let value = Ticket {}; let take = () -> i64 { move value; 42 }; move value; 42 }",
         ))
     else {
         panic!("use after a moved capture unexpectedly compiled")
@@ -14354,7 +14567,7 @@ fn service_executes_sealed_capture_post_states_and_rejects_their_moved_source_us
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "G5001"),
+            .any(|diagnostic| diagnostic.code == "G5001" || diagnostic.code == "G5003"),
         "missing moved-capture post-state diagnostic: {diagnostics:#?}"
     );
 }

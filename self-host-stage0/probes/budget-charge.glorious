@@ -1,0 +1,70 @@
+use operation_library::operation;
+
+pub fn score(result: operation::BudgetResult) -> i64 {
+    handle result {
+        operation::BudgetResult::Value(value) => operation::spent(value),
+        operation::BudgetResult::Error(_) => 0,
+        _ => 0,
+    }
+}
+
+pub fn score_pair(result: operation::BudgetPairResult) -> i64 {
+    handle result {
+        operation::BudgetPairResult::Value(pair) => operation::parent_spent(pair) + operation::child_spent(pair),
+        operation::BudgetPairResult::Error(pair, _) => operation::parent_spent(pair) + operation::child_spent(pair),
+        _ => 0,
+    }
+}
+
+pub fn charged_parent_pair() -> i64 {
+    handle operation::charge(operation::budget(10), 4) {
+        operation::BudgetResult::Value(parent) => score_pair(operation::charge_child(operation::child(parent, 2), 3)),
+        operation::BudgetResult::Error(_) => 0,
+        _ => 0,
+    }
+}
+
+pub fn released_child_pair() -> i64 {
+    handle operation::charge_child(operation::child(operation::budget(3), 3), 2) {
+        operation::BudgetPairResult::Value(pair) => handle operation::release_child(pair, 2) {
+            operation::BudgetPairReleaseResult::Value(released) => handle operation::parent_spent(released) == 0 {
+                true => 1,
+                false => 0,
+                _ => 0,
+            },
+            operation::BudgetPairReleaseResult::Invalid(_) => 0,
+            _ => 0,
+        },
+        operation::BudgetPairResult::Error(_, _) => 0,
+        _ => 0,
+    }
+}
+
+pub fn score_admission(result: operation::BudgetAdmission) -> i64 {
+    handle result {
+        operation::BudgetAdmission::Value(_) => 100,
+        operation::BudgetAdmission::Error(_) => 1000,
+        _ => 0,
+    }
+}
+
+pub fn score_pair_admission(result: operation::BudgetPairAdmission) -> i64 {
+    handle result {
+        operation::BudgetPairAdmission::Value(_) => 10000,
+        operation::BudgetPairAdmission::Error(_) => 100000,
+        _ => 0,
+    }
+}
+
+pub fn main() -> i64 {
+    score(operation::charge(operation::budget(5), 3))
+        + score(operation::charge(operation::budget(5), 6))
+        + score(operation::charge(operation::budget(5), -1))
+        + score_pair(operation::charge_child(operation::child(operation::budget(10), 7), 7))
+        + charged_parent_pair()
+        + released_child_pair()
+        + score_admission(operation::checked_budget(5))
+        + score_admission(operation::checked_budget(-1))
+        + score_pair_admission(operation::child_checked(operation::budget(5), 2))
+        + score_pair_admission(operation::child_checked(operation::budget(5), -1))
+}

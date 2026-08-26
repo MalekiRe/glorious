@@ -1,0 +1,121 @@
+use identity_library::identity;
+use compiler_support::__g1_int_wrapping_add;
+use compiler_support::__g1_text_as_bytes;
+
+// This is a source-level end-to-end primitive probe, not a Rust fallback.
+pub fn main() -> u8 {
+    handle identity::equals(identity::digest_of_text("abc"), identity::digest_of_text("abc")) {
+        true => handle identity::equals(identity::digest_of_text("abc"), identity::digest_of_text("abd")) {
+            true => 0,
+            false => handle identity::equals(identity::digest_of_concatenated_bytes(__g1_text_as_bytes("a"), __g1_text_as_bytes("bc")), identity::digest_of_text("abc")) {
+                true => handle identity::equals(identity::digest_of_byte_pair(97, 98), identity::digest_of_text("ab")) {
+                    true => handle identity::equals(identity::digest_of_bytes(identity::u32_le_bytes(25185)), identity::digest_of_concatenated_bytes(identity::byte_pair(97, 98), identity::byte_pair(0, 0))) {
+                        true => handle identity::equals(identity::digest_of_bytes(identity::u64_le_bytes(25185)), identity::digest_of_concatenated_bytes(identity::u32_le_bytes(25185), identity::u32_le_bytes(0))) {
+                            true => handle identity::same_module(identity::module_key("pkg-a", "src/lib.glorious"), identity::module_key("pkg-b", "src/lib.glorious")) {
+                                true => 0,
+                                false => handle identity::same_file_key(identity::file_key("pkg-a", "src/lib.glorious"), identity::file_key("pkg-a", "src/lib.glorious")) {
+                                    true => handle identity::same_package(identity::package_key("pkg-a@0.1.0"), identity::package_key("pkg-a@0.1.0")) {
+                                        true => handle identity::same_file_key(identity::file_key("pkg-a", "src/lib.glorious"), identity::file_key("pkg-a", "src/main.glorious")) {
+                                            true => 0,
+                                        false => handle definition_method_keys_are_stable() {
+                                            true => handle parts_are_length_framed() {
+                                                true => handle digest_reconstruction_is_checked() {
+                                                    true => handle package_aliases_are_checked() {
+                                                        true => __g1_int_wrapping_add<u8>(identity::first_byte(identity::digest_of_text("abc")), 10),
+                                                        false => 0,
+                                                        _ => 0,
+                                                    },
+                                                    false => 0,
+                                                    _ => 0,
+                                                },
+                                                false => 0,
+                                                _ => 0,
+                                            },
+                                            false => 0,
+                                            _ => 0,
+                                        },
+                                            _ => 0,
+                                        },
+                                        false => 0,
+                                        _ => 0,
+                                    },
+                                    false => 0,
+                                    _ => 0,
+                                },
+                                _ => 0,
+                            },
+                            false => 0,
+                            _ => 0,
+                        },
+                        false => 0,
+                        _ => 0,
+                    },
+                    false => 0,
+                    _ => 0,
+                },
+                false => 0,
+                _ => 0,
+            },
+            _ => 0,
+        },
+        false => 0,
+        _ => 0,
+    }
+}
+
+pub fn parts_are_length_framed() -> Bool {
+    let a = __g1_text_as_bytes("a");
+    let bc = __g1_text_as_bytes("bc");
+    handle identity::equals(identity::digest_of_parts2(a, bc), identity::digest_of_parts2(__g1_text_as_bytes("a"), __g1_text_as_bytes("bc"))) {
+        true => handle identity::equals(identity::digest_of_parts2(a, bc), identity::digest_of_text("abc")) {
+            true => false,
+            false => handle identity::equals(identity::digest_of_parts2(a, bc), identity::digest_of_parts2(__g1_text_as_bytes("ab"), __g1_text_as_bytes("c"))) {
+                true => false,
+                false => true,
+                _ => false,
+            },
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn definition_method_keys_are_stable() -> Bool {
+    let owner = identity::def_key_from_digest(identity::digest_of_text("implementation"));
+    handle identity::same_def_key(identity::implementation_method_key(owner, "run"), identity::implementation_method_key(owner, "run")) {
+        true => handle identity::same_def_key(identity::implementation_method_key(owner, "run"), identity::implementation_method_key(owner, "stop")) {
+            true => false,
+            false => true,
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn digest_reconstruction_is_checked() -> Bool {
+    handle identity::digest_from_bytes(__g1_text_as_bytes("too short")) {
+        identity::DigestAdmission::Invalid => handle identity::digest_from_bytes(thirty_two_zero_bytes()) {
+            identity::DigestAdmission::Value(value) => identity::first_byte(value) == 48,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+pub fn thirty_two_zero_bytes() -> Bytes {
+    __g1_text_as_bytes("00000000000000000000000000000000")
+}
+
+pub fn package_aliases_are_checked() -> Bool {
+    handle identity::package_alias_is_valid(identity::package_key("math-lib@0.1.0")) {
+        true => handle identity::package_alias_is_valid(identity::package_key("9lives@0.1.0")) {
+            true => false,
+            false => identity::same_package_module_alias(identity::package_key("math-lib@0.1.0"), identity::package_key("math_lib@0.1.0")),
+            _ => false,
+        },
+        false => false,
+        _ => false,
+    }
+}

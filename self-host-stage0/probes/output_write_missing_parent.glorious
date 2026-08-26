@@ -1,0 +1,12 @@
+use compiler_support::__g1_text_as_bytes;
+use output_library::output;
+
+// Atomic publication may not create output directories implicitly.
+pub fn main() -> u8 {
+    handle output::write_to(output::stage("missing-parent/artifact.grbc", __g1_text_as_bytes("new artifact")), "missing-parent/artifact.grbc") {
+        output::WriteResult::Written => 65,
+        output::WriteResult::NotStaged => 0,
+        output::WriteResult::TargetMismatch => 0,
+        _ => 0,
+    }
+}

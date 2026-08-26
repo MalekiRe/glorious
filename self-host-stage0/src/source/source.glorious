@@ -1,0 +1,451 @@
+// M07 scaffold: immutable source records. Construction requires a supplied
+// digest until M03's length-delimited part encoder and M05 path validation are
+// complete; it never synthesizes an unchecked identity.
+use identity::Digest;
+use identity::digest_of_bytes;
+use identity::digest_of_parts2;
+use identity::digest_of_digests2;
+use identity::equals;
+use identity::FileKey;
+use identity::PackageKey;
+use identity::file_key;
+use identity::package_key;
+use identity::file_key_digest;
+use identity::same_file_key;
+use compiler_support::branch_bool;
+use compiler_support::__g1_bytes_len;
+use compiler_support::__g1_bytes_get;
+use compiler_support::__g1_bytes_slice;
+use compiler_support::__g1_int_wrapping_add;
+use compiler_support::__g1_int_convert_wrapping_to_u64;
+use compiler_support::__g1_text_as_bytes;
+use compiler_support::read_file;
+
+pub struct SourceInput {
+    package: PackageKey,
+    logical_path: LogicalPath,
+    bytes: Bytes,
+    digest: Digest,
+    file_identity: FileKey,
+}
+
+pub enum FirstByte { Empty, Value(u8) }
+pub struct LogicalPath { text: Text }
+pub enum LogicalPathAdmission { Value(LogicalPath), Invalid }
+pub enum SourceAdmission { Value(SourceInput), DigestMismatch, InvalidLogicalPath }
+pub enum SliceAdmission { Value(Bytes), OutOfBounds }
+pub enum ByteAdmission { Value(u8), OutOfBounds }
+pub enum LineCountAdmission { Value(usize), DigestMismatch }
+pub struct SourcePosition { line: usize, utf16_column: usize }
+pub enum PositionAdmission { Value(SourcePosition), InvalidOffset }
+pub enum CheckedPositionAdmission { Value(SourcePosition), DigestMismatch, InvalidOffset }
+
+pub fn input(package: Text, logical_path: Text, bytes: Bytes, digest: Digest) -> SourceInput {
+    SourceInput {
+        package: package_key(package),
+        logical_path: LogicalPath { text: logical_path },
+        bytes: bytes,
+        digest: digest,
+        // This is Rust stage0's FileKey construction: each logical component
+        // is length-framed before hashing. Keep it once in the source record
+        // so equality performs one file-key comparison instead of hashing or
+        // comparing package/path independently on every query lookup.
+        file_identity: file_key(package, logical_path),
+    }
+}
+
+// Host paths cross the capability boundary only here.  The resulting source
+// record immediately receives a content digest, so all later scanner/query
+// work stays on immutable package/path/bytes identities rather than paths.
+pub fn input_from_file(package: Text, logical_path: Text) -> SourceInput {
+    input_from_file_bytes(package, logical_path, read_file(logical_path))
+}
+
+fn input_from_file_bytes(package: Text, logical_path: Text, value: Bytes) -> SourceInput {
+    input(package, logical_path, value, digest_of_bytes(value))
+}
+
+// Request-derived source must cross this admission boundary before entering
+// scanners, interfaces, or caches. The trusted bootstrap source path may use
+// `input`; all externally supplied identities are checked here.
+pub fn checked_input(package: Text, logical_path: Text, bytes: Bytes, digest: Digest) -> SourceAdmission {
+    handle checked_logical_path(logical_path) {
+        LogicalPathAdmission::Value(_) => checked_input_digest(package, logical_path, bytes, digest),
+        LogicalPathAdmission::Invalid => SourceAdmission::InvalidLogicalPath,
+        _ => SourceAdmission::InvalidLogicalPath,
+    }
+}
+
+fn checked_input_digest(package: Text, logical_path: Text, bytes: Bytes, digest: Digest) -> SourceAdmission {
+    let source = input(package, logical_path, bytes, digest);
+    handle digest_matches_bytes(source) {
+        true => SourceAdmission::Value(source),
+        false => SourceAdmission::DigestMismatch,
+        _ => SourceAdmission::DigestMismatch,
+    }
+}
+
+pub fn bytes(source: SourceInput) -> Bytes {
+    source.bytes
+}
+
+pub fn package(source: SourceInput) -> PackageKey { source.package }
+
+// Package graph construction receives logical identities only. In particular,
+// it must not recover a checkout path or use buffer address identity while
+// building a deterministic source-world topology.
+pub fn logical_path(source: SourceInput) -> Text {
+    source.logical_path.text
+}
+
+// Stage0 logical paths are nonempty relative slash-separated paths.  Reject
+// absolute/Windows spellings and empty, dot, or parent segments before an
+// external source can enter a request world.
+pub fn checked_logical_path(path: Text) -> LogicalPathAdmission {
+    handle logical_path_bytes_valid(__g1_text_as_bytes(path), 0, 0) {
+        true => LogicalPathAdmission::Value(LogicalPath { text: path }),
+        false => LogicalPathAdmission::Invalid,
+        _ => LogicalPathAdmission::Invalid,
+    }
+}
+
+pub fn has_valid_logical_path(source: SourceInput) -> Bool {
+    handle checked_logical_path(logical_path(source)) {
+        LogicalPathAdmission::Value(_) => true,
+        LogicalPathAdmission::Invalid => false,
+        _ => false,
+    }
+}
+
+fn logical_path_bytes_valid(bytes: Bytes, index: usize, segment_start: usize) -> Bool {
+    let length = __g1_bytes_len(bytes);
+    handle length == 0 {
+        true => false,
+        false => handle index == length {
+            true => logical_path_segment_valid(bytes, segment_start, index),
+            false => logical_path_byte_valid(bytes, index, segment_start),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn logical_path_byte_valid(bytes: Bytes, index: usize, segment_start: usize) -> Bool {
+    let byte = __g1_bytes_get(bytes, index);
+    handle byte == 92 {
+        true => false,
+        false => handle byte == 47 {
+            true => handle logical_path_segment_valid(bytes, segment_start, index) {
+                true => logical_path_bytes_valid(bytes, __g1_int_wrapping_add<usize>(index, 1), __g1_int_wrapping_add<usize>(index, 1)),
+                false => false,
+                _ => false,
+            },
+            false => logical_path_bytes_valid(bytes, __g1_int_wrapping_add<usize>(index, 1), segment_start),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn logical_path_segment_valid(bytes: Bytes, start: usize, end: usize) -> Bool {
+    handle start == end {
+        true => false,
+        false => handle __g1_bytes_get(bytes, start) == 46 {
+            false => true,
+            true => logical_path_dot_segment_valid(bytes, __g1_int_wrapping_add<usize>(start, 1), end),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn logical_path_dot_segment_valid(bytes: Bytes, after_first_dot: usize, end: usize) -> Bool {
+    handle after_first_dot == end {
+        true => false,
+        false => handle __g1_bytes_get(bytes, after_first_dot) == 46 {
+            false => true,
+            true => __g1_int_wrapping_add<usize>(after_first_dot, 1) != end,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// A source identity is valid only when its supplied digest names its exact
+// immutable byte buffer. This check is deliberately pure and allocation-free
+// beyond the manifest-bound digest result.
+pub fn digest_matches_bytes(source: SourceInput) -> Bool {
+    equals(source.digest, digest_of_bytes(source.bytes))
+}
+
+// The source facade only exposes immutable buffer views. Bounds remain
+// checked by the manifest-bound primitive, matching Stage0's failure model.
+pub fn byte_len(source: SourceInput) -> usize {
+    __g1_bytes_len(source.bytes)
+}
+
+// Request limits are u64 so they remain stable across host word sizes. Keep
+// the conversion beside the immutable byte view instead of making every
+// request and cache client repeat a target-dependent conversion.
+pub fn byte_len_u64(source: SourceInput) -> u64 {
+    __g1_int_convert_wrapping_to_u64<usize>(byte_len(source))
+}
+
+pub fn is_empty(source: SourceInput) -> Bool {
+    byte_len(source) == 0
+}
+
+pub fn byte_slice(source: SourceInput, start: usize, end: usize) -> Bytes {
+    __g1_bytes_slice(source.bytes, start, end)
+}
+
+// Source clients that process untrusted offsets must not rely on a primitive
+// trap for bounds checking. This admission makes malformed spans a normal
+// source result and leaves the primitive reachable only after both bounds have
+// been proven against this immutable buffer.
+pub fn checked_byte_slice(source: SourceInput, start: usize, end: usize) -> SliceAdmission {
+    branch_bool(start <= end,
+        () -> SliceAdmission { checked_byte_slice_end(source, start, end) },
+        () -> SliceAdmission { SliceAdmission::OutOfBounds })
+}
+
+fn checked_byte_slice_end(source: SourceInput, start: usize, end: usize) -> SliceAdmission {
+    branch_bool(end <= byte_len(source),
+        () -> SliceAdmission { SliceAdmission::Value(byte_slice(source, start, end)) },
+        () -> SliceAdmission { SliceAdmission::OutOfBounds })
+}
+
+pub fn byte_at(source: SourceInput, index: usize) -> u8 {
+    __g1_bytes_get(source.bytes, index)
+}
+
+// Like checked slices, diagnostic and scanner clients operating on externally
+// supplied offsets receive a source result rather than depending on a host
+// bounds trap. Trusted inner loops may still use `byte_at` after establishing
+// their cursor invariant once.
+pub fn checked_byte_at(source: SourceInput, index: usize) -> ByteAdmission {
+    handle byte_at_or_empty(source.bytes, index) {
+        FirstByte::Value(value) => ByteAdmission::Value(value),
+        FirstByte::Empty => ByteAdmission::OutOfBounds,
+        _ => ByteAdmission::OutOfBounds,
+    }
+}
+
+pub fn first_byte(bytes: Bytes) -> FirstByte {
+    byte_at_or_empty(bytes, 0)
+}
+
+pub fn byte_at_or_empty(bytes: Bytes, index: usize) -> FirstByte {
+    let length = __g1_bytes_len(bytes);
+    handle index < length {
+        true => FirstByte::Value(__g1_bytes_get(bytes, index)),
+        false => FirstByte::Empty,
+        _ => FirstByte::Empty,
+    }
+}
+
+pub fn next_index(index: usize) -> usize {
+    __g1_int_wrapping_add<usize>(index, 1)
+}
+
+// The line index is derived only from immutable bytes: every LF starts one
+// additional line, while CR remains part of a CRLF spelling rather than a
+// second line boundary. This is the same stable byte rule used by Stage0's
+// editor-facing line index before UTF-16 column calculation.
+pub fn line_count(source: SourceInput) -> usize {
+    count_line_starts(bytes(source), 0, 1)
+}
+
+pub fn line_count_checked(source: SourceInput) -> LineCountAdmission {
+    handle digest_matches_bytes(source) {
+        true => LineCountAdmission::Value(line_count(source)),
+        false => LineCountAdmission::DigestMismatch,
+        _ => LineCountAdmission::DigestMismatch,
+    }
+}
+
+// Editor-facing positions are derived from the immutable bytes without
+// rereading the source. Offsets must land on UTF-8 boundaries; columns count
+// UTF-16 code units, so a four-byte scalar contributes two columns.
+pub fn position(source: SourceInput, offset: usize) -> PositionAdmission {
+    handle offset <= byte_len(source) {
+        true => position_bytes(source.bytes, 0, offset, 0, 0),
+        false => PositionAdmission::InvalidOffset,
+        _ => PositionAdmission::InvalidOffset,
+    }
+}
+
+// Editor-facing offsets that cross a request boundary must preserve the
+// source identity check used by other derived views.  The unchecked form is
+// retained for trusted scanner internals that already admitted the input.
+pub fn position_checked(source: SourceInput, offset: usize) -> CheckedPositionAdmission {
+    handle digest_matches_bytes(source) {
+        true => position_checked_admitted(source, offset),
+        false => CheckedPositionAdmission::DigestMismatch,
+        _ => CheckedPositionAdmission::DigestMismatch,
+    }
+}
+
+fn position_checked_admitted(source: SourceInput, offset: usize) -> CheckedPositionAdmission {
+    handle position(source, offset) {
+        PositionAdmission::Value(value) => CheckedPositionAdmission::Value(value),
+        PositionAdmission::InvalidOffset => CheckedPositionAdmission::InvalidOffset,
+        _ => CheckedPositionAdmission::InvalidOffset,
+    }
+}
+
+pub fn position_line(position: SourcePosition) -> usize { position.line }
+pub fn position_utf16_column(position: SourcePosition) -> usize { position.utf16_column }
+
+fn position_bytes(bytes: Bytes, index: usize, offset: usize, line: usize, column: usize) -> PositionAdmission {
+    handle index == offset {
+        true => PositionAdmission::Value(SourcePosition { line: line, utf16_column: column }),
+        false => position_next_byte(bytes, index, offset, line, column),
+        _ => PositionAdmission::InvalidOffset,
+    }
+}
+
+fn position_next_byte(bytes: Bytes, index: usize, offset: usize, line: usize, column: usize) -> PositionAdmission {
+    let byte = __g1_bytes_get(bytes, index);
+    handle byte < 128 {
+        true => handle byte == 10 {
+            true => position_bytes(bytes, __g1_int_wrapping_add<usize>(index, 1), offset, __g1_int_wrapping_add<usize>(line, 1), 0),
+            false => position_bytes(bytes, __g1_int_wrapping_add<usize>(index, 1), offset, line, __g1_int_wrapping_add<usize>(column, 1)),
+            _ => PositionAdmission::InvalidOffset,
+        },
+        false => position_utf8_scalar(bytes, index, offset, line, column, byte),
+        _ => PositionAdmission::InvalidOffset,
+    }
+}
+
+fn position_utf8_scalar(bytes: Bytes, index: usize, offset: usize, line: usize, column: usize, lead: u8) -> PositionAdmission {
+    handle lead >= 194 {
+        true => handle lead < 224 {
+            true => position_utf8_width(bytes, index, offset, line, column, lead, 2, 1),
+            false => handle lead < 240 {
+                true => position_utf8_width(bytes, index, offset, line, column, lead, 3, 1),
+                false => handle lead < 245 {
+                    true => position_utf8_width(bytes, index, offset, line, column, lead, 4, 2),
+                    false => PositionAdmission::InvalidOffset,
+                    _ => PositionAdmission::InvalidOffset,
+                },
+                _ => PositionAdmission::InvalidOffset,
+            },
+            _ => PositionAdmission::InvalidOffset,
+        },
+        false => PositionAdmission::InvalidOffset,
+        _ => PositionAdmission::InvalidOffset,
+    }
+}
+
+fn position_utf8_width(bytes: Bytes, index: usize, offset: usize, line: usize, column: usize, lead: u8, width: usize, units: usize) -> PositionAdmission {
+    let next = __g1_int_wrapping_add<usize>(index, width);
+    handle next <= __g1_bytes_len(bytes) {
+        true => handle utf8_scalar_is_canonical(bytes, index, lead) {
+            true => handle next <= offset {
+            true => handle utf8_continuations(bytes, __g1_int_wrapping_add<usize>(index, 1), next) {
+                true => position_bytes(bytes, next, offset, line, __g1_int_wrapping_add<usize>(column, units)),
+                false => PositionAdmission::InvalidOffset,
+                _ => PositionAdmission::InvalidOffset,
+            },
+            false => PositionAdmission::InvalidOffset,
+            _ => PositionAdmission::InvalidOffset,
+        },
+            false => PositionAdmission::InvalidOffset,
+            _ => PositionAdmission::InvalidOffset,
+        },
+        false => PositionAdmission::InvalidOffset,
+        _ => PositionAdmission::InvalidOffset,
+    }
+}
+
+// Continuation-byte shape alone accepts overlong encodings and UTF-8 forms
+// that encode surrogate or out-of-range scalar values. Restrict the lead and
+// first continuation according to the Unicode scalar UTF-8 ranges.
+fn utf8_scalar_is_canonical(bytes: Bytes, index: usize, lead: u8) -> Bool {
+    let second = __g1_bytes_get(bytes, __g1_int_wrapping_add<usize>(index, 1));
+    handle lead < 224 {
+        true => true,
+        false => handle lead == 224 {
+            true => second >= 160,
+            false => handle lead == 237 {
+                true => second < 160,
+                false => handle lead == 240 {
+                    true => second >= 144,
+                    false => handle lead == 244 {
+                        true => second < 144,
+                        false => true,
+                        _ => false,
+                    },
+                    _ => false,
+                },
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn utf8_continuations(bytes: Bytes, index: usize, end: usize) -> Bool {
+    handle index == end {
+        true => true,
+        false => handle __g1_bytes_get(bytes, index) >= 128 {
+            true => handle __g1_bytes_get(bytes, index) < 192 {
+                true => utf8_continuations(bytes, __g1_int_wrapping_add<usize>(index, 1), end),
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn count_line_starts(input: Bytes, index: usize, count: usize) -> usize {
+    handle byte_at_or_empty(input, index) {
+        FirstByte::Value(value) => count_line_byte(input, index, count, value),
+        FirstByte::Empty => count,
+        _ => count,
+    }
+}
+
+fn count_line_byte(input: Bytes, index: usize, count: usize, value: u8) -> usize {
+    handle value == 10 {
+        true => count_line_starts(input, next_index(index), next_index(count)),
+        false => count_line_starts(input, next_index(index), count),
+        _ => count,
+    }
+}
+
+// Cache and revision layers compare stable source identities, not host paths
+// or buffer addresses. The framed FileKey and content digest make this two
+// fixed-size comparisons, independent of path length or source size.
+pub fn same_identity(left: SourceInput, right: SourceInput) -> Bool {
+    same_identity_parts(left.file_identity, right.file_identity, left.digest, right.digest)
+}
+
+// This source-world component binds both the framed logical file key and its
+// content digest. A cache key derived from it therefore changes for a path
+// relocation as well as a byte change, with neither host paths nor buffer
+// addresses participating in the result.
+pub fn identity_digest(source: SourceInput) -> Digest {
+    digest_of_digests2(file_key_digest(source.file_identity), source.digest)
+}
+
+// A source-world cannot contain two records for the same logical file, even
+// if their content differs. `same_identity` intentionally includes content
+// for cache keys; request normalization needs this narrower FileKey check to
+// reject contradictory versions of one requested file before caching.
+pub fn same_file_identity(left: SourceInput, right: SourceInput) -> Bool {
+    same_file_key(left.file_identity, right.file_identity)
+}
+
+fn same_identity_parts(left_file: FileKey, right_file: FileKey, left_digest: Digest, right_digest: Digest) -> Bool {
+    handle same_file_key(left_file, right_file) {
+        true => equals(left_digest, right_digest),
+        false => false,
+        _ => false,
+    }
+}

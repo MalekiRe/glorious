@@ -1,0 +1,45 @@
+// M24 bootstrap storage slot lifecycle.  An unwritten slot and an explicitly
+// moved-out slot both contain no readable value, but retain different cleanup
+// provenance so later MIR storage events cannot infer a false initialization.
+pub enum Slot { Uninitialized, Value(i64), Moved }
+pub enum TakeResult { Value(i64), Empty }
+pub enum MoveResult { Value(i64, Slot), Empty(Slot) }
+pub fn empty() -> Slot { Slot::Uninitialized }
+pub fn write(slot: Slot, value: i64) -> Slot { handle slot { Slot::Uninitialized => Slot::Value(value), Slot::Moved => Slot::Value(value), Slot::Value(_) => Slot::Value(value), _ => Slot::Value(value) } }
+pub fn take(slot: Slot) -> TakeResult { handle slot { Slot::Uninitialized => TakeResult::Empty, Slot::Moved => TakeResult::Empty, Slot::Value(value) => TakeResult::Value(value), _ => TakeResult::Empty } }
+
+// A MIR move exposes both the moved payload and the replacement slot. This
+// keeps the post-state explicit so later place/projection storage cannot
+// accidentally keep a moved value live.
+pub fn move_out(slot: Slot) -> MoveResult {
+    handle slot {
+        Slot::Uninitialized => MoveResult::Empty(Slot::Uninitialized),
+        Slot::Moved => MoveResult::Empty(Slot::Moved),
+        Slot::Value(value) => MoveResult::Value(value, Slot::Moved),
+        _ => MoveResult::Empty(Slot::Uninitialized),
+    }
+}
+
+// Reinitialization consumes the explicit post-move slot rather than creating
+// a fresh slot identity. This is the compact precursor to MIR's storage
+// event bookkeeping.
+pub fn write_after_move(result: MoveResult, value: i64) -> Slot {
+    handle result {
+        MoveResult::Value(_, slot) => write(slot, value),
+        MoveResult::Empty(slot) => write(slot, value),
+        _ => Slot::Uninitialized,
+    }
+}
+
+pub fn is_empty(slot: Slot) -> Bool {
+    handle slot {
+        Slot::Uninitialized => true,
+        Slot::Moved => true,
+        Slot::Value(_) => false,
+        _ => false,
+    }
+}
+
+pub fn was_moved(slot: Slot) -> Bool {
+    handle slot { Slot::Moved => true, Slot::Uninitialized => false, Slot::Value(_) => false, _ => false }
+}

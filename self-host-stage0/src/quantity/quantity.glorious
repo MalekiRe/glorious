@@ -1,0 +1,318 @@
+// M02 scaffold: exact interval vocabulary and canonical constants. Checked
+// construction/arithmetic still waits for the result toolkit; containment is
+// already total and forms the shared ownership/callable-use predicate.
+use compiler_support::branch_bool;
+use compiler_support::__g1_int_wrapping_add;
+use compiler_support::__g1_int_wrapping_mul;
+use compiler_support::__g1_int_checked_div;
+pub enum QuantityUpper {
+    Finite(u64),
+    Infinite,
+}
+
+pub enum QuantityError {
+    Overflow,
+    EmptyInterval,
+}
+
+pub enum QuantityResult {
+    Value(Quantity),
+    Error(QuantityError),
+}
+
+enum U64Result {
+    Value(u64),
+    Error(QuantityError),
+}
+
+enum UpperResult {
+    Value(QuantityUpper),
+    Error(QuantityError),
+}
+
+pub struct Quantity {
+    lower: u64,
+    upper: QuantityUpper,
+}
+
+pub fn zero() -> Quantity {
+    Quantity { lower: 0, upper: QuantityUpper::Finite(0) }
+}
+
+pub fn once() -> Quantity {
+    Quantity { lower: 1, upper: QuantityUpper::Finite(1) }
+}
+
+pub fn affine() -> Quantity {
+    Quantity { lower: 0, upper: QuantityUpper::Finite(1) }
+}
+
+pub fn unrestricted() -> Quantity {
+    Quantity { lower: 0, upper: QuantityUpper::Infinite }
+}
+
+pub fn exact(value: u64) -> Quantity {
+    Quantity { lower: value, upper: QuantityUpper::Finite(value) }
+}
+
+// The public construction boundary makes an inverted finite interval
+// unrepresentable to callers that honor the result. Infinite upper bounds
+// are always valid, while finite bounds are checked before publishing.
+pub fn new(lower: u64, upper: QuantityUpper) -> QuantityResult {
+    let candidate = Quantity { lower: lower, upper: upper };
+    branch_bool(
+        is_valid(candidate),
+        () -> QuantityResult { QuantityResult::Value(candidate) },
+        () -> QuantityResult { QuantityResult::Error(QuantityError::EmptyInterval) },
+    )
+}
+
+pub fn lower(quantity: Quantity) -> u64 {
+    quantity.lower
+}
+
+pub fn has_finite_upper(quantity: Quantity, expected: u64) -> Bool {
+    handle quantity.upper {
+        QuantityUpper::Finite(actual) => actual == expected,
+        QuantityUpper::Infinite => false,
+        _ => false,
+    }
+}
+
+pub fn has_infinite_upper(quantity: Quantity) -> Bool {
+    handle quantity.upper {
+        QuantityUpper::Infinite => true,
+        QuantityUpper::Finite(_) => false,
+        _ => false,
+    }
+}
+
+pub fn result_has_bounds(result: QuantityResult, expected_lower: u64, expected_upper: QuantityUpper) -> Bool {
+    handle result {
+        QuantityResult::Value(quantity) => has_bounds(quantity, expected_lower, expected_upper),
+        QuantityResult::Error(_) => false,
+        _ => false,
+    }
+}
+
+pub fn has_bounds(quantity: Quantity, expected_lower: u64, expected_upper: QuantityUpper) -> Bool {
+    handle quantity.lower == expected_lower {
+        true => upper_matches(quantity.upper, expected_upper),
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn result_has_error(result: QuantityResult, expected: QuantityError) -> Bool {
+    handle (result, expected) {
+        (QuantityResult::Error(QuantityError::Overflow), QuantityError::Overflow) => true,
+        (QuantityResult::Error(QuantityError::EmptyInterval), QuantityError::EmptyInterval) => true,
+        _ => false,
+    }
+}
+
+fn upper_matches(actual: QuantityUpper, expected: QuantityUpper) -> Bool {
+    handle (actual, expected) {
+        (QuantityUpper::Infinite, QuantityUpper::Infinite) => true,
+        (QuantityUpper::Finite(actual), QuantityUpper::Finite(expected)) => actual == expected,
+        _ => false,
+    }
+}
+
+pub fn requires_positive_use(quantity: Quantity) -> Bool {
+    quantity.lower > 0
+}
+
+pub fn contains(principal: Quantity, actual: Quantity) -> Bool {
+    branch_bool(
+        principal.lower <= actual.lower,
+        () -> Bool { upper_contains(principal.upper, actual.upper) },
+        () -> Bool { false },
+    )
+}
+
+// Exclusive control-flow joins form the interval hull. The finite comparison
+// helpers are root branch calls, allowing Stage0 to specialize them to CFG.
+pub fn branch_hull(left: Quantity, right: Quantity) -> Quantity {
+    Quantity {
+        lower: lower_min(left.lower, right.lower),
+        upper: upper_max(left.upper, right.upper),
+    }
+}
+
+// Structural aggregates use the strongest interval permitted by every field.
+// An inverted finite interval is represented explicitly instead of reaching a
+// numeric trap or fabricating a value.
+pub fn intersection(left: Quantity, right: Quantity) -> QuantityResult {
+    let candidate = Quantity {
+        lower: lower_max(left.lower, right.lower),
+        upper: upper_min(left.upper, right.upper),
+    };
+    branch_bool(
+        is_valid(candidate),
+        () -> QuantityResult { QuantityResult::Value(candidate) },
+        () -> QuantityResult { QuantityResult::Error(QuantityError::EmptyInterval) },
+    )
+}
+
+// Sequencing adds uses along one path. Every finite addition first wraps in
+// the sealed primitive, then detects the wrap before a Quantity is published.
+pub fn sequence(left: Quantity, right: Quantity) -> QuantityResult {
+    handle checked_add(left.lower, right.lower) {
+        U64Result::Value(lower) => sequence_with_lower(lower, left.upper, right.upper),
+        U64Result::Error(error) => QuantityResult::Error(error),
+        _ => QuantityResult::Error(QuantityError::Overflow),
+    }
+}
+
+// Nested execution/replay multiplies every permitted use.  The product is
+// formed by the manifest-bound wrapping leaf only after the zero fast path;
+// division by the nonzero left factor then proves that no bits were lost.
+pub fn multiply(left: Quantity, right: Quantity) -> QuantityResult {
+    handle checked_multiply(left.lower, right.lower) {
+        U64Result::Value(lower) => multiply_with_lower(lower, left.upper, right.upper),
+        U64Result::Error(error) => QuantityResult::Error(error),
+        _ => QuantityResult::Error(QuantityError::Overflow),
+    }
+}
+
+fn multiply_with_lower(lower: u64, left: QuantityUpper, right: QuantityUpper) -> QuantityResult {
+    handle upper_multiply(left, right) {
+        UpperResult::Value(upper) => QuantityResult::Value(Quantity { lower: lower, upper: upper }),
+        UpperResult::Error(error) => QuantityResult::Error(error),
+        _ => QuantityResult::Error(QuantityError::Overflow),
+    }
+}
+
+fn sequence_with_lower(lower: u64, left: QuantityUpper, right: QuantityUpper) -> QuantityResult {
+    handle upper_add(left, right) {
+        UpperResult::Value(upper) => QuantityResult::Value(Quantity { lower: lower, upper: upper }),
+        UpperResult::Error(error) => QuantityResult::Error(error),
+        _ => QuantityResult::Error(QuantityError::Overflow),
+    }
+}
+
+fn checked_add(left: u64, right: u64) -> U64Result {
+    let sum = __g1_int_wrapping_add<u64>(left, right);
+    branch_bool(
+        sum < left,
+        () -> U64Result { U64Result::Error(QuantityError::Overflow) },
+        () -> U64Result { U64Result::Value(sum) },
+    )
+}
+
+fn checked_multiply(left: u64, right: u64) -> U64Result {
+    branch_bool(
+        left == 0,
+        () -> U64Result { U64Result::Value(0) },
+        () -> U64Result { checked_multiply_nonzero_left(left, right) },
+    )
+}
+
+fn checked_multiply_nonzero_left(left: u64, right: u64) -> U64Result {
+    let product = __g1_int_wrapping_mul<u64>(left, right);
+    let recovered = __g1_int_checked_div<u64>(product, left);
+    branch_bool(
+        recovered == right,
+        () -> U64Result { U64Result::Value(product) },
+        () -> U64Result { U64Result::Error(QuantityError::Overflow) },
+    )
+}
+
+fn upper_add(left: QuantityUpper, right: QuantityUpper) -> UpperResult {
+    handle (left, right) {
+        (QuantityUpper::Finite(left), QuantityUpper::Finite(right)) => upper_add_finite(left, right),
+        (QuantityUpper::Infinite, _) => UpperResult::Value(QuantityUpper::Infinite),
+        (_, QuantityUpper::Infinite) => UpperResult::Value(QuantityUpper::Infinite),
+        _ => UpperResult::Error(QuantityError::Overflow),
+    }
+}
+
+fn upper_add_finite(left: u64, right: u64) -> UpperResult {
+    handle checked_add(left, right) {
+        U64Result::Value(value) => UpperResult::Value(QuantityUpper::Finite(value)),
+        U64Result::Error(error) => UpperResult::Error(error),
+        _ => UpperResult::Error(QuantityError::Overflow),
+    }
+}
+
+fn upper_multiply(left: QuantityUpper, right: QuantityUpper) -> UpperResult {
+    handle (left, right) {
+        (QuantityUpper::Finite(left), QuantityUpper::Finite(right)) => upper_multiply_finite(left, right),
+        (QuantityUpper::Finite(left), QuantityUpper::Infinite) => upper_multiply_finite_infinite(left),
+        (QuantityUpper::Infinite, QuantityUpper::Finite(right)) => upper_multiply_finite_infinite(right),
+        _ => UpperResult::Value(QuantityUpper::Infinite),
+    }
+}
+
+fn upper_multiply_finite(left: u64, right: u64) -> UpperResult {
+    handle checked_multiply(left, right) {
+        U64Result::Value(value) => UpperResult::Value(QuantityUpper::Finite(value)),
+        U64Result::Error(error) => UpperResult::Error(error),
+        _ => UpperResult::Error(QuantityError::Overflow),
+    }
+}
+
+fn upper_multiply_finite_infinite(finite: u64) -> UpperResult {
+    branch_bool(
+        finite == 0,
+        () -> UpperResult { UpperResult::Value(QuantityUpper::Finite(0)) },
+        () -> UpperResult { UpperResult::Value(QuantityUpper::Infinite) },
+    )
+}
+
+fn lower_min(left: u64, right: u64) -> u64 {
+    branch_bool(left <= right, () -> u64 { left }, () -> u64 { right })
+}
+
+fn lower_max(left: u64, right: u64) -> u64 {
+    branch_bool(left <= right, () -> u64 { right }, () -> u64 { left })
+}
+
+fn upper_max(left: QuantityUpper, right: QuantityUpper) -> QuantityUpper {
+    handle (left, right) {
+        (QuantityUpper::Infinite, _) => QuantityUpper::Infinite,
+        (_, QuantityUpper::Infinite) => QuantityUpper::Infinite,
+        (QuantityUpper::Finite(left), QuantityUpper::Finite(right)) => {
+            QuantityUpper::Finite(finite_max(left, right))
+        },
+        _ => QuantityUpper::Infinite,
+    }
+}
+
+fn upper_min(left: QuantityUpper, right: QuantityUpper) -> QuantityUpper {
+    handle (left, right) {
+        (QuantityUpper::Finite(left), QuantityUpper::Finite(right)) => {
+            QuantityUpper::Finite(finite_min(left, right))
+        },
+        (QuantityUpper::Finite(value), QuantityUpper::Infinite) => QuantityUpper::Finite(value),
+        (QuantityUpper::Infinite, QuantityUpper::Finite(value)) => QuantityUpper::Finite(value),
+        (QuantityUpper::Infinite, QuantityUpper::Infinite) => QuantityUpper::Infinite,
+        _ => QuantityUpper::Infinite,
+    }
+}
+
+fn finite_max(left: u64, right: u64) -> u64 {
+    branch_bool(left <= right, () -> u64 { right }, () -> u64 { left })
+}
+
+fn finite_min(left: u64, right: u64) -> u64 {
+    branch_bool(left <= right, () -> u64 { left }, () -> u64 { right })
+}
+
+fn is_valid(quantity: Quantity) -> Bool {
+    handle quantity.upper {
+        QuantityUpper::Infinite => true,
+        QuantityUpper::Finite(upper) => quantity.lower <= upper,
+        _ => false,
+    }
+}
+
+fn upper_contains(principal: QuantityUpper, actual: QuantityUpper) -> Bool {
+    handle (principal, actual) {
+        (QuantityUpper::Infinite, _) => true,
+        (QuantityUpper::Finite(_), QuantityUpper::Infinite) => false,
+        (QuantityUpper::Finite(limit), QuantityUpper::Finite(value)) => value <= limit,
+        _ => false,
+    }
+}

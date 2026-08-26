@@ -1588,6 +1588,7 @@ impl StageZeroCompiler {
                             crate::PrimitiveRole::BytesFromArrayMove,
                             crate::PrimitiveRole::BytesToArray,
                             crate::PrimitiveRole::BytesUtf8ValidUpTo,
+                            crate::PrimitiveRole::Blake3,
                             crate::PrimitiveRole::ArrayNew,
                             crate::PrimitiveRole::ArrayLen,
                             crate::PrimitiveRole::ArrayGetCopy,
@@ -1619,6 +1620,7 @@ impl StageZeroCompiler {
                             crate::PrimitiveRole::U32ToUsize,
                             crate::PrimitiveRole::UsizeToU32Checked,
                             crate::PrimitiveRole::IntCheckedAdd,
+                            crate::PrimitiveRole::IntCheckedDiv,
                             crate::PrimitiveRole::IntWrappingAdd,
                             crate::PrimitiveRole::IntConvertCheckedToI64,
                             crate::PrimitiveRole::IntConvertWrappingToI64,
@@ -1795,7 +1797,7 @@ impl StageZeroCompiler {
                 diagnostics.extend(core_validation.iter().map(|diagnostic| {
                     CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
                 }));
-                let flow = PlaceFlow::analyze(&core);
+                let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
                 diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
                     CompileDiagnostic::source(
                         diagnostic.code,
@@ -1964,7 +1966,7 @@ impl StageZeroCompiler {
                     diagnostics.extend(core_validation.iter().map(|diagnostic| {
                         CompileDiagnostic::invariant(diagnostic.code, diagnostic.message.clone())
                     }));
-                    let flow = PlaceFlow::analyze(&core);
+                    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
                     diagnostics.extend(flow.diagnostics.iter().map(|diagnostic| {
                         CompileDiagnostic::source(
                             diagnostic.code,
@@ -2294,15 +2296,12 @@ impl StageZeroCompiler {
                 CompileDiagnostic::invariant(diagnostic.code, diagnostic.message)
             }));
             if let Some(mir) = lowered.function {
-                let mir = match crate::mir::optimize(mir) {
+                let mir = match crate::mir::optimize(mir.clone()) {
                     Ok((mir, _)) => mir,
-                    Err(message) => {
-                        diagnostics.push(CompileDiagnostic::invariant(
-                            "G7010",
-                            format!("MIR optimization rejected function: {message}"),
-                        ));
-                        continue;
-                    }
+                    // Optimization is not a semantic admission boundary.
+                    // Keep the validated lowering available at O0 when a
+                    // speculative MIR edit cannot be proven safe.
+                    Err(_) => mir,
                 };
                 dependencies.record(
                     DependencyNode::Mir(definition),
@@ -2311,15 +2310,9 @@ impl StageZeroCompiler {
                 );
                 lowering.stage_root(definition, is_constant, mir);
                 for (lifted_definition, lifted) in lowered.lifted {
-                    let lifted = match crate::mir::optimize(lifted) {
+                    let lifted = match crate::mir::optimize(lifted.clone()) {
                         Ok((mir, _)) => mir,
-                        Err(message) => {
-                            diagnostics.push(CompileDiagnostic::invariant(
-                                "G7010",
-                                format!("MIR optimization rejected lifted callable: {message}"),
-                            ));
-                            continue;
-                        }
+                        Err(_) => lifted,
                     };
                     if lowering.stage_lifted(lifted_definition, lifted).is_none() {
                         diagnostics.push(CompileDiagnostic::invariant(

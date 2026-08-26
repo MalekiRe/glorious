@@ -1,0 +1,103 @@
+// M22 bootstrap finite-use accounting.  The interval stays source-owned so
+// the same lower/upper contract can later be shared with Quantity and handler
+// replay accounting; a value is never silently treated as unrestricted.
+use compiler_support::branch_bool;
+use placeflow::PlaceState;
+use placeflow::can_read;
+pub enum UseUpper { Finite(i64), Infinite }
+pub struct UseState { lower: i64, upper: UseUpper }
+pub enum ConsumeResult { Value(UseState), Exhausted }
+pub enum UseConstruction { Value(UseState), Invalid }
+pub enum PlaceConsume { Value(UseState), PlaceUnavailable, Exhausted }
+
+pub fn uses(count: i64) -> UseState {
+    branch_bool(
+        count < 0,
+        () -> UseState { UseState { lower: 0, upper: UseUpper::Finite(0) } },
+        () -> UseState { UseState { lower: count, upper: UseUpper::Finite(count) } },
+    )
+}
+
+pub fn bounded(lower: i64, upper: i64) -> UseConstruction {
+    branch_bool(
+        invalid_bounds(lower, upper),
+        () -> UseConstruction { UseConstruction::Invalid },
+        () -> UseConstruction { UseConstruction::Value(UseState { lower: lower, upper: UseUpper::Finite(upper) }) },
+    )
+}
+
+pub fn at_least(lower: i64) -> UseState {
+    branch_bool(lower < 0,
+        () -> UseState { UseState { lower: 0, upper: UseUpper::Infinite } },
+        () -> UseState { UseState { lower: lower, upper: UseUpper::Infinite } })
+}
+
+pub fn consume(state: UseState) -> ConsumeResult {
+    handle state.upper {
+        UseUpper::Finite(0) => ConsumeResult::Exhausted,
+        UseUpper::Finite(upper) => ConsumeResult::Value(UseState { lower: subtract_one_if_positive(state.lower), upper: UseUpper::Finite(upper - 1) }),
+        UseUpper::Infinite => ConsumeResult::Value(UseState { lower: subtract_one_if_positive(state.lower), upper: UseUpper::Infinite }),
+        _ => ConsumeResult::Exhausted,
+    }
+}
+
+// Quantitative permission is meaningful only when the shared ownership flow
+// says the capability can still be read. This keeps UseFlow from treating a
+// moved callable as independently invocable.
+pub fn consume_from_place(place: PlaceState, state: UseState) -> PlaceConsume {
+    branch_bool(can_read(place),
+        () -> PlaceConsume { consume_readable(state) },
+        () -> PlaceConsume { PlaceConsume::PlaceUnavailable })
+}
+
+fn consume_readable(state: UseState) -> PlaceConsume {
+    handle consume(state) {
+        ConsumeResult::Value(next) => PlaceConsume::Value(next),
+        ConsumeResult::Exhausted => PlaceConsume::Exhausted,
+        _ => PlaceConsume::Exhausted,
+    }
+}
+
+pub fn remaining(state: UseState) -> i64 { state.lower }
+pub fn permits_another(state: UseState) -> Bool {
+    handle state.upper { UseUpper::Finite(0) => false, UseUpper::Finite(_) => true, UseUpper::Infinite => true, _ => false }
+}
+
+// A value that may have travelled through either branch is usable only as
+// often as the least permissive incoming state permits.
+pub fn join(left: UseState, right: UseState) -> UseState {
+    UseState { lower: lesser(left.lower, right.lower), upper: greater_upper(left.upper, right.upper) }
+}
+
+fn lesser(left: i64, right: i64) -> i64 {
+    branch_bool(left < right,
+        () -> i64 { left },
+        () -> i64 { right })
+}
+
+fn subtract_one_if_positive(value: i64) -> i64 {
+    branch_bool(value > 0, () -> i64 { value - 1 }, () -> i64 { 0 })
+}
+
+fn invalid_bounds(lower: i64, upper: i64) -> Bool {
+    branch_bool(lower < 0,
+        () -> Bool { true },
+        () -> Bool { invalid_nonnegative_bounds(lower, upper) })
+}
+
+fn invalid_nonnegative_bounds(lower: i64, upper: i64) -> Bool {
+    branch_bool(upper < 0,
+        () -> Bool { true },
+        () -> Bool { lower > upper })
+}
+
+fn greater_upper(left: UseUpper, right: UseUpper) -> UseUpper {
+    handle (left, right) {
+        (UseUpper::Infinite, _) => UseUpper::Infinite,
+        (_, UseUpper::Infinite) => UseUpper::Infinite,
+        (UseUpper::Finite(left), UseUpper::Finite(right)) => branch_bool(left < right,
+            () -> UseUpper { UseUpper::Finite(right) },
+            () -> UseUpper { UseUpper::Finite(left) }),
+        _ => UseUpper::Finite(0),
+    }
+}

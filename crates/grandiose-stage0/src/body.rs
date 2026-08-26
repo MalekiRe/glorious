@@ -116,6 +116,14 @@ pub enum ExprKind {
         parameters: Vec<String>,
         body: ExprId,
     },
+    /// A zero-argument closure whose listed outer bindings are captured by
+    /// value. The body may still borrow those captured fields normally.
+    /// Unlike `move value`, this is a closure-formation override rather than
+    /// an expression-level transfer.
+    MoveClosure {
+        captures: Vec<String>,
+        body: ExprId,
+    },
     /// Explicit callable syntax: `(x: T, y: U) -> R / {E | e} { body }`.
     /// Header terms remain syntactic here; signature/type elaboration owns
     /// their semantic meaning and any contextual callable selection.
@@ -522,6 +530,9 @@ impl Parser<'_> {
         }
         if self.word() == Some("move") {
             let start = self.advance()?;
+            if self.move_capture_closure_ahead() {
+                return self.parse_move_capture_closure(start);
+            }
             let value = self
                 .parse_prefix()
                 .unwrap_or_else(|| self.recover_expression());
@@ -1371,6 +1382,54 @@ impl Parser<'_> {
         Some(self.alloc(
             ExprKind::Closure { parameters, body },
             join(self.lexed.tokens[open].span, self.lexed.tokens[close].span),
+        ))
+    }
+
+    /// `move (first, second) { ... }` forces an owned closure capture for
+    /// the listed outer bindings. Keep the lookahead deliberately narrow so
+    /// existing `move (value)` expressions retain their expression-level
+    /// transfer meaning.
+    fn move_capture_closure_ahead(&self) -> bool {
+        let Some(open) = self.current() else {
+            return false;
+        };
+        if self.lexed.tokens[open].kind != TokenKind::Punctuation('(') {
+            return false;
+        }
+        let Some(close) = self.lexed.delimiters.matching(open) else {
+            return false;
+        };
+        let Some(close_position) = self.tokens.iter().position(|token| *token == close) else {
+            return false;
+        };
+        self.tokens.get(close_position + 1).is_some_and(|token| {
+            self.lexed.tokens[*token].kind == TokenKind::Punctuation('{')
+        })
+    }
+
+    fn parse_move_capture_closure(&mut self, start: usize) -> Option<ExprId> {
+        self.expect_punctuation('(')?;
+        let mut captures = vec![];
+        while !self.at_punctuation(')') && self.current().is_some() {
+            let capture = self.expect_identifier()?;
+            if captures.contains(&capture) {
+                self.error_current("G4029", "duplicate closure move capture");
+            }
+            captures.push(capture);
+            if !self.at_punctuation(',') {
+                break;
+            }
+            self.position += 1;
+        }
+        self.expect_punctuation(')')?;
+        if !self.at_punctuation('{') {
+            self.error_current("G4029", "expected `{` after closure move captures");
+            return None;
+        }
+        let body = self.parse_block(false)?;
+        Some(self.alloc(
+            ExprKind::MoveClosure { captures, body },
+            join(self.lexed.tokens[start].span, self.expression(body).span),
         ))
     }
 

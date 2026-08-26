@@ -1,0 +1,92 @@
+// M06 scaffold: explicit publication state. The host-backed same-directory
+// atomic rename is introduced only with the capability layer; these values
+// already make staged/committed/discarded transitions non-ambient.
+pub enum PublicationState {
+    Staged,
+    Committed,
+    Discarded,
+}
+
+pub struct Publication {
+    path: Text,
+    bytes: Bytes,
+    state: PublicationState,
+}
+
+pub enum CommitResult {
+    Value(Bytes),
+    NotStaged,
+}
+
+pub enum TargetCommitResult {
+    Value(Bytes),
+    NotStaged,
+    TargetMismatch,
+}
+
+pub enum WriteResult {
+    Written,
+    NotStaged,
+    TargetMismatch,
+}
+
+pub fn stage(path: Text, bytes: Bytes) -> Publication {
+    Publication { path: path, bytes: bytes, state: PublicationState::Staged }
+}
+
+pub fn discard(publication: Publication) -> Publication {
+    Publication { path: publication.path, bytes: publication.bytes, state: PublicationState::Discarded }
+}
+
+// The host publication layer later performs write/flush/rename, but source
+// policy already rejects invalid transitions. In particular, discarding a
+// staged value makes its bytes unavailable to a later commit attempt.
+pub fn targets(publication: Publication, path: Text) -> Bool {
+    compiler_support::text_eq(publication.path, path)
+}
+
+// A caller that knows its target can keep target identity and the staged
+// state transition in one source-owned operation. A mismatch never releases
+// the staged bytes to an unrelated output path.
+pub fn commit_to(publication: Publication, path: Text) -> TargetCommitResult {
+    handle publication.state {
+        PublicationState::Staged => commit_staged_to(publication.path, publication.bytes, path),
+        PublicationState::Committed => TargetCommitResult::NotStaged,
+        PublicationState::Discarded => TargetCommitResult::NotStaged,
+        _ => TargetCommitResult::NotStaged,
+    }
+}
+
+fn commit_staged_to(staged_path: Text, bytes: Bytes, path: Text) -> TargetCommitResult {
+    handle compiler_support::text_eq(staged_path, path) {
+        true => TargetCommitResult::Value(bytes),
+        false => TargetCommitResult::TargetMismatch,
+        _ => TargetCommitResult::TargetMismatch,
+    }
+}
+
+// File authority is explicit and manifest-bound: this module decides which
+// staged bytes may be published, while the host performs only an atomic final
+// replacement. A non-staged or mismatched publication never invokes it.
+pub fn write_to(publication: Publication, path: Text) -> WriteResult {
+    handle commit_to(publication, path) {
+        TargetCommitResult::Value(bytes) => write_committed(path, bytes),
+        TargetCommitResult::NotStaged => WriteResult::NotStaged,
+        TargetCommitResult::TargetMismatch => WriteResult::TargetMismatch,
+        _ => WriteResult::NotStaged,
+    }
+}
+
+fn write_committed(path: Text, bytes: Bytes) -> WriteResult {
+    let ignored = compiler_support::write_file_atomically(path, bytes);
+    WriteResult::Written
+}
+
+pub fn commit(publication: Publication) -> CommitResult {
+    handle publication.state {
+        PublicationState::Staged => CommitResult::Value(publication.bytes),
+        PublicationState::Committed => CommitResult::NotStaged,
+        PublicationState::Discarded => CommitResult::NotStaged,
+        _ => CommitResult::NotStaged,
+    }
+}

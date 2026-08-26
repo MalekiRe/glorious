@@ -1,0 +1,13 @@
+use compiler_support::__g1_text_as_bytes;
+use output_library::output;
+
+// The source policy must reject this before the atomic host boundary is
+// reached; the harness verifies the existing target remains untouched.
+pub fn main() -> u8 {
+    handle output::write_to(output::stage("different.grbc", __g1_text_as_bytes("new artifact")), "mismatch-target.grbc") {
+        output::WriteResult::Written => 0,
+        output::WriteResult::NotStaged => 0,
+        output::WriteResult::TargetMismatch => 66,
+        _ => 0,
+    }
+}

@@ -1,0 +1,82 @@
+use query_library::query;
+use query_library::revision;
+use query_library::dependency;
+use query_library::operation;
+pub fn score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn score_decision(value: query::QueryDecision) -> i64 {
+    handle value {
+        query::QueryDecision::Reuse => 1,
+        query::QueryDecision::Compute => 10,
+        query::QueryDecision::Reject => 100,
+        _ => 0,
+    }
+}
+pub fn score_publication(value: query::QueryPublication) -> i64 {
+    handle value {
+        query::QueryPublication::Value(slot) => score_decision(query::decide_at(query::RecoveryPolicy::Allow, slot, revision::root(1))),
+        query::QueryPublication::CrossRevision => 1000,
+        query::QueryPublication::NotComputing => 10000,
+        _ => 0,
+    }
+}
+pub fn score_publication_with_dependency(value: query::QueryPublication, status: dependency::DependencyStatus) -> i64 {
+    handle value {
+        query::QueryPublication::Value(slot) => score_decision(query::decide_with_dependencies(query::RecoveryPolicy::Allow, slot, revision::root(1), status)),
+        query::QueryPublication::CrossRevision => 1000,
+        query::QueryPublication::NotComputing => 10000,
+        _ => 0,
+    }
+}
+pub fn main() -> i64 {
+    score(query::permits(query::RecoveryPolicy::Reject, query::QueryState::Value(query::QueryCompleteness::Complete)))
+        + score(query::permits(query::RecoveryPolicy::Allow, query::QueryState::Value(query::QueryCompleteness::Recovered)))
+        + score(query::permits(query::RecoveryPolicy::Reject, query::QueryState::Value(query::QueryCompleteness::Recovered)))
+        + score(query::permits(query::RecoveryPolicy::Allow, query::QueryState::Computing))
+        + score_decision(query::decide(query::RecoveryPolicy::Reject, query::QueryState::Value(query::QueryCompleteness::Complete)))
+        + score_decision(query::decide(query::RecoveryPolicy::Reject, query::QueryState::Value(query::QueryCompleteness::Recovered)))
+        + score_decision(query::decide(query::RecoveryPolicy::Allow, query::QueryState::Empty))
+        + score_decision(query::decide(query::RecoveryPolicy::Allow, query::QueryState::Failed))
+        + score_decision(query::decide(query::RecoveryPolicy::Allow, query::QueryState::Computing))
+        + score(query::permits(query::RecoveryPolicy::Allow, query::publish(query::QueryState::Computing, query::QueryCompleteness::Complete)))
+        + score(query::permits(query::RecoveryPolicy::Allow, query::publish(query::QueryState::Empty, query::QueryCompleteness::Complete)))
+        + score_decision(query::decide(query::RecoveryPolicy::Allow, query::begin(query::QueryState::Empty)))
+        + score(query::permits(query::RecoveryPolicy::Allow, query::publish(query::begin(query::QueryState::Failed), query::QueryCompleteness::Complete)))
+        + score_publication(query::publish_at(query::begin_at(query::slot(revision::root(1))), revision::root(1), query::QueryCompleteness::Complete))
+        + score_decision(query::decide_at(query::RecoveryPolicy::Allow, query::slot(revision::root(1)), revision::root(2)))
+        + score_decision(query::decide_at(query::RecoveryPolicy::Allow, query::slot(revision::root(1)), revision::apply(revision::root(1), revision::RevisionEvent::Supersede)))
+        + score_decision(query::decide_at(query::RecoveryPolicy::Allow, query::slot(revision::apply(revision::root(1), revision::RevisionEvent::Supersede)), revision::root(1)))
+        + score_publication(query::publish_at(query::begin_at(query::slot(revision::root(1))), revision::root(2), query::QueryCompleteness::Complete))
+        + score_failure(query::fail_at(query::begin_at(query::slot(revision::root(1))), revision::root(1)))
+        + score_failure(query::fail_at(query::begin_at(query::slot(revision::root(1))), revision::root(2)))
+        + score_publication_with_dependency(query::publish_at(query::begin_at(query::slot(revision::root(1))), revision::root(1), query::QueryCompleteness::Complete), dependency::DependencyStatus::Green)
+        + score_publication_with_dependency(query::publish_at(query::begin_at(query::slot(revision::root(1))), revision::root(1), query::QueryCompleteness::Complete), dependency::DependencyStatus::Red(dependency::DependencyNode::Core))
+        + score_decision(query::decide_with_dependencies(query::RecoveryPolicy::Allow, query::begin_at(query::slot(revision::root(1))), revision::root(1), dependency::DependencyStatus::Green))
+        + score_decision(query::decide_with_cancellation(query::RecoveryPolicy::Allow, query::slot(revision::root(1)), revision::root(1), dependency::DependencyStatus::Green, operation::active()))
+        + score_decision(query::decide_with_cancellation(query::RecoveryPolicy::Allow, query::slot(revision::root(1)), revision::root(1), dependency::DependencyStatus::Green, operation::cancel(operation::active())))
+        + score_decision(query::decide_with_cancellation(query::RecoveryPolicy::Allow, query::begin_at(query::slot(revision::root(1))), revision::root(1), dependency::DependencyStatus::Green, operation::cancel(operation::active())))
+        + score_publication_keyed(query::publish_at(query::begin_at(query::keyed_slot(17, revision::root(1))), revision::root(1), query::QueryCompleteness::Complete), 17, dependency::DependencyStatus::Green)
+        + score_publication_keyed(query::publish_at(query::begin_at(query::keyed_slot(17, revision::root(1))), revision::root(1), query::QueryCompleteness::Complete), 18, dependency::DependencyStatus::Green)
+        + score_start(query::begin_for(query::slot(revision::root(1)), revision::root(1)))
+        + score_start(query::begin_for(query::begin_at(query::slot(revision::root(1))), revision::root(1)))
+        + score_start(query::begin_for(query::slot(revision::root(1)), revision::root(2)))
+        + score_start(query::begin_for(query::slot(revision::apply(revision::root(1), revision::RevisionEvent::Supersede)), revision::apply(revision::root(1), revision::RevisionEvent::Supersede)))
+}
+
+pub fn score_failure(value: query::QueryFailure) -> i64 {
+    handle value {
+        query::QueryFailure::Value(slot) => score_decision(query::decide_at(query::RecoveryPolicy::Allow, slot, revision::root(1))),
+        query::QueryFailure::CrossRevision => 1000,
+        query::QueryFailure::NotComputing => 10000,
+        _ => 0,
+    }
+}
+
+pub fn score_publication_keyed(value: query::QueryPublication, key: i64, status: dependency::DependencyStatus) -> i64 {
+    handle value {
+        query::QueryPublication::Value(slot) => score_decision(query::decide_keyed_with_dependencies(query::RecoveryPolicy::Allow, slot, key, revision::root(1), status)),
+        query::QueryPublication::CrossRevision => 1000,
+        query::QueryPublication::NotComputing => 10000,
+        _ => 0,
+    }
+}
+pub fn score_start(value: query::QueryStart) -> i64 { handle value { query::QueryStart::Value(_) => 1, query::QueryStart::Cycle => 10, query::QueryStart::CrossRevision => 100, query::QueryStart::Inactive => 1000, _ => 0 } }

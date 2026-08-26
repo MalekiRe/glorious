@@ -1,0 +1,134 @@
+use bootstrap_library::bootstrap;
+use bootstrap_library::identity;
+use bootstrap_library::vm_backend;
+use bootstrap_library::runtime_manifest;
+use bootstrap_library::request;
+use bootstrap_library::source;
+use compiler_support::__g1_text_as_bytes;
+use compiler_support::__g1_bytes_len;
+pub fn score(value: bootstrap::Convergence) -> i64 {
+    handle value {
+        bootstrap::Convergence::Compatible => 1,
+        bootstrap::Convergence::ProducerMismatch => 10,
+        bootstrap::Convergence::ArtifactBytesMismatch => 100,
+        bootstrap::Convergence::InvalidStage => 1000000,
+        bootstrap::Convergence::SourceWorldMismatch => 1000,
+        bootstrap::Convergence::CodegenInputMismatch => 10000,
+        bootstrap::Convergence::ArtifactMismatch => 100000,
+        _ => 0,
+    }
+}
+pub fn score_bool(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn score_admission(value: bootstrap::ArtifactAdmission) -> i64 { handle value { bootstrap::ArtifactAdmission::Verified => 1000000, bootstrap::ArtifactAdmission::Rejected => 10000000, _ => 0 } }
+pub fn score_manifest_bytes(value: bootstrap::ManifestBytesAdmission) -> i64 {
+    handle value {
+        bootstrap::ManifestBytesAdmission::Seed => 1,
+        bootstrap::ManifestBytesAdmission::Successor => 10,
+        bootstrap::ManifestBytesAdmission::Truncated => 100,
+        bootstrap::ManifestBytesAdmission::ProducerMismatch => 1000,
+        _ => 0,
+    }
+}
+pub fn score_manifest_decode(value: bootstrap::ManifestDecode) -> i64 {
+    handle value {
+        bootstrap::ManifestDecode::Seed(_) => 1,
+        bootstrap::ManifestDecode::Successor(_, _) => 10,
+        bootstrap::ManifestDecode::Rejected => 100,
+        _ => 0,
+    }
+}
+pub fn main() -> i64 {
+    score(bootstrap::producer_matches(14, 14))
+        + score(bootstrap::producer_matches(14, 99))
+        + score(bootstrap::byte_identity_matches(15, 16))
+        + score(bootstrap::source_world_matches(16, 16))
+        + score(bootstrap::source_world_matches(16, 17))
+        + score(bootstrap::codegen_input_matches(18, 19))
+        + score(bootstrap::expected_artifact_matches(identity::digest_of_text("same"), identity::digest_of_text("same")))
+        + score(bootstrap::expected_artifact_matches(identity::digest_of_text("first"), identity::digest_of_text("second")))
+        + score(bootstrap::compare(bootstrap::manifest(1, 1, 0, 5, 6, 9, 10), bootstrap::manifest(1, 2, 9, 5, 6, 9, 10)))
+        + score(bootstrap::compare(bootstrap::manifest(1, 1, 0, 5, 6, 9, 10), bootstrap::manifest(1, 2, 8, 5, 6, 9, 10)))
+        + score(bootstrap::compare(bootstrap::manifest(1, -1, 0, 5, 6, 9, 10), bootstrap::manifest(1, 0, 9, 5, 6, 9, 10)))
+        + score(bootstrap::compare_digest_manifest(digest_stage(1, identity::digest_of_text("artifact-bytes")), digest_stage(2, identity::digest_of_text("artifact-bytes"))))
+        + score(bootstrap::compare_digest_manifest(digest_stage(1, identity::digest_of_text("artifact-bytes")), digest_stage(2, identity::digest_of_text("other-bytes"))))
+        + score_admission(bootstrap::admit_candidate(vm_backend::CandidateProgram::Arithmetic(vm_backend::ArithmeticInstruction::Constant(7))))
+        + score_admission(bootstrap::admit_candidate(vm_backend::CandidateProgram::Arithmetic(vm_backend::ArithmeticInstruction::CheckedDiv(7, 0))))
+        + score_admission(bootstrap::admit_runtime_declaration("compiler-support@0.1.0", "text-eq", runtime_manifest::PrimitiveSignature::TextTextToBool))
+        + score_admission(bootstrap::admit_runtime_declaration("user_package", "text-eq", runtime_manifest::PrimitiveSignature::TextTextToBool))
+        + score(bootstrap::compare_digest_manifest(world_stage(1, world_one()), world_stage(2, world_one())))
+        + score(bootstrap::compare_digest_manifest(world_stage(1, world_one()), world_stage(2, world_changed())))
+        + score(bootstrap::compare_digest_manifest(world_stage(1, world_one()), world_stage(2, world_reordered())))
+        + score_bool(__g1_bytes_len(bootstrap::seed_manifest_prefix_bytes()) == 12)
+        + score_bool(bootstrap::manifest_prefix_is_valid(bootstrap::seed_manifest_prefix_bytes()))
+        + score_prefix_rejected(bootstrap::admit_manifest_prefix(__g1_text_as_bytes("G0BM")))
+        + score_bool(__g1_bytes_len(bootstrap::seed_manifest_stage_header_bytes(1, identity::digest_of_text("producer"), 0, 36, 1048576)) == 62)
+        + score_bool(__g1_bytes_len(seed_manifest_bytes()) == 222)
+        + score_bool(__g1_bytes_len(successor_manifest_bytes()) == 254)
+        + score_bool(bootstrap::seed_stage_is_valid(1, 0, 36, 1048576))
+        + score_bool(bootstrap::seed_stage_is_valid(2, 0, 36, 1048576))
+        + score_bool(bootstrap::successor_stage_is_valid(2, identity::digest_of_text("predecessor"), identity::digest_of_text("predecessor"), 0, 36, 1048576))
+        + score_bool(bootstrap::successor_stage_is_valid(2, identity::digest_of_text("producer"), identity::digest_of_text("predecessor"), 0, 36, 1048576))
+        + score_manifest_bytes(bootstrap::admit_manifest_bytes(seed_manifest_bytes()))
+        + score_manifest_bytes(bootstrap::admit_manifest_bytes(successor_manifest_bytes()))
+        + score_manifest_bytes(bootstrap::admit_manifest_bytes(bootstrap::seed_manifest_stage_header_bytes(1, identity::digest_of_text("producer"), 0, 36, 1048576)))
+        + score_manifest_bytes(bootstrap::admit_manifest_bytes(matching_successor_manifest_bytes()))
+        + score_manifest_decode(bootstrap::decode_manifest(seed_manifest_bytes()))
+        + score_manifest_decode(bootstrap::decode_manifest(successor_manifest_bytes()))
+        + score_manifest_decode(bootstrap::decode_manifest(matching_successor_manifest_bytes()))
+        + score(bootstrap::compare_manifest_bytes(seed_manifest_bytes(), matching_successor_manifest_bytes()))
+        + score(bootstrap::compare_manifest_bytes(seed_manifest_bytes(), adjacent_successor_manifest_bytes()))
+        + score_bool(identity::equals(
+            bootstrap::digest_manifest_source_world(bootstrap::digest_manifest_for_source_bundle(1, 1, identity::digest_of_text("producer"), bundle_world(), identity::digest_of_text("codegen"), identity::digest_of_text("producer"), identity::digest_of_text("artifact-bytes"))),
+            request::source_bundle_fingerprint(bundle_world()),
+        ))
+}
+
+pub fn seed_manifest_bytes() -> Bytes {
+    bootstrap::encode_seed_manifest_bytes(1, identity::digest_of_text("producer"), 0, 36, 1048576, identity::digest_of_text("world"), identity::digest_of_text("source"), identity::digest_of_text("codegen"), identity::digest_of_text("artifact"), identity::digest_of_text("artifact-bytes"))
+}
+pub fn successor_manifest_bytes() -> Bytes {
+    bootstrap::encode_successor_manifest_bytes(2, identity::digest_of_text("producer"), 0, 36, 1048576, identity::digest_of_text("predecessor"), identity::digest_of_text("world"), identity::digest_of_text("source"), identity::digest_of_text("codegen"), identity::digest_of_text("artifact"), identity::digest_of_text("artifact-bytes"))
+}
+pub fn matching_successor_manifest_bytes() -> Bytes {
+    bootstrap::encode_successor_manifest_bytes(2, identity::digest_of_text("same"), 0, 36, 1048576, identity::digest_of_text("same"), identity::digest_of_text("world"), identity::digest_of_text("source"), identity::digest_of_text("codegen"), identity::digest_of_text("artifact"), identity::digest_of_text("artifact-bytes"))
+}
+pub fn adjacent_successor_manifest_bytes() -> Bytes {
+    bootstrap::encode_successor_manifest_bytes(2, identity::digest_of_text("artifact"), 0, 36, 1048576, identity::digest_of_text("artifact"), identity::digest_of_text("world"), identity::digest_of_text("source"), identity::digest_of_text("codegen"), identity::digest_of_text("artifact"), identity::digest_of_text("artifact-bytes"))
+}
+
+pub fn score_prefix_rejected(value: bootstrap::ManifestPrefixAdmission) -> i64 { handle value { bootstrap::ManifestPrefixAdmission::Truncated => 1, _ => 0 } }
+
+pub fn digest_stage(stage: i64, artifact_bytes: identity::Digest) -> bootstrap::DigestManifest {
+    bootstrap::digest_manifest(1, stage, identity::digest_of_text("producer"), identity::digest_of_text("source-world"), identity::digest_of_text("codegen"), identity::digest_of_text("producer"), artifact_bytes)
+}
+
+pub fn world_stage(stage: i64, world: request::SourceWorld2) -> bootstrap::DigestManifest {
+    bootstrap::digest_manifest_for_source_world(1, stage, identity::digest_of_text("producer"), world, identity::digest_of_text("codegen"), identity::digest_of_text("producer"), identity::digest_of_text("artifact-bytes"))
+}
+pub fn world_one() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("bootstrap", "src/one", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        source::input("bootstrap", "src/two", __g1_text_as_bytes("two"), identity::digest_of_text("two")),
+        request::bootstrap_limits(2, 6),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => world_one() }
+}
+pub fn world_changed() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("bootstrap", "src/one", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        source::input("bootstrap", "src/two", __g1_text_as_bytes("three"), identity::digest_of_text("three")),
+        request::bootstrap_limits(2, 8),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => world_changed() }
+}
+pub fn world_reordered() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("bootstrap", "src/two", __g1_text_as_bytes("two"), identity::digest_of_text("two")),
+        source::input("bootstrap", "src/one", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        request::bootstrap_limits(2, 6),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => world_reordered() }
+}
+pub fn bundle_world() -> request::SourceBundle {
+    handle request::source_bundle(request::source_sequence_one(source::input("bootstrap", "src/bundle", __g1_text_as_bytes("bundle"), identity::digest_of_text("bundle"))), request::bootstrap_limits(1, 6)) {
+        request::SourceBundleAdmission::Value(value) => value,
+        _ => bundle_world(),
+    }
+}

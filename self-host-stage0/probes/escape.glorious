@@ -1,0 +1,21 @@
+use escape_library::escape; use escape_library::placeflow;
+pub fn score(value: escape::EscapeResult) -> i64 { handle value { escape::EscapeResult::Allowed => 1, escape::EscapeResult::Rejected => 0, _ => 0 } }
+pub fn main() -> i64 {
+    score(escape::return_place(placeflow::available()))
+        + score(escape::return_place(placeflow::move_out(placeflow::available())))
+        + score(escape::return_place(placeflow::join(placeflow::available(), placeflow::available())))
+        + score(escape::return_place(placeflow::join(placeflow::available(), placeflow::move_out(placeflow::available()))))
+        + score(escape::return_place(placeflow::initialize(placeflow::move_out(placeflow::available()))))
+        + score(escape::return_place(placeflow::borrow_shared(placeflow::available())))
+        + score(escape::return_reference(escape::ReferenceOrigin::ExternalBorrow))
+        + score(escape::return_reference(escape::ReferenceOrigin::LocalBorrow))
+        + score(escape::return_reference_from(placeflow::available(), escape::ReferenceOrigin::ExternalBorrow))
+        + score(escape::return_reference_from(placeflow::borrow_shared(placeflow::available()), escape::ReferenceOrigin::ExternalBorrow))
+        + score(escape::return_reference_from(placeflow::borrow_unique(placeflow::available()), escape::ReferenceOrigin::ExternalBorrow))
+        + score(escape::return_reference_from(placeflow::move_out(placeflow::available()), escape::ReferenceOrigin::ExternalBorrow))
+        + score(escape::return_reference_from(placeflow::available(), escape::ReferenceOrigin::LocalBorrow))
+        + score(escape::suspend_reference(escape::ReferenceOrigin::ExternalBorrow))
+        + score(escape::suspend_reference(escape::ReferenceOrigin::LocalBorrow))
+        + score(escape::store_reference(escape::ReferenceOrigin::Owned))
+        + score(escape::store_reference(escape::ReferenceOrigin::LocalBorrow))
+}

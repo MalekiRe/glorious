@@ -1,0 +1,76 @@
+// M15's initial callable contract. Effects, generics, lifetimes, quantities,
+// and trait bounds extend this source-defined parameter/result boundary.
+use types::Type;
+use types::same;
+use compiler_support::branch_bool;
+
+pub enum Callable {
+    Unary(Type, Type),
+    Binary(Type, Type, Type),
+}
+
+pub enum Arguments { One(Type), Two(Type, Type) }
+
+pub fn callable(parameter: Type, result: Type) -> Callable {
+    Callable::Unary(parameter, result)
+}
+
+pub fn binary(first: Type, second: Type, result: Type) -> Callable {
+    Callable::Binary(first, second, result)
+}
+
+pub fn accepts_argument(callable: Callable, argument: Type) -> Bool {
+    accepts(callable, Arguments::One(argument))
+}
+
+// The argument shape is part of a frozen callable contract: a binary
+// declaration cannot accidentally be accepted as a unary call merely because
+// one parameter's type happens to match.
+pub fn accepts(callable: Callable, arguments: Arguments) -> Bool {
+    handle callable {
+        Callable::Unary(parameter, _) => handle arguments {
+            Arguments::One(argument) => same(parameter, argument),
+            Arguments::Two(_, _) => false,
+            _ => false,
+        },
+        Callable::Binary(first, second, _) => handle arguments {
+            Arguments::One(_) => false,
+            Arguments::Two(left, right) => binary_arguments_match(first, second, left, right),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn binary_arguments_match(first: Type, second: Type, left: Type, right: Type) -> Bool {
+    branch_bool(
+        same(first, left),
+        () -> Bool { same(second, right) },
+        () -> Bool { false },
+    )
+}
+
+pub fn result_matches(callable: Callable, result: Type) -> Bool {
+    handle callable {
+        Callable::Unary(_, expected) => same(expected, result),
+        Callable::Binary(_, _, expected) => same(expected, result),
+        _ => false,
+    }
+}
+
+pub fn same_callable(left: Callable, right: Callable) -> Bool {
+    handle (left, right) {
+        (Callable::Unary(left_parameter, left_result), Callable::Unary(right_parameter, right_result)) => branch_bool(same(left_parameter, right_parameter), () -> Bool { same(left_result, right_result) }, () -> Bool { false }),
+        (Callable::Binary(left_first, left_second, left_result), Callable::Binary(right_first, right_second, right_result)) => same_binary(first_same(left_first, right_first), left_second, left_result, right_second, right_result),
+        _ => false,
+    }
+}
+
+fn first_same(left: Type, right: Type) -> Bool { same(left, right) }
+fn same_binary(first: Bool, left_second: Type, left_result: Type, right_second: Type, right_result: Type) -> Bool {
+    handle first {
+        true => handle same(left_second, right_second) { true => same(left_result, right_result), false => false, _ => false },
+        false => false,
+        _ => false,
+    }
+}

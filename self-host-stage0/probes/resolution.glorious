@@ -1,0 +1,56 @@
+use resolution_library::resolution;
+use resolution_library::interface;
+use compiler_support::__g1_text_as_bytes;
+
+pub fn score(value: Bool) -> i64 {
+    handle value {
+        true => 1,
+        false => 0,
+        _ => 0,
+    }
+}
+
+pub fn main() -> i64 {
+    score(resolution::visible_from(
+        resolution::binding("pkg", "pkg.root", resolution::Visibility::Public),
+        "other", "other.module"))
+        + score(resolution::visible_from(
+            resolution::binding("pkg", "pkg.root", resolution::Visibility::Package),
+            "pkg", "pkg.child"))
+        + score(resolution::visible_from(
+            resolution::binding("pkg", "pkg.root", resolution::Visibility::Private),
+            "pkg", "pkg.root"))
+        + score(resolution::visible_from(
+            resolution::binding("pkg", "pkg.root", resolution::Visibility::Private),
+            "pkg", "pkg.child"))
+        + score(resolution::visible_from(
+            resolution::binding_from_definition("pkg", "pkg.root", interface::definition(interface::DefinitionKind::Function, true)),
+            "other", "other.module"))
+        + score(resolution::visible_from(
+            resolution::binding_from_definition("pkg", "pkg.root", interface::definition(interface::DefinitionKind::Implementation, true)),
+            "pkg", "pkg.child"))
+        + score_admission(resolution::binding_from_header("pkg", "pkg.root", __g1_text_as_bytes("pub fn exported")), "other", "other.module")
+        + score_admission(resolution::binding_from_header("pkg", "pkg.root", __g1_text_as_bytes("fn private")), "pkg", "pkg.root")
+        + score_admission(resolution::binding_from_header("pkg", "pkg.root", __g1_text_as_bytes("value")), "pkg", "pkg.root")
+        + score_lookup(resolution::lookup(resolution::binding("pkg", "pkg.root", resolution::Visibility::Private), "pkg", "pkg.root"))
+        + score_lookup(resolution::lookup(resolution::binding("pkg", "pkg.root", resolution::Visibility::Private), "pkg", "pkg.child"))
+        + score_named_lookup(resolution::lookup_named(resolution::named_binding("local", "pkg", "pkg.root", resolution::Visibility::Private), "local", "pkg", "pkg.root"))
+        + score_named_lookup(resolution::lookup_named(resolution::named_binding("local", "pkg", "pkg.root", resolution::Visibility::Private), "local", "pkg", "pkg.child"))
+        + score_named_lookup(resolution::lookup_named(resolution::named_binding("local", "pkg", "pkg.root", resolution::Visibility::Private), "other", "pkg", "pkg.root"))
+}
+
+pub fn score_admission(value: resolution::BindingAdmission, package: Text, module: Text) -> i64 {
+    handle value {
+        resolution::BindingAdmission::Value(binding) => score(resolution::visible_from(binding, package, module)),
+        resolution::BindingAdmission::NotDeclaration => 0,
+        _ => 0,
+    }
+}
+
+pub fn score_lookup(value: resolution::Lookup) -> i64 {
+    handle value { resolution::Lookup::Resolved => 1, resolution::Lookup::Inaccessible => 0, resolution::Lookup::Missing => 0, _ => 0 }
+}
+
+pub fn score_named_lookup(value: resolution::Lookup) -> i64 {
+    handle value { resolution::Lookup::Resolved => 1, resolution::Lookup::Inaccessible => 10, resolution::Lookup::Missing => 100, _ => 0 }
+}

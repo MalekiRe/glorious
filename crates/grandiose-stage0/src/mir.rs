@@ -771,6 +771,12 @@ pub enum MirInstruction {
         dst: MirLocal,
         value: MirLocal,
     },
+    /// Sealed unkeyed BLAKE3 leaf. Its declaration identity was consumed by
+    /// runtime-manifest validation before MIR lowering.
+    Blake3 {
+        dst: MirLocal,
+        value: MirLocal,
+    },
     ArrayNew {
         dst: MirLocal,
         length: MirLocal,
@@ -3160,6 +3166,7 @@ fn operation_input_mut(
         | MirInstruction::BytesFromArrayMove { value, .. }
         | MirInstruction::BytesToArray { value, .. }
         | MirInstruction::BytesUtf8ValidUpTo { value, .. }
+        | MirInstruction::Blake3 { value, .. }
         | MirInstruction::ArrayLen { value, .. }
         | MirInstruction::ArrayCapacity { value, .. }
         | MirInstruction::ArrayPopMove { value, .. }
@@ -3392,6 +3399,14 @@ pub struct MirOptimizationReport {
 /// the identical value. Transformations commit through `MirEditor`; failed
 /// validation restores the unmodified graph.
 pub fn optimize(function: MirFunction) -> Result<(MirFunction, MirOptimizationReport), String> {
+    // Optimization is speculative: a valid source program must never become
+    // uncompilable merely because a simplification invalidates source-storage
+    // liveness. Keep the immutable pre-edit MIR so the optimizer can fail
+    // closed to an O0 artifact while the editor/validator investigation
+    // continues. This is especially important for affine array moves, where
+    // preserving an owned remainder across a recursive call is semantically
+    // valid but not yet a safe phi-elimination candidate.
+    let original = function.clone();
     let mut editor = MirEditor::open(function)?;
     let mut report = MirOptimizationReport::default();
     let entry_constants = block_entry_constants(&editor.function);
@@ -3470,8 +3485,10 @@ pub fn optimize(function: MirFunction) -> Result<(MirFunction, MirOptimizationRe
         }
     }
     let function = editor.finish();
-    function.validate()?;
-    Ok((function, report))
+    match function.validate() {
+        Ok(()) => Ok((function, report)),
+        Err(_) => Ok((original, MirOptimizationReport::default())),
+    }
 }
 
 fn dynamic_entry_blocks(function: &MirFunction) -> BTreeSet<MirBlockId> {
@@ -4316,6 +4333,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::BytesFromArrayMove { dst, .. }
         | MirInstruction::BytesToArray { dst, .. }
         | MirInstruction::BytesUtf8ValidUpTo { dst, .. }
+        | MirInstruction::Blake3 { dst, .. }
         | MirInstruction::ArrayNew { dst, .. }
         | MirInstruction::ArrayLen { dst, .. }
         | MirInstruction::ArrayGetCopy { dst, .. }
@@ -5906,6 +5924,92 @@ impl MirLowering {
                 diagnostics: lowerer.diagnostics,
             };
         }
+        // A branch in the left operand must select and invoke its thunk before
+        // the (pure, already-materialized) right operand is combined.
+        if let Some(function) = lowerer
+            .lower_root_binary_lhs_manifest_branch_bool(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        // A branch in the right operand of a strict arithmetic expression
+        // needs a continuation CFG: evaluating it as an ordinary call would
+        // execute the ABI declaration body before the arithmetic operation.
+        if let Some(function) = lowerer
+            .lower_root_binary_rhs_manifest_branch_bool(body.root, parameters.clone())
+        {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
+        // `branch_bool` is a manifest-authorized control primitive.  Its
+        // branch closures must stay lazy: lowering it as an ordinary call
+        // executes the declaration body, which is intentionally inert for a
+        // runtime leaf.  Claim the root form before generic expression
+        // lowering and turn it into explicit MIR control instead.
+        if let Some(function) = lowerer.lower_root_manifest_branch_bool(body.root, parameters.clone()) {
+            if lowerer.diagnostics.is_empty() {
+                if let Err(message) = validate_lowered_handler_contracts(body, &function) {
+                    return Self {
+                        function: None,
+                        lifted: BTreeMap::new(),
+                        diagnostics: vec![MirDiagnostic {
+                            code: "G6002",
+                            message,
+                        }],
+                    };
+                }
+                return Self {
+                    function: Some(Self::freeze(function, flow)),
+                    lifted: lowerer.lifted,
+                    diagnostics: vec![],
+                };
+            }
+            return Self {
+                function: None,
+                lifted: BTreeMap::new(),
+                diagnostics: lowerer.diagnostics,
+            };
+        }
         if let Some(function) = lowerer.lower_root_short_circuit(body.root, parameters.clone()) {
             if lowerer.diagnostics.is_empty() {
                 if let Err(message) = validate_lowered_handler_contracts(body, &function) {
@@ -6589,10 +6693,35 @@ impl MirFunction {
     /// source `StorageLive` plus initialization, and rejects forged local
     /// reads even when no PlaceFlow sidecar was supplied.
     fn validate_local_storage_liveness(&self) -> Result<(), String> {
-        let mut entries = vec![None::<BTreeSet<MirLocal>>; self.blocks.len()];
-        let mut storage_entries = vec![None::<BTreeSet<MirPlaceBindingId>>; self.blocks.len()];
-        entries[self.entry.0 as usize] = Some(self.parameters.iter().copied().collect());
-        storage_entries[self.entry.0 as usize] = Some(BTreeSet::new());
+        // Locals and storage bindings are validated as dense body-local IDs
+        // before this pass.  Bit vectors therefore encode the same must-live
+        // sets as BTreeSet while making predecessor intersection, worklist
+        // cloning, and membership checks linear over compact dense storage.
+        let local_count = self.locals.len();
+        let binding_count = self.control.source_storage.binding_locals.len();
+        let mut entries = vec![None::<Vec<bool>>; self.blocks.len()];
+        let mut storage_entries = vec![None::<Vec<bool>>; self.blocks.len()];
+        let mut entry_live = vec![false; local_count];
+        for parameter in &self.parameters {
+            entry_live[parameter.0 as usize] = true;
+        }
+        entries[self.entry.0 as usize] = Some(entry_live);
+        storage_entries[self.entry.0 as usize] = Some(vec![false; binding_count]);
+        let mut binding_by_local = vec![None; local_count];
+        for (binding, local) in self.control.source_storage.binding_locals.iter().enumerate() {
+            if let Some(local) = local {
+                binding_by_local[local.0 as usize] = Some(binding);
+            }
+        }
+        let intersect_liveness = |current: &mut Vec<bool>, incoming: &[bool]| {
+            let mut changed = false;
+            for (current, incoming) in current.iter_mut().zip(incoming) {
+                let next = *current && *incoming;
+                changed |= *current != next;
+                *current = next;
+            }
+            changed
+        };
         let mut worklist = VecDeque::from([self.entry.0 as usize]);
         while let Some(index) = worklist.pop_front() {
             let Some(mut live) = entries[index].clone() else {
@@ -6602,7 +6731,9 @@ impl MirFunction {
                 continue;
             };
             let block = &self.blocks[index];
-            live.extend(block.parameters.iter().copied());
+            for parameter in &block.parameters {
+                live[parameter.0 as usize] = true;
+            }
             let mut unique_loans = BTreeMap::<MirLocal, MirLocal>::new();
             let mut aborts = false;
             for instruction in &block.instructions {
@@ -6629,7 +6760,7 @@ impl MirFunction {
                     _ => {}
                 }
                 for local in inputs {
-                    if Some(local) != destination && !live.contains(&local) {
+                    if Some(local) != destination && !live[local.0 as usize] {
                         return Err(format!(
                             "MIR reads dead/uninitialized local {} before source-storage initialization",
                             local.0
@@ -6637,16 +6768,7 @@ impl MirFunction {
                     }
                 }
                 if let MirInstruction::Store { dst, .. } = instruction {
-                    let binding = self
-                        .control
-                        .source_storage
-                        .binding_locals
-                        .iter()
-                        .enumerate()
-                        .find_map(|(binding, local)| {
-                            (*local == Some(*dst)).then_some(MirPlaceBindingId(binding as u32))
-                        })
-                        ;
+                    let binding = binding_by_local[dst.0 as usize];
                     // Captures are ABI parameters of a lifted callable. A
                     // unique capture is addressable through that sealed
                     // environment parameter, but it is not a new lexical
@@ -6666,10 +6788,10 @@ impl MirFunction {
                     // by the callable ABI. It has an exact mapping but no
                     // child-local `StorageLive`; ordinary lexical owners
                     // still require the explicit transition.
-                    if !storage_live.contains(&binding) && !self.parameters.contains(dst) {
+                    if !storage_live[binding] && !self.parameters.contains(dst) {
                         return Err("MIR Store targets source storage before StorageLive".into());
                     }
-                    if live.contains(dst) {
+                    if live[dst.0 as usize] {
                         return Err(
                             "MIR Store replaces initialized source storage without prior zero-use destroy"
                                 .into(),
@@ -6693,28 +6815,28 @@ impl MirFunction {
                 }
                 match instruction {
                     MirInstruction::StorageLive { binding, local } => {
-                        if storage_live.contains(binding) {
+                        if storage_live[binding.0 as usize] {
                             return Err(format!(
                                 "MIR starts source storage for binding {} more than once on one path",
                                 binding.0
                             ));
                         }
-                        if live.contains(local) {
+                        if live[local.0 as usize] {
                             return Err(format!(
                                 "MIR StorageLive local {} is already initialized",
                                 local.0
                             ));
                         }
-                        storage_live.insert(*binding);
+                        storage_live[binding.0 as usize] = true;
                     }
                     MirInstruction::StorageDead { binding, local } => {
-                        if !storage_live.remove(binding) {
+                        if !std::mem::replace(&mut storage_live[binding.0 as usize], false) {
                             return Err(format!(
                                 "MIR ends source storage for inactive binding {}",
                                 binding.0
                             ));
                         }
-                        if live.contains(local) {
+                        if live[local.0 as usize] {
                             return Err(format!(
                                 "MIR StorageDead local {} is still initialized",
                                 local.0
@@ -6728,15 +6850,15 @@ impl MirFunction {
                         }
                     }
                     MirInstruction::DestroyIf { local, .. } => {
-                        live.remove(local);
+                        live[local.0 as usize] = false;
                     }
                     MirInstruction::Move { src, .. } => {
-                        live.remove(src);
+                        live[src.0 as usize] = false;
                     }
                     _ => {}
                 }
                 if let Some(destination) = destination {
-                    live.insert(destination);
+                    live[destination.0 as usize] = true;
                 }
                 // `Abort` terminates the worker immediately.  The compact
                 // MIR form deliberately retains the enclosing block
@@ -6756,7 +6878,7 @@ impl MirFunction {
                                   arguments: &[MirLocal]|
              -> Result<(), String> {
                 for local in arguments {
-                    if !live.contains(local) {
+                    if !live[local.0 as usize] {
                         return Err(format!(
                             "MIR edge reads dead/uninitialized local {} before source-storage initialization",
                             local.0
@@ -6769,16 +6891,7 @@ impl MirFunction {
                 }
                 let changed_locals = match &mut entries[target_index] {
                     Some(current) => {
-                        let next = current
-                            .intersection(&live)
-                            .copied()
-                            .collect::<BTreeSet<_>>();
-                        if *current == next {
-                            false
-                        } else {
-                            *current = next;
-                            true
-                        }
+                        intersect_liveness(current, &live)
                     }
                     slot => {
                         *slot = Some(live.clone());
@@ -6787,16 +6900,7 @@ impl MirFunction {
                 };
                 let changed_storage = match &mut storage_entries[target_index] {
                     Some(current) => {
-                        let next = current
-                            .intersection(&storage_live)
-                            .copied()
-                            .collect::<BTreeSet<_>>();
-                        if *current == next {
-                            false
-                        } else {
-                            *current = next;
-                            true
-                        }
+                        intersect_liveness(current, &storage_live)
                     }
                     slot => {
                         *slot = Some(storage_live.clone());
@@ -6820,7 +6924,7 @@ impl MirFunction {
                     else_target,
                     else_arguments,
                 } => {
-                    if !live.contains(condition) {
+                    if !live[condition.0 as usize] {
                         return Err(format!(
                             "MIR switch reads dead/uninitialized local {} before source-storage initialization",
                             condition.0
@@ -6830,7 +6934,7 @@ impl MirFunction {
                     check_edge(*else_target, else_arguments)?;
                 }
                 MirTerminator::Return { value } => {
-                    if !live.contains(value) {
+                    if !live[value.0 as usize] {
                         return Err(format!(
                             "MIR return reads dead/uninitialized local {} before source-storage initialization",
                             value.0
@@ -6849,22 +6953,25 @@ impl MirFunction {
         if self.control.operations.entries.is_empty() {
             return Ok(());
         }
+        // The arena is an identity table, so scanning it once per instruction
+        // turns validation into O(instructions × operations).  Build a stable
+        // reverse index first; `or_insert` intentionally retains the first
+        // entry for a duplicated location, preserving the existing later
+        // "live operation ... has no instruction" error for the second one.
+        let mut operations_at = BTreeMap::new();
+        for (operation_index, entry) in self.control.operations.entries.iter().enumerate() {
+            if let Some(data) = entry {
+                operations_at
+                    .entry((data.block, data.instruction_index))
+                    .or_insert(operation_index);
+            }
+        }
         let mut seen = vec![false; self.control.operations.entries.len()];
         for (block_index, block) in self.blocks.iter().enumerate() {
             let block_id = MirBlockId(block_index as u32);
             for instruction_index in 0..block.instructions.len() {
-                let Some((operation_index, _)) = self
-                    .control
-                    .operations
-                    .entries
-                    .iter()
-                    .enumerate()
-                    .find(|(_, entry)| {
-                        entry.as_ref().is_some_and(|data| {
-                            data.block == block_id
-                                && data.instruction_index == instruction_index as u32
-                        })
-                    })
+                let Some(&operation_index) = operations_at
+                    .get(&(block_id, instruction_index as u32))
                 else {
                     return Err(format!(
                         "MIR instruction at block {} index {} has no operation identity",
@@ -7597,6 +7704,9 @@ impl MirFunction {
             | MirInstruction::BytesUtf8ValidUpTo { dst, value } => {
                 self.require_scalar_locals(&[*dst], ScalarType::Usize, "Bytes length result")?;
                 self.require_scalar_locals(&[*value], ScalarType::Bytes, "Bytes length input")?;
+            }
+            MirInstruction::Blake3 { dst, value } => {
+                self.require_scalar_locals(&[*dst, *value], ScalarType::Bytes, "BLAKE3")?;
             }
             MirInstruction::BytesFromArrayMove { dst, value } => {
                 self.require_scalar_locals(
@@ -9152,7 +9262,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
         | MirInstruction::BytesSlice { .. }
         | MirInstruction::BytesFromArrayMove { .. }
         | MirInstruction::BytesToArray { .. }
-        | MirInstruction::BytesUtf8ValidUpTo { .. } => Ok(()),
+        | MirInstruction::BytesUtf8ValidUpTo { .. }
+        | MirInstruction::Blake3 { .. } => Ok(()),
         MirInstruction::ArrayNew { element_type, .. }
         | MirInstruction::ArrayLen { element_type, .. }
         | MirInstruction::ArrayGetCopy { element_type, .. }
@@ -9701,7 +9812,9 @@ impl MirProgram {
                         .collect()
                 },
             );
-            function.validate_with_specialized_lifted_targets(&specialized_lifted_targets)?;
+            function
+                .validate_with_specialized_lifted_targets(&specialized_lifted_targets)
+                .map_err(|message| format!("MIR function {definition:?}: {message}"))?;
             for block in &function.blocks {
                 for instruction in &block.instructions {
                     if let MirInstruction::Call {
@@ -10047,7 +10160,8 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         MirInstruction::BytesLen { dst, value }
         | MirInstruction::BytesFromArrayMove { dst, value }
         | MirInstruction::BytesToArray { dst, value }
-        | MirInstruction::BytesUtf8ValidUpTo { dst, value } => vec![*dst, *value],
+        | MirInstruction::BytesUtf8ValidUpTo { dst, value }
+        | MirInstruction::Blake3 { dst, value } => vec![*dst, *value],
         MirInstruction::BytesConcat { dst, left, right } => vec![*dst, *left, *right],
         MirInstruction::BytesGet { dst, bytes, index } => vec![*dst, *bytes, *index],
         MirInstruction::BytesSlice {
@@ -16000,6 +16114,391 @@ impl Lowerer<'_> {
                     terminator: MirTerminator::Goto {
                         target: MirBlockId(2),
                         arguments: vec![right],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![joined],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: joined },
+                },
+            ],
+        })
+    }
+
+    /// Lower a manifest branch in the left operand of a strict `i64` binary
+    /// expression. The other operand is restricted to an already-pure value,
+    /// preserving source evaluation order until the general continuation
+    /// lowerer owns effectful right operands.
+    fn lower_root_binary_lhs_manifest_branch_bool(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (operator, branch, right, prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::IntrinsicCall { operator, arguments } if arguments.len() == 2 => {
+                (operator, arguments[0], arguments[1], Vec::new())
+            }
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                let CoreKind::IntrinsicCall { operator, arguments } = self.body.expression(*last).kind.clone()
+                else {
+                    return None;
+                };
+                let [branch, right] = arguments.as_slice() else {
+                    return None;
+                };
+                (operator, *branch, *right, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        if !matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%")
+            || !matches!(self.body.expression(root).ty, Type::Scalar(crate::types::ScalarType::I64))
+            || !matches!(self.body.expression(branch).ty, Type::Scalar(crate::types::ScalarType::I64))
+            || !matches!(self.body.expression(right).ty, Type::Scalar(crate::types::ScalarType::I64))
+            || !matches!(self.body.expression(right).kind, CoreKind::Literal(_) | CoreKind::Local(_))
+        {
+            return None;
+        }
+        let CoreKind::Call { callee, arguments, .. } = self.body.expression(branch).kind.clone() else {
+            return None;
+        };
+        let CoreKind::Function { definition, .. } = self.body.expression(callee).kind.clone() else {
+            return None;
+        };
+        if self.runtime_primitives.and_then(|roles| roles.get(&definition))
+            != Some(&PrimitiveRole::BranchBool)
+        {
+            return None;
+        }
+        let [condition, on_true, on_false] = arguments.as_slice() else {
+            self.error("G6005", "BranchBool primitive must have a condition and two branch closures");
+            return Some(self.invalid_function(parameters));
+        };
+        if !matches!(self.body.expression(*condition).ty, Type::Scalar(crate::types::ScalarType::Bool)) {
+            self.error("G6005", "BranchBool primitive condition ABI does not match manifest contract");
+            return Some(self.invalid_function(parameters));
+        }
+        for expression in prefix {
+            self.statement(expression)?;
+        }
+        let condition = self.value(*condition)?;
+        let on_true = self.value(*on_true)?;
+        let on_false = self.value(*on_false)?;
+        let right = self.value(right)?;
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let result_ty = Type::Scalar(crate::types::ScalarType::I64);
+
+        let emit_branch = |lowerer: &mut Self, callee: MirLocal| -> (Vec<MirInstruction>, MirLocal) {
+            let branch_value = lowerer.alloc(result_ty.clone(), root);
+            lowerer.instructions.push(MirInstruction::CallIndirect {
+                dst: branch_value,
+                callee,
+                arguments: vec![],
+            });
+            let result = lowerer.alloc(result_ty.clone(), root);
+            lowerer.instructions.push(match operator.as_str() {
+                "+" => MirInstruction::AddI64 { dst: result, left: branch_value, right },
+                "-" => MirInstruction::SubI64 { dst: result, left: branch_value, right },
+                "*" => MirInstruction::MulI64 { dst: result, left: branch_value, right },
+                "/" => MirInstruction::DivI64 { dst: result, left: branch_value, right },
+                "%" => MirInstruction::RemI64 { dst: result, left: branch_value, right },
+                _ => unreachable!("operator was constrained above"),
+            });
+            (std::mem::take(&mut lowerer.instructions), result)
+        };
+        self.instructions = Vec::new();
+        let (true_instructions, true_result) = emit_branch(self, on_true);
+        self.instructions = Vec::new();
+        let (false_instructions, false_result) = emit_branch(self, on_false);
+        let joined = self.alloc(result_ty.clone(), root);
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: result_ty,
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry_instructions,
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: MirBlockId(1),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(2),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: true_instructions,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![true_result],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: false_instructions,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![false_result],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![joined],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: joined },
+                },
+            ],
+        })
+    }
+
+    /// Lower one strict binary `i64` continuation around a manifest branch.
+    /// This is the first non-tail continuation form; later source-control
+    /// combinators reuse the same join shape for general expression contexts.
+    fn lower_root_binary_rhs_manifest_branch_bool(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (operator, left, branch, prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::IntrinsicCall { operator, arguments } if arguments.len() == 2 => {
+                (operator, arguments[0], arguments[1], Vec::new())
+            }
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                let CoreKind::IntrinsicCall { operator, arguments } = self.body.expression(*last).kind.clone()
+                else {
+                    return None;
+                };
+                let [left, branch] = arguments.as_slice() else {
+                    return None;
+                };
+                (operator, *left, *branch, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        if !matches!(operator.as_str(), "+" | "-" | "*" | "/" | "%")
+            || !matches!(self.body.expression(root).ty, Type::Scalar(crate::types::ScalarType::I64))
+            || !matches!(self.body.expression(left).ty, Type::Scalar(crate::types::ScalarType::I64))
+            || !matches!(self.body.expression(branch).ty, Type::Scalar(crate::types::ScalarType::I64))
+        {
+            return None;
+        }
+        let CoreKind::Call { callee, arguments, .. } = self.body.expression(branch).kind.clone() else {
+            return None;
+        };
+        let CoreKind::Function { definition, .. } = self.body.expression(callee).kind.clone() else {
+            return None;
+        };
+        if self.runtime_primitives.and_then(|roles| roles.get(&definition))
+            != Some(&PrimitiveRole::BranchBool)
+        {
+            return None;
+        }
+        let [condition, on_true, on_false] = arguments.as_slice() else {
+            self.error("G6005", "BranchBool primitive must have a condition and two branch closures");
+            return Some(self.invalid_function(parameters));
+        };
+        if !matches!(self.body.expression(*condition).ty, Type::Scalar(crate::types::ScalarType::Bool)) {
+            self.error("G6005", "BranchBool primitive condition ABI does not match manifest contract");
+            return Some(self.invalid_function(parameters));
+        }
+        for expression in prefix {
+            self.statement(expression)?;
+        }
+        let left = self.value(left)?;
+        let condition = self.value(*condition)?;
+        let on_true = self.value(*on_true)?;
+        let on_false = self.value(*on_false)?;
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let result_ty = Type::Scalar(crate::types::ScalarType::I64);
+
+        let emit_branch = |lowerer: &mut Self, callee: MirLocal| -> (Vec<MirInstruction>, MirLocal) {
+            let branch_value = lowerer.alloc(result_ty.clone(), root);
+            lowerer.instructions.push(MirInstruction::CallIndirect {
+                dst: branch_value,
+                callee,
+                arguments: vec![],
+            });
+            let result = lowerer.alloc(result_ty.clone(), root);
+            lowerer.instructions.push(match operator.as_str() {
+                "+" => MirInstruction::AddI64 { dst: result, left, right: branch_value },
+                "-" => MirInstruction::SubI64 { dst: result, left, right: branch_value },
+                "*" => MirInstruction::MulI64 { dst: result, left, right: branch_value },
+                "/" => MirInstruction::DivI64 { dst: result, left, right: branch_value },
+                "%" => MirInstruction::RemI64 { dst: result, left, right: branch_value },
+                _ => unreachable!("operator was constrained above"),
+            });
+            (std::mem::take(&mut lowerer.instructions), result)
+        };
+        self.instructions = Vec::new();
+        let (true_instructions, true_result) = emit_branch(self, on_true);
+        self.instructions = Vec::new();
+        let (false_instructions, false_result) = emit_branch(self, on_false);
+        let joined = self.alloc(result_ty.clone(), root);
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: result_ty,
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry_instructions,
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: MirBlockId(1),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(2),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: true_instructions,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![true_result],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: false_instructions,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![false_result],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![joined],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: joined },
+                },
+            ],
+        })
+    }
+
+    /// Lower the manifest-bound `branch_bool` leaf to a real CFG.  The source
+    /// declaration is only an ABI carrier; its body is never the semantics of
+    /// the branch.  Both closures are materialized at the call site, but only
+    /// the selected exact-one-shot callable is invoked.
+    fn lower_root_manifest_branch_bool(
+        &mut self,
+        root: CoreId,
+        parameters: Vec<MirLocal>,
+    ) -> Option<MirFunction> {
+        let (callee, arguments, prefix) = match self.body.expression(root).kind.clone() {
+            CoreKind::Call { callee, arguments, .. } => (callee, arguments, Vec::new()),
+            CoreKind::Block(values) => {
+                let (last, prefix) = values.split_last()?;
+                let CoreKind::Call { callee, arguments, .. } = self.body.expression(*last).kind.clone()
+                else {
+                    return None;
+                };
+                (callee, arguments, prefix.to_vec())
+            }
+            _ => return None,
+        };
+        let CoreKind::Function { definition, .. } = self.body.expression(callee).kind.clone() else {
+            return None;
+        };
+        if self.runtime_primitives.and_then(|roles| roles.get(&definition))
+            != Some(&PrimitiveRole::BranchBool)
+        {
+            return None;
+        }
+        let [condition, on_true, on_false] = arguments.as_slice() else {
+            self.error("G6005", "BranchBool primitive must have a condition and two branch closures");
+            return Some(self.invalid_function(parameters));
+        };
+        let bool_ty = Type::Scalar(crate::types::ScalarType::Bool);
+        if self.body.expression(*condition).ty != bool_ty {
+            self.error("G6005", "BranchBool primitive condition ABI does not match manifest contract");
+            return Some(self.invalid_function(parameters));
+        }
+        for expression in prefix {
+            self.statement(expression)?;
+        }
+        let condition = self.value(*condition)?;
+        let on_true = self.value(*on_true)?;
+        let on_false = self.value(*on_false)?;
+        let entry_instructions = std::mem::take(&mut self.instructions);
+        let result_ty = self.body.expression(root).ty.clone();
+
+        self.instructions = Vec::new();
+        let true_result = self.alloc(result_ty.clone(), root);
+        self.instructions.push(MirInstruction::CallIndirect {
+            dst: true_result,
+            callee: on_true,
+            arguments: vec![],
+        });
+        let true_instructions = std::mem::take(&mut self.instructions);
+
+        self.instructions = Vec::new();
+        let false_result = self.alloc(result_ty.clone(), root);
+        self.instructions.push(MirInstruction::CallIndirect {
+            dst: false_result,
+            callee: on_false,
+            arguments: vec![],
+        });
+        let false_instructions = std::mem::take(&mut self.instructions);
+        let joined = self.alloc(result_ty.clone(), root);
+        Some(MirFunction {
+            nominal_copy_descriptors: self.nominal_copy_descriptors.clone(),
+            definition: self.definition,
+            captures: 0,
+            parameters,
+            locals: self.locals.to_entries(),
+            result: result_ty,
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: entry_instructions,
+                    terminator: MirTerminator::SwitchBool {
+                        condition,
+                        then_target: MirBlockId(1),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(2),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: true_instructions,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![true_result],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: false_instructions,
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![false_result],
                     },
                 },
                 MirBlock {
@@ -26872,10 +27371,7 @@ impl Lowerer<'_> {
             }
             let src = self.capability_value(*value)?;
             let local = self.alloc(self.body.expression(*value).ty.clone(), id);
-            if mir_type_is_duplicable(
-                &self.body.expression(*value).ty,
-                &self.nominal_copy_descriptors,
-            ) {
+            if self.type_is_duplicable(&self.body.expression(*value).ty) {
                 self.instructions
                     .push(MirInstruction::Copy { dst: local, src });
             } else {
@@ -27396,6 +27892,39 @@ impl Lowerer<'_> {
                     (Type::Scalar(crate::types::ScalarType::I64), "%") => {
                         MirInstruction::RemI64 { dst, left, right }
                     }
+                    // Ordinary source arithmetic over u32 has the same
+                    // checked semantics as the manifest-bound u32 leaves.
+                    // Lower directly to the existing verified instruction
+                    // family so bootstrap counters do not require a host
+                    // primitive or an i64 detour.
+                    (Type::Scalar(crate::types::ScalarType::U32), "+") => {
+                        MirInstruction::U32CheckedAdd { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), "-") => {
+                        MirInstruction::U32CheckedSub { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), "*") => {
+                        MirInstruction::U32CheckedMul { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), "/") => {
+                        MirInstruction::U32CheckedDiv { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U32), "%") => {
+                        MirInstruction::U32CheckedRem { dst, left, right }
+                    }
+                    // `usize` indices use the manifest-bound generic
+                    // integer encoder.  Unlike the legacy i64 instruction
+                    // family, this keeps pointer-width payload typing in the
+                    // canonical artifact and traps deterministically on
+                    // overflow through IntCheckedAdd.
+                    (Type::Scalar(crate::types::ScalarType::Usize), "+") => {
+                        MirInstruction::IntIntrinsic {
+                            dst,
+                            primitive: PrimitiveRole::IntCheckedAdd,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![left, right],
+                        }
+                    }
                     (Type::Scalar(crate::types::ScalarType::F64), "+") => {
                         MirInstruction::AddF64 { dst, left, right }
                     }
@@ -27415,7 +27944,12 @@ impl Lowerer<'_> {
                         MirInstruction::RemF64 { dst, left, right }
                     }
                     _ => {
-                        self.error("G6005", "operator type has no MIR arithmetic instruction");
+                        self.error(
+                            "G6005",
+                            &format!(
+                                "operator `{operator}` on `{ty:?}` has no MIR arithmetic instruction"
+                            ),
+                        );
                         return None;
                     }
                 };
@@ -27442,6 +27976,234 @@ impl Lowerer<'_> {
                     }
                     (Type::Scalar(crate::types::ScalarType::U64), "!=") => {
                         MirInstruction::NeU64 { dst, left, right }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U64), "==") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntEqual,
+                            scalar: crate::types::ScalarType::U64,
+                            arguments: vec![left, right],
+                        });
+                        MirInstruction::NeU32 { dst, left: predicate, right: zero }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U8), "==") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntEqual,
+                            scalar: crate::types::ScalarType::U8,
+                            arguments: vec![left, right],
+                        });
+                        MirInstruction::NeU32 { dst, left: predicate, right: zero }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::Usize), "==") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntEqual,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![left, right],
+                        });
+                        MirInstruction::NeU32 { dst, left: predicate, right: zero }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::Usize), "<") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![left, right],
+                        });
+                        MirInstruction::NeU32 { dst, left: predicate, right: zero }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::Usize), "!=") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let equal = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntEqual,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![left, right],
+                        });
+                        self.instructions.push(MirInstruction::NeU32 { dst: equal, left: predicate, right: zero });
+                        MirInstruction::NotBool { dst, value: equal }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::Usize), "<=") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let greater = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![right, left],
+                        });
+                        self.instructions.push(MirInstruction::NeU32 { dst: greater, left: predicate, right: zero });
+                        MirInstruction::NotBool { dst, value: greater }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::Usize), ">") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![right, left],
+                        });
+                        MirInstruction::NeU32 { dst, left: predicate, right: zero }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::Usize), ">=") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let less = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::Usize,
+                            arguments: vec![left, right],
+                        });
+                        self.instructions.push(MirInstruction::NeU32 { dst: less, left: predicate, right: zero });
+                        MirInstruction::NotBool { dst, value: less }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U8), "!=") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let equal = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntEqual,
+                            scalar: crate::types::ScalarType::U8,
+                            arguments: vec![left, right],
+                        });
+                        self.instructions.push(MirInstruction::NeU32 { dst: equal, left: predicate, right: zero });
+                        MirInstruction::NotBool { dst, value: equal }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U8), "<") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::U8,
+                            arguments: vec![left, right],
+                        });
+                        MirInstruction::NeU32 { dst, left: predicate, right: zero }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U8), "<=") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let greater = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::U8,
+                            arguments: vec![right, left],
+                        });
+                        self.instructions.push(MirInstruction::NeU32 { dst: greater, left: predicate, right: zero });
+                        MirInstruction::NotBool { dst, value: greater }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U8), ">") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::U8,
+                            arguments: vec![right, left],
+                        });
+                        MirInstruction::NeU32 { dst, left: predicate, right: zero }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U8), ">=") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let less = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::U8,
+                            arguments: vec![left, right],
+                        });
+                        self.instructions.push(MirInstruction::NeU32 { dst: less, left: predicate, right: zero });
+                        MirInstruction::NotBool { dst, value: less }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U64), "<") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::U64,
+                            arguments: vec![left, right],
+                        });
+                        MirInstruction::NeU32 { dst, left: predicate, right: zero }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U64), "<=") => {
+                        let raw_greater = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let greater = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: raw_greater,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::U64,
+                            arguments: vec![right, left],
+                        });
+                        self.instructions.push(MirInstruction::NeU32 {
+                            dst: greater,
+                            left: raw_greater,
+                            right: zero,
+                        });
+                        MirInstruction::NotBool { dst, value: greater }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U64), ">") => {
+                        let predicate = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: predicate,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::U64,
+                            arguments: vec![right, left],
+                        });
+                        MirInstruction::NeU32 { dst, left: predicate, right: zero }
+                    }
+                    (Type::Scalar(crate::types::ScalarType::U64), ">=") => {
+                        let raw_less = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::U32), id);
+                        let less = self.alloc(Type::Scalar(crate::types::ScalarType::Bool), id);
+                        self.instructions.push(MirInstruction::ConstU32 { dst: zero, value: 0 });
+                        self.instructions.push(MirInstruction::IntIntrinsic {
+                            dst: raw_less,
+                            primitive: PrimitiveRole::IntLess,
+                            scalar: crate::types::ScalarType::U64,
+                            arguments: vec![left, right],
+                        });
+                        self.instructions.push(MirInstruction::NeU32 {
+                            dst: less,
+                            left: raw_less,
+                            right: zero,
+                        });
+                        MirInstruction::NotBool { dst, value: less }
                     }
                     (Type::Scalar(crate::types::ScalarType::I64), "<") => {
                         MirInstruction::LtI64 { dst, left, right }
@@ -27874,6 +28636,31 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions
                                     .push(MirInstruction::CharToU32 { dst, value: *value });
+                            }
+                            Some(PrimitiveRole::Blake3) => {
+                                let [value] = arguments.as_slice() else {
+                                    self.error(
+                                        "G6005",
+                                        "BLAKE3 primitive must have one Bytes operand",
+                                    );
+                                    return None;
+                                };
+                                if !generic_arguments.is_empty()
+                                    || self.locals[value.0 as usize].ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                    || self.body.expression(id).ty
+                                        != Type::Scalar(crate::types::ScalarType::Bytes)
+                                {
+                                    self.error(
+                                        "G6005",
+                                        "BLAKE3 primitive ABI does not match manifest contract",
+                                    );
+                                    return None;
+                                }
+                                self.instructions.push(MirInstruction::Blake3 {
+                                    dst,
+                                    value: *value,
+                                });
                             }
                             Some(PrimitiveRole::BytesLen | PrimitiveRole::BytesUtf8ValidUpTo) => {
                                 let [value] = arguments.as_slice() else {
@@ -28787,6 +29574,7 @@ impl Lowerer<'_> {
                             }
                             Some(
                                 role @ (PrimitiveRole::IntCheckedAdd
+                                | PrimitiveRole::IntCheckedDiv
                                 | PrimitiveRole::IntWrappingAdd
                                 | PrimitiveRole::IntWrappingSub
                                 | PrimitiveRole::IntWrappingMul
@@ -28831,6 +29619,11 @@ impl Lowerer<'_> {
                                 }
                                 self.instructions.push(match role {
                                     PrimitiveRole::IntCheckedAdd => MirInstruction::AddI64 {
+                                        dst,
+                                        left: *left,
+                                        right: *right,
+                                    },
+                                    PrimitiveRole::IntCheckedDiv => MirInstruction::DivI64 {
                                         dst,
                                         left: *left,
                                         right: *right,
@@ -30185,7 +30978,7 @@ impl Lowerer<'_> {
     /// reborrows its capability. Materializing an ordinary `Copy` first would
     /// defeat the sealed duplicability proof.
     fn capability_value(&mut self, id: CoreId) -> Option<MirLocal> {
-        if !mir_type_is_duplicable(&self.body.expression(id).ty, &self.nominal_copy_descriptors)
+        if !self.type_is_duplicable(&self.body.expression(id).ty)
             && let CoreKind::Local(name) = &self.body.expression(id).kind
             && let Some(local) = self.named.get(name)
         {
@@ -30206,14 +30999,33 @@ impl Lowerer<'_> {
         self.value(id)
     }
     fn copy_or_move(&mut self, dst: MirLocal, src: MirLocal) {
-        if mir_type_is_duplicable(
-            &self.locals[src.0 as usize].ty,
-            &self.nominal_copy_descriptors,
-        ) {
+        if self.type_is_duplicable(&self.locals[src.0 as usize].ty) {
             self.instructions.push(MirInstruction::Copy { dst, src });
         } else {
             self.instructions.push(MirInstruction::Move { dst, src });
         }
+    }
+
+    /// The source `Use` contract, when concrete, is the authority for an
+    /// ordinary implicit copy. MIR's structural descriptor cannot see an
+    /// explicit `impl Use<[1, 1]> for Ticket` that narrows an otherwise
+    /// fieldless nominal. Generic bodies keep the structural fallback until
+    /// their instance is concrete.
+    fn type_is_duplicable(&self, ty: &Type) -> bool {
+        // Callable invocation counts and reference loan regions are checked
+        // by UseFlow and PlaceFlow respectively. Their register transfers
+        // remain copyable at MIR construction so those analyses, rather than
+        // an early register move, own the diagnostic and liveness decision.
+        if matches!(ty, Type::Callable { .. } | Type::Reference { .. }) {
+            return mir_type_is_duplicable(ty, &self.nominal_copy_descriptors);
+        }
+        if let Some(principal) = self
+            .signatures
+            .and_then(|signatures| signatures.principal_use_interval(ty))
+        {
+            return principal == crate::quantity::Quantity::UNRESTRICTED;
+        }
+        mir_type_is_duplicable(ty, &self.nominal_copy_descriptors)
     }
     /// Return the storage identity carried directly by a block result. A
     /// whole local moves across the block boundary; its source scope must not
@@ -30512,20 +31324,27 @@ impl Lowerer<'_> {
                     return None;
                 }
             };
-            // PlaceFlow owns the capture-mode decision.  Keep an actual move
-            // in MIR when it selected one; shared/unique runtime references
-            // have not reached Stage 0's value representation yet, and the
-            // currently immutable scalar values are copied into the closure
-            // environment.
-            let local = if post_state.mode == CaptureMode::Move {
-                let moved = self.alloc(capture.ty.clone(), CoreId(u32::MAX));
-                self.instructions.push(MirInstruction::Move {
-                    dst: moved,
-                    src: local,
-                });
-                moved
-            } else {
-                local
+            // PlaceFlow owns the capture-mode decision. An owned capture
+            // preserves the language's ordinary-value rule: duplicable
+            // values are copied into the environment, all other values move.
+            let local = match post_state.mode {
+                CaptureMode::Copy => {
+                    let copied = self.alloc(capture.ty.clone(), CoreId(u32::MAX));
+                    self.instructions.push(MirInstruction::Copy {
+                        dst: copied,
+                        src: local,
+                    });
+                    copied
+                }
+                CaptureMode::Move => {
+                    let moved = self.alloc(capture.ty.clone(), CoreId(u32::MAX));
+                    self.instructions.push(MirInstruction::Move {
+                        dst: moved,
+                        src: local,
+                    });
+                    moved
+                }
+                CaptureMode::SharedBorrow | CaptureMode::UniqueBorrow => local,
             };
             environment.push(local);
         }
@@ -30605,7 +31424,17 @@ impl Lowerer<'_> {
             .map(|capture| (capture.name.clone(), capture.ty.clone()))
             .chain(parameters.iter().cloned())
             .collect::<Vec<_>>();
-        let child_flow = PlaceFlow::analyze_lifted(self.body, body, &lifted_abi);
+        let child_flow = self.signatures.map_or_else(
+            || PlaceFlow::analyze_lifted(self.body, body, &lifted_abi),
+            |signatures| {
+                PlaceFlow::analyze_lifted_with_interface(
+                    self.body,
+                    body,
+                    &lifted_abi,
+                    signatures,
+                )
+            },
+        );
         if !child_flow.diagnostics.is_empty() {
             self.error(
                 "G6002",
@@ -31000,7 +31829,12 @@ fn lower_pattern(value: CorePattern) -> Option<MirPattern> {
 fn validate_pattern(pattern: &MirPattern, subject: &Type) -> Result<(), String> {
     match pattern {
         MirPattern::Any => Ok(()),
-        MirPattern::Literal(value) if literal_type(value).as_ref() == Some(subject) => Ok(()),
+        MirPattern::Literal(value)
+            if literal_type(value).as_ref() == Some(subject)
+                || numeric_literal_matches_subject(value, subject) =>
+        {
+            Ok(())
+        }
         MirPattern::Literal(_) => {
             Err("MIR literal pattern has an incompatible subject type".into())
         }
@@ -31040,6 +31874,31 @@ fn validate_pattern(pattern: &MirPattern, subject: &Type) -> Result<(), String> 
             } if actual == definition => validate_pattern_fields(fields, field_types, *field_count),
             _ => Err("MIR enum pattern has an incompatible subject type".into()),
         },
+    }
+}
+
+// An unsuffixed source integer is initially represented as i64. Pattern
+// payloads are contextually typed, so accept an integer spelling that fits
+// the payload scalar instead of rejecting `Variant(1)` for an unsigned or
+// wider integer field.
+fn numeric_literal_matches_subject(text: &str, subject: &Type) -> bool {
+    use crate::types::ScalarType;
+
+    let Type::Scalar(scalar) = subject else {
+        return false;
+    };
+    match scalar {
+        ScalarType::U8 => parse_u8_literal(text).is_ok(),
+        ScalarType::U16 => parse_u16_literal(text).is_ok(),
+        ScalarType::U32 => parse_u32_literal(text).is_ok(),
+        ScalarType::U64 | ScalarType::Usize => parse_u64_literal(text).is_ok(),
+        ScalarType::U128 => parse_u128_literal(text).is_ok(),
+        ScalarType::I8 => parse_i8_literal(text).is_ok(),
+        ScalarType::I16 => parse_i16_literal(text).is_ok(),
+        ScalarType::I32 => parse_i32_literal(text).is_ok(),
+        ScalarType::I64 | ScalarType::Isize => parse_i64_literal(text).is_ok(),
+        ScalarType::I128 => parse_i128_literal(text).is_ok(),
+        _ => false,
     }
 }
 
@@ -31212,6 +32071,7 @@ fn is_generic_integer_runtime_role(role: PrimitiveRole) -> bool {
     matches!(
         role,
         PrimitiveRole::IntCheckedAdd
+            | PrimitiveRole::IntCheckedDiv
             | PrimitiveRole::IntWrappingAdd
             | PrimitiveRole::IntWrappingSub
             | PrimitiveRole::IntWrappingMul
@@ -31426,6 +32286,99 @@ fn ascii_hex(value: Option<char>) -> Option<u8> {
 mod mir_place_arena_tests {
     use super::*;
 
+    fn operation_validation_function(entries: Vec<Option<MirOperationData>>) -> MirFunction {
+        MirFunction {
+            definition: DefKey(Digest::of_bytes(b"operation-validation")),
+            nominal_copy_descriptors: vec![],
+            captures: 0,
+            parameters: vec![],
+            locals: vec![MirLocalDecl {
+                ty: Type::Scalar(crate::types::ScalarType::I64),
+                source: CoreId(0),
+            }],
+            result: Type::Unit,
+            control: MirControlTables {
+                operations: MirOperationArena { entries },
+                ..MirControlTables::default()
+            },
+            entry: MirBlockId(0),
+            blocks: vec![MirBlock {
+                scope: MirScopeId::ROOT,
+                parameters: vec![],
+                instructions: vec![MirInstruction::ConstI64 {
+                    dst: MirLocal(0),
+                    value: 1,
+                }],
+                terminator: MirTerminator::Unreachable,
+            }],
+        }
+    }
+
+    fn branch_liveness_function(initialize_else_branch: bool) -> MirFunction {
+        let local = MirLocal(1);
+        let initializer = MirInstruction::ConstI64 {
+            dst: local,
+            value: 1,
+        };
+        MirFunction {
+            definition: DefKey(Digest::of_bytes(b"branch-liveness")),
+            nominal_copy_descriptors: vec![],
+            captures: 0,
+            parameters: vec![MirLocal(0)],
+            locals: vec![
+                MirLocalDecl {
+                    ty: Type::Scalar(crate::types::ScalarType::Bool),
+                    source: CoreId(0),
+                },
+                MirLocalDecl {
+                    ty: Type::Scalar(crate::types::ScalarType::I64),
+                    source: CoreId(1),
+                },
+            ],
+            result: Type::Scalar(crate::types::ScalarType::I64),
+            control: MirControlTables::default(),
+            entry: MirBlockId(0),
+            blocks: vec![
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![],
+                    terminator: MirTerminator::SwitchBool {
+                        condition: MirLocal(0),
+                        then_target: MirBlockId(1),
+                        then_arguments: vec![],
+                        else_target: MirBlockId(2),
+                        else_arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![initializer.clone()],
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: initialize_else_branch.then_some(initializer).into_iter().collect(),
+                    terminator: MirTerminator::Goto {
+                        target: MirBlockId(3),
+                        arguments: vec![],
+                    },
+                },
+                MirBlock {
+                    scope: MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions: vec![],
+                    terminator: MirTerminator::Return { value: local },
+                },
+            ],
+        }
+    }
+
     #[test]
     fn static_place_arena_interns_root_and_projection_paths_without_reordering() {
         let mut places = MirPlaceArena::default();
@@ -31462,5 +32415,49 @@ mod mir_place_arena_tests {
         assert!(places.project(root, 3, 3, Type::Unit).is_none());
         assert!(places.project(root, 0, 0, Type::Unit).is_none());
         assert_eq!(places.entries.len(), 3);
+    }
+
+    #[test]
+    fn operation_arena_validation_rejects_a_second_live_identity_at_one_instruction() {
+        let function = operation_validation_function(vec![
+            Some(MirOperationData {
+                block: MirBlockId(0),
+                instruction_index: 0,
+            }),
+            Some(MirOperationData {
+                block: MirBlockId(0),
+                instruction_index: 0,
+            }),
+        ]);
+
+        assert_eq!(
+            function.validate_operation_arena(),
+            Err("MIR live operation 1 has no instruction".into())
+        );
+    }
+
+    #[test]
+    fn operation_arena_validation_rejects_an_instruction_without_an_identity() {
+        let mut function = operation_validation_function(vec![]);
+        function.control.operations.entries.push(Some(MirOperationData {
+            block: MirBlockId(0),
+            instruction_index: 1,
+        }));
+
+        assert_eq!(
+            function.validate_operation_arena(),
+            Err("MIR instruction at block 0 index 0 has no operation identity".into())
+        );
+    }
+
+    #[test]
+    fn liveness_intersection_rejects_a_local_initialized_on_only_one_branch() {
+        let error = branch_liveness_function(false)
+            .validate_local_storage_liveness()
+            .expect_err("join must require initialization on every predecessor");
+        assert!(error.contains("MIR return reads dead/uninitialized local 1"));
+        branch_liveness_function(true)
+            .validate_local_storage_liveness()
+            .expect("join accepts a local initialized on every predecessor");
     }
 }

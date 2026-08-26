@@ -1,0 +1,3 @@
+use compiler_support::__g1_int_checked_div;
+
+pub fn main() -> u64 { __g1_int_checked_div<u64>(21, 3) }

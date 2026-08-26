@@ -10,6 +10,7 @@ permissions:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -17,36 +18,27 @@ jobs:
           components: rustfmt
       - name: Formatting
         run: cargo fmt --all -- --check
-      - name: Tooling formatting
-        run: |
-          cargo fmt --manifest-path tooling/fmt/Cargo.toml -- --check
-          cargo fmt --manifest-path tooling/grand/Cargo.toml -- --check
-          cargo fmt --manifest-path tooling/lsp/Cargo.toml -- --check
-      - name: Compiler and VM
-        run: cargo test --workspace --all-targets
-      - name: Formatter
-        run: cargo test --manifest-path tooling/fmt/Cargo.toml --all-targets
-      - name: Build tool
-        run: cargo test --manifest-path tooling/grand/Cargo.toml --all-targets
-      - name: Real grc-grand-grvm contract
-        run: |
-          cargo build --release --workspace --bins
-          cargo build --release --manifest-path tooling/grand/Cargo.toml --bin grand
-          integration_root="$(mktemp -d)"
-          cd "$integration_root"
-          "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" new app
-          cd app
-          export GRAND_COMPILER="$GITHUB_WORKSPACE/target/release/grc"
-          export GRAND_VM="$GITHUB_WORKSPACE/target/release/grvm"
-          "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" check
-          "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" build
-          "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" run
-          test -f target/grand/app.grbc
-      - name: Language server
-        run: cargo test --manifest-path tooling/lsp/Cargo.toml --all-targets
+      - name: Self-host baseline audit
+        run: tooling/self-host-stage0-audit.sh
+      - name: Self-host progress dashboard
+        run: tooling/self-host-stage0-status.sh
+      - name: Self-host semantic-fallback audit
+        run: tooling/self-host-semantic-fallback-audit.sh
+      - name: Stage0 and VM
+        run: tooling/test-with-budget.sh tooling/ram-gate.sh cargo test --workspace --all-targets
+
+  self-host-conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Self-host source conformance
+        run: tooling/test-with-budget.sh tooling/self-host-stage0-conformance.sh
 
   editor-metadata:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6

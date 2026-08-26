@@ -66,6 +66,17 @@ fn cli_emits_verifies_and_runs_verified_vm_programs() {
     );
     assert_eq!(String::from_utf8(verified.stdout).unwrap().trim().len(), 64);
 
+    let executed = Command::new(compiler)
+        .args(["run-vm", program.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "run-vm failed: {}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert_eq!(String::from_utf8(executed.stdout).unwrap(), "\"glorious\"\n");
+
     let run = Command::new(compiler)
         .args(["run", source.to_str().unwrap()])
         .output()
@@ -77,6 +88,64 @@ fn cli_emits_verifies_and_runs_verified_vm_programs() {
     );
     assert_eq!(String::from_utf8(run.stdout).unwrap(), "\"glorious\"\n");
 
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn cli_run_vm_separates_guest_arguments_from_launcher_options() {
+    let directory = temporary_directory();
+    let source = directory.join("guest-argv.glorious");
+    let program = directory.join("guest-argv.g0vp");
+    fs::write(
+        &source,
+        "fn __g1_process_args_get() -> Array<Text> { () } pub fn main() -> Array<Text> { __g1_process_args_get() }",
+    )
+    .unwrap();
+    let compiler = env!("CARGO_BIN_EXE_grc-stage0");
+
+    let emitted = Command::new(compiler)
+        .args([
+            "--runtime-standard-library",
+            "command@0.1.0",
+            "--runtime-host",
+            "process_args",
+            "__g1_process_args_get",
+            "crate",
+            "__g1_process_args_get",
+            "--capability",
+            "process_args",
+            "emit-vm",
+            source.to_str().unwrap(),
+            program.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        emitted.status.success(),
+        "emit-vm with process-args import failed: {}",
+        String::from_utf8_lossy(&emitted.stderr)
+    );
+
+    let executed = Command::new(compiler)
+        .args([
+            "run-vm",
+            program.to_str().unwrap(),
+            "--",
+            "emit-vm",
+            "input.glorious",
+            "output.grbc",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        executed.status.success(),
+        "run-vm with guest arguments failed: {}",
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    assert_eq!(
+        String::from_utf8(executed.stdout).unwrap(),
+        "[\"grc\", \"emit-vm\", \"input.glorious\", \"output.grbc\"]\n"
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 

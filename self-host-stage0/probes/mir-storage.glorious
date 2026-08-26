@@ -1,0 +1,20 @@
+use mir_storage_library::mir_storage;
+pub fn score(value: mir_storage::TakeResult) -> i64 { handle value { mir_storage::TakeResult::Value(value) => value, mir_storage::TakeResult::Empty => 0, _ => 0 } }
+pub fn score_bool(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn score_move(value: mir_storage::MoveResult) -> i64 {
+    handle value {
+        mir_storage::MoveResult::Value(value, remainder) => value + score_bool(mir_storage::is_empty(remainder)) + score_bool(mir_storage::was_moved(remainder)),
+        mir_storage::MoveResult::Empty(remainder) => score_bool(mir_storage::is_empty(remainder)) + score_bool(mir_storage::was_moved(remainder)),
+        _ => 0,
+    }
+}
+pub fn main() -> i64 {
+    score(mir_storage::take(mir_storage::write(mir_storage::empty(), 7)))
+        + score(mir_storage::take(mir_storage::empty()))
+        + score_move(mir_storage::move_out(mir_storage::write(mir_storage::empty(), 5)))
+        + score_move(mir_storage::move_out(mir_storage::empty()))
+        + score_bool(mir_storage::was_moved(mir_storage::empty()))
+        + score(mir_storage::take(mir_storage::write_after_move(mir_storage::move_out(mir_storage::write(mir_storage::empty(), 2)), 1)))
+        + score_move(mir_storage::move_out(mir_storage::Slot::Moved))
+        + score(mir_storage::take(mir_storage::write(mir_storage::Slot::Moved, 9)))
+}

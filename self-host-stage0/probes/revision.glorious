@@ -1,0 +1,38 @@
+use revision_library::revision;
+pub fn score(value: revision::SnapshotAdmission) -> i64 { handle value { revision::SnapshotAdmission::Value => 1, revision::SnapshotAdmission::Stale => 10, revision::SnapshotAdmission::Retired => 100, _ => 0 } }
+pub fn score_bool(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn score_creation(value: revision::SnapshotCreation) -> i64 {
+    handle value {
+        revision::SnapshotCreation::Value(snapshot) => 1 + score_bool(revision::parent_is(snapshot, 10)),
+        revision::SnapshotCreation::ParentUnavailable => 10,
+        revision::SnapshotCreation::NonMonotonic => 100,
+        _ => 0,
+    }
+}
+pub fn score_collection(value: revision::RetentionCollection) -> i64 { handle value { revision::RetentionCollection::Active => 100, revision::RetentionCollection::Pinned(_) => 10, revision::RetentionCollection::Collected => 1, _ => 0 } }
+pub fn main() -> i64 {
+    score(revision::admit(revision::SnapshotStatus::Active))
+        + score(revision::admit(revision::SnapshotStatus::Stale))
+        + score(revision::admit(revision::SnapshotStatus::Retired))
+        + score(revision::admit(revision::transition(revision::SnapshotStatus::Active, revision::RevisionEvent::Supersede)))
+        + score(revision::admit(revision::transition(revision::SnapshotStatus::Stale, revision::RevisionEvent::Retire)))
+        + score(revision::admit(revision::transition(revision::SnapshotStatus::Retired, revision::RevisionEvent::Keep)))
+        + score_creation(revision::child(revision::root(10), 11))
+        + score_creation(revision::child(revision::apply(revision::root(10), revision::RevisionEvent::Supersede), 11))
+        + score_creation(revision::child(revision::root(10), 10))
+        + score_root(revision::root_checked(0))
+        + score_root(revision::root_checked(-1))
+        + score_collection(revision::collect_retired(revision::retention(revision::root(1))))
+        + score_collection(revision::collect_retired(revision::retire_retention(revision::pin_snapshot(revision::pin_session(revision::retention(revision::root(1)))))))
+        + score_collection(revision::collect_retired(revision::retire_retention(revision::release_session(revision::release_snapshot(revision::pin_snapshot(revision::pin_session(revision::retention(revision::root(1)))))))))
+        + revision::retention_pin_count(revision::pin_snapshot(revision::pin_session(revision::retention(revision::root(1)))))
+        + score_package(revision::stage_package(revision::PackageSessionStatus::Open))
+        + score_package(revision::commit_package(revision::PackageSessionStatus::Staged))
+        + score_package(revision::commit_package(revision::PackageSessionStatus::Open))
+        + score_package(revision::stage_package(revision::rollback_package(revision::PackageSessionStatus::Open)))
+        + score_package(revision::open_package(false))
+        + score_bool(revision::may_publish_package(revision::PackageSessionStatus::Staged))
+}
+
+pub fn score_root(value: revision::RootCreation) -> i64 { handle value { revision::RootCreation::Value(_) => 1, revision::RootCreation::Invalid => 10, _ => 0 } }
+pub fn score_package(value: revision::PackageSessionAdmission) -> i64 { handle value { revision::PackageSessionAdmission::Value(revision::PackageSessionStatus::Staged) => 1, revision::PackageSessionAdmission::Value(revision::PackageSessionStatus::Committed) => 10, revision::PackageSessionAdmission::NotOpen => 100, revision::PackageSessionAdmission::Unstaged => 1000, revision::PackageSessionAdmission::RolledBack => 10000, _ => 0 } }

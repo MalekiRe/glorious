@@ -1,0 +1,31 @@
+use body_library::body;
+use body_library::types;
+use body_library::signature;
+use body_library::pattern;
+pub fn score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn score_admission(value: body::BodyAdmission) -> i64 { handle value { body::BodyAdmission::Value(body::BodyKind::Call) => 1, body::BodyAdmission::Value(body::BodyKind::Literal) => 0, body::BodyAdmission::TypeError => 0, _ => 0 } }
+pub fn score_pattern_admission(value: body::BodyAdmission) -> i64 { handle value { body::BodyAdmission::Value(body::BodyKind::PatternTest) => 1, _ => 0 } }
+pub fn main() -> i64 {
+    score(body::has_type(body::Expression::I64(7), types::Type::I64))
+        + score(body::has_type(body::Expression::ParameterI64(7), types::Type::I64))
+        + score(body::has_type(body::Expression::ParameterBoolNot(true), types::Type::Bool))
+        + score(body::has_type(body::Expression::ParameterI64Select(true, 7, 9), types::Type::I64))
+        + score(body::has_type(body::Expression::ParameterI64Arithmetic(body::Arithmetic::Add, 20, 22), types::Type::I64))
+        + score(body::has_type(body::Expression::Bool(true), types::Type::Bool))
+        + score(body::has_type(body::Expression::U8(7), types::Type::U8))
+        + score(body::has_type(body::Expression::U32(7), types::Type::U32))
+        + score(body::has_type(body::Expression::U64(7), types::Type::U64))
+        + score(body::has_type(body::Expression::Usize(7), types::Type::Usize))
+        + score(body::has_type(body::Expression::I64(7), types::Type::Bool))
+        + score(body::has_type(body::Expression::U8(7), types::Type::Usize))
+        + score(body::has_type(body::Expression::Call1(signature::callable(types::Type::I64, types::Type::Bool), types::Type::I64), types::Type::Bool))
+        + score(body::has_type(body::Expression::Call1(signature::callable(types::Type::I64, types::Type::Bool), types::Type::U64), types::Type::Bool))
+        + score(body::has_type(body::Expression::Call2(signature::binary(types::Type::I64, types::Type::U8, types::Type::U64), types::Type::I64, types::Type::U8), types::Type::U64))
+        + score(body::has_type(body::Expression::Call2(signature::binary(types::Type::I64, types::Type::U8, types::Type::U64), types::Type::I64, types::Type::U64), types::Type::U64))
+        + score_admission(body::admit(body::Expression::Call1(signature::callable(types::Type::I64, types::Type::Bool), types::Type::I64), types::Type::Bool))
+        + score(body::has_type(body::Expression::PatternTest(pattern::Pattern::PairFirst(3), pattern::Value::Pair(3, 9)), types::Type::Bool))
+        + score(body::has_type(body::Expression::PatternTest(pattern::Pattern::PairFirst(3), pattern::Value::Pair(3, 9)), types::Type::I64))
+        + score(body::evaluate_pattern_test(body::Expression::PatternTest(pattern::Pattern::PairFirst(3), pattern::Value::Pair(3, 9))))
+        + score(body::evaluate_pattern_test(body::Expression::PatternTest(pattern::Pattern::Variant(2, 7), pattern::Value::Variant(2, 8))))
+        + score_pattern_admission(body::admit(body::Expression::PatternTest(pattern::Pattern::PairFirst(3), pattern::Value::Pair(3, 9)), types::Type::Bool))
+}

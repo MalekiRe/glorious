@@ -51,6 +51,24 @@ fn body_parser_marks_malformed_bodies_recovered_without_nontermination() {
 }
 
 #[test]
+fn body_parser_keeps_optional_move_capture_closures_distinct_from_moves() {
+    let body = parse("{ let callback = move (config, job) { job }; move (value) }");
+    assert!(body.diagnostics.is_empty(), "{:#?}", body.diagnostics);
+    let ExprKind::Block(values) = &body.expression(body.root).kind else {
+        panic!("expected block")
+    };
+    let ExprKind::Let { value: closure, .. } = body.expression(values[0]).kind else {
+        panic!("expected closure binding")
+    };
+    assert!(matches!(
+        &body.expression(closure).kind,
+        ExprKind::MoveClosure { captures, .. }
+            if captures == &vec!["config".to_owned(), "job".to_owned()]
+    ));
+    assert!(matches!(body.expression(values[1]).kind, ExprKind::Move(_)));
+}
+
+#[test]
 fn body_parser_retains_stacked_higher_ranked_closure_type_binders() {
     let body = parse(
         "{ let callback = (value: for<'a> for<'b> (&'a i64, &'b i64) -> &'a i64) -> i64 { 0 }; 0 }",

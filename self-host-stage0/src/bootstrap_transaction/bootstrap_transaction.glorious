@@ -1,0 +1,10 @@
+use operation;
+
+// Executable checkpoint proof for the shared transaction kernel.
+pub fn rollback_value(initial: i64, staged: i64) -> i64 {
+    operation::commit(operation::rollback(operation::stage(operation::mark(operation::begin(initial)), staged)))
+}
+
+pub fn smoke() -> i64 {
+    rollback_value(1, 99)
+}

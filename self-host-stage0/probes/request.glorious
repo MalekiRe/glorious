@@ -1,0 +1,188 @@
+use request_library::identity;
+use request_library::request;
+use request_library::source;
+use compiler_support::__g1_text_as_bytes;
+
+pub fn main() -> u32 {
+    request::bytecode_generation(request::stage0_build(identity::digest_of_text("seed")))
+        + score_stage(request::bootstrap_stage(1, identity::digest_of_text("seed"), 3, request::bootstrap_limits(1, 1)))
+        + score_expected(request::bootstrap_stage(1, identity::digest_of_text("seed"), 3, request::bootstrap_limits(1, 1)))
+        + score_stage(request::bootstrap_stage(0, identity::digest_of_text("seed"), 3, request::bootstrap_limits(1, 1)))
+        + score_stage(request::bootstrap_stage(1, identity::digest_of_text("seed"), 4, request::bootstrap_limits(1, 1)))
+        + score_stage(request::bootstrap_stage(1, identity::digest_of_text("seed"), 3, request::bootstrap_limits(0, 1)))
+        + score_stage(request::bootstrap_stage(3, identity::digest_of_text("seed"), 3, request::bootstrap_limits(1, 1)))
+        + score_stage(request::bootstrap_stage(4, identity::digest_of_text("seed"), 3, request::bootstrap_limits(1, 1)))
+        + score_invalid(request::bootstrap_stage(1, identity::digest_of_text("seed"), 3, request::bootstrap_limits(1, 0)))
+        + score_expected_mismatch(request::bootstrap_stage(1, identity::digest_of_text("seed"), 3, request::bootstrap_limits(1, 1)))
+        + score_same_build(request::stage0_build(identity::digest_of_text("seed")), request::stage0_build(identity::digest_of_text("seed")))
+        + score_not_same_build(request::stage0_build(identity::digest_of_text("seed")), request::stage0_build(identity::digest_of_text("other-seed")))
+        + score_world(request::source_world2(
+            source::input("request", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+            source::input("request", "src/two.glorious", __g1_text_as_bytes("two!"), identity::digest_of_text("two!")),
+            request::bootstrap_limits(2, 7),
+        ))
+        + score_world_duplicate(request::source_world2(
+            source::input("request", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+            source::input("request", "src/one.glorious", __g1_text_as_bytes("other"), identity::digest_of_text("other")),
+            request::bootstrap_limits(2, 20),
+        ))
+        + score_world_limit(request::source_world2(
+            source::input("request", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+            source::input("request", "src/two.glorious", __g1_text_as_bytes("two!"), identity::digest_of_text("two!")),
+            request::bootstrap_limits(1, 7),
+        ))
+        + score_world_limit(request::source_world2(
+            source::input("request", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+            source::input("request", "src/two.glorious", __g1_text_as_bytes("two!"), identity::digest_of_text("two!")),
+            request::bootstrap_limits(2, 6),
+        ))
+        + score_world_digest(request::source_world2(
+            source::input("request", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("wrong")),
+            source::input("request", "src/two.glorious", __g1_text_as_bytes("two!"), identity::digest_of_text("two!")),
+            request::bootstrap_limits(2, 7),
+        ))
+        + score_world_invalid_path(request::source_world2(
+            source::input("request", "../one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+            source::input("request", "src/two.glorious", __g1_text_as_bytes("two!"), identity::digest_of_text("two!")),
+            request::bootstrap_limits(2, 7),
+        ))
+        + score_same_world_fingerprint(
+            request::source_world2_fingerprint(request_world_one()),
+            request::source_world2_fingerprint(request_world_one()),
+        )
+        + score_different_world_fingerprint(
+            request::source_world2_fingerprint(request_world_one()),
+            request::source_world2_fingerprint(request_world_two()),
+        )
+        + score_same_world_fingerprint(
+            request::source_world2_fingerprint(request_world_one()),
+            request::source_world2_fingerprint(request_world_one_reordered()),
+        )
+        + score_bundle(request::source_bundle(bundle_three_sources(), request::bootstrap_limits(3, 9)))
+        + score_bundle_duplicate(request::source_bundle(request::source_sequence_prepend_public(bundle_one(), request::source_sequence_one(bundle_one())), request::bootstrap_limits(3, 9)))
+        + score_bundle_limit(request::source_bundle(bundle_three_sources(), request::bootstrap_limits(2, 9)))
+        + score_bundle_limit(request::source_bundle(bundle_three_sources(), request::bootstrap_limits(3, 8)))
+        + score_bundle_digest(request::source_bundle(request::source_sequence_one(source::input("request", "src/bad.glorious", __g1_text_as_bytes("bad"), identity::digest_of_text("wrong"))), request::bootstrap_limits(3, 9)))
+        + score_different_bundle_fingerprint(admitted_bundle_three(), admitted_bundle_changed())
+}
+
+pub fn score_expected(value: request::BootstrapStageResult) -> u32 {
+    handle value {
+        request::BootstrapStageResult::Value(stage) => handle request::expected_artifact_matches(
+            request::with_expected_artifact(stage, identity::digest_of_text("artifact")),
+            identity::digest_of_text("artifact"),
+        ) { true => 1, false => 0, _ => 0 },
+        request::BootstrapStageResult::Invalid => 0,
+        _ => 0,
+    }
+}
+
+pub fn score_stage(value: request::BootstrapStageResult) -> u32 {
+    handle value {
+        request::BootstrapStageResult::Value(_) => 1,
+        request::BootstrapStageResult::Invalid => 0,
+        _ => 0,
+    }
+}
+
+pub fn score_invalid(value: request::BootstrapStageResult) -> u32 {
+    handle value {
+        request::BootstrapStageResult::Invalid => 10,
+        _ => 0,
+    }
+}
+
+pub fn score_expected_mismatch(value: request::BootstrapStageResult) -> u32 {
+    handle value {
+        request::BootstrapStageResult::Value(stage) => handle request::expected_artifact_matches(
+            request::with_expected_artifact(stage, identity::digest_of_text("expected")),
+            identity::digest_of_text("actual"),
+        ) { true => 0, false => 100, _ => 0 },
+        _ => 0,
+    }
+}
+
+pub fn score_same_build(left: request::CompilerBuildIdentity, right: request::CompilerBuildIdentity) -> u32 {
+    handle request::same_build_identity(left, right) { true => 10, false => 0, _ => 0 }
+}
+
+pub fn score_not_same_build(left: request::CompilerBuildIdentity, right: request::CompilerBuildIdentity) -> u32 {
+    handle request::same_build_identity(left, right) { true => 0, false => 1000, _ => 0 }
+}
+
+pub fn score_world(value: request::SourceWorldAdmission) -> u32 {
+    handle value { request::SourceWorldAdmission::Value(_) => 10, _ => 0 }
+}
+
+pub fn score_world_duplicate(value: request::SourceWorldAdmission) -> u32 {
+    handle value { request::SourceWorldAdmission::DuplicateFileIdentity => 100, _ => 0 }
+}
+
+pub fn score_world_limit(value: request::SourceWorldAdmission) -> u32 {
+    handle value {
+        request::SourceWorldAdmission::TooManySources => 1000,
+        request::SourceWorldAdmission::TooManyBytes => 1000,
+        _ => 0,
+    }
+}
+
+pub fn score_world_digest(value: request::SourceWorldAdmission) -> u32 {
+    handle value { request::SourceWorldAdmission::DigestMismatch => 10000, _ => 0 }
+}
+
+pub fn score_world_invalid_path(value: request::SourceWorldAdmission) -> u32 {
+    handle value { request::SourceWorldAdmission::InvalidLogicalPath => 100000, _ => 0 }
+}
+pub fn score_bundle(value: request::SourceBundleAdmission) -> u32 { handle value { request::SourceBundleAdmission::Value(bundle) => handle request::source_bundle_count(bundle) == 3 { true => 3, false => 0, _ => 0 }, _ => 0 } }
+pub fn score_bundle_duplicate(value: request::SourceBundleAdmission) -> u32 { handle value { request::SourceBundleAdmission::DuplicateFileIdentity => 30, _ => 0 } }
+pub fn score_bundle_limit(value: request::SourceBundleAdmission) -> u32 { handle value { request::SourceBundleAdmission::TooManySources => 300, request::SourceBundleAdmission::TooManyBytes => 300, _ => 0 } }
+pub fn score_bundle_digest(value: request::SourceBundleAdmission) -> u32 { handle value { request::SourceBundleAdmission::DigestMismatch => 3000, _ => 0 } }
+pub fn bundle_one() -> source::SourceInput { source::input("request", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")) }
+pub fn bundle_two() -> source::SourceInput { source::input("request", "src/two.glorious", __g1_text_as_bytes("two"), identity::digest_of_text("two")) }
+pub fn bundle_three() -> source::SourceInput { source::input("request", "src/three.glorious", __g1_text_as_bytes("tri"), identity::digest_of_text("tri")) }
+pub fn bundle_three_sources() -> request::SourceSequence { request::source_sequence_prepend_public(bundle_one(), request::source_sequence_prepend_public(bundle_two(), request::source_sequence_one(bundle_three()))) }
+pub fn bundle_three_sources_reordered() -> request::SourceSequence { request::source_sequence_prepend_public(bundle_three(), request::source_sequence_prepend_public(bundle_one(), request::source_sequence_one(bundle_two()))) }
+pub fn bundle_changed() -> source::SourceInput { source::input("request", "src/three.glorious", __g1_text_as_bytes("changed"), identity::digest_of_text("changed")) }
+pub fn bundle_changed_sources() -> request::SourceSequence { request::source_sequence_prepend_public(bundle_one(), request::source_sequence_prepend_public(bundle_two(), request::source_sequence_one(bundle_changed()))) }
+pub fn admitted_bundle_three() -> request::SourceBundle { handle request::source_bundle(bundle_three_sources(), request::bootstrap_limits(3, 9)) { request::SourceBundleAdmission::Value(value) => value, _ => admitted_bundle_three() } }
+pub fn admitted_bundle_three_reordered() -> request::SourceBundle { handle request::source_bundle(bundle_three_sources_reordered(), request::bootstrap_limits(3, 9)) { request::SourceBundleAdmission::Value(value) => value, _ => admitted_bundle_three_reordered() } }
+pub fn admitted_bundle_changed() -> request::SourceBundle { handle request::source_bundle(bundle_changed_sources(), request::bootstrap_limits(3, 13)) { request::SourceBundleAdmission::Value(value) => value, _ => admitted_bundle_changed() } }
+
+
+pub fn request_world_one() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("request", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        source::input("request", "src/two.glorious", __g1_text_as_bytes("two!"), identity::digest_of_text("two!")),
+        request::bootstrap_limits(2, 7),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => request_world_one() }
+}
+
+pub fn request_world_two() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("request", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        source::input("request", "src/two.glorious", __g1_text_as_bytes("changed"), identity::digest_of_text("changed")),
+        request::bootstrap_limits(2, 10),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => request_world_two() }
+}
+
+pub fn request_world_one_reordered() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("request", "src/two.glorious", __g1_text_as_bytes("two!"), identity::digest_of_text("two!")),
+        source::input("request", "src/one.glorious", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        request::bootstrap_limits(2, 7),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => request_world_one_reordered() }
+}
+
+pub fn score_same_world_fingerprint(left: identity::Digest, right: identity::Digest) -> u32 {
+    handle identity::equals(left, right) { true => 100000, false => 0, _ => 0 }
+}
+
+pub fn score_different_world_fingerprint(left: identity::Digest, right: identity::Digest) -> u32 {
+    handle identity::equals(left, right) { true => 0, false => 1000000, _ => 0 }
+}
+pub fn score_same_bundle_fingerprint(left: request::SourceBundle, right: request::SourceBundle) -> u32 {
+    handle identity::equals(request::source_bundle_fingerprint(left), request::source_bundle_fingerprint(right)) { true => 10000000, false => 0, _ => 0 }
+}
+pub fn score_different_bundle_fingerprint(left: request::SourceBundle, right: request::SourceBundle) -> u32 {
+    handle identity::equals(request::source_bundle_fingerprint(left), request::source_bundle_fingerprint(right)) { true => 0, false => 100000000, _ => 0 }
+}

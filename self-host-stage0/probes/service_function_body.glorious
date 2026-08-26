@@ -1,0 +1,284 @@
+use service_library::service;
+use service_library::source;
+use service_library::identity;
+use service_library::request;
+use service_library::bootstrap;
+use service_library::vm_backend;
+use service_library::body;
+use service_library::types;
+use compiler_support::__g1_text_as_bytes;
+use compiler_support::__g1_int_wrapping_add;
+use compiler_support::__g1_int_wrapping_sub;
+
+pub fn score(value: vm_backend::Execution) -> i64 {
+    handle value {
+        vm_backend::Execution::Returned(number) => number,
+        vm_backend::Execution::Faulted => 100,
+        _ => 0,
+    }
+}
+
+pub fn score_artifact(value: vm_backend::ArtifactEmission) -> i64 {
+    handle value {
+        vm_backend::ArtifactEmission::Artifact(_) => 1,
+        vm_backend::ArtifactEmission::Rejected => 0,
+        _ => 0,
+    }
+}
+pub fn score_verified_i64_artifact(value: vm_backend::ArtifactEmission) -> i64 {
+    handle value {
+        vm_backend::ArtifactEmission::Artifact(bytes) => handle vm_backend::verify_g1_i64_callable_artifact(bytes) { true => 1, _ => 0 },
+        vm_backend::ArtifactEmission::Rejected => 0,
+        _ => 0,
+    }
+}
+
+pub fn score_u32(value: vm_backend::Execution) -> i64 { handle value { vm_backend::Execution::ReturnedU32(42) => 1, _ => 0 } }
+pub fn score_usize(value: vm_backend::Execution) -> i64 { handle value { vm_backend::Execution::ReturnedUsize(42) => 1, _ => 0 } }
+pub fn score_u32_value(value: vm_backend::Execution, expected: u32) -> i64 { handle value { vm_backend::Execution::ReturnedU32(actual) => handle actual == expected { true => 1, false => 0, _ => 0 }, _ => 0 } }
+pub fn score_bool(value: vm_backend::Execution, expected: Bool) -> i64 { handle (value, expected) { (vm_backend::Execution::Returned(1), true) => 1, (vm_backend::Execution::Returned(0), false) => 1, _ => 0 } }
+
+pub fn score_negative_seven(value: vm_backend::Execution) -> i64 {
+    handle value { vm_backend::Execution::Returned(number) => __g1_int_wrapping_add<i64>(number, 7), vm_backend::Execution::Faulted => 100, _ => 100 }
+}
+
+pub fn score_negative_three(value: vm_backend::Execution) -> i64 {
+    handle value { vm_backend::Execution::Returned(number) => __g1_int_wrapping_add<i64>(number, 3), vm_backend::Execution::Faulted => 100, _ => 100 }
+}
+
+pub fn score_i64_minimum(value: vm_backend::Execution) -> i64 {
+    handle value { vm_backend::Execution::Returned(number) => __g1_int_wrapping_add<i64>(__g1_int_wrapping_add<i64>(number, 9223372036854775807), 1), vm_backend::Execution::Faulted => 100, _ => 100 }
+}
+
+pub fn main() -> i64 {
+    score(service::compile_source_i64_function(source::input("service", "body", __g1_text_as_bytes("fn answer { 1_234 }"), identity::digest_of_text("fn answer { 1_234 }"))))
+        + score_u32(service::compile_u32_arithmetic(body::Arithmetic::Add, 20, 22, types::Type::U32))
+        + score_usize(service::compile_usize_arithmetic(body::Arithmetic::Add, 20, 22, types::Type::Usize))
+        + score_usize(service::compile_source_usize_add_function(source::input("service", "usize-binary-add", __g1_text_as_bytes("pub fn add(left: usize, right: usize) -> usize { left + right }"), identity::digest_of_text("pub fn add(left: usize, right: usize) -> usize { left + right }")), 20, 22))
+        + score_usize(service::compile_source_usize_add_function(source::input("service", "usize-binary-add-return", __g1_text_as_bytes("pub fn add(left: usize, right: usize) -> usize { return left + right; }"), identity::digest_of_text("pub fn add(left: usize, right: usize) -> usize { return left + right; }")), 20, 22))
+        + score_fault(service::compile_source_usize_add_function(source::input("service", "usize-binary-add-overflow", __g1_text_as_bytes("pub fn add(left: usize, right: usize) -> usize { left + right }"), identity::digest_of_text("pub fn add(left: usize, right: usize) -> usize { left + right }")), __g1_int_wrapping_sub<usize>(0, 1), 1))
+        + score_fault(service::compile_source_usize_add_function(source::input("service", "usize-binary-add-return-missing-semicolon", __g1_text_as_bytes("pub fn add(left: usize, right: usize) -> usize { return left + right }"), identity::digest_of_text("pub fn add(left: usize, right: usize) -> usize { return left + right }")), 20, 22))
+        + score_fault(service::compile_source_usize_add_function(source::input("service", "usize-binary-add-wrong-reference", __g1_text_as_bytes("pub fn add(left: usize, right: usize) -> usize { left + other }"), identity::digest_of_text("pub fn add(left: usize, right: usize) -> usize { left + other }")), 20, 22))
+        + score_u32(service::compile_u32_identity_call(42, types::Type::U32))
+        + score_u32(service::compile_source_u32_identity_function(source::input("service", "u32-identity", __g1_text_as_bytes("pub fn id(value: u32) -> u32 { return value; }"), identity::digest_of_text("pub fn id(value: u32) -> u32 { return value; }")), 42))
+        + score_fault(service::compile_source_u32_identity_function(source::input("service", "u32-identity-wrong-reference", __g1_text_as_bytes("pub fn id(value: u32) -> u32 { return other; }"), identity::digest_of_text("pub fn id(value: u32) -> u32 { return other; }")), 42))
+        + score_u32(service::compile_source_u32_binary_function(source::input("service", "u32-binary-add", __g1_text_as_bytes("pub fn add(left: u32, right: u32) -> u32 { left + right }"), identity::digest_of_text("pub fn add(left: u32, right: u32) -> u32 { left + right }")), 20, 22))
+        + score_u32(service::compile_source_u32_binary_function(source::input("service", "u32-binary-remainder", __g1_text_as_bytes("pub fn remainder(left: u32, right: u32) -> u32 { return left % right; }"), identity::digest_of_text("pub fn remainder(left: u32, right: u32) -> u32 { return left % right; }")), 85, 43))
+        + score_fault(service::compile_source_u32_binary_function(source::input("service", "u32-binary-overflow", __g1_text_as_bytes("pub fn add(left: u32, right: u32) -> u32 { left + right }"), identity::digest_of_text("pub fn add(left: u32, right: u32) -> u32 { left + right }")), 4294967295, 1))
+        + score_fault(service::compile_source_u32_binary_function(source::input("service", "u32-binary-wrong-reference", __g1_text_as_bytes("pub fn add(left: u32, right: u32) -> u32 { left + other }"), identity::digest_of_text("pub fn add(left: u32, right: u32) -> u32 { left + other }")), 20, 22))
+        + score_bool(service::compile_source_u64_comparison_function(source::input("service", "u64-equal", __g1_text_as_bytes("pub fn relation(left: u64, right: u64) -> Bool { left == right }"), identity::digest_of_text("pub fn relation(left: u64, right: u64) -> Bool { left == right }")), 2, 2), true)
+        + score_bool(service::compile_u64_equals(18446744073709551615, 18446744073709551615, types::Type::Bool), true)
+        + score_bool(service::compile_u64_equals(18446744073709551615, 0, types::Type::Bool), false)
+        + score_bool(service::compile_source_u64_comparison_function(source::input("service", "u64-not-equal", __g1_text_as_bytes("pub fn relation(left: u64, right: u64) -> Bool { return left != right; }"), identity::digest_of_text("pub fn relation(left: u64, right: u64) -> Bool { return left != right; }")), 2, 3), true)
+        + score_bool(service::compile_source_u64_comparison_function(source::input("service", "u64-less", __g1_text_as_bytes("pub fn relation(left: u64, right: u64) -> Bool { left < right }"), identity::digest_of_text("pub fn relation(left: u64, right: u64) -> Bool { left < right }")), 2, 3), true)
+        + score_bool(service::compile_source_u64_comparison_function(source::input("service", "u64-less-equal", __g1_text_as_bytes("pub fn relation(left: u64, right: u64) -> Bool { left <= right }"), identity::digest_of_text("pub fn relation(left: u64, right: u64) -> Bool { left <= right }")), 3, 3), true)
+        + score_bool(service::compile_source_u64_comparison_function(source::input("service", "u64-greater", __g1_text_as_bytes("pub fn relation(left: u64, right: u64) -> Bool { left > right }"), identity::digest_of_text("pub fn relation(left: u64, right: u64) -> Bool { left > right }")), 3, 2), true)
+        + score_bool(service::compile_source_u64_comparison_function(source::input("service", "u64-greater-equal", __g1_text_as_bytes("pub fn relation(left: u64, right: u64) -> Bool { left >= right }"), identity::digest_of_text("pub fn relation(left: u64, right: u64) -> Bool { left >= right }")), 3, 3), true)
+        + score_bool(service::compile_source_u64_comparison_function(source::input("service", "u64-false", __g1_text_as_bytes("pub fn relation(left: u64, right: u64) -> Bool { left > right }"), identity::digest_of_text("pub fn relation(left: u64, right: u64) -> Bool { left > right }")), 2, 3), false)
+        + score_fault(service::compile_source_u64_comparison_function(source::input("service", "u64-wrong-reference", __g1_text_as_bytes("pub fn relation(left: u64, right: u64) -> Bool { left < other }"), identity::digest_of_text("pub fn relation(left: u64, right: u64) -> Bool { left < other }")), 2, 3))
+        + score_fault(service::compile_source_u64_comparison_function(source::input("service", "u64-return-missing-semicolon", __g1_text_as_bytes("pub fn relation(left: u64, right: u64) -> Bool { return left < right }"), identity::digest_of_text("pub fn relation(left: u64, right: u64) -> Bool { return left < right }")), 2, 3))
+        + score_bool(service::compile_source_u8_comparison_function(source::input("service", "u8-equal", __g1_text_as_bytes("pub fn relation(left: u8, right: u8) -> Bool { left == right }"), identity::digest_of_text("pub fn relation(left: u8, right: u8) -> Bool { left == right }")), 2, 2), true)
+        + score_bool(service::compile_source_u8_comparison_function(source::input("service", "u8-not-equal", __g1_text_as_bytes("pub fn relation(left: u8, right: u8) -> Bool { left != right }"), identity::digest_of_text("pub fn relation(left: u8, right: u8) -> Bool { left != right }")), 2, 3), true)
+        + score_bool(service::compile_source_u8_comparison_function(source::input("service", "u8-less", __g1_text_as_bytes("pub fn relation(left: u8, right: u8) -> Bool { left < right }"), identity::digest_of_text("pub fn relation(left: u8, right: u8) -> Bool { left < right }")), 2, 3), true)
+        + score_bool(service::compile_source_u8_comparison_function(source::input("service", "u8-less-equal", __g1_text_as_bytes("pub fn relation(left: u8, right: u8) -> Bool { left <= right }"), identity::digest_of_text("pub fn relation(left: u8, right: u8) -> Bool { left <= right }")), 3, 3), true)
+        + score_bool(service::compile_source_u8_comparison_function(source::input("service", "u8-greater", __g1_text_as_bytes("pub fn relation(left: u8, right: u8) -> Bool { left > right }"), identity::digest_of_text("pub fn relation(left: u8, right: u8) -> Bool { left > right }")), 3, 2), true)
+        + score_bool(service::compile_source_u8_comparison_function(source::input("service", "u8-greater-equal", __g1_text_as_bytes("pub fn relation(left: u8, right: u8) -> Bool { left >= right }"), identity::digest_of_text("pub fn relation(left: u8, right: u8) -> Bool { left >= right }")), 3, 3), true)
+        + score_fault(service::compile_source_u8_comparison_function(source::input("service", "u8-wrong-reference", __g1_text_as_bytes("pub fn relation(left: u8, right: u8) -> Bool { left < other }"), identity::digest_of_text("pub fn relation(left: u8, right: u8) -> Bool { left < other }")), 2, 3))
+        + score_bool(service::compile_source_u8_comparison_function(source::input("service", "u8-return", __g1_text_as_bytes("pub fn relation(left: u8, right: u8) -> Bool { return left < right; }"), identity::digest_of_text("pub fn relation(left: u8, right: u8) -> Bool { return left < right; }")), 2, 3), true)
+        + score_fault(service::compile_source_u8_comparison_function(source::input("service", "u8-return-missing-semicolon", __g1_text_as_bytes("pub fn relation(left: u8, right: u8) -> Bool { return left < right }"), identity::digest_of_text("pub fn relation(left: u8, right: u8) -> Bool { return left < right }")), 2, 3))
+        + score_bool(service::compile_source_usize_comparison_function(source::input("service", "usize-equality", __g1_text_as_bytes("pub fn is_empty(length: usize, zero: usize) -> Bool { length == zero }"), identity::digest_of_text("pub fn is_empty(length: usize, zero: usize) -> Bool { length == zero }")), 0, 0), true)
+        + score_bool(service::compile_source_usize_comparison_function(source::input("service", "usize-less", __g1_text_as_bytes("pub fn in_bounds(index: usize, length: usize) -> Bool { index < length }"), identity::digest_of_text("pub fn in_bounds(index: usize, length: usize) -> Bool { index < length }")), 1, 2), true)
+        + score_fault(service::compile_source_usize_comparison_function(source::input("service", "usize-wrong-reference", __g1_text_as_bytes("pub fn in_bounds(index: usize, length: usize) -> Bool { index < other }"), identity::digest_of_text("pub fn in_bounds(index: usize, length: usize) -> Bool { index < other }")), 1, 2))
+        + score_bool(service::compile_source_usize_comparison_function(source::input("service", "usize-not-equal", __g1_text_as_bytes("pub fn relation(left: usize, right: usize) -> Bool { left != right }"), identity::digest_of_text("pub fn relation(left: usize, right: usize) -> Bool { left != right }")), 2, 3), true)
+        + score_bool(service::compile_source_usize_comparison_function(source::input("service", "usize-less-equal", __g1_text_as_bytes("pub fn relation(left: usize, right: usize) -> Bool { left <= right }"), identity::digest_of_text("pub fn relation(left: usize, right: usize) -> Bool { left <= right }")), 3, 3), true)
+        + score_bool(service::compile_source_usize_comparison_function(source::input("service", "usize-greater", __g1_text_as_bytes("pub fn relation(left: usize, right: usize) -> Bool { left > right }"), identity::digest_of_text("pub fn relation(left: usize, right: usize) -> Bool { left > right }")), 3, 2), true)
+        + score_bool(service::compile_source_usize_comparison_function(source::input("service", "usize-greater-equal", __g1_text_as_bytes("pub fn relation(left: usize, right: usize) -> Bool { left >= right }"), identity::digest_of_text("pub fn relation(left: usize, right: usize) -> Bool { left >= right }")), 3, 3), true)
+        + score_bool(service::compile_source_usize_comparison_function(source::input("service", "usize-return", __g1_text_as_bytes("pub fn relation(left: usize, right: usize) -> Bool { return left < right; }"), identity::digest_of_text("pub fn relation(left: usize, right: usize) -> Bool { return left < right; }")), 2, 3), true)
+        + score_fault(service::compile_source_usize_comparison_function(source::input("service", "usize-return-missing-semicolon", __g1_text_as_bytes("pub fn relation(left: usize, right: usize) -> Bool { return left < right }"), identity::digest_of_text("pub fn relation(left: usize, right: usize) -> Bool { return left < right }")), 2, 3))
+        + score_u32_value(service::compile_u32_arithmetic(body::Arithmetic::Subtract, 44, 2, types::Type::U32), 42)
+        + score_u32_value(service::compile_u32_arithmetic(body::Arithmetic::Multiply, 6, 7, types::Type::U32), 42)
+        + score_u32_value(service::compile_u32_arithmetic(body::Arithmetic::Divide, 84, 2, types::Type::U32), 42)
+        + score_u32_value(service::compile_u32_arithmetic(body::Arithmetic::Remainder, 85, 43, types::Type::U32), 42)
+        + score_fault(service::compile_u32_arithmetic(body::Arithmetic::Divide, 42, 0, types::Type::U32))
+        + score_u32(service::compile_source_u32_arithmetic(source::input("service", "u32-source-add", __g1_text_as_bytes("20 + 22"), identity::digest_of_text("20 + 22"))))
+        + score_u32(service::compile_source_u32_arithmetic(source::input("service", "u32-source-remainder", __g1_text_as_bytes("85 % 43"), identity::digest_of_text("85 % 43"))))
+        + score_fault(service::compile_source_u32_arithmetic(source::input("service", "u32-source-zero-divisor", __g1_text_as_bytes("42 / 0"), identity::digest_of_text("42 / 0"))))
+        + score_fault(service::compile_source_u32_arithmetic(source::input("service", "u32-source-add-overflow", __g1_text_as_bytes("4294967295 + 1"), identity::digest_of_text("4294967295 + 1"))))
+        + score_fault(service::compile_source_u32_arithmetic(source::input("service", "u32-source-subtract-underflow", __g1_text_as_bytes("0 - 1"), identity::digest_of_text("0 - 1"))))
+        + score_fault(service::compile_source_u32_arithmetic(source::input("service", "u32-source-multiply-overflow", __g1_text_as_bytes("4294967295 * 2"), identity::digest_of_text("4294967295 * 2"))))
+        + score_fault(service::compile_source_u32_arithmetic(source::input("service", "u32-source-overflow", __g1_text_as_bytes("4294967296 + 1"), identity::digest_of_text("4294967296 + 1"))))
+        + score_u32(service::compile_source_u32_function(source::input("service", "u32-function-add", __g1_text_as_bytes("pub fn answer() -> u32 { 20 + 22 }"), identity::digest_of_text("pub fn answer() -> u32 { 20 + 22 }"))))
+        + score_u32(service::compile_source_u32_function(source::input("service", "u32-function-literal", __g1_text_as_bytes("pub fn answer() -> u32 { 42 }"), identity::digest_of_text("pub fn answer() -> u32 { 42 }"))))
+        + score_fault(service::compile_source_u32_function(source::input("service", "u32-function-malformed", __g1_text_as_bytes("pub fn answer() -> u32 { 20 + }"), identity::digest_of_text("pub fn answer() -> u32 { 20 + }"))))
+        + score_u32(service::compile_source_u32_function(source::input("service", "u32-function-return", __g1_text_as_bytes("pub fn answer() -> u32 { return 20 + 22; }"), identity::digest_of_text("pub fn answer() -> u32 { return 20 + 22; }"))))
+        + score_u32(service::compile_source_u32_function(source::input("service", "u32-function-return-literal", __g1_text_as_bytes("pub fn answer() -> u32 { return 42; }"), identity::digest_of_text("pub fn answer() -> u32 { return 42; }"))))
+        + score_u32(service::compile_source_u32_function(source::input("service", "u32-function-remainder", __g1_text_as_bytes("pub fn answer() -> u32 { return 85 % 43; }"), identity::digest_of_text("pub fn answer() -> u32 { return 85 % 43; }"))))
+        + score_fault(service::compile_source_u32_function(source::input("service", "u32-function-return-malformed", __g1_text_as_bytes("pub fn answer() -> u32 { return 20 + 22 }"), identity::digest_of_text("pub fn answer() -> u32 { return 20 + 22 }"))))
+        + score_negative_seven(service::compile_source_i64_function(source::input("service", "negative-scalar", __g1_text_as_bytes("fn answer { -7 }"), identity::digest_of_text("fn answer { -7 }"))))
+        + score_negative_three(service::compile_source_i64_function(source::input("service", "negative-arithmetic", __g1_text_as_bytes("fn answer { 2 + -5 }"), identity::digest_of_text("fn answer { 2 + -5 }"))))
+        + score_i64_minimum(service::compile_source_i64_function(source::input("service", "i64-minimum", __g1_text_as_bytes("fn answer { -9223372036854775808 }"), identity::digest_of_text("fn answer { -9223372036854775808 }"))))
+        + score_fault(service::compile_source_i64_function(source::input("service", "positive-overflow", __g1_text_as_bytes("fn answer { 9223372036854775808 }"), identity::digest_of_text("fn answer { 9223372036854775808 }"))))
+        + score_fault(service::compile_source_i64_function(source::input("service", "negative-overflow", __g1_text_as_bytes("fn answer { -9223372036854775809 }"), identity::digest_of_text("fn answer { -9223372036854775809 }"))))
+        + score_artifact(service::compile_source_i64_function_entry(source::input("service", "artifact-body", __g1_text_as_bytes("fn answer { 40 + 2 }"), identity::digest_of_text("fn answer { 40 + 2 }"))))
+        + score_artifact(service::compile_source_i64_function_entry(source::input("service", "artifact-invalid", __g1_text_as_bytes("fn answer { 40 + }"), identity::digest_of_text("fn answer { 40 + }"))))
+        + score_artifact(service::compile_source_i64_function_entry(source::input("service", "artifact-scalar", __g1_text_as_bytes("fn answer { 42 }"), identity::digest_of_text("fn answer { 42 }"))))
+        + score_artifact(service::compile_source_i64_arithmetic_entry(source::input("service", "primitive-add", __g1_text_as_bytes("2 + 40"), identity::digest_of_text("2 + 40"))))
+        + score_artifact(service::compile_source_i64_arithmetic_entry(source::input("service", "primitive-signed", __g1_text_as_bytes("2 + -5"), identity::digest_of_text("2 + -5"))))
+        + score_negative_three(service::compile_source_i64_arithmetic(source::input("service", "primitive-signed-execution", __g1_text_as_bytes("2 + -5"), identity::digest_of_text("2 + -5"))))
+        + score_artifact(service::compile_source_i64_arithmetic_entry(source::input("service", "primitive-invalid", __g1_text_as_bytes("2 +"), identity::digest_of_text("2 +"))))
+        + score_artifact(service::compile_source_i64_arithmetic_entry(source::input("service", "primitive-duplicate", __g1_text_as_bytes("2 + 2"), identity::digest_of_text("2 + 2"))))
+        + score_artifact(service::compile_source_i64_arithmetic_entry(source::input("service", "primitive-subtract", __g1_text_as_bytes("40 - 2"), identity::digest_of_text("40 - 2"))))
+        + score_artifact(service::compile_source_i64_arithmetic_entry(source::input("service", "primitive-multiply", __g1_text_as_bytes("6 * 7"), identity::digest_of_text("6 * 7"))))
+        + score_artifact(service::compile_source_i64_arithmetic_entry(source::input("service", "primitive-divide", __g1_text_as_bytes("42 / 2"), identity::digest_of_text("42 / 2"))))
+        + score_artifact(service::compile_source_i64_arithmetic_entry(source::input("service", "primitive-zero-divisor", __g1_text_as_bytes("42 / 0"), identity::digest_of_text("42 / 0"))))
+        + score_artifact(service::compile_source_i64_function_arithmetic_entry(source::input("service", "function-primitive-add", __g1_text_as_bytes("fn add { 40 + 2 }"), identity::digest_of_text("fn add { 40 + 2 }"))))
+        + score_artifact(service::compile_source_i64_function_arithmetic_entry(source::input("service", "function-primitive-signed", __g1_text_as_bytes("fn add { 2 + -5 }"), identity::digest_of_text("fn add { 2 + -5 }"))))
+        + score_artifact(service::compile_source_i64_function_arithmetic_entry(source::input("service", "function-primitive-duplicate", __g1_text_as_bytes("fn twice { 2 + 2 }"), identity::digest_of_text("fn twice { 2 + 2 }"))))
+        + score_artifact(service::compile_source_i64_function_arithmetic_entry(source::input("service", "function-primitive-invalid", __g1_text_as_bytes("fn add { 40 + }"), identity::digest_of_text("fn add { 40 + }"))))
+        + score_artifact(service::compile_source_i64_function_arithmetic_entry(source::input("service", "function-primitive-annotated", __g1_text_as_bytes("fn add() -> i64 { 40 + 2 }"), identity::digest_of_text("fn add() -> i64 { 40 + 2 }"))))
+        + score_artifact(service::compile_source_i64_function_arithmetic_entry(source::input("service", "function-primitive-public", __g1_text_as_bytes("pub fn add() -> i64 { 6 * 7 }"), identity::digest_of_text("pub fn add() -> i64 { 6 * 7 }"))))
+        + score_artifact(service::compile_source_i64_function_arithmetic_entry(source::input("service", "function-primitive-unused-parameter", __g1_text_as_bytes("fn add(value: i64) -> i64 { 40 - 2 }"), identity::digest_of_text("fn add(value: i64) -> i64 { 40 - 2 }"))))
+        + score_artifact(service::compile_source_unit_entry(source::input("service", "unit-entry", __g1_text_as_bytes("fn main() -> Unit { () }"), identity::digest_of_text("fn main() -> Unit { () }"))))
+        + score_artifact(service::compile_source_unit_entry(source::input("service", "public-unit-entry", __g1_text_as_bytes("pub fn main() -> Unit { () }"), identity::digest_of_text("pub fn main() -> Unit { () }"))))
+        + score_artifact(service::compile_source_unit_entry(source::input("service", "four-byte-unit-entry", __g1_text_as_bytes("fn boot() -> Unit { () }"), identity::digest_of_text("fn boot() -> Unit { () }"))))
+        + score_artifact(service::compile_source_unit_entry(source::input("service", "unit-entry-invalid", __g1_text_as_bytes("fn main() -> Unit { 1 }"), identity::digest_of_text("fn main() -> Unit { 1 }"))))
+        + score_artifact(service::compile_source_unit_entry(source::input("service", "non-entry-name", __g1_text_as_bytes("fn helper() -> Unit { () }"), identity::digest_of_text("fn helper() -> Unit { () }"))))
+        + score(service::compile_source_i64_function(source::input("service", "missing-name", __g1_text_as_bytes("fn { 1 }"), identity::digest_of_text("fn { 1 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "extra-body", __g1_text_as_bytes("fn answer { 1 2 }"), identity::digest_of_text("fn answer { 1 2 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "forged", __g1_text_as_bytes("fn answer { 7 }"), identity::digest_of_text("fn answer { 8 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "sum", __g1_text_as_bytes("fn sum { 2 + 5 }"), identity::digest_of_text("fn sum { 2 + 5 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "division", __g1_text_as_bytes("fn half { 8 / 2 }"), identity::digest_of_text("fn half { 8 / 2 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "missing-right", __g1_text_as_bytes("fn bad { 2 + }"), identity::digest_of_text("fn bad { 2 + }"))))
+        + score(service::compile_source_i64_function(source::input("service", "annotated", __g1_text_as_bytes("fn answer() -> i64 { 40 + 2 }"), identity::digest_of_text("fn answer() -> i64 { 40 + 2 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "public-annotated", __g1_text_as_bytes("pub fn public_answer() -> i64 { 9 * 9 }"), identity::digest_of_text("pub fn public_answer() -> i64 { 9 * 9 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "unused-parameter", __g1_text_as_bytes("fn ignored(value: i64) -> i64 { 7 }"), identity::digest_of_text("fn ignored(value: i64) -> i64 { 7 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "wrong-parameter-type", __g1_text_as_bytes("fn wrong(value: Bool) -> i64 { 7 }"), identity::digest_of_text("fn wrong(value: Bool) -> i64 { 7 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "nonempty-parameters", __g1_text_as_bytes("fn id(value) -> i64 { 1 }"), identity::digest_of_text("fn id(value) -> i64 { 1 }"))))
+        + score(service::compile_source_i64_function(source::input("service", "wrong-return", __g1_text_as_bytes("fn truth() -> Bool { 1 }"), identity::digest_of_text("fn truth() -> Bool { 1 }"))))
+        + score(service::compile_source_i64_identity_function(source::input("service", "identity", __g1_text_as_bytes("pub fn id(value: i64) -> i64 { value }"), identity::digest_of_text("pub fn id(value: i64) -> i64 { value }")), 42))
+        + score(service::compile_source_i64_identity_function(source::input("service", "identity-return", __g1_text_as_bytes("pub fn id(value: i64) -> i64 { return value; }"), identity::digest_of_text("pub fn id(value: i64) -> i64 { return value; }")), 42))
+        + score_artifact(service::compile_source_i64_identity_function_entry(source::input("service", "identity-artifact", __g1_text_as_bytes("pub fn id(value: i64) -> i64 { value }"), identity::digest_of_text("pub fn id(value: i64) -> i64 { value }")), 42))
+        + score_artifact(service::compile_source_i64_identity_function_entry(source::input("service", "identity-return-artifact", __g1_text_as_bytes("pub fn id(value: i64) -> i64 { return value; }"), identity::digest_of_text("pub fn id(value: i64) -> i64 { return value; }")), 42))
+        + score_fault(service::compile_source_i64_identity_function(source::input("service", "identity-return-missing-semicolon", __g1_text_as_bytes("pub fn id(value: i64) -> i64 { return value }"), identity::digest_of_text("pub fn id(value: i64) -> i64 { return value }")), 42))
+        + score_artifact(service::compile_source_i64_identity_function_entry(source::input("service", "identity-artifact-wrong-reference", __g1_text_as_bytes("pub fn id(value: i64) -> i64 { other }"), identity::digest_of_text("pub fn id(value: i64) -> i64 { other }")), 42))
+        + score(service::compile_source_i64_identity_function(source::input("service", "wrong-reference", __g1_text_as_bytes("fn id(value: i64) -> i64 { other }"), identity::digest_of_text("fn id(value: i64) -> i64 { other }")), 42))
+        + score(service::compile_source_i64_identity_function(source::input("service", "forged-identity", __g1_text_as_bytes("fn id(value: i64) -> i64 { value }"), identity::digest_of_text("wrong")), 42))
+        + score(service::compile_source_i64_add_function(source::input("service", "add", __g1_text_as_bytes("pub fn add(left: i64, right: i64) -> i64 { left + right }"), identity::digest_of_text("pub fn add(left: i64, right: i64) -> i64 { left + right }")), 20, 22))
+        + score(service::compile_source_i64_add_function(source::input("service", "wrong-add-reference", __g1_text_as_bytes("pub fn add(left: i64, right: i64) -> i64 { left + other }"), identity::digest_of_text("pub fn add(left: i64, right: i64) -> i64 { left + other }")), 20, 22))
+        + score(service::compile_source_i64_add_function(source::input("service", "forged-add", __g1_text_as_bytes("pub fn add(left: i64, right: i64) -> i64 { left + right }"), identity::digest_of_text("wrong")), 20, 22))
+        + score(service::compile_source_i64_binary_function(source::input("service", "subtract", __g1_text_as_bytes("pub fn subtract(left: i64, right: i64) -> i64 { left - right }"), identity::digest_of_text("pub fn subtract(left: i64, right: i64) -> i64 { left - right }")), 20, 22))
+        + score(service::compile_source_i64_binary_function(source::input("service", "multiply", __g1_text_as_bytes("pub fn multiply(left: i64, right: i64) -> i64 { left * right }"), identity::digest_of_text("pub fn multiply(left: i64, right: i64) -> i64 { left * right }")), 6, 7))
+        + score(service::compile_source_i64_binary_function(source::input("service", "divide", __g1_text_as_bytes("pub fn divide(left: i64, right: i64) -> i64 { left / right }"), identity::digest_of_text("pub fn divide(left: i64, right: i64) -> i64 { left / right }")), 8, 2))
+        + score(service::compile_source_i64_binary_function(source::input("service", "return-add", __g1_text_as_bytes("pub fn add(left: i64, right: i64) -> i64 { return left + right; }"), identity::digest_of_text("pub fn add(left: i64, right: i64) -> i64 { return left + right; }")), 20, 22))
+        + score(service::compile_source_i64_binary_function(source::input("service", "unsupported", __g1_text_as_bytes("pub fn equal(left: i64, right: i64) -> i64 { left == right }"), identity::digest_of_text("pub fn equal(left: i64, right: i64) -> i64 { left == right }")), 8, 8))
+        + score_artifact(service::compile_source_i64_binary_function_entry(source::input("service", "add-artifact", __g1_text_as_bytes("pub fn add(left: i64, right: i64) -> i64 { left + right }"), identity::digest_of_text("pub fn add(left: i64, right: i64) -> i64 { left + right }")), 20, 22))
+        + score_artifact(service::compile_source_i64_binary_function_entry(source::input("service", "wrong-add-artifact", __g1_text_as_bytes("pub fn add(left: i64, right: i64) -> i64 { left + other }"), identity::digest_of_text("pub fn add(left: i64, right: i64) -> i64 { left + other }")), 20, 22))
+        + score_artifact(service::compile_source_i64_binary_function_entry(source::input("service", "subtract-artifact", __g1_text_as_bytes("pub fn subtract(left: i64, right: i64) -> i64 { left - right }"), identity::digest_of_text("pub fn subtract(left: i64, right: i64) -> i64 { left - right }")), 42, 2))
+        + score_artifact(service::compile_source_i64_binary_function_entry(source::input("service", "multiply-artifact", __g1_text_as_bytes("pub fn multiply(left: i64, right: i64) -> i64 { left * right }"), identity::digest_of_text("pub fn multiply(left: i64, right: i64) -> i64 { left * right }")), 6, 7))
+        + score_artifact(service::compile_source_i64_binary_function_entry(source::input("service", "divide-artifact", __g1_text_as_bytes("pub fn divide(left: i64, right: i64) -> i64 { left / right }"), identity::digest_of_text("pub fn divide(left: i64, right: i64) -> i64 { left / right }")), 42, 2))
+        + score_artifact(service::compile_source_i64_binary_function_entry(source::input("service", "return-add-artifact", __g1_text_as_bytes("pub fn add(left: i64, right: i64) -> i64 { return left + right; }"), identity::digest_of_text("pub fn add(left: i64, right: i64) -> i64 { return left + right; }")), 20, 22))
+        + score_fault(service::compile_source_i64_binary_function(source::input("service", "return-add-missing-semicolon", __g1_text_as_bytes("pub fn add(left: i64, right: i64) -> i64 { return left + right }"), identity::digest_of_text("pub fn add(left: i64, right: i64) -> i64 { return left + right }")), 20, 22))
+        + score(service::compile_source_bool_not_function(source::input("service", "invert", __g1_text_as_bytes("pub fn invert(value: Bool) -> Bool { !value }"), identity::digest_of_text("pub fn invert(value: Bool) -> Bool { !value }")), false))
+        + score(service::compile_source_bool_not_function(source::input("service", "wrong-bool-reference", __g1_text_as_bytes("pub fn invert(value: Bool) -> Bool { !other }"), identity::digest_of_text("pub fn invert(value: Bool) -> Bool { !other }")), false))
+        + score(service::compile_source_bool_not_function(source::input("service", "forged-bool", __g1_text_as_bytes("pub fn invert(value: Bool) -> Bool { !value }"), identity::digest_of_text("wrong")), false))
+        + score(service::compile_source_bool_not_literal_function(source::input("service", "literal-invert-false", __g1_text_as_bytes("pub fn invert() -> Bool { !false }"), identity::digest_of_text("pub fn invert() -> Bool { !false }"))))
+        + score(service::compile_source_bool_not_literal_function(source::input("service", "literal-invert-true", __g1_text_as_bytes("pub fn invert() -> Bool { !true }"), identity::digest_of_text("pub fn invert() -> Bool { !true }"))))
+        + score_fault(service::compile_source_bool_not_literal_function(source::input("service", "literal-invert-trailing", __g1_text_as_bytes("pub fn invert() -> Bool { !false } trailing"), identity::digest_of_text("pub fn invert() -> Bool { !false } trailing"))))
+        + score(service::compile_source_i64_comparison_function(source::input("service", "comparison-equal", __g1_text_as_bytes("pub fn equal() -> Bool { 7 == 7 }"), identity::digest_of_text("pub fn equal() -> Bool { 7 == 7 }"))))
+        + score(service::compile_source_i64_comparison_function(source::input("service", "comparison-less", __g1_text_as_bytes("pub fn less() -> Bool { 7 < 3 }"), identity::digest_of_text("pub fn less() -> Bool { 7 < 3 }"))))
+        + score(service::compile_source_i64_comparison_function(source::input("service", "comparison-greater", __g1_text_as_bytes("pub fn greater() -> Bool { 7 > 3 }"), identity::digest_of_text("pub fn greater() -> Bool { 7 > 3 }"))))
+        + score(service::compile_source_i64_comparison_function(source::input("service", "comparison-signed", __g1_text_as_bytes("pub fn less() -> Bool { -7 < 3 }"), identity::digest_of_text("pub fn less() -> Bool { -7 < 3 }"))))
+        + score_fault(service::compile_source_i64_comparison_function(source::input("service", "comparison-trailing", __g1_text_as_bytes("pub fn equal() -> Bool { 7 == 7 } trailing"), identity::digest_of_text("pub fn equal() -> Bool { 7 == 7 } trailing"))))
+        + score(service::compile_source_i64_select_function(source::input("service", "select-true", __g1_text_as_bytes("pub fn select() -> i64 { if true { 7 } else { 9 } }"), identity::digest_of_text("pub fn select() -> i64 { if true { 7 } else { 9 } }"))))
+        + score(service::compile_source_i64_select_function(source::input("service", "select-false", __g1_text_as_bytes("pub fn select() -> i64 { if false { 7 } else { 9 } }"), identity::digest_of_text("pub fn select() -> i64 { if false { 7 } else { 9 } }"))))
+        + score_negative_seven(service::compile_source_i64_select_function(source::input("service", "select-signed", __g1_text_as_bytes("pub fn select() -> i64 { if true { -7 } else { 9 } }"), identity::digest_of_text("pub fn select() -> i64 { if true { -7 } else { 9 } }"))))
+        + score_artifact(service::compile_source_i64_select_function_entry(source::input("service", "select-artifact", __g1_text_as_bytes("pub fn select() -> i64 { if false { 7 } else { 9 } }"), identity::digest_of_text("pub fn select() -> i64 { if false { 7 } else { 9 } }"))))
+        + score(service::compile_source_i64_select_function(source::input("service", "invalid-condition", __g1_text_as_bytes("pub fn select() -> i64 { if maybe { 7 } else { 9 } }"), identity::digest_of_text("pub fn select() -> i64 { if maybe { 7 } else { 9 } }"))))
+        + score(service::compile_source_i64_select_function(source::input("service", "forged-select", __g1_text_as_bytes("pub fn select() -> i64 { if true { 7 } else { 9 } }"), identity::digest_of_text("wrong"))))
+        + score(service::compile_source_i64_select_parameter_function(source::input("service", "parameter-select-true", __g1_text_as_bytes("pub fn select(condition: Bool) -> i64 { if condition { 7 } else { 9 } }"), identity::digest_of_text("pub fn select(condition: Bool) -> i64 { if condition { 7 } else { 9 } }")), true))
+        + score(service::compile_manifest_branch_bool(true, 42, 9, types::Type::I64))
+        + score(service::compile_manifest_branch_bool(false, 9, 42, types::Type::I64))
+        + score_verified_i64_artifact(service::compile_manifest_branch_bool_entry(true, 42, 9))
+        + score(service::compile_manifest_branch_bool_add_left(true, 1, 41, 42))
+        + score(service::compile_manifest_branch_bool_add_right(false, 41, 42, 1))
+        + score(service::compile_source_manifest_branch_bool_function(source::input("service", "manifest-branch-true", __g1_text_as_bytes("pub fn choose(condition: Bool) -> i64 { branch_bool(condition, () -> i64 { 42 }, () -> i64 { 9 }) }"), identity::digest_of_text("pub fn choose(condition: Bool) -> i64 { branch_bool(condition, () -> i64 { 42 }, () -> i64 { 9 }) }")), true))
+        + score(service::compile_source_manifest_branch_bool_function(source::input("service", "manifest-branch-false", __g1_text_as_bytes("pub fn choose(condition: Bool) -> i64 { branch_bool(condition, () -> i64 { 9 }, () -> i64 { 42 }) }"), identity::digest_of_text("pub fn choose(condition: Bool) -> i64 { branch_bool(condition, () -> i64 { 9 }, () -> i64 { 42 }) }")), false))
+        + score_fault(service::compile_source_manifest_branch_bool_function(source::input("service", "manifest-branch-wrong-condition", __g1_text_as_bytes("pub fn choose(condition: Bool) -> i64 { branch_bool(other, () -> i64 { 42 }, () -> i64 { 9 }) }"), identity::digest_of_text("pub fn choose(condition: Bool) -> i64 { branch_bool(other, () -> i64 { 42 }, () -> i64 { 9 }) }")), true))
+        + score(service::compile_source_manifest_branch_bool_function(source::input("service", "manifest-branch-right", __g1_text_as_bytes("pub fn choose(condition: Bool) -> i64 { branch_bool(condition, () -> i64 { 41 }, () -> i64 { 42 }) + 1 }"), identity::digest_of_text("pub fn choose(condition: Bool) -> i64 { branch_bool(condition, () -> i64 { 41 }, () -> i64 { 42 }) + 1 }")), false))
+        + score(service::compile_source_manifest_branch_bool_function(source::input("service", "manifest-branch-left", __g1_text_as_bytes("pub fn choose(condition: Bool) -> i64 { 1 + branch_bool(condition, () -> i64 { 41 }, () -> i64 { 42 }) }"), identity::digest_of_text("pub fn choose(condition: Bool) -> i64 { 1 + branch_bool(condition, () -> i64 { 41 }, () -> i64 { 42 }) }")), true))
+        + score(service::compile_source_manifest_branch_bool_function(source::input("service", "manifest-branch-return", __g1_text_as_bytes("pub fn choose(condition: Bool) -> i64 { return branch_bool(condition, () -> i64 { 42 }, () -> i64 { 9 }); }"), identity::digest_of_text("pub fn choose(condition: Bool) -> i64 { return branch_bool(condition, () -> i64 { 42 }, () -> i64 { 9 }); }")), true))
+        + score_fault(service::compile_source_manifest_branch_bool_function(source::input("service", "manifest-branch-return-missing-semicolon", __g1_text_as_bytes("pub fn choose(condition: Bool) -> i64 { return branch_bool(condition, () -> i64 { 42 }, () -> i64 { 9 }) }"), identity::digest_of_text("pub fn choose(condition: Bool) -> i64 { return branch_bool(condition, () -> i64 { 42 }, () -> i64 { 9 }) }")), true))
+        + score(service::compile_source_manifest_branch_bool_function(source::input("service", "manifest-branch-return-left", __g1_text_as_bytes("pub fn choose(condition: Bool) -> i64 { return 1 + branch_bool(condition, () -> i64 { 41 }, () -> i64 { 42 }); }"), identity::digest_of_text("pub fn choose(condition: Bool) -> i64 { return 1 + branch_bool(condition, () -> i64 { 41 }, () -> i64 { 42 }); }")), true))
+        + score(service::compile_source_manifest_branch_bool_function(source::input("service", "manifest-branch-return-right", __g1_text_as_bytes("pub fn choose(condition: Bool) -> i64 { return branch_bool(condition, () -> i64 { 41 }, () -> i64 { 42 }) + 1; }"), identity::digest_of_text("pub fn choose(condition: Bool) -> i64 { return branch_bool(condition, () -> i64 { 41 }, () -> i64 { 42 }) + 1; }")), false))
+        + score(service::compile_source_i64_select_parameter_function(source::input("service", "parameter-select-false", __g1_text_as_bytes("pub fn select(condition: Bool) -> i64 { if condition { 7 } else { 9 } }"), identity::digest_of_text("pub fn select(condition: Bool) -> i64 { if condition { 7 } else { 9 } }")), false))
+        + score(service::compile_source_i64_select_parameter_function(source::input("service", "parameter-return-select-true", __g1_text_as_bytes("pub fn select(condition: Bool) -> i64 { return if condition { 7 } else { 9 }; }"), identity::digest_of_text("pub fn select(condition: Bool) -> i64 { return if condition { 7 } else { 9 }; }")), true))
+        + score(service::compile_source_i64_select_parameter_function(source::input("service", "parameter-return-select-false", __g1_text_as_bytes("pub fn select(condition: Bool) -> i64 { return if condition { 7 } else { 9 }; }"), identity::digest_of_text("pub fn select(condition: Bool) -> i64 { return if condition { 7 } else { 9 }; }")), false))
+        + score_fault(service::compile_source_i64_select_parameter_function(source::input("service", "parameter-return-select-missing-semicolon", __g1_text_as_bytes("pub fn select(condition: Bool) -> i64 { return if condition { 7 } else { 9 } }"), identity::digest_of_text("pub fn select(condition: Bool) -> i64 { return if condition { 7 } else { 9 } }")), true))
+        + score(service::compile_source_i64_select_parameter_function(source::input("service", "wrong-condition-reference", __g1_text_as_bytes("pub fn select(condition: Bool) -> i64 { if other { 7 } else { 9 } }"), identity::digest_of_text("pub fn select(condition: Bool) -> i64 { if other { 7 } else { 9 } }")), true))
+        + score(service::compile_source_i64_select_parameter_function(source::input("service", "forged-parameter-select", __g1_text_as_bytes("pub fn select(condition: Bool) -> i64 { if condition { 7 } else { 9 } }"), identity::digest_of_text("wrong")), true))
+        + score_service_world(service::admit_source_world(request::source_world2(
+            source::input("service", "first", __g1_text_as_bytes("fn one { 1 }"), identity::digest_of_text("fn one { 1 }")),
+            source::input("service", "second", __g1_text_as_bytes("fn two { 2 }"), identity::digest_of_text("fn two { 2 }")),
+            request::bootstrap_limits(2, 24),
+        )))
+        + score_service_world(service::admit_source_world(request::source_world2(
+            source::input("service", "same", __g1_text_as_bytes("fn one { 1 }"), identity::digest_of_text("fn one { 1 }")),
+            source::input("service", "same", __g1_text_as_bytes("fn two { 2 }"), identity::digest_of_text("fn two { 2 }")),
+            request::bootstrap_limits(2, 24),
+        )))
+        + score_service_world(service::compile_source_world_headers(request::source_world2(
+            source::input("service", "first-header", __g1_text_as_bytes("fn one"), identity::digest_of_text("fn one")),
+            source::input("service", "second-header", __g1_text_as_bytes("fn two"), identity::digest_of_text("fn two")),
+            request::bootstrap_limits(2, 12),
+        )))
+        + score_service_world(service::compile_source_world_headers(request::source_world2(
+            source::input("service", "first-valid", __g1_text_as_bytes("fn one"), identity::digest_of_text("fn one")),
+            source::input("service", "second-invalid", __g1_text_as_bytes("fn"), identity::digest_of_text("fn")),
+            request::bootstrap_limits(2, 7),
+        )))
+        + score_world_dispatch(service::dispatch_build_source_world_cache(
+            request::stage0_build(identity::digest_of_text("seed")),
+            request::stage0_build(identity::digest_of_text("seed")),
+            cache_world_one_fingerprint(),
+            cache_world_one(),
+            identity::digest_of_text("artifact"),
+            identity::digest_of_text("artifact"),
+            bootstrap::ArtifactAdmission::Verified,
+        ))
+        + score_world_dispatch(service::dispatch_build_source_world_cache(
+            request::stage0_build(identity::digest_of_text("seed")),
+            request::stage0_build(identity::digest_of_text("seed")),
+            cache_world_one_fingerprint(),
+            cache_world_changed(),
+            identity::digest_of_text("artifact"),
+            identity::digest_of_text("artifact"),
+            bootstrap::ArtifactAdmission::Verified,
+        ))
+}
+
+pub fn score_service_world(value: service::ServiceOutcome) -> i64 {
+    handle value { service::ServiceOutcome::Program => 10, service::ServiceOutcome::Diagnostics => 100, _ => 0 }
+}
+
+pub fn score_fault(value: vm_backend::Execution) -> i64 {
+    handle value { vm_backend::Execution::Faulted => 1, _ => 0 }
+}
+
+pub fn cache_world_one_fingerprint() -> identity::Digest { request::source_world2_fingerprint(cache_world_one()) }
+pub fn cache_world_one() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("service-cache", "src/one", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        source::input("service-cache", "src/two", __g1_text_as_bytes("two"), identity::digest_of_text("two")),
+        request::bootstrap_limits(2, 6),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => cache_world_one() }
+}
+pub fn cache_world_changed() -> request::SourceWorld2 {
+    handle request::source_world2(
+        source::input("service-cache", "src/one", __g1_text_as_bytes("one"), identity::digest_of_text("one")),
+        source::input("service-cache", "src/two", __g1_text_as_bytes("three"), identity::digest_of_text("three")),
+        request::bootstrap_limits(2, 8),
+    ) { request::SourceWorldAdmission::Value(value) => value, _ => cache_world_changed() }
+}
+pub fn score_world_dispatch(value: service::ServiceDispatch) -> i64 {
+    handle value { service::ServiceDispatch::Reuse => 1, service::ServiceDispatch::Recompute => 10, _ => 0 }
+}

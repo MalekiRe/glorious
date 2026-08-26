@@ -1,0 +1,409 @@
+// M09 scaffold: declaration shape and provenance. Full lexical/header grammar
+// is admitted only with the complete scanner and parser corpus.
+use diagnostic::SourceSpan;
+use scanner::TokenKind;
+use scanner::first_token;
+use scanner::token_kind;
+use scanner::token_matches;
+use scanner::next_token;
+use scanner::TokenStart;
+use source::SourceInput;
+use source::bytes;
+use source::digest_matches_bytes;
+use compiler_support::__g1_int_wrapping_add;
+use compiler_support::__g1_int_wrapping_sub;
+
+pub enum HeaderKind {
+    Function,
+    Struct,
+    Enum,
+    Trait,
+    Effect,
+    Type,
+    Constant,
+    Implementation,
+    Import,
+    Module,
+    Fixity,
+    HostImport,
+    ValueAlias,
+    AutoTrait,
+}
+
+pub struct Header {
+    kind: HeaderKind,
+    span: SourceSpan,
+}
+
+pub enum HeaderAdmission { Candidate, NotDeclaration }
+pub enum SourceHeaderAdmission { Value(HeaderPrefix), Unadmitted }
+pub enum HeaderSequenceAdmission { Value(i64), Rejected, Unadmitted }
+pub enum HeaderLead {
+    Function,
+    Struct,
+    Enum,
+    Trait,
+    Effect,
+    Type,
+    Constant,
+    Implementation,
+    Import,
+    Module,
+    Prefix,
+    InfixLeft,
+    InfixRight,
+    InfixNonAssociative,
+    HostImport,
+    ValueAlias,
+    AutoTrait,
+    Identifier,
+    NotDeclaration,
+}
+
+// A declaration prefix keeps lexical visibility adjacent to the keyword that
+// introduced it. Interface collection consumes this record directly, so it
+// cannot accidentally assign a visibility different from the parsed source.
+pub struct HeaderPrefix {
+    lead: HeaderLead,
+    public: Bool,
+}
+
+// Header parsing begins only at an identifier token. Keyword and complete
+// declaration grammar remain the M09 corpus, but numeric/punctuation/empty
+// input cannot enter it as an invented declaration.
+pub fn admit(input: Bytes) -> HeaderAdmission {
+    handle token_kind(first_token(input)) {
+        TokenKind::Identifier => HeaderAdmission::Candidate,
+        TokenKind::End => HeaderAdmission::NotDeclaration,
+        TokenKind::Integer => HeaderAdmission::NotDeclaration,
+        TokenKind::Float => HeaderAdmission::NotDeclaration,
+        TokenKind::Invalid => HeaderAdmission::NotDeclaration,
+        TokenKind::Other => HeaderAdmission::NotDeclaration,
+        _ => HeaderAdmission::NotDeclaration,
+    }
+}
+
+// The header layer now consumes the scanner's bounded identifier matcher for
+// declaration dispatch. The remaining keyword grammar is deliberately added
+// through this same dispatch rather than re-reading source text ad hoc.
+pub fn leading(input: Bytes) -> HeaderLead {
+    lead(declaration(input))
+}
+
+pub fn declaration(input: Bytes) -> HeaderPrefix {
+    handle token_matches(input, first_token(input), "pub") {
+        true => HeaderPrefix { lead: leading_token(input, next_token(input, first_token(input))), public: true },
+        false => HeaderPrefix { lead: leading_token(input, first_token(input)), public: false },
+        _ => HeaderPrefix { lead: HeaderLead::NotDeclaration, public: false },
+    }
+}
+
+// Interface collection starts from request-owned source products. This entry
+// preserves that authority through keyword dispatch, so a forged byte buffer
+// cannot manufacture a declaration after scanner admission.
+pub fn declaration_checked(input: SourceInput) -> SourceHeaderAdmission {
+    handle digest_matches_bytes(input) {
+        true => SourceHeaderAdmission::Value(declaration(bytes(input))),
+        false => SourceHeaderAdmission::Unadmitted,
+        _ => SourceHeaderAdmission::Unadmitted,
+    }
+}
+
+pub fn named_declaration_checked(input: SourceInput) -> SourceHeaderAdmission {
+    handle digest_matches_bytes(input) {
+        true => named_declaration(bytes(input)),
+        false => SourceHeaderAdmission::Unadmitted,
+        _ => SourceHeaderAdmission::Unadmitted,
+    }
+}
+
+// Whole-source header admission is deliberately delimiter-aware. A semicolon
+// ends imports/module leaves and a balanced outer brace ends functions,
+// nominal declarations, traits, and implementations; punctuation inside a
+// body never starts a phantom top-level declaration.
+pub fn declaration_sequence_checked(input: SourceInput) -> HeaderSequenceAdmission {
+    handle digest_matches_bytes(input) {
+        true => declaration_sequence(bytes(input), first_token(bytes(input)), 0),
+        false => HeaderSequenceAdmission::Unadmitted,
+        _ => HeaderSequenceAdmission::Unadmitted,
+    }
+}
+
+fn declaration_sequence(input: Bytes, token: TokenStart, count: i64) -> HeaderSequenceAdmission {
+    handle token_kind(token) {
+        TokenKind::End => handle count > 0 { true => HeaderSequenceAdmission::Value(count), false => HeaderSequenceAdmission::Rejected, _ => HeaderSequenceAdmission::Rejected },
+        _ => declaration_sequence_lead(input, token, count),
+    }
+}
+
+fn declaration_sequence_lead(input: Bytes, token: TokenStart, count: i64) -> HeaderSequenceAdmission {
+    handle lead(declaration(input)) {
+        HeaderLead::NotDeclaration => HeaderSequenceAdmission::Rejected,
+        _ => declaration_end(input, token, 0, count),
+    }
+}
+
+fn declaration_end(input: Bytes, token: TokenStart, depth: i64, count: i64) -> HeaderSequenceAdmission {
+    handle token_kind(token) {
+        TokenKind::End => HeaderSequenceAdmission::Rejected,
+        _ => declaration_end_token(input, token, depth, count),
+    }
+}
+
+fn declaration_end_token(input: Bytes, token: TokenStart, depth: i64, count: i64) -> HeaderSequenceAdmission {
+    handle token_matches(input, token, "{") {
+        true => declaration_end(input, next_token(input, token), __g1_int_wrapping_add<i64>(depth, 1), count),
+        false => handle token_matches(input, token, "}") {
+            true => declaration_close_brace(input, token, depth, count),
+            false => handle token_matches(input, token, ";") {
+                true => handle depth == 0 { true => declaration_sequence(input, next_token(input, token), __g1_int_wrapping_add<i64>(count, 1)), false => declaration_end(input, next_token(input, token), depth, count), _ => HeaderSequenceAdmission::Rejected },
+                false => declaration_end(input, next_token(input, token), depth, count),
+                _ => HeaderSequenceAdmission::Rejected,
+            },
+            _ => HeaderSequenceAdmission::Rejected,
+        },
+        _ => HeaderSequenceAdmission::Rejected,
+    }
+}
+
+fn declaration_close_brace(input: Bytes, token: TokenStart, depth: i64, count: i64) -> HeaderSequenceAdmission {
+    handle depth == 1 {
+        true => declaration_sequence(input, next_token(input, token), __g1_int_wrapping_add<i64>(count, 1)),
+        false => handle depth > 1 { true => declaration_end(input, next_token(input, token), __g1_int_wrapping_sub<i64>(depth, 1), count), false => HeaderSequenceAdmission::Rejected, _ => HeaderSequenceAdmission::Rejected },
+        _ => HeaderSequenceAdmission::Rejected,
+    }
+}
+
+fn named_declaration(input: Bytes) -> SourceHeaderAdmission {
+    let first = first_token(input);
+    handle token_matches(input, first, "pub") {
+        true => named_after_keyword(input, next_token(input, first)),
+        false => named_after_keyword(input, first),
+        _ => SourceHeaderAdmission::Unadmitted,
+    }
+}
+
+fn named_after_keyword(input: Bytes, keyword: TokenStart) -> SourceHeaderAdmission {
+    handle leading_token(input, keyword) {
+        HeaderLead::Function => named_prefix(input, keyword),
+        HeaderLead::Struct => named_prefix(input, keyword),
+        HeaderLead::Enum => named_prefix(input, keyword),
+        HeaderLead::Trait => named_prefix(input, keyword),
+        HeaderLead::Effect => named_prefix(input, keyword),
+        HeaderLead::Type => named_prefix(input, keyword),
+        HeaderLead::Constant => named_prefix(input, keyword),
+        HeaderLead::Module => named_prefix(input, keyword),
+        HeaderLead::ValueAlias => named_prefix(input, keyword),
+        HeaderLead::AutoTrait => named_auto_trait_prefix(input, keyword),
+        HeaderLead::HostImport => named_host_prefix(input, keyword),
+        HeaderLead::Implementation => SourceHeaderAdmission::Value(declaration(input)),
+        HeaderLead::Import => SourceHeaderAdmission::Value(declaration(input)),
+        HeaderLead::Prefix => SourceHeaderAdmission::Value(declaration(input)),
+        HeaderLead::InfixLeft => SourceHeaderAdmission::Value(declaration(input)),
+        HeaderLead::InfixRight => SourceHeaderAdmission::Value(declaration(input)),
+        HeaderLead::InfixNonAssociative => SourceHeaderAdmission::Value(declaration(input)),
+        _ => SourceHeaderAdmission::Value(declaration(input)),
+    }
+}
+
+fn named_prefix(input: Bytes, keyword: TokenStart) -> SourceHeaderAdmission {
+    handle token_kind(next_token(input, keyword)) {
+        TokenKind::Identifier => SourceHeaderAdmission::Value(declaration(input)),
+        _ => SourceHeaderAdmission::Unadmitted,
+    }
+}
+
+// `auto trait Name` has a two-token declaration introducer, while host
+// imports are `host Capability fn Name`.  Keep these offsets here rather than
+// making service callers reconstruct keyword spelling around the checked
+// source boundary.
+fn named_auto_trait_prefix(input: Bytes, auto_keyword: TokenStart) -> SourceHeaderAdmission {
+    let trait_keyword = next_token(input, auto_keyword);
+    handle token_matches(input, trait_keyword, "trait") {
+        true => named_prefix(input, trait_keyword),
+        _ => SourceHeaderAdmission::Unadmitted,
+    }
+}
+
+fn named_host_prefix(input: Bytes, host_keyword: TokenStart) -> SourceHeaderAdmission {
+    let capability = next_token(input, host_keyword);
+    handle token_kind(capability) {
+        TokenKind::Identifier => named_host_function(input, next_token(input, capability)),
+        _ => SourceHeaderAdmission::Unadmitted,
+    }
+}
+
+fn named_host_function(input: Bytes, function_keyword: TokenStart) -> SourceHeaderAdmission {
+    handle token_matches(input, function_keyword, "fn") {
+        true => named_prefix(input, function_keyword),
+        _ => SourceHeaderAdmission::Unadmitted,
+    }
+}
+
+
+pub fn lead(prefix: HeaderPrefix) -> HeaderLead { prefix.lead }
+pub fn is_public(prefix: HeaderPrefix) -> Bool { prefix.public }
+
+fn leading_token(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "fn") {
+        true => HeaderLead::Function,
+        false => leading_after_function(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_function(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "struct") {
+        true => HeaderLead::Struct,
+        false => leading_after_struct(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_struct(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "enum") {
+        true => HeaderLead::Enum,
+        false => leading_after_enum(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_enum(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "trait") {
+        true => HeaderLead::Trait,
+        false => leading_after_trait(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_trait(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "effect") {
+        true => HeaderLead::Effect,
+        false => leading_after_effect(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_effect(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "type") {
+        true => HeaderLead::Type,
+        false => leading_after_type(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_type(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "const") {
+        true => HeaderLead::Constant,
+        false => leading_after_constant(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_constant(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "impl") {
+        true => HeaderLead::Implementation,
+        false => leading_after_implementation(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_implementation(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "use") {
+        true => HeaderLead::Import,
+        false => leading_after_import(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_import(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "mod") {
+        true => HeaderLead::Module,
+        false => leading_after_module(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_module(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "prefix") {
+        true => HeaderLead::Prefix,
+        false => leading_after_prefix(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_prefix(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "infixl") {
+        true => HeaderLead::InfixLeft,
+        false => leading_after_infix_left(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_infix_left(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "infixr") {
+        true => HeaderLead::InfixRight,
+        false => leading_after_infix_right(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_infix_right(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "infix") {
+        true => HeaderLead::InfixNonAssociative,
+        false => leading_after_infix(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_infix(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "host") {
+        true => HeaderLead::HostImport,
+        false => leading_after_host(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_host(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "let") {
+        true => HeaderLead::ValueAlias,
+        false => leading_after_let(input, token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_after_let(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "auto") {
+        true => auto_trait_lead(input, next_token(input, token)),
+        false => leading_non_keyword(token),
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn auto_trait_lead(input: Bytes, token: TokenStart) -> HeaderLead {
+    handle token_matches(input, token, "trait") {
+        true => HeaderLead::AutoTrait,
+        false => HeaderLead::NotDeclaration,
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+fn leading_non_keyword(token: TokenStart) -> HeaderLead {
+    handle token_kind(token) {
+        TokenKind::Identifier => HeaderLead::Identifier,
+        TokenKind::End => HeaderLead::NotDeclaration,
+        TokenKind::Integer => HeaderLead::NotDeclaration,
+        TokenKind::Float => HeaderLead::NotDeclaration,
+        TokenKind::Invalid => HeaderLead::NotDeclaration,
+        TokenKind::Other => HeaderLead::NotDeclaration,
+        _ => HeaderLead::NotDeclaration,
+    }
+}
+
+pub fn header(kind: HeaderKind, span: SourceSpan) -> Header {
+    Header { kind: kind, span: span }
+}
+
+pub fn span(header: Header) -> SourceSpan {
+    header.span
+}

@@ -1,0 +1,51 @@
+// M16 starts with concrete implementation-head overlap. Generic unification,
+// negative impls, orphan checks, and where-bound satisfiability extend this
+// same source-owned decision boundary.
+use compiler_support::branch_bool;
+use compiler_support::text_eq;
+use types::Type;
+use types::same;
+
+pub struct ImplementationHead {
+    trait_name: Text,
+    self_type: Type,
+    polarity: ImplementationPolarity,
+}
+
+// Positive and negative declarations occupy the same coherence namespace:
+// either polarity conflicts with another declaration of the same trait/self
+// head. Later generic overlap uses this preserved polarity when explaining a
+// conflict, instead of treating a negative implementation as absence.
+pub enum ImplementationPolarity {
+    Positive,
+    Negative,
+}
+
+pub enum Overlap {
+    Disjoint,
+    Conflict,
+}
+
+pub fn implementation(trait_name: Text, self_type: Type) -> ImplementationHead {
+    ImplementationHead { trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Positive }
+}
+
+pub fn negative_implementation(trait_name: Text, self_type: Type) -> ImplementationHead {
+    ImplementationHead { trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Negative }
+}
+
+pub fn overlap(left: ImplementationHead, right: ImplementationHead) -> Overlap {
+    branch_bool(
+        text_eq(left.trait_name, right.trait_name),
+        () -> Overlap { overlap_same_trait(left.self_type, right.self_type) },
+        () -> Overlap { Overlap::Disjoint },
+    )
+}
+
+fn overlap_same_trait(left: Type, right: Type) -> Overlap {
+    branch_bool(
+        same(left, right),
+        () -> Overlap { Overlap::Conflict },
+        () -> Overlap { Overlap::Disjoint },
+    )
+}

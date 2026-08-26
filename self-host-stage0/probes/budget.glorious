@@ -1,0 +1,5 @@
+use operation_library::operation;
+
+pub fn main() -> Bool {
+    operation::can_charge(operation::budget(2), 3)
+}

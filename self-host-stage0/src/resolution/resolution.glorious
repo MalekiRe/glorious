@@ -1,0 +1,101 @@
+// M13's first resolver boundary: visibility is evaluated from stable logical
+// package/module names, never from host paths or ambient process state.
+use compiler_support::branch_bool;
+use compiler_support::text_eq;
+use interface::Definition;
+use interface::DefinitionAdmission;
+use interface::is_exported;
+use identity::PackageKey;
+use identity::ModuleKey;
+use identity::package_key;
+use identity::module_key;
+use identity::same_package;
+use identity::same_module;
+
+pub enum Visibility {
+    Public,
+    Package,
+    Private,
+}
+
+pub struct Binding {
+    package: PackageKey,
+    module: ModuleKey,
+    visibility: Visibility,
+}
+
+// Keep lookup spelling with its visibility owner.  A caller can then retain
+// the distinction between a known-but-inaccessible name and a name that was
+// never declared in this namespace.
+pub struct NamedBinding { name: Text, binding: Binding }
+
+pub enum BindingAdmission {
+    Value(Binding),
+    NotDeclaration,
+}
+
+// Preserve a denied lookup separately from an absent header.  Downstream
+// diagnostics and import recovery must not collapse an inaccessible binding
+// into an unresolved name.
+pub enum Lookup { Resolved, Inaccessible, Missing }
+
+pub fn binding(package: Text, module: Text, visibility: Visibility) -> Binding {
+    Binding { package: package_key(package), module: module_key(package, module), visibility: visibility }
+}
+
+pub fn named_binding(name: Text, package: Text, module: Text, visibility: Visibility) -> NamedBinding {
+    NamedBinding { name: name, binding: binding(package, module, visibility) }
+}
+
+// Resolution consumes the interface's export decision instead of maintaining
+// a second public-declaration rule. Non-exportable declarations remain local
+// to the declaring module at this early boundary.
+pub fn binding_from_definition(package: Text, module: Text, definition: Definition) -> Binding {
+    branch_bool(
+        is_exported(definition),
+        () -> Binding { binding(package, module, Visibility::Public) },
+        () -> Binding { binding(package, module, Visibility::Private) },
+    )
+}
+
+// Keep source-derived admission explicit through resolution: invalid header
+// input must not become a private binding simply because it reached this
+// layer. Later collection adds names and identity to this same result.
+pub fn binding_from_header(package: Text, module: Text, input: Bytes) -> BindingAdmission {
+    handle interface::definition_from_header(input) {
+        DefinitionAdmission::Value(definition) => BindingAdmission::Value(binding_from_definition(package, module, definition)),
+        DefinitionAdmission::NotDeclaration => BindingAdmission::NotDeclaration,
+        _ => BindingAdmission::NotDeclaration,
+    }
+}
+
+pub fn visible_from(binding: Binding, package: Text, module: Text) -> Bool {
+    handle binding.visibility {
+        Visibility::Public => true,
+        Visibility::Package => same_package(binding.package, package_key(package)),
+        Visibility::Private => private_visible(binding.package, binding.module, package, module),
+        _ => false,
+    }
+}
+
+pub fn lookup(binding: Binding, package: Text, module: Text) -> Lookup {
+    branch_bool(visible_from(binding, package, module),
+        () -> Lookup { Lookup::Resolved },
+        () -> Lookup { Lookup::Inaccessible })
+}
+
+pub fn lookup_named(value: NamedBinding, name: Text, package: Text, module: Text) -> Lookup {
+    branch_bool(
+        text_eq(value.name, name),
+        () -> Lookup { lookup(value.binding, package, module) },
+        () -> Lookup { Lookup::Missing },
+    )
+}
+
+fn private_visible(owner_package: PackageKey, owner_module: ModuleKey, package: Text, module: Text) -> Bool {
+    branch_bool(
+        same_package(owner_package, package_key(package)),
+        () -> Bool { same_module(owner_module, module_key(package, module)) },
+        () -> Bool { false },
+    )
+}

@@ -1,0 +1,340 @@
+// M04 scaffold: the reusable value-level transaction core. Later operation
+// layers add hierarchical parent/child charging, affine leases, and host
+// publication guards over this same mark/commit/rollback vocabulary.
+use compiler_support::branch_bool;
+pub struct Transaction {
+    initial: i64,
+    current: i64,
+    mark: i64,
+}
+
+pub enum CommitResult { Value(i64), Cancelled }
+
+pub struct Cancellation {
+    cancelled: Bool,
+}
+
+pub enum CancellationResult {
+    Active,
+    Cancelled,
+}
+
+pub struct Budget {
+    limit: i64,
+    used: i64,
+}
+
+pub struct BudgetError {
+    limit: i64,
+    used: i64,
+    requested: i64,
+}
+
+pub enum BudgetResult {
+    Value(Budget),
+    Error(BudgetError),
+}
+
+// The current bootstrap source subset has no destructor hook, so this is an
+// explicit affine counterpart of Stage0's RAII BudgetLease. A lease owns the
+// charged budget state and its exact reservation amount; only release_lease
+// can recover capacity from that state.
+pub struct BudgetLease {
+    budget: Budget,
+    amount: i64,
+}
+
+pub enum BudgetLeaseResult {
+    Value(BudgetLease),
+    Error(BudgetError),
+}
+
+// Stage0 resource ceilings are unsigned. The bootstrap representation uses
+// signed integers temporarily, so construction admits the non-negative
+// subset explicitly instead of creating an unusable negative ceiling.
+pub enum BudgetAdmission {
+    Value(Budget),
+    Error(BudgetError),
+}
+
+// A child budget carries the request-owned parent explicitly. This is the
+// single-owner form of stage0's parent pointer: each transition returns the
+// updated pair, which makes the parent rollback on a failed child reservation
+// observable without ambient mutation or a host-side accounting fallback.
+pub struct BudgetPair {
+    parent: Budget,
+    child: Budget,
+}
+
+pub enum BudgetPairResult {
+    Value(BudgetPair),
+    Error(BudgetPair, BudgetError),
+}
+
+pub enum BudgetPairAdmission {
+    Value(BudgetPair),
+    Error(BudgetError),
+}
+
+pub enum BudgetPairReleaseResult {
+    Value(BudgetPair),
+    Invalid(BudgetPair),
+}
+
+// A child lease owns the pair after a successful hierarchical reservation.
+// Its release therefore returns capacity to both the local phase and its
+// request-owned parent, mirroring Stage0's recursive Budget::release path.
+pub struct BudgetPairLease {
+    pair: BudgetPair,
+    amount: i64,
+}
+
+pub enum BudgetPairLeaseResult {
+    Value(BudgetPairLease),
+    Error(BudgetPair, BudgetError),
+}
+
+// Publication is explicitly staged. A cancelled request cannot turn a staged
+// product into a published value; callers must handle the cancellation arm.
+pub struct Publication<T> {
+    value: T,
+}
+
+pub enum PublicationResult<T> {
+    Value(T),
+    Cancelled,
+}
+
+pub fn active() -> Cancellation {
+    Cancellation { cancelled: false }
+}
+
+pub fn cancel(cancellation: Cancellation) -> Cancellation {
+    Cancellation { cancelled: true }
+}
+
+pub fn is_cancelled(cancellation: Cancellation) -> Bool {
+    cancellation.cancelled
+}
+
+pub fn check(cancellation: Cancellation) -> CancellationResult {
+    branch_bool(
+        is_cancelled(cancellation),
+        () -> CancellationResult { CancellationResult::Cancelled },
+        () -> CancellationResult { CancellationResult::Active },
+    )
+}
+
+pub fn stage_publication<T>(value: T) -> Publication<T> {
+    Publication { value: value }
+}
+
+pub fn publish<T>(publication: Publication<T>, cancellation: Cancellation) -> PublicationResult<T> {
+    branch_bool(
+        is_cancelled(cancellation),
+        () -> PublicationResult<T> { PublicationResult::Cancelled },
+        () -> PublicationResult<T> { PublicationResult::Value(publication.value) },
+    )
+}
+
+pub fn discard<T>(publication: Publication<T>) -> () {
+    ()
+}
+
+pub fn budget(limit: i64) -> Budget {
+    Budget { limit: limit, used: 0 }
+}
+
+pub fn checked_budget(limit: i64) -> BudgetAdmission {
+    branch_bool(
+        limit < 0,
+        () -> BudgetAdmission { BudgetAdmission::Error(BudgetError { limit: limit, used: 0, requested: 0 }) },
+        () -> BudgetAdmission { BudgetAdmission::Value(budget(limit)) },
+    )
+}
+
+pub fn remaining(budget: Budget) -> i64 {
+    budget.limit - budget.used
+}
+
+// The manifest leaf preserves lazy source control: the unavailable branch is
+// not evaluated, while the decision specializes to a direct VM CFG edge.
+pub fn can_charge(budget: Budget, amount: i64) -> Bool {
+    branch_bool(
+        amount < 0,
+        () -> Bool { false },
+        () -> Bool { can_charge_nonnegative(budget, amount) },
+    )
+}
+
+fn can_charge_nonnegative(budget: Budget, amount: i64) -> Bool {
+    branch_bool(
+        amount <= remaining(budget),
+        () -> Bool { true },
+        () -> Bool { false },
+    )
+}
+
+// The negative-request branch is separate so the successful arithmetic path
+// is reached only after the signed source value has been checked. Both limit
+// rejection and arithmetic eligibility remain ordinary source values.
+pub fn charge(budget: Budget, amount: i64) -> BudgetResult {
+    branch_bool(
+        amount < 0,
+        () -> BudgetResult { BudgetResult::Error(BudgetError { limit: budget.limit, used: budget.used, requested: amount }) },
+        () -> BudgetResult { charge_nonnegative(budget, amount) },
+    )
+}
+
+fn charge_nonnegative(budget: Budget, amount: i64) -> BudgetResult {
+    branch_bool(
+        can_charge(budget, amount),
+        () -> BudgetResult { BudgetResult::Value(Budget { limit: budget.limit, used: budget.used + amount }) },
+        () -> BudgetResult { BudgetResult::Error(BudgetError { limit: budget.limit, used: budget.used, requested: amount }) },
+    )
+}
+
+pub fn spent(budget: Budget) -> i64 {
+    budget.used
+}
+
+pub fn lease(budget: Budget, amount: i64) -> BudgetLeaseResult {
+    handle charge(budget, amount) {
+        BudgetResult::Value(charged) => BudgetLeaseResult::Value(BudgetLease { budget: charged, amount: amount }),
+        BudgetResult::Error(error) => BudgetLeaseResult::Error(error),
+        _ => BudgetLeaseResult::Error(BudgetError { limit: 0, used: 0, requested: amount }),
+    }
+}
+
+// Releasing a valid lease is total: it was constructed only after `charge`
+// proved the reservation was non-negative and available. The lease value is
+// consumed, preventing a normal source caller from recovering this
+// reservation through this API twice.
+pub fn release_lease(lease: BudgetLease) -> Budget {
+    Budget { limit: lease.budget.limit, used: lease.budget.used - lease.amount }
+}
+
+pub fn lease_amount(lease: BudgetLease) -> i64 { lease.amount }
+
+pub fn child(parent: Budget, limit: i64) -> BudgetPair {
+    BudgetPair { parent: parent, child: budget(limit) }
+}
+
+pub fn child_checked(parent: Budget, limit: i64) -> BudgetPairAdmission {
+    handle checked_budget(limit) {
+        BudgetAdmission::Value(child_budget) => BudgetPairAdmission::Value(BudgetPair { parent: parent, child: child_budget }),
+        BudgetAdmission::Error(error) => BudgetPairAdmission::Error(error),
+        _ => BudgetPairAdmission::Error(BudgetError { limit: limit, used: 0, requested: 0 }),
+    }
+}
+
+pub fn parent_spent(pair: BudgetPair) -> i64 { spent(pair.parent) }
+pub fn child_spent(pair: BudgetPair) -> i64 { spent(pair.child) }
+
+// Charge the parent first, then the child. If the child rejects, return the
+// original pair rather than the staged parent value. This is the same
+// transactional ordering as stage0's child charge/release path.
+pub fn charge_child(pair: BudgetPair, amount: i64) -> BudgetPairResult {
+    handle charge(pair.parent, amount) {
+        BudgetResult::Value(parent) => charge_child_local(pair, parent, amount),
+        BudgetResult::Error(error) => BudgetPairResult::Error(pair, error),
+        _ => BudgetPairResult::Error(pair, BudgetError { limit: 0, used: 0, requested: amount }),
+    }
+}
+
+pub fn lease_child(pair: BudgetPair, amount: i64) -> BudgetPairLeaseResult {
+    handle charge_child(pair, amount) {
+        BudgetPairResult::Value(charged) => BudgetPairLeaseResult::Value(BudgetPairLease { pair: charged, amount: amount }),
+        BudgetPairResult::Error(original, error) => BudgetPairLeaseResult::Error(original, error),
+        _ => BudgetPairLeaseResult::Error(pair, BudgetError { limit: 0, used: 0, requested: amount }),
+    }
+}
+
+pub fn release_child_lease(lease: BudgetPairLease) -> BudgetPair {
+    BudgetPair {
+        parent: Budget { limit: lease.pair.parent.limit, used: lease.pair.parent.used - lease.amount },
+        child: Budget { limit: lease.pair.child.limit, used: lease.pair.child.used - lease.amount },
+    }
+}
+
+fn charge_child_local(pair: BudgetPair, parent: Budget, amount: i64) -> BudgetPairResult {
+    handle charge(pair.child, amount) {
+        BudgetResult::Value(child) => BudgetPairResult::Value(BudgetPair { parent: parent, child: child }),
+        BudgetResult::Error(error) => BudgetPairResult::Error(pair, error),
+        _ => BudgetPairResult::Error(pair, BudgetError { limit: 0, used: 0, requested: amount }),
+    }
+}
+
+// The source representation has no destructor hook, so a lease discharge is
+// an explicit state transition. Validate before subtraction: a malformed or
+// duplicate discharge cannot create budget capacity or underflow either
+// member of the hierarchy.
+pub fn release_child(pair: BudgetPair, amount: i64) -> BudgetPairReleaseResult {
+    branch_bool(
+        amount < 0,
+        () -> BudgetPairReleaseResult { BudgetPairReleaseResult::Invalid(pair) },
+        () -> BudgetPairReleaseResult { release_child_nonnegative(pair, amount) },
+    )
+}
+
+fn release_child_nonnegative(pair: BudgetPair, amount: i64) -> BudgetPairReleaseResult {
+    branch_bool(
+        amount <= pair.child.used,
+        () -> BudgetPairReleaseResult { release_child_parent_checked(pair, amount) },
+        () -> BudgetPairReleaseResult { BudgetPairReleaseResult::Invalid(pair) },
+    )
+}
+
+fn release_child_parent_checked(pair: BudgetPair, amount: i64) -> BudgetPairReleaseResult {
+    branch_bool(
+        amount <= pair.parent.used,
+        () -> BudgetPairReleaseResult {
+            BudgetPairReleaseResult::Value(BudgetPair {
+                parent: Budget { limit: pair.parent.limit, used: pair.parent.used - amount },
+                child: Budget { limit: pair.child.limit, used: pair.child.used - amount },
+            })
+        },
+        () -> BudgetPairReleaseResult { BudgetPairReleaseResult::Invalid(pair) },
+    )
+}
+
+pub fn begin(value: i64) -> Transaction {
+    Transaction { initial: value, current: value, mark: value }
+}
+
+pub fn mark(transaction: Transaction) -> Transaction {
+    Transaction {
+        initial: transaction.initial,
+        current: transaction.current,
+        mark: transaction.current,
+    }
+}
+
+pub fn stage(transaction: Transaction, value: i64) -> Transaction {
+    Transaction {
+        initial: transaction.initial,
+        current: value,
+        mark: transaction.mark,
+    }
+}
+
+pub fn rollback(transaction: Transaction) -> Transaction {
+    Transaction {
+        initial: transaction.initial,
+        current: transaction.mark,
+        mark: transaction.mark,
+    }
+}
+
+pub fn commit(transaction: Transaction) -> i64 {
+    transaction.current
+}
+
+// A staged transaction may cross the same publication boundary as artifacts
+// and diagnostics. Check cancellation immediately before releasing its value;
+// rollback remains a separate explicit operation for semantic backtracking.
+pub fn commit_checked(transaction: Transaction, cancellation: Cancellation) -> CommitResult {
+    branch_bool(is_cancelled(cancellation),
+        () -> CommitResult { CommitResult::Cancelled },
+        () -> CommitResult { CommitResult::Value(commit(transaction)) })
+}

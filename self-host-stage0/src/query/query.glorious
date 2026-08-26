@@ -1,0 +1,232 @@
+// M32 scaffold: typed query-result admissibility. Revision-qualified memo
+// tables, frames, dependency journals, cycle detection, and resource-aware
+// execution are added over the shared query substrate.
+use revision::Snapshot;
+use revision::same;
+use revision::is_active;
+use dependency::ReuseDecision;
+use dependency::reuse_decision;
+use dependency::DependencyStatus;
+use compiler_support::branch_bool;
+use operation::Cancellation;
+use operation::CancellationResult;
+use operation::check;
+
+pub enum QueryCompleteness { Complete, Recovered }
+pub enum RecoveryPolicy { Reject, Allow }
+pub enum QueryState { Empty, Computing, Value(QueryCompleteness), Failed }
+pub enum QueryDecision { Reuse, Compute, Reject }
+
+// A query frame carries the immutable snapshot that owns it. The source
+// facade never accepts a caller-provided "same revision" Boolean: reuse and
+// publication compare snapshot identity at this boundary.
+pub struct QuerySlot { key: i64, snapshot: Snapshot, state: QueryState }
+pub enum QueryPublication { Value(QuerySlot), CrossRevision, NotComputing }
+pub enum QueryFailure { Value(QuerySlot), CrossRevision, NotComputing }
+pub enum QueryStart { Value(QuerySlot), CrossRevision, Inactive, Cycle }
+
+pub fn slot(snapshot: Snapshot) -> QuerySlot {
+    keyed_slot(0, snapshot)
+}
+
+// A revision match alone is insufficient for incremental reuse: the cached
+// frame must also belong to the requested query family/key.  The bootstrap
+// representation keeps a compact stable integer until typed keys are ported.
+pub fn keyed_slot(key: i64, snapshot: Snapshot) -> QuerySlot {
+    QuerySlot { key: key, snapshot: snapshot, state: QueryState::Empty }
+}
+
+pub fn begin_at(slot: QuerySlot) -> QuerySlot {
+    QuerySlot { key: slot.key, snapshot: slot.snapshot, state: begin(slot.state) }
+}
+
+// Re-entrant demand of the same revision-qualified key is a structural query
+// cycle, never a memo miss.  Detect it before reusing or replacing the frame;
+// this mirrors the Rust engine's running-key guard without requiring ambient
+// mutable state in callers.
+pub fn begin_for(slot: QuerySlot, target: Snapshot) -> QueryStart {
+    branch_bool(same(slot.snapshot, target),
+        () -> QueryStart { begin_for_owned(slot) },
+        () -> QueryStart { QueryStart::CrossRevision })
+}
+
+fn begin_for_owned(slot: QuerySlot) -> QueryStart {
+    branch_bool(is_active(slot.snapshot),
+        () -> QueryStart { begin_for_active(slot) },
+        () -> QueryStart { QueryStart::Inactive })
+}
+
+fn begin_for_active(slot: QuerySlot) -> QueryStart {
+    handle slot.state {
+        QueryState::Computing => QueryStart::Cycle,
+        _ => QueryStart::Value(begin_at(slot)),
+    }
+}
+
+pub fn publish_at(slot: QuerySlot, target: Snapshot, completeness: QueryCompleteness) -> QueryPublication {
+    branch_bool(
+        same(slot.snapshot, target),
+        () -> QueryPublication { publish_owned(slot, completeness) },
+        () -> QueryPublication { QueryPublication::CrossRevision },
+    )
+}
+
+fn publish_owned(slot: QuerySlot, completeness: QueryCompleteness) -> QueryPublication {
+    branch_bool(
+        is_active(slot.snapshot),
+        () -> QueryPublication { publish_computing(slot, completeness) },
+        () -> QueryPublication { QueryPublication::CrossRevision },
+    )
+}
+
+fn publish_computing(slot: QuerySlot, completeness: QueryCompleteness) -> QueryPublication {
+    handle slot.state {
+        QueryState::Computing => QueryPublication::Value(QuerySlot { key: slot.key, snapshot: slot.snapshot, state: publish(QueryState::Computing, completeness) }),
+        _ => QueryPublication::NotComputing,
+    }
+}
+
+// Failure is a revision-qualified transition too. Recording it prevents a
+// failed computation from remaining `Computing` forever, while preserving the
+// exact-world and owned-frame requirements of ordinary publication.
+pub fn fail_at(slot: QuerySlot, target: Snapshot) -> QueryFailure {
+    branch_bool(same(slot.snapshot, target),
+        () -> QueryFailure { fail_owned(slot) },
+        () -> QueryFailure { QueryFailure::CrossRevision })
+}
+
+fn fail_owned(slot: QuerySlot) -> QueryFailure {
+    branch_bool(is_active(slot.snapshot),
+        () -> QueryFailure { fail_computing(slot) },
+        () -> QueryFailure { QueryFailure::CrossRevision })
+}
+
+fn fail_computing(slot: QuerySlot) -> QueryFailure {
+    handle slot.state {
+        QueryState::Computing => QueryFailure::Value(QuerySlot { key: slot.key, snapshot: slot.snapshot, state: QueryState::Failed }),
+        _ => QueryFailure::NotComputing,
+    }
+}
+
+pub fn decide_at(policy: RecoveryPolicy, slot: QuerySlot, target: Snapshot) -> QueryDecision {
+    branch_bool(
+        is_active(target),
+        () -> QueryDecision { decide_active_target(policy, slot, target) },
+        () -> QueryDecision { QueryDecision::Reject },
+    )
+}
+
+pub fn decide_keyed_at(policy: RecoveryPolicy, slot: QuerySlot, key: i64, target: Snapshot) -> QueryDecision {
+    branch_bool(
+        slot.key == key,
+        () -> QueryDecision { decide_at(policy, slot, target) },
+        () -> QueryDecision { QueryDecision::Compute },
+    )
+}
+
+// Reuse requires two independently-owned facts: this exact query frame must
+// be reusable, and its revision-owned dependency validation must still be
+// green. A red or cold dependency converts only a cached reuse into normal
+// recomputation; it never weakens a rejected frame into executable work.
+pub fn decide_with_dependencies(policy: RecoveryPolicy, slot: QuerySlot, target: Snapshot, dependencies: DependencyStatus) -> QueryDecision {
+    gate_dependency(decide_at(policy, slot, target), reuse_decision(dependencies))
+}
+
+pub fn decide_keyed_with_dependencies(policy: RecoveryPolicy, slot: QuerySlot, key: i64, target: Snapshot, dependencies: DependencyStatus) -> QueryDecision {
+    gate_dependency(decide_keyed_at(policy, slot, key, target), reuse_decision(dependencies))
+}
+
+// Cancellation is checked at the query boundary, before a memo hit can be
+// observed or a cold/red frame can schedule recomputation.  Service therefore
+// cannot accidentally turn cancellation into an ordinary cache policy.
+pub fn decide_with_cancellation(policy: RecoveryPolicy, slot: QuerySlot, target: Snapshot, dependencies: DependencyStatus, cancellation: Cancellation) -> QueryDecision {
+    handle check(cancellation) {
+        CancellationResult::Active => decide_with_dependencies(policy, slot, target, dependencies),
+        CancellationResult::Cancelled => QueryDecision::Reject,
+        _ => QueryDecision::Reject,
+    }
+}
+
+fn gate_dependency(query: QueryDecision, dependency: ReuseDecision) -> QueryDecision {
+    handle query {
+        QueryDecision::Reuse => handle dependency {
+            ReuseDecision::Reuse => QueryDecision::Reuse,
+            ReuseDecision::Recompute => QueryDecision::Compute,
+            _ => QueryDecision::Compute,
+        },
+        QueryDecision::Compute => QueryDecision::Compute,
+        QueryDecision::Reject => QueryDecision::Reject,
+        _ => QueryDecision::Reject,
+    }
+}
+
+fn decide_active_target(policy: RecoveryPolicy, slot: QuerySlot, target: Snapshot) -> QueryDecision {
+    branch_bool(
+        is_active(slot.snapshot),
+        () -> QueryDecision { decide_owned_active_slot(policy, slot, target) },
+        () -> QueryDecision { QueryDecision::Reject },
+    )
+}
+
+fn decide_owned_active_slot(policy: RecoveryPolicy, slot: QuerySlot, target: Snapshot) -> QueryDecision {
+    branch_bool(
+        same(slot.snapshot, target),
+        () -> QueryDecision { decide(policy, slot.state) },
+        () -> QueryDecision { QueryDecision::Compute },
+    )
+}
+
+// Recompute frames are source-owned state transitions. A ready value cannot
+// be overwritten by an accidental begin, while an empty or failed slot gets
+// one fresh computing frame that publication may later complete.
+pub fn begin(state: QueryState) -> QueryState {
+    handle state {
+        QueryState::Empty => QueryState::Computing,
+        QueryState::Failed => QueryState::Computing,
+        QueryState::Computing => QueryState::Computing,
+        QueryState::Value(value) => QueryState::Value(value),
+        _ => QueryState::Failed,
+    }
+}
+
+// Publication is valid only for an owned computing frame. Other states are
+// returned unchanged, so an empty/failed cache entry cannot fabricate a
+// reusable product through this transition.
+pub fn publish(state: QueryState, completeness: QueryCompleteness) -> QueryState {
+    handle state {
+        QueryState::Computing => QueryState::Value(completeness),
+        QueryState::Empty => QueryState::Empty,
+        QueryState::Failed => QueryState::Failed,
+        QueryState::Value(value) => QueryState::Value(value),
+        _ => QueryState::Failed,
+    }
+}
+
+pub fn permits(policy: RecoveryPolicy, state: QueryState) -> Bool {
+    handle state {
+        QueryState::Value(QueryCompleteness::Complete) => true,
+        QueryState::Value(QueryCompleteness::Recovered) => handle policy { RecoveryPolicy::Allow => true, RecoveryPolicy::Reject => false, _ => false },
+        QueryState::Empty => false,
+        QueryState::Computing => false,
+        QueryState::Failed => false,
+        _ => false,
+    }
+}
+
+// Reuse is permitted only for a published value admitted by the recovery
+// policy. Missing and failed entries must recompute; an active frame or a
+// rejected recovered product must not be observed as a usable value.
+pub fn decide(policy: RecoveryPolicy, state: QueryState) -> QueryDecision {
+    handle state {
+        QueryState::Value(QueryCompleteness::Complete) => QueryDecision::Reuse,
+        QueryState::Value(QueryCompleteness::Recovered) => handle policy {
+            RecoveryPolicy::Allow => QueryDecision::Reuse,
+            RecoveryPolicy::Reject => QueryDecision::Reject,
+            _ => QueryDecision::Reject,
+        },
+        QueryState::Empty => QueryDecision::Compute,
+        QueryState::Failed => QueryDecision::Compute,
+        QueryState::Computing => QueryDecision::Reject,
+        _ => QueryDecision::Reject,
+    }
+}

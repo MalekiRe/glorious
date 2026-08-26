@@ -4410,6 +4410,38 @@ fn structural_pattern_tests_round_trip_through_the_independent_vm_decoder() {
 }
 
 #[test]
+fn wide_integer_pattern_literals_are_contextually_typed_by_the_vm_payload() {
+    let mut candidate = CandidateVmArtifact {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA,
+        runtime_manifest: None,
+        function: VmFunction {
+            nominal_copy_descriptors: vec![],
+            definition: DefKey(Digest::of_bytes(b"wide-pattern-test")),
+            captures: 0,
+            parameters: 0,
+            registers: vec![VmType::U128, VmType::Bool],
+            instructions: vec![
+                VmInstruction::ConstU128 {
+                    dst: 0,
+                    value: u128::MAX,
+                },
+                VmInstruction::PatternTest {
+                    dst: 1,
+                    subject: 0,
+                    pattern: VmPattern::Literal("340282366920938463463374607431768211455".into()),
+                },
+                VmInstruction::Return { value: 1 },
+            ],
+        },
+        fingerprint: Digest::of_bytes(b"wide-pattern-test-stale"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    let bytes = encode_artifact(&candidate);
+    assert_eq!(decode_artifact(&bytes).unwrap(), candidate);
+    assert!(decode_and_verify_artifact(&bytes).unwrap().run_bool().unwrap());
+}
+
+#[test]
 fn vm_scalar_pattern_literals_share_the_lexer_escape_contract() {
     let mut valid = CandidateVmArtifact {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,

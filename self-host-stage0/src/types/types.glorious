@@ -1,0 +1,82 @@
+// M14 begins with the closed bootstrap type vocabulary. Generic terms,
+// lifetimes, effects, projections, and structural constants extend this
+// source-owned equality boundary in later slices.
+use compiler_support::text_eq;
+
+pub enum Type {
+    Unit,
+    Never,
+    Bool,
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    Usize,
+    Isize,
+    F32,
+    F64,
+    Char,
+    Text,
+    Bytes,
+    Named(Text),
+    Generic(i64),
+    Projection(Text, i64),
+}
+
+// A compiler term has a kind.  Keeping the kinds explicit at the bootstrap
+// boundary prevents an effect row, lifetime, or structural constant with the
+// same numeric payload from being accepted as a value type by signatures or
+// trait goals.
+pub enum Term {
+    ValueType(Type),
+    EffectRow(i64),
+    Lifetime(i64),
+    StructuralConstant(i64),
+}
+
+pub fn same(left: Type, right: Type) -> Bool {
+    handle (left, right) {
+        (Type::Unit, Type::Unit) => true,
+        (Type::Never, Type::Never) => true,
+        (Type::Bool, Type::Bool) => true,
+        (Type::U8, Type::U8) => true,
+        (Type::U16, Type::U16) => true,
+        (Type::U32, Type::U32) => true,
+        (Type::U64, Type::U64) => true,
+        (Type::U128, Type::U128) => true,
+        (Type::I8, Type::I8) => true,
+        (Type::I16, Type::I16) => true,
+        (Type::I32, Type::I32) => true,
+        (Type::I64, Type::I64) => true,
+        (Type::I128, Type::I128) => true,
+        (Type::Usize, Type::Usize) => true,
+        (Type::Isize, Type::Isize) => true,
+        (Type::F32, Type::F32) => true,
+        (Type::F64, Type::F64) => true,
+        (Type::Char, Type::Char) => true,
+        (Type::Text, Type::Text) => true,
+        (Type::Bytes, Type::Bytes) => true,
+        (Type::Named(left), Type::Named(right)) => text_eq(left, right),
+        (Type::Generic(left), Type::Generic(right)) => left == right,
+        (Type::Projection(left_name, left_subject), Type::Projection(right_name, right_subject)) => projection_same(left_name, left_subject, right_name, right_subject),
+        _ => false,
+    }
+}
+
+pub fn same_term(left: Term, right: Term) -> Bool {
+    handle (left, right) {
+        (Term::ValueType(left), Term::ValueType(right)) => same(left, right),
+        (Term::EffectRow(left), Term::EffectRow(right)) => left == right,
+        (Term::Lifetime(left), Term::Lifetime(right)) => left == right,
+        (Term::StructuralConstant(left), Term::StructuralConstant(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn projection_same(left_name: Text, left_subject: i64, right_name: Text, right_subject: i64) -> Bool { handle text_eq(left_name, right_name) { true => left_subject == right_subject, false => false, _ => false } }

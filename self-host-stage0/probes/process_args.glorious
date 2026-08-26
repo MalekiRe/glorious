@@ -1,0 +1,9 @@
+use compiler_support::process_args_get;
+use compiler_support::__g1_array_len;
+
+// Array length is the first safe argv cursor operation: the unbound runtime
+// fallback is empty, while a granted host supplies this process invocation.
+pub fn main() -> i64 {
+    let supplied = process_args_get();
+    handle __g1_array_len<Text>(&supplied) > 0 { true => 7, false => 0, _ => 0 }
+}

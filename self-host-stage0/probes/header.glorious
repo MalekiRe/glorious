@@ -1,0 +1,66 @@
+use compiler_support::__g1_text_as_bytes;
+use header_library::header;
+use header_library::identity;
+use header_library::source;
+pub fn score(value: header::HeaderAdmission) -> i64 { handle value { header::HeaderAdmission::Candidate => 1, header::HeaderAdmission::NotDeclaration => 10, _ => 0 } }
+pub fn score_lead(value: header::HeaderLead) -> i64 {
+    handle value {
+        header::HeaderLead::Function => 1,
+        header::HeaderLead::Struct => 2,
+        header::HeaderLead::Enum => 3,
+        header::HeaderLead::Trait => 4,
+        header::HeaderLead::Effect => 5,
+        header::HeaderLead::Type => 6,
+        header::HeaderLead::Constant => 7,
+        header::HeaderLead::Implementation => 8,
+        header::HeaderLead::Import => 9,
+        header::HeaderLead::Module => 10,
+        header::HeaderLead::Prefix => 11,
+        header::HeaderLead::InfixLeft => 12,
+        header::HeaderLead::InfixRight => 13,
+        header::HeaderLead::InfixNonAssociative => 14,
+        header::HeaderLead::HostImport => 15,
+        header::HeaderLead::ValueAlias => 16,
+        header::HeaderLead::AutoTrait => 17,
+        header::HeaderLead::Identifier => 19,
+        header::HeaderLead::NotDeclaration => 100,
+        _ => 0,
+    }
+}
+pub fn main() -> i64 {
+    score(header::admit(__g1_text_as_bytes("  pub")))
+        + score(header::admit(__g1_text_as_bytes("  42")))
+        + score(header::admit(__g1_text_as_bytes("")))
+        + score_lead(header::leading(__g1_text_as_bytes("fn main")))
+        + score_lead(header::leading(__g1_text_as_bytes("pub struct Pair")))
+        + score_lead(header::leading(__g1_text_as_bytes("enum Choice")))
+        + score_lead(header::leading(__g1_text_as_bytes("trait Gate")))
+        + score_lead(header::leading(__g1_text_as_bytes("effect Trace")))
+        + score_lead(header::leading(__g1_text_as_bytes("type Alias")))
+        + score_lead(header::leading(__g1_text_as_bytes("const LIMIT")))
+        + score_lead(header::leading(__g1_text_as_bytes("impl Gate for i64")))
+        + score_lead(header::leading(__g1_text_as_bytes("use crate")))
+        + score_lead(header::leading(__g1_text_as_bytes("mod nested")))
+        + score_lead(header::leading(__g1_text_as_bytes("prefix !")))
+        + score_lead(header::leading(__g1_text_as_bytes("infixl +")))
+        + score_lead(header::leading(__g1_text_as_bytes("infixr **")))
+        + score_lead(header::leading(__g1_text_as_bytes("infix ==")))
+        + score_lead(header::leading(__g1_text_as_bytes("host io fn read")))
+        + score_lead(header::leading(__g1_text_as_bytes("let alias = value")))
+        + score_lead(header::leading(__g1_text_as_bytes("auto trait Marker")))
+        + score_lead(header::leading(__g1_text_as_bytes("answer")))
+        + score_lead(header::leading(__g1_text_as_bytes("42")))
+        + checked_lead_score(header::declaration_checked(source::input("package", "src/main.glorious", __g1_text_as_bytes("fn main"), identity::digest_of_text("fn main"))))
+        + checked_lead_score(header::declaration_checked(source::input("package", "src/main.glorious", __g1_text_as_bytes("fn main"), identity::digest_of_text("wrong"))))
+        + checked_lead_score(header::named_declaration_checked(source::input("package", "src/main.glorious", __g1_text_as_bytes("struct Pair"), identity::digest_of_text("struct Pair"))))
+        + checked_lead_score(header::named_declaration_checked(source::input("package", "src/main.glorious", __g1_text_as_bytes("auto trait Marker"), identity::digest_of_text("auto trait Marker"))))
+        + checked_lead_score(header::named_declaration_checked(source::input("package", "src/main.glorious", __g1_text_as_bytes("host io fn read"), identity::digest_of_text("host io fn read"))))
+        + checked_lead_score(header::named_declaration_checked(source::input("package", "src/main.glorious", __g1_text_as_bytes("struct 7"), identity::digest_of_text("struct 7"))))
+        + sequence_score(header::declaration_sequence_checked(source::input("package", "src/all.glorious", __g1_text_as_bytes("use crate::a; pub struct Pair { value: i64 } fn main() -> Unit { () }"), identity::digest_of_text("use crate::a; pub struct Pair { value: i64 } fn main() -> Unit { () }"))))
+        + sequence_score(header::declaration_sequence_checked(source::input("package", "src/bad.glorious", __g1_text_as_bytes("fn main() -> Unit { ()"), identity::digest_of_text("fn main() -> Unit { ()"))))
+        + sequence_score(header::declaration_sequence_checked(source::input("package", "src/forged.glorious", __g1_text_as_bytes("mod nested;"), identity::digest_of_text("wrong"))))
+        + sequence_score(header::declaration_sequence_checked(source::input("package", "src/empty.glorious", __g1_text_as_bytes(""), identity::digest_of_text(""))))
+}
+
+pub fn checked_lead_score(value: header::SourceHeaderAdmission) -> i64 { handle value { header::SourceHeaderAdmission::Value(prefix) => score_lead(header::lead(prefix)), header::SourceHeaderAdmission::Unadmitted => 1, _ => 0 } }
+pub fn sequence_score(value: header::HeaderSequenceAdmission) -> i64 { handle value { header::HeaderSequenceAdmission::Value(count) => count, header::HeaderSequenceAdmission::Rejected => 10, header::HeaderSequenceAdmission::Unadmitted => 100, _ => 0 } }

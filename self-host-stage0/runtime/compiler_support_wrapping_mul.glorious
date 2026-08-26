@@ -1,0 +1,22 @@
+// Dedicated runtime fixture for the manifest-bound generic multiplication
+// probe. The production bootstrap support remains sealed to its canonical
+// primitive set, so adding a future leaf cannot silently weaken every check.
+pub fn branch_bool<T>(condition: Bool, on_true: () -> T, on_false: () -> T) -> T {
+    let ignored = on_true();
+    on_false()
+}
+pub fn __g1_blake3(value: Bytes) -> Bytes { () }
+pub fn __g1_text_as_bytes(value: Text) -> Bytes { () }
+pub fn __g1_bytes_len(value: Bytes) -> usize { () }
+pub fn __g1_bytes_get(value: Bytes, index: usize) -> u8 { () }
+pub fn __g1_bytes_slice(value: Bytes, start: usize, end: usize) -> Bytes { () }
+pub fn __g1_int_wrapping_add<T>(left: T, right: T) -> T { () }
+pub fn __g1_int_wrapping_mul<T>(left: T, right: T) -> T { () }
+pub fn __g1_int_checked_div<T>(left: T, right: T) -> T { () }
+pub fn __g1_text_eq(left: Text, right: Text) -> u32 { 0 }
+pub fn __g1_array_empty<T>() -> Array<T> { [] }
+pub fn __g1_array_pop_move<T>(value: &mut Array<T>) -> T { __g1_array_pop_move<T>(value) }
+
+pub fn text_eq(left: Text, right: Text) -> Bool {
+    __g1_text_eq(left, right) == 1
+}
