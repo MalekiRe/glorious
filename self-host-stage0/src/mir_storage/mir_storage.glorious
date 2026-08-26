@@ -1,11 +1,15 @@
 // M24 bootstrap storage slot lifecycle.  An unwritten slot and an explicitly
 // moved-out slot both contain no readable value, but retain different cleanup
 // provenance so later MIR storage events cannot infer a false initialization.
+use compiler_support::__g1_array_pop_move;
+
 pub enum Slot { Uninitialized, Value(i64), Moved }
 pub enum TakeResult { Value(i64), Empty }
 pub enum MoveResult { Value(i64, Slot), Empty(Slot) }
 pub enum CleanupResult { Dropped(i64), Skipped }
 pub enum ReplaceResult { Written(Slot), Replaced(i64, Slot) }
+pub enum FieldSlots { Empty, Node(Slot, Bool, Array<FieldSlots>) }
+pub enum FieldMoveResult { Value(i64, FieldSlots), Empty(FieldSlots), Missing }
 pub fn empty() -> Slot { Slot::Uninitialized }
 pub fn write(slot: Slot, value: i64) -> Slot { handle slot { Slot::Uninitialized => Slot::Value(value), Slot::Moved => Slot::Value(value), Slot::Value(_) => Slot::Value(value), _ => Slot::Value(value) } }
 pub fn take(slot: Slot) -> TakeResult { handle slot { Slot::Uninitialized => TakeResult::Empty, Slot::Moved => TakeResult::Empty, Slot::Value(value) => TakeResult::Value(value), _ => TakeResult::Empty } }
@@ -66,4 +70,86 @@ pub fn is_empty(slot: Slot) -> Bool {
 
 pub fn was_moved(slot: Slot) -> Bool {
     handle slot { Slot::Moved => true, Slot::Uninitialized => false, Slot::Value(_) => false, _ => false }
+}
+
+pub fn empty_fields() -> FieldSlots { FieldSlots::Empty }
+pub fn single_field(slot: Slot) -> FieldSlots { FieldSlots::Node(slot, false, []) }
+pub fn prepend_field(slot: Slot, tail: FieldSlots) -> FieldSlots { FieldSlots::Node(slot, true, [tail]) }
+
+// Field storage mirrors PlaceFlow's projection rule: moving one initialized
+// slot does not erase its siblings, but the returned aggregate records the
+// exact `Moved` post-state for that one selected field.
+pub fn move_field(value: FieldSlots, index: i64) -> FieldMoveResult {
+    handle index < 0 {
+        true => FieldMoveResult::Missing,
+        false => move_field_nonnegative(value, index),
+        _ => FieldMoveResult::Missing,
+    }
+}
+
+fn move_field_nonnegative(value: FieldSlots, index: i64) -> FieldMoveResult {
+    handle value {
+        FieldSlots::Empty => FieldMoveResult::Missing,
+        FieldSlots::Node(slot, has_tail, tail) => handle index == 0 {
+            true => move_field_head(move_out(slot), has_tail, tail),
+            false => move_field_tail(slot, has_tail, tail, index),
+            _ => FieldMoveResult::Missing,
+        },
+        _ => FieldMoveResult::Missing,
+    }
+}
+
+fn move_field_head(result: MoveResult, has_tail: Bool, tail: Array<FieldSlots>) -> FieldMoveResult {
+    handle result {
+        MoveResult::Value(value, post) => FieldMoveResult::Value(value, FieldSlots::Node(post, has_tail, tail)),
+        MoveResult::Empty(post) => FieldMoveResult::Empty(FieldSlots::Node(post, has_tail, tail)),
+        _ => FieldMoveResult::Missing,
+    }
+}
+
+fn move_field_tail(slot: Slot, has_tail: Bool, tail: Array<FieldSlots>, index: i64) -> FieldMoveResult {
+    handle has_tail {
+        true => rebuild_field_move(slot, move_field_nonnegative(__g1_array_pop_move<FieldSlots>(&mut tail), index - 1)),
+        false => FieldMoveResult::Missing,
+        _ => FieldMoveResult::Missing,
+    }
+}
+
+fn rebuild_field_move(slot: Slot, result: FieldMoveResult) -> FieldMoveResult {
+    handle result {
+        FieldMoveResult::Value(value, tail) => FieldMoveResult::Value(value, FieldSlots::Node(slot, true, [tail])),
+        FieldMoveResult::Empty(tail) => FieldMoveResult::Empty(FieldSlots::Node(slot, true, [tail])),
+        FieldMoveResult::Missing => FieldMoveResult::Missing,
+        _ => FieldMoveResult::Missing,
+    }
+}
+
+// Assignment reinitializes exactly one selected field. An invalid projection
+// preserves the aggregate rather than appending an invented slot.
+pub fn write_field(value: FieldSlots, index: i64, replacement: i64) -> FieldSlots {
+    handle index < 0 {
+        true => value,
+        false => write_field_nonnegative(value, index, replacement),
+        _ => value,
+    }
+}
+
+fn write_field_nonnegative(value: FieldSlots, index: i64, replacement: i64) -> FieldSlots {
+    handle value {
+        FieldSlots::Empty => FieldSlots::Empty,
+        FieldSlots::Node(slot, has_tail, tail) => handle index == 0 {
+            true => FieldSlots::Node(write(slot, replacement), has_tail, tail),
+            false => write_field_tail(slot, has_tail, tail, index, replacement),
+            _ => FieldSlots::Node(slot, has_tail, tail),
+        },
+        _ => FieldSlots::Empty,
+    }
+}
+
+fn write_field_tail(slot: Slot, has_tail: Bool, tail: Array<FieldSlots>, index: i64, replacement: i64) -> FieldSlots {
+    handle has_tail {
+        true => FieldSlots::Node(slot, true, [write_field_nonnegative(__g1_array_pop_move<FieldSlots>(&mut tail), index - 1, replacement)]),
+        false => FieldSlots::Node(slot, false, tail),
+        _ => FieldSlots::Node(slot, has_tail, tail),
+    }
 }

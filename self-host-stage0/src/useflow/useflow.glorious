@@ -4,6 +4,8 @@
 use compiler_support::branch_bool;
 use placeflow::PlaceState;
 use placeflow::can_read;
+use placeflow::FieldStates;
+use placeflow::can_read_field;
 pub enum UseUpper { Finite(i64), Infinite }
 pub struct UseState { lower: i64, upper: UseUpper }
 pub enum ConsumeResult { Value(UseState), Exhausted }
@@ -53,6 +55,15 @@ pub fn consume(state: UseState) -> ConsumeResult {
 // moved callable as independently invocable.
 pub fn consume_from_place(place: PlaceState, state: UseState) -> PlaceConsume {
     branch_bool(can_read(place),
+        () -> PlaceConsume { consume_readable(state) },
+        () -> PlaceConsume { PlaceConsume::PlaceUnavailable })
+}
+
+// Quantitative capability follows the selected frozen projection. A live
+// sibling cannot make a moved field callable again merely because both share
+// one aggregate root.
+pub fn consume_from_field(place: FieldStates, index: i64, state: UseState) -> PlaceConsume {
+    branch_bool(can_read_field(place, index),
         () -> PlaceConsume { consume_readable(state) },
         () -> PlaceConsume { PlaceConsume::PlaceUnavailable })
 }

@@ -1,6 +1,9 @@
 use escape_library::escape; use escape_library::placeflow;
 pub fn score(value: escape::EscapeResult) -> i64 { handle value { escape::EscapeResult::Allowed => 1, escape::EscapeResult::Rejected => 0, _ => 0 } }
 pub fn rejection_score(value: escape::EscapeResult) -> i64 { handle value { escape::EscapeResult::Allowed => 0, escape::EscapeResult::Rejected => 1, _ => 0 } }
+pub fn moved_field_escape(value: placeflow::FieldMoveAdmission) -> escape::EscapeResult { handle value { placeflow::FieldMoveAdmission::Value(fields) => escape::return_fields(fields), _ => escape::EscapeResult::Rejected } }
+pub fn available_fields() -> placeflow::FieldStates { placeflow::prepend_field(placeflow::available(), placeflow::prepend_field(placeflow::available(), placeflow::single_field(placeflow::available()))) }
+pub fn external_reference_fields() -> escape::ReferenceFields { escape::prepend_reference_field(escape::ReferenceOrigin::ExternalBorrow, escape::prepend_reference_field(escape::ReferenceOrigin::Owned, escape::single_reference_field(escape::ReferenceOrigin::ExternalBorrow))) }
 pub fn main() -> i64 {
     score(escape::return_place(placeflow::available()))
         + score(escape::return_place(placeflow::move_out(placeflow::available())))
@@ -37,4 +40,16 @@ pub fn main() -> i64 {
         + score(escape::store_reference(escape::second_reference(escape::replace_first(
             escape::reference_pair(escape::ReferenceOrigin::ExternalBorrow, escape::ReferenceOrigin::Owned),
             escape::ReferenceOrigin::LocalBorrow))))
+        + score(escape::return_fields(available_fields()))
+        + rejection_score(moved_field_escape(placeflow::move_field_checked(available_fields(), 1)))
+        + rejection_score(escape::store_fields(placeflow::prepend_field(placeflow::borrow_shared(placeflow::available()), placeflow::single_field(placeflow::available()))))
+        + score(escape::return_reference_fields(external_reference_fields()))
+        + rejection_score(escape::store_reference_fields(escape::prepend_reference_field(
+            escape::ReferenceOrigin::ExternalBorrow,
+            escape::single_reference_field(escape::ReferenceOrigin::LocalBorrow))))
+        + rejection_score(escape::return_reference_fields(escape::replace_reference_field(
+            external_reference_fields(),
+            1,
+            escape::ReferenceOrigin::LocalBorrow)))
+        + score(escape::return_reference(escape::reference_field(external_reference_fields(), 2)))
 }

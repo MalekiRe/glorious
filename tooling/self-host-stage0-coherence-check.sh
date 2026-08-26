@@ -31,8 +31,8 @@ output="$("$compiler" \
     --runtime-leaf array-empty crate __g1_array_empty --runtime-leaf array-len crate __g1_array_len --runtime-leaf array-get-move crate __g1_array_get_move \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
-[[ "$output" == "19" ]] || {
-    echo "self-host coherence check: expected concrete and generic-Self same-trait overlap with mixed-kind trait-argument identity and orphan admission, including polarity conflicts, got $output" >&2
+[[ "$output" == "24" ]] || {
+    echo "self-host coherence check: expected type/lifetime generic trait-head unification with repeated-parameter rejection, concrete and generic-Self same-trait overlap with mixed-kind trait-argument identity and orphan admission, including polarity conflicts, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"

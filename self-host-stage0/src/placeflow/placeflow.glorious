@@ -1,5 +1,7 @@
 // M21 bootstrap place state. Projection paths, unique loans, and cleanup
 // later enrich this source-owned available/shared-borrowed/moved transition.
+use compiler_support::__g1_array_pop_move;
+
 pub enum PlaceState { Available, SharedBorrowed, UniqueBorrowed, Moved }
 pub enum ArgumentMode { Move, Borrow, UniqueBorrow }
 pub enum CallAdmission { Value(PlaceState), Rejected }
@@ -11,6 +13,26 @@ pub enum MoveAdmission { Value(PlaceState), BorrowConflict, AlreadyMoved }
 // both fields to be available.
 pub struct PairPlaceState { first: PlaceState, second: PlaceState }
 pub enum PairMoveAdmission { Value(PairPlaceState), BorrowConflict, AlreadyMoved }
+
+// A source aggregate is not intrinsically a pair. This persistent field list
+// carries an arbitrary number of independently tracked immediate projections;
+// recursive/nested paths will reuse this same representation at each level.
+pub enum FieldStates {
+    Empty,
+    Node(PlaceState, Bool, Array<FieldStates>),
+}
+
+pub enum FieldMoveAdmission {
+    Value(FieldStates),
+    Missing,
+    BorrowConflict,
+    AlreadyMoved,
+}
+
+pub enum FieldJoin {
+    Value(FieldStates),
+    ShapeMismatch,
+}
 
 pub fn available() -> PlaceState { PlaceState::Available }
 pub fn move_out(state: PlaceState) -> PlaceState { handle state { PlaceState::Available => PlaceState::Moved, PlaceState::SharedBorrowed => PlaceState::SharedBorrowed, PlaceState::UniqueBorrowed => PlaceState::UniqueBorrowed, PlaceState::Moved => PlaceState::Moved, _ => PlaceState::Moved } }
@@ -37,6 +59,184 @@ pub fn can_read(state: PlaceState) -> Bool { handle state { PlaceState::Availabl
 // boundary is not. EscapeFlow consumes this stronger predicate rather than
 // mistaking loan readability for ownership availability.
 pub fn can_escape_owned(state: PlaceState) -> Bool { handle state { PlaceState::Available => true, PlaceState::SharedBorrowed => false, PlaceState::UniqueBorrowed => false, PlaceState::Moved => false, _ => false } }
+
+pub fn empty_fields() -> FieldStates { FieldStates::Empty }
+
+pub fn single_field(state: PlaceState) -> FieldStates {
+    FieldStates::Node(state, false, [])
+}
+
+pub fn prepend_field(state: PlaceState, tail: FieldStates) -> FieldStates {
+    FieldStates::Node(state, true, [tail])
+}
+
+pub fn can_read_field(value: FieldStates, index: i64) -> Bool {
+    handle index < 0 {
+        true => discard_fields(value),
+        false => can_read_field_nonnegative(value, index),
+        _ => false,
+    }
+}
+
+fn can_read_field_nonnegative(value: FieldStates, index: i64) -> Bool {
+    handle value {
+        FieldStates::Empty => false,
+        FieldStates::Node(state, has_tail, tail) => handle index == 0 {
+            true => can_read(state),
+            false => handle has_tail {
+                true => can_read_field_nonnegative(__g1_array_pop_move<FieldStates>(&mut tail), index - 1),
+                false => false,
+                _ => false,
+            },
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// A partial move changes only the selected immediate projection. All other
+// fields remain in the returned persistent state, so a later root escape can
+// still observe the moved child instead of accidentally reconstituting it.
+pub fn move_field_checked(value: FieldStates, index: i64) -> FieldMoveAdmission {
+    handle index < 0 {
+        true => missing_after_discard(discard_fields(value)),
+        false => move_field_nonnegative(value, index),
+        _ => FieldMoveAdmission::Missing,
+    }
+}
+
+fn missing_after_discard(_: Bool) -> FieldMoveAdmission { FieldMoveAdmission::Missing }
+
+fn move_field_nonnegative(value: FieldStates, index: i64) -> FieldMoveAdmission {
+    handle value {
+        FieldStates::Empty => FieldMoveAdmission::Missing,
+        FieldStates::Node(state, has_tail, tail) => handle index == 0 {
+            true => move_field_head(state, has_tail, tail),
+            false => move_field_tail(state, has_tail, tail, index),
+            _ => FieldMoveAdmission::Missing,
+        },
+        _ => FieldMoveAdmission::Missing,
+    }
+}
+
+fn move_field_head(state: PlaceState, has_tail: Bool, tail: Array<FieldStates>) -> FieldMoveAdmission {
+    handle move_checked(state) {
+        MoveAdmission::Value(next) => FieldMoveAdmission::Value(FieldStates::Node(next, has_tail, tail)),
+        MoveAdmission::BorrowConflict => conflict_after_discard(has_tail, tail),
+        MoveAdmission::AlreadyMoved => moved_after_discard(has_tail, tail),
+        _ => FieldMoveAdmission::AlreadyMoved,
+    }
+}
+
+fn move_field_tail(state: PlaceState, has_tail: Bool, tail: Array<FieldStates>, index: i64) -> FieldMoveAdmission {
+    handle has_tail {
+        true => rebuild_field_move(state, move_field_nonnegative(__g1_array_pop_move<FieldStates>(&mut tail), index - 1)),
+        false => FieldMoveAdmission::Missing,
+        _ => FieldMoveAdmission::Missing,
+    }
+}
+
+fn rebuild_field_move(state: PlaceState, result: FieldMoveAdmission) -> FieldMoveAdmission {
+    handle result {
+        FieldMoveAdmission::Value(tail) => FieldMoveAdmission::Value(FieldStates::Node(state, true, [tail])),
+        FieldMoveAdmission::Missing => FieldMoveAdmission::Missing,
+        FieldMoveAdmission::BorrowConflict => FieldMoveAdmission::BorrowConflict,
+        FieldMoveAdmission::AlreadyMoved => FieldMoveAdmission::AlreadyMoved,
+        _ => FieldMoveAdmission::Missing,
+    }
+}
+
+fn conflict_after_discard(has_tail: Bool, tail: Array<FieldStates>) -> FieldMoveAdmission {
+    handle has_tail {
+        true => conflict_after_discard_tail(discard_fields(__g1_array_pop_move<FieldStates>(&mut tail))),
+        false => FieldMoveAdmission::BorrowConflict,
+        _ => FieldMoveAdmission::BorrowConflict,
+    }
+}
+
+fn conflict_after_discard_tail(_: Bool) -> FieldMoveAdmission { FieldMoveAdmission::BorrowConflict }
+
+fn moved_after_discard(has_tail: Bool, tail: Array<FieldStates>) -> FieldMoveAdmission {
+    handle has_tail {
+        true => moved_after_discard_tail(discard_fields(__g1_array_pop_move<FieldStates>(&mut tail))),
+        false => FieldMoveAdmission::AlreadyMoved,
+        _ => FieldMoveAdmission::AlreadyMoved,
+    }
+}
+
+fn moved_after_discard_tail(_: Bool) -> FieldMoveAdmission { FieldMoveAdmission::AlreadyMoved }
+
+pub fn can_escape_fields_owned(value: FieldStates) -> Bool {
+    handle value {
+        FieldStates::Empty => true,
+        FieldStates::Node(state, has_tail, tail) => handle can_escape_owned(state) {
+            true => handle has_tail {
+                true => can_escape_fields_owned(__g1_array_pop_move<FieldStates>(&mut tail)),
+                false => true,
+                _ => false,
+            },
+            false => discard_field_tail_for_escape(has_tail, tail),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn discard_field_tail_for_escape(has_tail: Bool, tail: Array<FieldStates>) -> Bool {
+    handle has_tail {
+        true => discard_fields(__g1_array_pop_move<FieldStates>(&mut tail)),
+        false => false,
+        _ => false,
+    }
+}
+
+fn discard_fields(value: FieldStates) -> Bool {
+    handle value {
+        FieldStates::Empty => false,
+        FieldStates::Node(_, has_tail, tail) => handle has_tail {
+            true => discard_fields(__g1_array_pop_move<FieldStates>(&mut tail)),
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+// A branch merge is field-wise, not aggregate-wise: moving `.1` along one
+// predecessor must not poison `.2`, but it must make `.1` unavailable after
+// the join. Differing aggregate shapes are rejected rather than guessed from
+// list length or silently truncating a source projection path.
+pub fn join_fields(left: FieldStates, right: FieldStates) -> FieldJoin {
+    handle (left, right) {
+        (FieldStates::Empty, FieldStates::Empty) => FieldJoin::Value(FieldStates::Empty),
+        (FieldStates::Node(left_state, left_has_tail, left_tail), FieldStates::Node(right_state, right_has_tail, right_tail)) => join_field_nodes(left_state, left_has_tail, left_tail, right_state, right_has_tail, right_tail),
+        _ => FieldJoin::ShapeMismatch,
+    }
+}
+
+fn join_field_nodes(left_state: PlaceState, left_has_tail: Bool, left_tail: Array<FieldStates>, right_state: PlaceState, right_has_tail: Bool, right_tail: Array<FieldStates>) -> FieldJoin {
+    handle (left_has_tail, right_has_tail) {
+        (false, false) => FieldJoin::Value(FieldStates::Node(join(left_state, right_state), false, [])),
+        (true, true) => rebuild_field_join(join(left_state, right_state), join_fields(__g1_array_pop_move<FieldStates>(&mut left_tail), __g1_array_pop_move<FieldStates>(&mut right_tail))),
+        (true, false) => shape_mismatch_after_discard_tail(left_tail),
+        (false, true) => shape_mismatch_after_discard_tail(right_tail),
+        _ => FieldJoin::ShapeMismatch,
+    }
+}
+
+fn rebuild_field_join(state: PlaceState, joined: FieldJoin) -> FieldJoin {
+    handle joined {
+        FieldJoin::Value(tail) => FieldJoin::Value(FieldStates::Node(state, true, [tail])),
+        FieldJoin::ShapeMismatch => FieldJoin::ShapeMismatch,
+        _ => FieldJoin::ShapeMismatch,
+    }
+}
+
+fn shape_mismatch_after_discard_tail(tail: Array<FieldStates>) -> FieldJoin {
+    shape_mismatch_after_discard(discard_fields(__g1_array_pop_move<FieldStates>(&mut tail)))
+}
+
+fn shape_mismatch_after_discard(_: Bool) -> FieldJoin { FieldJoin::ShapeMismatch }
 
 pub fn pair(first: PlaceState, second: PlaceState) -> PairPlaceState {
     PairPlaceState { first: first, second: second }

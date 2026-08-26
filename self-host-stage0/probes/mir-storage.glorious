@@ -16,6 +16,11 @@ pub fn score_move(value: mir_storage::MoveResult) -> i64 {
         _ => 0,
     }
 }
+pub fn field_slots() -> mir_storage::FieldSlots { mir_storage::prepend_field(mir_storage::write(mir_storage::empty(), 3), mir_storage::prepend_field(mir_storage::write(mir_storage::empty(), 5), mir_storage::single_field(mir_storage::write(mir_storage::empty(), 7)))) }
+pub fn score_field_move(value: mir_storage::FieldMoveResult) -> i64 { handle value { mir_storage::FieldMoveResult::Value(value, _) => value, mir_storage::FieldMoveResult::Empty(_) => 0, mir_storage::FieldMoveResult::Missing => 0, _ => 0 } }
+pub fn score_field_empty(value: mir_storage::FieldMoveResult) -> i64 { handle value { mir_storage::FieldMoveResult::Empty(_) => 1, _ => 0 } }
+pub fn move_field_again(value: mir_storage::FieldMoveResult, index: i64) -> mir_storage::FieldMoveResult { handle value { mir_storage::FieldMoveResult::Value(_, fields) => mir_storage::move_field(fields, index), mir_storage::FieldMoveResult::Empty(fields) => mir_storage::move_field(fields, index), mir_storage::FieldMoveResult::Missing => mir_storage::FieldMoveResult::Missing, _ => mir_storage::FieldMoveResult::Missing } }
+pub fn write_after_field_move(value: mir_storage::FieldMoveResult, index: i64, replacement: i64) -> mir_storage::FieldSlots { handle value { mir_storage::FieldMoveResult::Value(_, fields) => mir_storage::write_field(fields, index, replacement), mir_storage::FieldMoveResult::Empty(fields) => mir_storage::write_field(fields, index, replacement), mir_storage::FieldMoveResult::Missing => mir_storage::empty_fields(), _ => mir_storage::empty_fields() } }
 pub fn main() -> i64 {
     score(mir_storage::take(mir_storage::write(mir_storage::empty(), 7)))
         + score(mir_storage::take(mir_storage::empty()))
@@ -30,4 +35,8 @@ pub fn main() -> i64 {
         + score_cleanup(mir_storage::cleanup(mir_storage::Slot::Moved))
         + score_replace(mir_storage::replace(mir_storage::empty(), 3))
         + score_replace(mir_storage::replace(mir_storage::write(mir_storage::empty(), 5), 9))
+        + score_field_move(mir_storage::move_field(field_slots(), 1))
+        + score_field_move(move_field_again(mir_storage::move_field(field_slots(), 1), 2))
+        + score_field_move(mir_storage::move_field(write_after_field_move(mir_storage::move_field(field_slots(), 1), 1, 9), 1))
+        + score_field_empty(move_field_again(mir_storage::move_field(field_slots(), 1), 1))
 }

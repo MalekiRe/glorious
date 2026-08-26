@@ -46,6 +46,9 @@ use types::Type;
 use mir_storage::Slot;
 use mir_storage::MoveResult;
 use mir_storage::move_out;
+use mir_storage::FieldSlots;
+use mir_storage::FieldMoveResult;
+use mir_storage::move_field;
 pub enum Terminator { Return, ParameterReturn, BooleanReturn, ArithmeticReturn, ComparisonReturn, ConditionalReturn, CallReturn, PatternReturn, Trap }
 
 // These compact validators preserve the two invariants which make operation
@@ -281,6 +284,11 @@ pub enum StorageLowering {
     Trap(Slot),
 }
 
+pub enum FieldStorageLowering {
+    ReturnValue(i64, FieldSlots),
+    Trap(FieldSlots),
+}
+
 pub fn lower_move(slot: Slot) -> StorageLowering {
     lower_move_result(move_out(slot))
 }
@@ -290,5 +298,21 @@ fn lower_move_result(result: MoveResult) -> StorageLowering {
         MoveResult::Value(value, post_move) => StorageLowering::ReturnValue(value, post_move),
         MoveResult::Empty(slot) => StorageLowering::Trap(slot),
         _ => StorageLowering::Trap(Slot::Uninitialized),
+    }
+}
+
+// Field storage follows the same MIR post-state rule as a root move.  The
+// aggregate is retained on both normal and trap edges so later cleanup sees
+// the selected `Moved` slot and all untouched siblings exactly once.
+pub fn lower_move_field(fields: FieldSlots, index: i64) -> FieldStorageLowering {
+    lower_move_field_result(move_field(fields, index))
+}
+
+fn lower_move_field_result(result: FieldMoveResult) -> FieldStorageLowering {
+    handle result {
+        FieldMoveResult::Value(value, post_move) => FieldStorageLowering::ReturnValue(value, post_move),
+        FieldMoveResult::Empty(post_move) => FieldStorageLowering::Trap(post_move),
+        FieldMoveResult::Missing => FieldStorageLowering::Trap(FieldSlots::Empty),
+        _ => FieldStorageLowering::Trap(FieldSlots::Empty),
     }
 }

@@ -1,8 +1,11 @@
 // M23 bootstrap escape admission.  Provenance is kept distinct from place
 // liveness: caller-owned references may cross a boundary, body-local loans
 // may not, and ordinary owned values carry no borrow obligation.
+use compiler_support::__g1_array_pop_move;
 use placeflow::PlaceState;
+use placeflow::FieldStates;
 use placeflow::can_escape_owned;
+use placeflow::can_escape_fields_owned;
 use placeflow::can_read;
 pub enum EscapeResult { Allowed, Rejected }
 pub enum ReferenceOrigin { Owned, ExternalBorrow, LocalBorrow }
@@ -17,8 +20,27 @@ pub enum ReferenceValue {
     Pair(ReferenceOrigin, ReferenceOrigin),
 }
 
+// The pair form above remains the compact compatibility surface for existing
+// Core tuples. Arbitrary records use this persistent sequence: every field
+// keeps its own borrow provenance through selection and replacement.
+pub enum ReferenceFields {
+    Empty,
+    Node(ReferenceOrigin, Bool, Array<ReferenceFields>),
+}
+
 pub fn return_place(state: PlaceState) -> EscapeResult {
     handle can_escape_owned(state) { true => EscapeResult::Allowed, false => EscapeResult::Rejected, _ => EscapeResult::Rejected }
+}
+
+// Aggregate ownership must cross the same boundary as a root place.  This
+// consumes the arbitrary-field PlaceFlow state, so a single moved or borrowed
+// projection cannot be hidden by rebuilding a wider value at return/store.
+pub fn return_fields(value: FieldStates) -> EscapeResult {
+    handle can_escape_fields_owned(value) { true => EscapeResult::Allowed, false => EscapeResult::Rejected, _ => EscapeResult::Rejected }
+}
+
+pub fn store_fields(value: FieldStates) -> EscapeResult {
+    return_fields(value)
 }
 
 pub fn return_reference(origin: ReferenceOrigin) -> EscapeResult {
@@ -31,6 +53,84 @@ pub fn reference_value(origin: ReferenceOrigin) -> ReferenceValue {
 
 pub fn reference_pair(first: ReferenceOrigin, second: ReferenceOrigin) -> ReferenceValue {
     ReferenceValue::Pair(first, second)
+}
+
+pub fn empty_reference_fields() -> ReferenceFields { ReferenceFields::Empty }
+
+pub fn single_reference_field(origin: ReferenceOrigin) -> ReferenceFields {
+    ReferenceFields::Node(origin, false, [])
+}
+
+pub fn prepend_reference_field(origin: ReferenceOrigin, tail: ReferenceFields) -> ReferenceFields {
+    ReferenceFields::Node(origin, true, [tail])
+}
+
+pub fn return_reference_fields(value: ReferenceFields) -> EscapeResult {
+    reference_fields_boundary(value)
+}
+
+pub fn store_reference_fields(value: ReferenceFields) -> EscapeResult {
+    reference_fields_boundary(value)
+}
+
+// Missing projections fail closed as local provenance. This makes an invalid
+// path unable to manufacture an external reference simply by indexing past a
+// record's final field.
+pub fn reference_field(value: ReferenceFields, index: i64) -> ReferenceOrigin {
+    handle index < 0 {
+        true => local_after_discard_fields(discard_reference_fields(value)),
+        false => reference_field_nonnegative(value, index),
+        _ => ReferenceOrigin::LocalBorrow,
+    }
+}
+
+fn local_after_discard_fields(_: Bool) -> ReferenceOrigin { ReferenceOrigin::LocalBorrow }
+
+fn reference_field_nonnegative(value: ReferenceFields, index: i64) -> ReferenceOrigin {
+    handle value {
+        ReferenceFields::Empty => ReferenceOrigin::LocalBorrow,
+        ReferenceFields::Node(origin, has_tail, tail) => handle index == 0 {
+            true => origin,
+            false => handle has_tail {
+                true => reference_field_nonnegative(__g1_array_pop_move<ReferenceFields>(&mut tail), index - 1),
+                false => ReferenceOrigin::LocalBorrow,
+                _ => ReferenceOrigin::LocalBorrow,
+            },
+            _ => ReferenceOrigin::LocalBorrow,
+        },
+        _ => ReferenceOrigin::LocalBorrow,
+    }
+}
+
+// Replacing an invalid path preserves the original aggregate; it does not
+// create a synthetic field. Valid replacement rebuilds only the selected
+// path, preserving every sibling's independent provenance.
+pub fn replace_reference_field(value: ReferenceFields, index: i64, replacement: ReferenceOrigin) -> ReferenceFields {
+    handle index < 0 {
+        true => value,
+        false => replace_reference_field_nonnegative(value, index, replacement),
+        _ => value,
+    }
+}
+
+fn replace_reference_field_nonnegative(value: ReferenceFields, index: i64, replacement: ReferenceOrigin) -> ReferenceFields {
+    handle value {
+        ReferenceFields::Empty => ReferenceFields::Empty,
+        ReferenceFields::Node(origin, has_tail, tail) => handle index == 0 {
+            true => ReferenceFields::Node(replacement, has_tail, tail),
+            false => replace_reference_field_tail(origin, has_tail, tail, index, replacement),
+            _ => ReferenceFields::Node(origin, has_tail, tail),
+        },
+        _ => ReferenceFields::Empty,
+    }
+}
+
+fn replace_reference_field_tail(origin: ReferenceOrigin, has_tail: Bool, tail: Array<ReferenceFields>, index: i64, replacement: ReferenceOrigin) -> ReferenceFields {
+    handle has_tail {
+        true => ReferenceFields::Node(origin, true, [replace_reference_field_nonnegative(__g1_array_pop_move<ReferenceFields>(&mut tail), index - 1, replacement)]),
+        false => ReferenceFields::Node(origin, false, tail),
+        _ => ReferenceFields::Node(origin, has_tail, tail),
+    }
 }
 
 pub fn return_value(value: ReferenceValue) -> EscapeResult {
@@ -111,6 +211,44 @@ fn pair_boundary(first: ReferenceOrigin, second: ReferenceOrigin) -> EscapeResul
         EscapeResult::Allowed => boundary(second),
         EscapeResult::Rejected => discard_origin(second),
         _ => EscapeResult::Rejected,
+    }
+}
+
+fn reference_fields_boundary(value: ReferenceFields) -> EscapeResult {
+    handle value {
+        ReferenceFields::Empty => EscapeResult::Allowed,
+        ReferenceFields::Node(origin, has_tail, tail) => handle boundary(origin) {
+            EscapeResult::Allowed => handle has_tail {
+                true => reference_fields_boundary(__g1_array_pop_move<ReferenceFields>(&mut tail)),
+                false => EscapeResult::Allowed,
+                _ => EscapeResult::Rejected,
+            },
+            EscapeResult::Rejected => reject_after_discard_fields(has_tail, tail),
+            _ => EscapeResult::Rejected,
+        },
+        _ => EscapeResult::Rejected,
+    }
+}
+
+fn reject_after_discard_fields(has_tail: Bool, tail: Array<ReferenceFields>) -> EscapeResult {
+    handle has_tail {
+        true => reject_after_discard_field_tail(discard_reference_fields(__g1_array_pop_move<ReferenceFields>(&mut tail))),
+        false => EscapeResult::Rejected,
+        _ => EscapeResult::Rejected,
+    }
+}
+
+fn reject_after_discard_field_tail(_: Bool) -> EscapeResult { EscapeResult::Rejected }
+
+fn discard_reference_fields(value: ReferenceFields) -> Bool {
+    handle value {
+        ReferenceFields::Empty => true,
+        ReferenceFields::Node(_, has_tail, tail) => handle has_tail {
+            true => discard_reference_fields(__g1_array_pop_move<ReferenceFields>(&mut tail)),
+            false => true,
+            _ => false,
+        },
+        _ => false,
     }
 }
 

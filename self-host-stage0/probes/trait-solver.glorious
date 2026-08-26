@@ -188,4 +188,66 @@ pub fn main() -> i64 {
                 trait_solver::single_candidate(
                     trait_solver::implementation("Other", types::Type::I64),
                     trait_solver::goal("Other", types::Type::U8)))))
+        + score(trait_solver::solve(
+            trait_solver::generic_implementation_with_arguments(
+                72,
+                "Convert",
+                coherence::single_trait_argument(types::type_argument(types::Type::Generic(1)))),
+            trait_solver::goal_with_arguments(
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::I64)))))
+        + unsatisfied_score(trait_solver::solve(
+            trait_solver::generic_implementation_with_arguments(
+                73,
+                "Pair",
+                coherence::prepend_trait_argument(
+                    types::type_argument(types::Type::Generic(2)),
+                    coherence::single_trait_argument(types::type_argument(types::Type::Generic(2))))),
+            trait_solver::goal_with_arguments(
+                "Pair",
+                types::Type::I64,
+                coherence::prepend_trait_argument(
+                    types::type_argument(types::Type::I64),
+                    coherence::single_trait_argument(types::type_argument(types::Type::U64))))))
+        + score(trait_solver::solve(
+            trait_solver::generic_implementation_with_arguments(
+                74,
+                "Mirror",
+                coherence::single_trait_argument(types::type_argument(types::Type::Generic(0)))),
+            trait_solver::goal_with_arguments(
+                "Mirror",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::I64)))))
+        + unsatisfied_score(trait_solver::solve(
+            trait_solver::generic_implementation_with_arguments(
+                75,
+                "Mirror",
+                coherence::single_trait_argument(types::type_argument(types::Type::Generic(0)))),
+            trait_solver::goal_with_arguments(
+                "Mirror",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::U64)))))
+        + score(trait_solver::solve(
+            trait_solver::generic_implementation_with_arguments(
+                76,
+                "Region",
+                coherence::single_trait_argument(types::lifetime_argument(types::Lifetime::Generic(8)))),
+            trait_solver::goal_with_arguments(
+                "Region",
+                types::Type::I64,
+                coherence::single_trait_argument(types::lifetime_argument(types::Lifetime::Static)))))
+        + unsatisfied_score(trait_solver::solve(
+            trait_solver::generic_implementation_with_arguments(
+                77,
+                "SameRegion",
+                coherence::prepend_trait_argument(
+                    types::lifetime_argument(types::Lifetime::Generic(9)),
+                    coherence::single_trait_argument(types::lifetime_argument(types::Lifetime::Generic(9))))),
+            trait_solver::goal_with_arguments(
+                "SameRegion",
+                types::Type::I64,
+                coherence::prepend_trait_argument(
+                    types::lifetime_argument(types::Lifetime::Static),
+                    coherence::single_trait_argument(types::lifetime_argument(types::Lifetime::Elided))))))
 }

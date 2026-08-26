@@ -6,6 +6,9 @@ use compiler_support::text_eq;
 use compiler_support::__g1_array_pop_move;
 use types::Type;
 use types::same;
+use types::GenericArgument;
+use types::same_generic_argument;
+use types::Lifetime;
 use coherence::ImplementationPolarity;
 use coherence::TraitArguments;
 use coherence::empty_trait_arguments;
@@ -52,6 +55,33 @@ pub enum Answer {
     // Resource exhaustion is distinct from an ordinary absent candidate.
     // Callers must not cache a partial candidate scan as a negative answer.
     Overflow,
+}
+
+// Rule-head variables are not inference variables: they are rigidly owned by
+// one implementation declaration and acquire a value only while that rule is
+// matched against one goal.  Keep their bindings in a persistent chain so a
+// repeated parameter is checked against its first occurrence rather than
+// independently accepting every argument.  This is the source counterpart of
+// stage0's implementation substitution environment.
+pub enum GenericBindings {
+    Empty,
+    Binding(i64, Type, Bool, Array<GenericBindings>),
+    LifetimeBinding(i64, Lifetime, Bool, Array<GenericBindings>),
+}
+
+pub enum GenericBindingLookup {
+    Found(Type, GenericBindings),
+    Missing(GenericBindings),
+}
+
+pub enum GenericLifetimeBindingLookup {
+    Found(Lifetime, GenericBindings),
+    Missing(GenericBindings),
+}
+
+pub enum GenericMatch {
+    Matched(GenericBindings),
+    Mismatched,
 }
 
 pub fn implementation(trait_name: Text, self_type: Type) -> Implementation {
@@ -157,17 +187,250 @@ fn solve_goal_parts(
     requested_arguments: TraitArguments,
 ) -> Answer {
     handle text_eq(candidate_trait, requested_trait) {
-        true => solve_same_trait_arguments(evidence, candidate_type, candidate_arguments, polarity, generic_self, requested_type, requested_arguments),
+        true => solve_candidate_head(evidence, candidate_type, candidate_arguments, polarity, generic_self, requested_type, requested_arguments),
         false => Answer::Unsatisfied,
         _ => Answer::Unsatisfied,
     }
 }
 
-fn solve_same_trait_arguments(evidence: i64, candidate_type: Type, candidate_arguments: TraitArguments, polarity: ImplementationPolarity, generic_self: Bool, requested_type: Type, requested_arguments: TraitArguments) -> Answer {
-    handle same_trait_arguments(candidate_arguments, requested_arguments) {
-        true => solve_same_trait_parts(evidence, candidate_type, polarity, generic_self, requested_type),
-        false => Answer::Unsatisfied,
+fn solve_candidate_head(evidence: i64, candidate_type: Type, candidate_arguments: TraitArguments, polarity: ImplementationPolarity, generic_self: Bool, requested_type: Type, requested_arguments: TraitArguments) -> Answer {
+    handle match_candidate_self(candidate_type, generic_self, requested_type, GenericBindings::Empty) {
+        GenericMatch::Matched(bindings) => solve_candidate_arguments(evidence, candidate_arguments, polarity, requested_arguments, bindings),
+        GenericMatch::Mismatched => Answer::Unsatisfied,
         _ => Answer::Unsatisfied,
+    }
+}
+
+fn match_candidate_self(candidate_type: Type, generic_self: Bool, requested_type: Type, bindings: GenericBindings) -> GenericMatch {
+    handle generic_self {
+        true => match_template_type(Type::Generic(0), requested_type, bindings),
+        false => match_template_type(candidate_type, requested_type, bindings),
+        _ => GenericMatch::Mismatched,
+    }
+}
+
+fn solve_candidate_arguments(evidence: i64, candidate_arguments: TraitArguments, polarity: ImplementationPolarity, requested_arguments: TraitArguments, bindings: GenericBindings) -> Answer {
+    handle match_trait_arguments(candidate_arguments, requested_arguments, bindings) {
+        GenericMatch::Matched(_) => answer_for_polarity(polarity, evidence),
+        GenericMatch::Mismatched => Answer::Unsatisfied,
+        _ => Answer::Unsatisfied,
+    }
+}
+
+// Only a direct `Type::Generic` can occur in this compact source head at the
+// moment.  Nested nominal/array terms remain arena-addressed and are added
+// with their structural matcher; they must not be treated as wildcard handles
+// here.  All non-binder terms retain exact M14 identity.
+fn match_template_type(template: Type, actual: Type, bindings: GenericBindings) -> GenericMatch {
+    handle template {
+        Type::Generic(index) => bind_generic_type(bindings, index, actual),
+        value => handle same(value, actual) {
+            true => GenericMatch::Matched(bindings),
+            false => GenericMatch::Mismatched,
+            _ => GenericMatch::Mismatched,
+        },
+    }
+}
+
+fn match_trait_arguments(template: TraitArguments, actual: TraitArguments, bindings: GenericBindings) -> GenericMatch {
+    handle (template, actual) {
+        (TraitArguments::Empty, TraitArguments::Empty) => GenericMatch::Matched(bindings),
+        (TraitArguments::Node(template_value, template_has_tail, template_tail), TraitArguments::Node(actual_value, actual_has_tail, actual_tail)) => match_trait_argument_node(template_value, template_has_tail, template_tail, actual_value, actual_has_tail, actual_tail, bindings),
+        _ => GenericMatch::Mismatched,
+    }
+}
+
+fn match_trait_argument_node(template_value: GenericArgument, template_has_tail: Bool, template_tail: Array<TraitArguments>, actual_value: GenericArgument, actual_has_tail: Bool, actual_tail: Array<TraitArguments>, bindings: GenericBindings) -> GenericMatch {
+    handle match_template_argument(template_value, actual_value, bindings) {
+        GenericMatch::Matched(next_bindings) => match_trait_argument_tails(template_has_tail, template_tail, actual_has_tail, actual_tail, next_bindings),
+        GenericMatch::Mismatched => GenericMatch::Mismatched,
+        _ => GenericMatch::Mismatched,
+    }
+}
+
+fn match_template_argument(template: GenericArgument, actual: GenericArgument, bindings: GenericBindings) -> GenericMatch {
+    handle (template, actual) {
+        (GenericArgument::Type(template), GenericArgument::Type(actual)) => match_template_type(template, actual, bindings),
+        (GenericArgument::Lifetime(Lifetime::Generic(index)), GenericArgument::Lifetime(actual)) => bind_generic_lifetime(bindings, index, actual),
+        (template, actual) => handle same_generic_argument(template, actual) {
+            true => GenericMatch::Matched(bindings),
+            false => GenericMatch::Mismatched,
+            _ => GenericMatch::Mismatched,
+        },
+    }
+}
+
+fn match_trait_argument_tails(template_has_tail: Bool, template_tail: Array<TraitArguments>, actual_has_tail: Bool, actual_tail: Array<TraitArguments>, bindings: GenericBindings) -> GenericMatch {
+    handle (template_has_tail, actual_has_tail) {
+        (false, false) => GenericMatch::Matched(bindings),
+        (true, true) => match_trait_arguments(__g1_array_pop_move<TraitArguments>(&mut template_tail), __g1_array_pop_move<TraitArguments>(&mut actual_tail), bindings),
+        _ => GenericMatch::Mismatched,
+    }
+}
+
+fn bind_generic_type(bindings: GenericBindings, index: i64, value: Type) -> GenericMatch {
+    handle lookup_generic_type(bindings, index) {
+        GenericBindingLookup::Found(previous, next_bindings) => handle same(previous, value) {
+            true => GenericMatch::Matched(next_bindings),
+            false => GenericMatch::Mismatched,
+            _ => GenericMatch::Mismatched,
+        },
+        GenericBindingLookup::Missing(next_bindings) => GenericMatch::Matched(insert_generic_type(next_bindings, index, value)),
+        _ => GenericMatch::Mismatched,
+    }
+}
+
+fn lookup_generic_type(bindings: GenericBindings, wanted: i64) -> GenericBindingLookup {
+    handle bindings {
+        GenericBindings::Empty => GenericBindingLookup::Missing(GenericBindings::Empty),
+        GenericBindings::Binding(index, value, has_tail, tail) => lookup_generic_type_node(index, value, has_tail, tail, wanted),
+        GenericBindings::LifetimeBinding(index, value, has_tail, tail) => lookup_generic_type_after_lifetime(index, value, has_tail, tail, wanted),
+        _ => GenericBindingLookup::Missing(GenericBindings::Empty),
+    }
+}
+
+fn lookup_generic_type_after_lifetime(index: i64, value: Lifetime, has_tail: Bool, tail: Array<GenericBindings>, wanted: i64) -> GenericBindingLookup {
+    handle has_tail {
+        true => rebuild_generic_type_after_lifetime(index, value, lookup_generic_type(__g1_array_pop_move<GenericBindings>(&mut tail), wanted)),
+        false => GenericBindingLookup::Missing(GenericBindings::LifetimeBinding(index, value, false, tail)),
+        _ => GenericBindingLookup::Missing(GenericBindings::LifetimeBinding(index, value, false, tail)),
+    }
+}
+
+fn rebuild_generic_type_after_lifetime(index: i64, value: Lifetime, lookup: GenericBindingLookup) -> GenericBindingLookup {
+    handle lookup {
+        GenericBindingLookup::Found(found, bindings) => GenericBindingLookup::Found(found, GenericBindings::LifetimeBinding(index, value, true, [bindings])),
+        GenericBindingLookup::Missing(bindings) => GenericBindingLookup::Missing(GenericBindings::LifetimeBinding(index, value, true, [bindings])),
+        _ => GenericBindingLookup::Missing(GenericBindings::LifetimeBinding(index, value, false, [])),
+    }
+}
+
+fn lookup_generic_type_node(index: i64, value: Type, has_tail: Bool, tail: Array<GenericBindings>, wanted: i64) -> GenericBindingLookup {
+    handle index == wanted {
+        true => GenericBindingLookup::Found(value, GenericBindings::Binding(index, value, has_tail, tail)),
+        false => lookup_generic_type_tail(index, value, has_tail, tail, wanted),
+        _ => GenericBindingLookup::Missing(GenericBindings::Binding(index, value, has_tail, tail)),
+    }
+}
+
+fn lookup_generic_type_tail(index: i64, value: Type, has_tail: Bool, tail: Array<GenericBindings>, wanted: i64) -> GenericBindingLookup {
+    handle has_tail {
+        true => rebuild_generic_type_lookup(index, value, lookup_generic_type(__g1_array_pop_move<GenericBindings>(&mut tail), wanted)),
+        false => GenericBindingLookup::Missing(GenericBindings::Binding(index, value, false, tail)),
+        _ => GenericBindingLookup::Missing(GenericBindings::Binding(index, value, false, tail)),
+    }
+}
+
+fn rebuild_generic_type_lookup(index: i64, value: Type, lookup: GenericBindingLookup) -> GenericBindingLookup {
+    handle lookup {
+        GenericBindingLookup::Found(found, bindings) => GenericBindingLookup::Found(found, GenericBindings::Binding(index, value, true, [bindings])),
+        GenericBindingLookup::Missing(bindings) => GenericBindingLookup::Missing(GenericBindings::Binding(index, value, true, [bindings])),
+        _ => GenericBindingLookup::Missing(GenericBindings::Binding(index, value, false, [])),
+    }
+}
+
+fn insert_generic_type(bindings: GenericBindings, index: i64, value: Type) -> GenericBindings {
+    handle bindings {
+        GenericBindings::Empty => GenericBindings::Binding(index, value, false, []),
+        GenericBindings::Binding(existing_index, existing_value, has_tail, tail) => handle has_tail {
+            true => GenericBindings::Binding(existing_index, existing_value, true, [insert_generic_type(__g1_array_pop_move<GenericBindings>(&mut tail), index, value)]),
+            false => GenericBindings::Binding(existing_index, existing_value, true, [GenericBindings::Binding(index, value, false, [])]),
+            _ => GenericBindings::Binding(existing_index, existing_value, has_tail, tail),
+        },
+        GenericBindings::LifetimeBinding(existing_index, existing_value, has_tail, tail) => handle has_tail {
+            true => GenericBindings::LifetimeBinding(existing_index, existing_value, true, [insert_generic_type(__g1_array_pop_move<GenericBindings>(&mut tail), index, value)]),
+            false => GenericBindings::LifetimeBinding(existing_index, existing_value, true, [GenericBindings::Binding(index, value, false, [])]),
+            _ => GenericBindings::LifetimeBinding(existing_index, existing_value, has_tail, tail),
+        },
+        _ => GenericBindings::Binding(index, value, false, []),
+    }
+}
+
+fn bind_generic_lifetime(bindings: GenericBindings, index: i64, value: Lifetime) -> GenericMatch {
+    handle lookup_generic_lifetime(bindings, index) {
+        GenericLifetimeBindingLookup::Found(previous, next_bindings) => handle same_lifetime(previous, value) {
+            true => GenericMatch::Matched(next_bindings),
+            false => GenericMatch::Mismatched,
+            _ => GenericMatch::Mismatched,
+        },
+        GenericLifetimeBindingLookup::Missing(next_bindings) => GenericMatch::Matched(insert_generic_lifetime(next_bindings, index, value)),
+        _ => GenericMatch::Mismatched,
+    }
+}
+
+fn same_lifetime(left: Lifetime, right: Lifetime) -> Bool {
+    handle (left, right) {
+        (Lifetime::Static, Lifetime::Static) => true,
+        (Lifetime::Generic(left), Lifetime::Generic(right)) => left == right,
+        (Lifetime::Bound(left_depth, left_index), Lifetime::Bound(right_depth, right_index)) => handle left_depth == right_depth { true => left_index == right_index, false => false, _ => false },
+        (Lifetime::Elided, Lifetime::Elided) => true,
+        _ => false,
+    }
+}
+
+fn lookup_generic_lifetime(bindings: GenericBindings, wanted: i64) -> GenericLifetimeBindingLookup {
+    handle bindings {
+        GenericBindings::Empty => GenericLifetimeBindingLookup::Missing(GenericBindings::Empty),
+        GenericBindings::Binding(index, value, has_tail, tail) => lookup_generic_lifetime_after_type(index, value, has_tail, tail, wanted),
+        GenericBindings::LifetimeBinding(index, value, has_tail, tail) => lookup_generic_lifetime_node(index, value, has_tail, tail, wanted),
+        _ => GenericLifetimeBindingLookup::Missing(GenericBindings::Empty),
+    }
+}
+
+fn lookup_generic_lifetime_node(index: i64, value: Lifetime, has_tail: Bool, tail: Array<GenericBindings>, wanted: i64) -> GenericLifetimeBindingLookup {
+    handle index == wanted {
+        true => GenericLifetimeBindingLookup::Found(value, GenericBindings::LifetimeBinding(index, value, has_tail, tail)),
+        false => lookup_generic_lifetime_tail(index, value, has_tail, tail, wanted),
+        _ => GenericLifetimeBindingLookup::Missing(GenericBindings::LifetimeBinding(index, value, has_tail, tail)),
+    }
+}
+
+fn lookup_generic_lifetime_after_type(index: i64, value: Type, has_tail: Bool, tail: Array<GenericBindings>, wanted: i64) -> GenericLifetimeBindingLookup {
+    handle has_tail {
+        true => rebuild_generic_lifetime_after_type(index, value, lookup_generic_lifetime(__g1_array_pop_move<GenericBindings>(&mut tail), wanted)),
+        false => GenericLifetimeBindingLookup::Missing(GenericBindings::Binding(index, value, false, tail)),
+        _ => GenericLifetimeBindingLookup::Missing(GenericBindings::Binding(index, value, false, tail)),
+    }
+}
+
+fn lookup_generic_lifetime_tail(index: i64, value: Lifetime, has_tail: Bool, tail: Array<GenericBindings>, wanted: i64) -> GenericLifetimeBindingLookup {
+    handle has_tail {
+        true => rebuild_generic_lifetime_lookup(index, value, lookup_generic_lifetime(__g1_array_pop_move<GenericBindings>(&mut tail), wanted)),
+        false => GenericLifetimeBindingLookup::Missing(GenericBindings::LifetimeBinding(index, value, false, tail)),
+        _ => GenericLifetimeBindingLookup::Missing(GenericBindings::LifetimeBinding(index, value, false, tail)),
+    }
+}
+
+fn rebuild_generic_lifetime_after_type(index: i64, value: Type, lookup: GenericLifetimeBindingLookup) -> GenericLifetimeBindingLookup {
+    handle lookup {
+        GenericLifetimeBindingLookup::Found(found, bindings) => GenericLifetimeBindingLookup::Found(found, GenericBindings::Binding(index, value, true, [bindings])),
+        GenericLifetimeBindingLookup::Missing(bindings) => GenericLifetimeBindingLookup::Missing(GenericBindings::Binding(index, value, true, [bindings])),
+        _ => GenericLifetimeBindingLookup::Missing(GenericBindings::Binding(index, value, false, [])),
+    }
+}
+
+fn rebuild_generic_lifetime_lookup(index: i64, value: Lifetime, lookup: GenericLifetimeBindingLookup) -> GenericLifetimeBindingLookup {
+    handle lookup {
+        GenericLifetimeBindingLookup::Found(found, bindings) => GenericLifetimeBindingLookup::Found(found, GenericBindings::LifetimeBinding(index, value, true, [bindings])),
+        GenericLifetimeBindingLookup::Missing(bindings) => GenericLifetimeBindingLookup::Missing(GenericBindings::LifetimeBinding(index, value, true, [bindings])),
+        _ => GenericLifetimeBindingLookup::Missing(GenericBindings::LifetimeBinding(index, value, false, [])),
+    }
+}
+
+fn insert_generic_lifetime(bindings: GenericBindings, index: i64, value: Lifetime) -> GenericBindings {
+    handle bindings {
+        GenericBindings::Empty => GenericBindings::LifetimeBinding(index, value, false, []),
+        GenericBindings::Binding(existing_index, existing_value, has_tail, tail) => handle has_tail {
+            true => GenericBindings::Binding(existing_index, existing_value, true, [insert_generic_lifetime(__g1_array_pop_move<GenericBindings>(&mut tail), index, value)]),
+            false => GenericBindings::Binding(existing_index, existing_value, true, [GenericBindings::LifetimeBinding(index, value, false, [])]),
+            _ => GenericBindings::Binding(existing_index, existing_value, has_tail, tail),
+        },
+        GenericBindings::LifetimeBinding(existing_index, existing_value, has_tail, tail) => handle has_tail {
+            true => GenericBindings::LifetimeBinding(existing_index, existing_value, true, [insert_generic_lifetime(__g1_array_pop_move<GenericBindings>(&mut tail), index, value)]),
+            false => GenericBindings::LifetimeBinding(existing_index, existing_value, true, [GenericBindings::LifetimeBinding(index, value, false, [])]),
+            _ => GenericBindings::LifetimeBinding(existing_index, existing_value, has_tail, tail),
+        },
+        _ => GenericBindings::LifetimeBinding(index, value, false, []),
     }
 }
 

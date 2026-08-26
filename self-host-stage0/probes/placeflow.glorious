@@ -4,6 +4,16 @@ pub fn false_score(value: Bool) -> i64 { handle value { true => 0, false => 1, _
 pub fn score_call(value: placeflow::CallAdmission) -> i64 { handle value { placeflow::CallAdmission::Value(state) => score(placeflow::can_read(state)), placeflow::CallAdmission::Rejected => 1, _ => 0 } }
 pub fn score_move(value: placeflow::MoveAdmission) -> i64 { handle value { placeflow::MoveAdmission::Value(_) => 1, placeflow::MoveAdmission::BorrowConflict => 10, placeflow::MoveAdmission::AlreadyMoved => 100, _ => 0 } }
 pub fn score_pair_move(value: placeflow::PairMoveAdmission) -> i64 { handle value { placeflow::PairMoveAdmission::Value(_) => 1, placeflow::PairMoveAdmission::BorrowConflict => 10, placeflow::PairMoveAdmission::AlreadyMoved => 100, _ => 0 } }
+pub fn score_field_move(value: placeflow::FieldMoveAdmission) -> i64 { handle value { placeflow::FieldMoveAdmission::Value(_) => 1, placeflow::FieldMoveAdmission::Missing => 1, placeflow::FieldMoveAdmission::BorrowConflict => 1, placeflow::FieldMoveAdmission::AlreadyMoved => 1, _ => 0 } }
+pub fn moved_field_unreadable(value: placeflow::FieldMoveAdmission) -> i64 { handle value { placeflow::FieldMoveAdmission::Value(fields) => false_score(placeflow::can_read_field(fields, 1)), _ => 0 } }
+pub fn moved_field_keeps_sibling(value: placeflow::FieldMoveAdmission) -> i64 { handle value { placeflow::FieldMoveAdmission::Value(fields) => score(placeflow::can_read_field(fields, 2)), _ => 0 } }
+pub fn moved_field_blocks_root_escape(value: placeflow::FieldMoveAdmission) -> i64 { handle value { placeflow::FieldMoveAdmission::Value(fields) => false_score(placeflow::can_escape_fields_owned(fields)), _ => 0 } }
+pub fn three_available_fields() -> placeflow::FieldStates { placeflow::prepend_field(placeflow::available(), placeflow::prepend_field(placeflow::available(), placeflow::single_field(placeflow::available()))) }
+pub fn moved_field_states(value: placeflow::FieldMoveAdmission) -> placeflow::FieldStates { handle value { placeflow::FieldMoveAdmission::Value(fields) => fields, _ => placeflow::empty_fields() } }
+pub fn joined_field_unreadable(value: placeflow::FieldJoin) -> i64 { handle value { placeflow::FieldJoin::Value(fields) => false_score(placeflow::can_read_field(fields, 1)), _ => 0 } }
+pub fn joined_field_keeps_sibling(value: placeflow::FieldJoin) -> i64 { handle value { placeflow::FieldJoin::Value(fields) => score(placeflow::can_read_field(fields, 2)), _ => 0 } }
+pub fn joined_field_blocks_escape(value: placeflow::FieldJoin) -> i64 { handle value { placeflow::FieldJoin::Value(fields) => false_score(placeflow::can_escape_fields_owned(fields)), _ => 0 } }
+pub fn shape_score(value: placeflow::FieldJoin) -> i64 { handle value { placeflow::FieldJoin::ShapeMismatch => 1, placeflow::FieldJoin::Value(_) => 0, _ => 0 } }
 pub fn main() -> i64 {
     score(placeflow::can_read(placeflow::available()))
         + score(placeflow::can_read(placeflow::move_out(placeflow::available())))
@@ -36,4 +46,14 @@ pub fn main() -> i64 {
         + score(placeflow::can_read_second(placeflow::join_pair(
             placeflow::pair_available(),
             placeflow::move_first(placeflow::pair_available()))))
+        + score_field_move(placeflow::move_field_checked(three_available_fields(), 1))
+        + moved_field_unreadable(placeflow::move_field_checked(three_available_fields(), 1))
+        + moved_field_keeps_sibling(placeflow::move_field_checked(three_available_fields(), 1))
+        + moved_field_blocks_root_escape(placeflow::move_field_checked(three_available_fields(), 1))
+        + score_field_move(placeflow::move_field_checked(three_available_fields(), 4))
+        + score_field_move(placeflow::move_field_checked(placeflow::prepend_field(placeflow::borrow_shared(placeflow::available()), placeflow::single_field(placeflow::available())), 0))
+        + joined_field_unreadable(placeflow::join_fields(three_available_fields(), moved_field_states(placeflow::move_field_checked(three_available_fields(), 1))))
+        + joined_field_keeps_sibling(placeflow::join_fields(three_available_fields(), moved_field_states(placeflow::move_field_checked(three_available_fields(), 1))))
+        + joined_field_blocks_escape(placeflow::join_fields(three_available_fields(), moved_field_states(placeflow::move_field_checked(three_available_fields(), 1))))
+        + shape_score(placeflow::join_fields(three_available_fields(), placeflow::single_field(placeflow::available())))
 }
