@@ -15,7 +15,7 @@ source_args=(
     --source compiler_support@0.1.0 src/lib.glorious "$support"
     --source vm-backend-library@0.1.0 src/lib.glorious "$library"
 )
-for module in bootstrap_indirection identity source scanner types signature pattern body core mir_storage mir runtime_manifest vm_backend; do
+for module in bootstrap_indirection identity source scanner types signature pattern placeflow body core mir_storage mir runtime_manifest vm_backend; do
     source_args+=(--source vm-backend-library@0.1.0 "src/$module/$module.glorious" "$root/self-host-stage0/src/$module/$module.glorious")
 done
 
@@ -33,7 +33,7 @@ output="$(timeout --kill-after=5s --preserve-status 120s "$compiler" --root-pack
     --runtime-leaf array-get-move crate __g1_array_get_move --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "576" ]] || {
+[[ "$output" == "621" ]] || {
     echo "self-host vm backend check: expected canonical G1 schema admission, magic/header, manifest-bound imports, and verified execution paths, got $output" >&2
     exit 1
 }

@@ -4,6 +4,7 @@ use core_library::types;
 use core_library::signature;
 use core_library::pattern;
 use core_library::placeflow;
+use compiler_support::__g1_text_as_bytes;
 pub fn score(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(_) => 1, core::CoreResult::TypeError => 0, _ => 0 } }
 pub fn score_call(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_call(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
 pub fn score_pattern(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_pattern_test(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
@@ -20,6 +21,13 @@ pub fn score_unary_call_contract(result: core::CoreResult) -> i64 { handle resul
 pub fn score_binary_call_contract(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::call(value) { core::CallValue::Binary(signature::Callable::Binary(0, types::Type::I64, types::Type::I64, types::Type::I64, types::EffectRowIdentity::Empty, signature::Invocation::Once), types::Type::I64, types::Type::I64) => 1, _ => 0 }, _ => 0 } }
 pub fn score_capture(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_closure_capture(value) { true => 1, false => 0, _ => 0 }, _ => 0 } }
 pub fn score_assignment(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::i64_assignment(value) { core::I64AssignmentValue::Value(1, 42) => 1, _ => 0 }, _ => 0 } }
+pub fn score_source_postfix(value: core::SourceSyntaxAdmission) -> i64 { handle value { core::SourceSyntaxAdmission::Value(core::SourceSyntaxKind::Postfix) => 1, _ => 0 } }
+pub fn score_source_pattern_test(value: core::SourceSyntaxAdmission) -> i64 { handle value { core::SourceSyntaxAdmission::Value(core::SourceSyntaxKind::PatternTest) => 1, _ => 0 } }
+pub fn score_source_let_assignment(value: core::SourceSyntaxAdmission) -> i64 { handle value { core::SourceSyntaxAdmission::Value(core::SourceSyntaxKind::LetAssignment) => 1, _ => 0 } }
+pub fn score_rejected_source_syntax(value: core::SourceSyntaxAdmission) -> i64 { handle value { core::SourceSyntaxAdmission::Rejected => 1, _ => 0 } }
+pub fn score_parsed_assignment(value: body::LetI64ExpressionAdmission) -> i64 { handle value { body::LetI64ExpressionAdmission::Value(expression, _) => score_assignment(core::lower(expression, types::Type::I64)), _ => 0 } }
+pub fn static_utf8_expression() -> body::Expression { handle body::lower_static_literal(__g1_text_as_bytes("\"sealed\"")) { body::StaticLiteralAdmission::Value(expression) => expression, _ => body::Expression::Unit } }
+pub fn score_static_data(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::static_data(value) { core::StaticDataValue::Value(data) => handle (types::static_len(&data), types::static_matches_type(&data, types::StaticDataTag::Utf8Bytes, 1)) { (6, true) => 1, _ => 0 }, _ => 0 }, _ => 0 } }
 pub fn main() -> i64 {
     score(core::lower(body::Expression::I64(1), types::Type::I64))
         + score_parameter(core::lower(body::Expression::ParameterI64(1), types::Type::I64))
@@ -47,4 +55,10 @@ pub fn main() -> i64 {
         + score_binary_call_contract(core::lower(body::Expression::Call2(signature::binary(types::Type::I64, types::Type::I64, types::Type::I64), types::Type::I64, types::Type::I64), types::Type::I64))
         + score_capture(core::lower(body::Expression::ClosureCapture(placeflow::available(), placeflow::ClosureCaptureMode::ExplicitMove, types::Type::I64), types::Type::I64))
         + score_assignment(core::lower(body::Expression::I64Assignment(1, 42), types::Type::I64))
+        + score_source_postfix(core::lower_source_syntax(body::source_expression_syntax(__g1_text_as_bytes("factory(1).field"))))
+        + score_source_pattern_test(core::lower_source_syntax(body::source_expression_syntax(__g1_text_as_bytes("subject is (left, right)"))))
+        + score_source_let_assignment(core::lower_source_syntax(body::source_expression_syntax(__g1_text_as_bytes("let value = 1; value = 42; value"))))
+        + score_rejected_source_syntax(core::lower_source_syntax(body::source_expression_syntax(__g1_text_as_bytes("value +"))))
+        + score_parsed_assignment(body::lower_let_i64_assignment(__g1_text_as_bytes("let value = 1; value = 42; value")))
+        + score_static_data(core::lower(static_utf8_expression(), types::Type::StaticData(types::StaticDataTag::Utf8Bytes, 1)))
 }

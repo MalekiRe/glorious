@@ -63,8 +63,8 @@ output="$("$compiler" \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "29" ]] || {
-    echo "self-host mir check: expected terminals, typed unsigned literal/arithmetic lowering, value-carrying scalar/call lowering, root-and-nested-field moved/empty storage lowering, and exactly-one operation/liveness validation, got $output" >&2
+[[ "$output" == "34" ]] || {
+    echo "self-host mir check: expected terminals, typed unsigned literal/arithmetic lowering, value-carrying scalar/call lowering, source assignment initialization/replacement/read storage lowering, root-and-nested-field moved/empty storage lowering, and exactly-one operation/liveness validation, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"

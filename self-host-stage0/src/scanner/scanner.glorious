@@ -8,6 +8,10 @@ use compiler_support::__g1_int_wrapping_add;
 use compiler_support::__g1_int_wrapping_mul;
 use compiler_support::__g1_int_convert_wrapping_to_u32;
 use compiler_support::__g1_bytes_slice;
+use compiler_support::__g1_bytes_concat;
+use compiler_support::__g1_bytes_from_array_move;
+use compiler_support::__g1_int_convert_wrapping_to_u8;
+use compiler_support::__g1_int_shr;
 use source::SourceInput;
 use source::bytes;
 use source::FirstByte;
@@ -27,6 +31,10 @@ pub enum I64LiteralAdmission { Value(i64), NotI64Literal, Unadmitted }
 pub enum SignedI64LiteralAdmission { Value(i64, TokenStart), NotI64Literal, Unadmitted }
 pub enum U32LiteralAdmission { Value(u32, TokenStart), NotU32Literal, Unadmitted }
 pub enum BoolLiteralAdmission { Value(Bool), NotBoolLiteral, Unadmitted }
+// Literal decoding belongs beside lexical escape validation.  Body receives
+// decoded bytes and a final cursor, never a source slice it could reinterpret
+// as a compiler static-data handle.
+pub enum ByteLiteralAdmission { Value(Bytes, TokenStart), NotLiteral, Rejected }
 pub enum ScannedArithmetic { Add, Subtract, Multiply, Divide }
 pub enum ArithmeticLiteralAdmission { Value(ScannedArithmetic, i64, i64), NotArithmeticLiteral, Unadmitted }
 pub enum ScannedComparison { Equal, Less, Greater }
@@ -42,6 +50,7 @@ enum CharacterCount { Empty, One, Many }
 enum TriviaEnd { Value(usize), Invalid(usize, usize) }
 enum EscapeEnd { Valid(usize), Invalid(usize) }
 enum HexValue { Value(u32), Invalid }
+enum DecodedBytes { Value(Bytes), Rejected }
 
 pub fn first_is_line_feed(input: SourceInput) -> Bool {
     handle first_class(input) {
@@ -197,6 +206,180 @@ pub fn u32_literal_at(input: Bytes, token: TokenStart) -> U32LiteralAdmission {
         SignedI64LiteralAdmission::Unadmitted => U32LiteralAdmission::Unadmitted,
         _ => U32LiteralAdmission::NotU32Literal,
     }
+}
+
+pub fn string_literal_at(input: Bytes, token: TokenStart) -> ByteLiteralAdmission {
+    handle token_kind(token) {
+        TokenKind::String => decoded_literal_at(input, token),
+        _ => ByteLiteralAdmission::NotLiteral,
+    }
+}
+
+// `b"..."` remains two scanner tokens in this bootstrap lexer.  Joining
+// them here keeps that spelling a parser-level literal form while preserving
+// the same fully checked escape decoder as quoted UTF-8 data.
+pub fn byte_string_literal_at(input: Bytes, token: TokenStart) -> ByteLiteralAdmission {
+    handle token_matches(input, token, "b") {
+        true => byte_string_after_prefix(input, next_token(input, token)),
+        false => ByteLiteralAdmission::NotLiteral,
+        _ => ByteLiteralAdmission::Rejected,
+    }
+}
+
+fn byte_string_after_prefix(input: Bytes, token: TokenStart) -> ByteLiteralAdmission {
+    handle string_literal_at(input, token) {
+        ByteLiteralAdmission::Value(bytes, last) => ByteLiteralAdmission::Value(bytes, last),
+        ByteLiteralAdmission::NotLiteral => ByteLiteralAdmission::Rejected,
+        ByteLiteralAdmission::Rejected => ByteLiteralAdmission::Rejected,
+        _ => ByteLiteralAdmission::Rejected,
+    }
+}
+
+fn decoded_literal_at(input: Bytes, token: TokenStart) -> ByteLiteralAdmission {
+    handle decode_literal_bytes(input, source::next_index(token_start(token)), __g1_int_wrapping_sub<usize>(token_end(token), 1)) {
+        DecodedBytes::Value(bytes) => ByteLiteralAdmission::Value(bytes, token),
+        DecodedBytes::Rejected => ByteLiteralAdmission::Rejected,
+        _ => ByteLiteralAdmission::Rejected,
+    }
+}
+
+fn decode_literal_bytes(input: Bytes, index: usize, end: usize) -> DecodedBytes {
+    handle index == end {
+        true => DecodedBytes::Value(__g1_bytes_from_array_move([])),
+        false => handle source::byte_at_or_empty(input, index) {
+            FirstByte::Value(92) => decode_literal_escape(input, source::next_index(index), end),
+            FirstByte::Value(byte) => decode_literal_tail(input, source::next_index(index), end, byte),
+            _ => DecodedBytes::Rejected,
+        },
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+fn decode_literal_tail(input: Bytes, index: usize, end: usize, byte: u8) -> DecodedBytes {
+    handle decode_literal_bytes(input, index, end) {
+        DecodedBytes::Value(tail) => DecodedBytes::Value(__g1_bytes_concat(__g1_bytes_from_array_move([byte]), tail)),
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+fn decode_literal_escape(input: Bytes, index: usize, end: usize) -> DecodedBytes {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(110) => decode_literal_tail(input, source::next_index(index), end, 10),
+        FirstByte::Value(114) => decode_literal_tail(input, source::next_index(index), end, 13),
+        FirstByte::Value(116) => decode_literal_tail(input, source::next_index(index), end, 9),
+        FirstByte::Value(48) => decode_literal_tail(input, source::next_index(index), end, 0),
+        FirstByte::Value(34) => decode_literal_tail(input, source::next_index(index), end, 34),
+        FirstByte::Value(39) => decode_literal_tail(input, source::next_index(index), end, 39),
+        FirstByte::Value(92) => decode_literal_tail(input, source::next_index(index), end, 92),
+        FirstByte::Value(120) => decode_literal_hex_escape(input, source::next_index(index), end),
+        FirstByte::Value(117) => decode_literal_unicode_escape(input, source::next_index(index), end),
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+fn decode_literal_hex_escape(input: Bytes, index: usize, end: usize) -> DecodedBytes {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(first) => handle source::byte_at_or_empty(input, source::next_index(index)) {
+            FirstByte::Value(second) => decode_literal_hex_digits(input, source::next_index(source::next_index(index)), end, hex_value(first), hex_value(second)),
+            _ => DecodedBytes::Rejected,
+        },
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+fn decode_literal_hex_digits(input: Bytes, index: usize, end: usize, first: HexValue, second: HexValue) -> DecodedBytes {
+    handle (first, second) {
+        (HexValue::Value(high), HexValue::Value(low)) => decode_literal_tail(input, index, end, __g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(__g1_int_wrapping_mul<u32>(high, 16), low))),
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+// Scanner validation has already established the braced escape grammar and
+// scalar range. Decode it again into a concrete scalar only to emit its UTF-8
+// bytes; Body never receives a source slice or an untagged `Bytes` shortcut.
+fn decode_literal_unicode_escape(input: Bytes, index: usize, end: usize) -> DecodedBytes {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(123) => decode_literal_unicode_digits(input, source::next_index(index), 0, 0, end),
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+fn decode_literal_unicode_digits(input: Bytes, index: usize, count: usize, scalar: u32, end: usize) -> DecodedBytes {
+    handle source::byte_at_or_empty(input, index) {
+        FirstByte::Value(125) => decode_literal_unicode_closed(input, source::next_index(index), count, scalar, end),
+        FirstByte::Value(byte) => decode_literal_unicode_digit(input, index, count, scalar, end, hex_value(byte)),
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+fn decode_literal_unicode_closed(input: Bytes, index: usize, count: usize, scalar: u32, end: usize) -> DecodedBytes {
+    handle count == 0 {
+        true => DecodedBytes::Rejected,
+        false => handle is_unicode_scalar(scalar) {
+            true => decode_literal_unicode_tail(input, index, end, scalar),
+            false => DecodedBytes::Rejected,
+            _ => DecodedBytes::Rejected,
+        },
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+fn decode_literal_unicode_digit(input: Bytes, index: usize, count: usize, scalar: u32, end: usize, digit: HexValue) -> DecodedBytes {
+    handle digit {
+        HexValue::Value(value) => handle count < 6 {
+            true => decode_literal_unicode_digits(input, source::next_index(index), source::next_index(count), __g1_int_wrapping_add<u32>(__g1_int_wrapping_mul<u32>(scalar, 16), value), end),
+            false => DecodedBytes::Rejected,
+            _ => DecodedBytes::Rejected,
+        },
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+fn decode_literal_unicode_tail(input: Bytes, index: usize, end: usize, scalar: u32) -> DecodedBytes {
+    handle decode_literal_bytes(input, index, end) {
+        DecodedBytes::Value(tail) => DecodedBytes::Value(unicode_utf8_prefix(scalar, tail)),
+        _ => DecodedBytes::Rejected,
+    }
+}
+
+fn unicode_utf8_prefix(scalar: u32, tail: Bytes) -> Bytes {
+    handle scalar <= 127 {
+        true => __g1_bytes_concat(__g1_bytes_from_array_move([__g1_int_convert_wrapping_to_u8<u32>(scalar)]), tail),
+        false => unicode_utf8_two_or_more(scalar, tail),
+        _ => tail,
+    }
+}
+
+fn unicode_utf8_two_or_more(scalar: u32, tail: Bytes) -> Bytes {
+    handle scalar <= 2047 {
+        true => __g1_bytes_concat(__g1_bytes_from_array_move([__g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(192, __g1_int_shr<u32>(scalar, 6))), __g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(128, unicode_low_six(scalar)))]), tail),
+        false => unicode_utf8_three_or_more(scalar, tail),
+        _ => tail,
+    }
+}
+
+fn unicode_utf8_three_or_more(scalar: u32, tail: Bytes) -> Bytes {
+    handle scalar <= 65535 {
+        true => __g1_bytes_concat(__g1_bytes_from_array_move([__g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(224, __g1_int_shr<u32>(scalar, 12))), __g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(128, unicode_middle_six(scalar))), __g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(128, unicode_low_six(scalar)))]), tail),
+        false => unicode_utf8_four(scalar, tail),
+        _ => tail,
+    }
+}
+
+fn unicode_utf8_four(scalar: u32, tail: Bytes) -> Bytes {
+    __g1_bytes_concat(__g1_bytes_from_array_move([__g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(240, __g1_int_shr<u32>(scalar, 18))), __g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(128, unicode_high_middle_six(scalar))), __g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(128, unicode_middle_six(scalar))), __g1_int_convert_wrapping_to_u8<u32>(__g1_int_wrapping_add<u32>(128, unicode_low_six(scalar)))]), tail)
+}
+
+fn unicode_low_six(value: u32) -> u32 {
+    __g1_int_wrapping_sub<u32>(value, __g1_int_wrapping_mul<u32>(__g1_int_shr<u32>(value, 6), 64))
+}
+
+fn unicode_middle_six(value: u32) -> u32 {
+    unicode_low_six(__g1_int_shr<u32>(value, 6))
+}
+
+fn unicode_high_middle_six(value: u32) -> u32 {
+    unicode_low_six(__g1_int_shr<u32>(value, 12))
 }
 
 fn u32_literal_range(value: i64, last: TokenStart) -> U32LiteralAdmission {
@@ -756,7 +939,10 @@ fn scan_byte_escape(input: Bytes, index: usize) -> EscapeEnd {
 }
 
 fn scan_byte_escape_first(input: Bytes, index: usize, first: u8) -> EscapeEnd {
-    handle is_ascii_hex_lead(first) {
+    // Both nibbles accept the complete hexadecimal alphabet. Restricting the
+    // leading nibble to `0..7` incorrectly rejected valid byte literals such
+    // as `b"\\xff"` before Body could lower their raw static data.
+    handle is_hex_digit(first) {
         true => scan_byte_escape_second(input, source::next_index(index)),
         false => EscapeEnd::Invalid(source::next_index(index)),
         _ => EscapeEnd::Invalid(source::next_index(index)),

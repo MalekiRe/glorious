@@ -3,6 +3,9 @@
 // source-owned equality boundary in later slices.
 use compiler_support::text_eq;
 use compiler_support::__g1_array_pop_move;
+use compiler_support::__g1_bytes_len;
+use compiler_support::__g1_bytes_get;
+use compiler_support::__g1_int_wrapping_add;
 
 pub enum Type {
     Unit,
@@ -25,6 +28,10 @@ pub enum Type {
     Char,
     Text,
     Bytes,
+    // This is the compiler-only backing type for literals and embedded
+    // artifacts.  It is deliberately distinct from `Array<u8>` and from a
+    // public slice: only trusted lowering may construct one.
+    StaticData(StaticDataTag, u32),
     Named(Text),
     // Nominal identity preserves the declaration and the canonical mixed-kind
     // generic-argument arena node. The arena is indirect so passing a nominal
@@ -48,6 +55,74 @@ pub enum Type {
     // boundary can observe a concrete type.
     Inference(i64),
     Projection(Text, i64),
+}
+
+// A tag is part of the immutable static-data type identity, not a user
+// spelling such as "png".  The named form is reserved for compiler-declared
+// embedded assets; ordinary source never receives a constructor for it.
+pub enum StaticDataTag { Utf8Bytes, RawU8, Embedded(i64) }
+
+// The bootstrap evaluator keeps the program segment as `Bytes`, but the
+// public shape is the VM-safe fat handle described by the static-data design:
+// a segment identity, a bounded byte window, tag, and alignment.  No bytecode
+// carries an arbitrary machine pointer.
+pub struct StaticData {
+    segment_id: usize,
+    byte_offset: usize,
+    length: usize,
+    tag: StaticDataTag,
+    alignment: u32,
+    backing: Bytes,
+}
+
+pub enum StaticDataAdmission { Value(StaticData), OutOfBounds, TagMismatch }
+pub enum StaticByteAdmission { Value(u8), OutOfBounds }
+
+pub fn static_utf8(segment_id: usize, backing: Bytes) -> StaticData {
+    StaticData { segment_id: segment_id, byte_offset: 0, length: __g1_bytes_len(backing), tag: StaticDataTag::Utf8Bytes, alignment: 1, backing: backing }
+}
+
+pub fn static_raw_u8(segment_id: usize, backing: Bytes) -> StaticData {
+    StaticData { segment_id: segment_id, byte_offset: 0, length: __g1_bytes_len(backing), tag: StaticDataTag::RawU8, alignment: 1, backing: backing }
+}
+
+pub fn static_len(value: &StaticData) -> usize { value.length }
+
+pub fn static_subslice(value: StaticData, start: usize, length: usize) -> StaticDataAdmission {
+    handle start <= value.length {
+        true => handle length <= value.length - start {
+            true => StaticDataAdmission::Value(StaticData { segment_id: value.segment_id, byte_offset: __g1_int_wrapping_add<usize>(value.byte_offset, start), length: length, tag: value.tag, alignment: value.alignment, backing: value.backing }),
+            false => StaticDataAdmission::OutOfBounds,
+            _ => StaticDataAdmission::OutOfBounds,
+        },
+        false => StaticDataAdmission::OutOfBounds,
+        _ => StaticDataAdmission::OutOfBounds,
+    }
+}
+
+pub fn static_get_shared(value: &StaticData, index: usize) -> StaticByteAdmission {
+    handle index < value.length {
+        true => StaticByteAdmission::Value(__g1_bytes_get(value.backing, __g1_int_wrapping_add<usize>(value.byte_offset, index))),
+        false => StaticByteAdmission::OutOfBounds,
+        _ => StaticByteAdmission::OutOfBounds,
+    }
+}
+
+pub fn static_matches_type(value: &StaticData, tag: StaticDataTag, alignment: u32) -> Bool {
+    handle static_tag_same(value.tag, tag) {
+        true => value.alignment == alignment,
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn static_tag_same(left: StaticDataTag, right: StaticDataTag) -> Bool {
+    handle (left, right) {
+        (StaticDataTag::Utf8Bytes, StaticDataTag::Utf8Bytes) => true,
+        (StaticDataTag::RawU8, StaticDataTag::RawU8) => true,
+        (StaticDataTag::Embedded(left), StaticDataTag::Embedded(right)) => left == right,
+        _ => false,
+    }
 }
 
 // Lifetimes are their own term kind. A region can never be encoded as an
@@ -230,6 +305,7 @@ pub fn same(left: Type, right: Type) -> Bool {
         (Type::Char, Type::Char) => true,
         (Type::Text, Type::Text) => true,
         (Type::Bytes, Type::Bytes) => true,
+        (Type::StaticData(left_tag, left_alignment), Type::StaticData(right_tag, right_alignment)) => static_type_same(left_tag, left_alignment, right_tag, right_alignment),
         (Type::Named(left), Type::Named(right)) => text_eq(left, right),
         (Type::Nominal(left_definition, left_arguments), Type::Nominal(right_definition, right_arguments)) => same_nominal(left_definition, left_arguments, right_definition, right_arguments),
         (Type::Reference(left), Type::Reference(right)) => left == right,
@@ -238,6 +314,14 @@ pub fn same(left: Type, right: Type) -> Bool {
         (Type::Generic(left), Type::Generic(right)) => left == right,
         (Type::Inference(left), Type::Inference(right)) => left == right,
         (Type::Projection(left_name, left_subject), Type::Projection(right_name, right_subject)) => projection_same(left_name, left_subject, right_name, right_subject),
+        _ => false,
+    }
+}
+
+fn static_type_same(left_tag: StaticDataTag, left_alignment: u32, right_tag: StaticDataTag, right_alignment: u32) -> Bool {
+    handle static_tag_same(left_tag, right_tag) {
+        true => left_alignment == right_alignment,
+        false => false,
         _ => false,
     }
 }

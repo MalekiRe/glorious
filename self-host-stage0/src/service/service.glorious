@@ -26,10 +26,20 @@ use body::Arithmetic;
 use body::Comparison;
 use body::ScalarBinaryAdmission;
 use body::scalar_binary_arithmetic;
+use body::I64ParameterBinaryAdmission;
+use body::lower_i64_parameter_binary;
+use body::I64LiteralArithmeticAdmission;
+use body::lower_i64_literal_arithmetic;
+use body::I64LiteralComparisonAdmission;
+use body::lower_i64_literal_comparison;
+use body::U32LiteralArithmeticAdmission;
+use body::lower_u32_literal_arithmetic;
+use body::StaticLiteralAdmission;
+use body::lower_static_literal;
 use body::LabelI64TransferAdmission;
 use body::label_i64_transfer_at;
-use body::LetI64AssignmentAdmission;
-use body::let_i64_assignment_at;
+use body::LetI64ExpressionAdmission;
+use body::lower_let_i64_assignment_at;
 use pattern::Pattern;
 use pattern::Value;
 use types::Type;
@@ -45,6 +55,7 @@ use vm_backend::emit_g1_i64_binary;
 use vm_backend::emit_g1_i64_identity_call; use vm_backend::emit_g1_i64_binary_call;
 use vm_backend::emit_g1_for_i64_arithmetic_body;
 use vm_backend::execute_i64_comparison_lowering;
+use vm_backend::execute_i64_arithmetic_lowering;
 use vm_backend::execute_u64_comparison_lowering;
 use vm_backend::execute_u8_comparison_lowering;
 use vm_backend::execute_usize_comparison_lowering;
@@ -59,6 +70,9 @@ use vm_backend::execute_bool_not_lowering;
 use vm_backend::execute_parameter_i64_lowering;
 use vm_backend::execute_parameter_u32_lowering;
 use vm_backend::execute_call_lowering;
+use vm_backend::execute_static_len_lowering;
+use vm_backend::execute_static_subslice_len_lowering;
+use vm_backend::execute_static_get_shared_lowering;
 use vm_backend::emit_g1_for_i64_select_body;
 use vm_backend::G1I64Arithmetic;
 use vm_backend::execute_candidate;
@@ -625,6 +639,93 @@ pub fn compile_source_i64_literal(input: SourceInput) -> Execution {
     }
 }
 
+// These compiler-internal source routes are the first end-to-end static-data
+// leaves. Public `Str` and `Slice` remain std wrappers; Service only proves
+// that an admitted literal has the sealed tag required by the selected leaf.
+pub fn compile_source_static_utf8_len(input: SourceInput) -> Execution {
+    handle token_stream_checked(input) {
+        TokenStreamAdmission::Valid => execute_static_utf8_len_body(lower_static_literal(source::bytes(input))),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn compile_source_static_raw_len(input: SourceInput) -> Execution {
+    handle token_stream_checked(input) {
+        TokenStreamAdmission::Valid => execute_static_raw_len_body(lower_static_literal(source::bytes(input))),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn compile_source_static_utf8_subslice_len(input: SourceInput, start: usize, length: usize) -> Execution {
+    handle token_stream_checked(input) {
+        TokenStreamAdmission::Valid => execute_static_utf8_subslice_body(lower_static_literal(source::bytes(input)), start, length),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn compile_source_static_raw_subslice_len(input: SourceInput, start: usize, length: usize) -> Execution {
+    handle token_stream_checked(input) {
+        TokenStreamAdmission::Valid => execute_static_raw_subslice_body(lower_static_literal(source::bytes(input)), start, length),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn compile_source_static_utf8_get_shared(input: SourceInput, index: usize) -> Execution {
+    handle token_stream_checked(input) {
+        TokenStreamAdmission::Valid => execute_static_utf8_get_body(lower_static_literal(source::bytes(input)), index),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn compile_source_static_raw_get_shared(input: SourceInput, index: usize) -> Execution {
+    handle token_stream_checked(input) {
+        TokenStreamAdmission::Valid => execute_static_raw_get_body(lower_static_literal(source::bytes(input)), index),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_static_utf8_len_body(value: StaticLiteralAdmission) -> Execution {
+    handle value {
+        StaticLiteralAdmission::Value(expression) => execute_static_len_lowering(mir::lower_static_len(lower(expression, Type::StaticData(types::StaticDataTag::Utf8Bytes, 1)))),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_static_raw_len_body(value: StaticLiteralAdmission) -> Execution {
+    handle value {
+        StaticLiteralAdmission::Value(expression) => execute_static_len_lowering(mir::lower_static_len(lower(expression, Type::StaticData(types::StaticDataTag::RawU8, 1)))),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_static_utf8_subslice_body(value: StaticLiteralAdmission, start: usize, length: usize) -> Execution {
+    handle value {
+        StaticLiteralAdmission::Value(expression) => execute_static_subslice_len_lowering(mir::lower_static_subslice(lower(expression, Type::StaticData(types::StaticDataTag::Utf8Bytes, 1)), start, length)),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_static_raw_subslice_body(value: StaticLiteralAdmission, start: usize, length: usize) -> Execution {
+    handle value {
+        StaticLiteralAdmission::Value(expression) => execute_static_subslice_len_lowering(mir::lower_static_subslice(lower(expression, Type::StaticData(types::StaticDataTag::RawU8, 1)), start, length)),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_static_utf8_get_body(value: StaticLiteralAdmission, index: usize) -> Execution {
+    handle value {
+        StaticLiteralAdmission::Value(expression) => execute_static_get_shared_lowering(mir::lower_static_get_shared(lower(expression, Type::StaticData(types::StaticDataTag::Utf8Bytes, 1)), index)),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_static_raw_get_body(value: StaticLiteralAdmission, index: usize) -> Execution {
+    handle value {
+        StaticLiteralAdmission::Value(expression) => execute_static_get_shared_lowering(mir::lower_static_get_shared(lower(expression, Type::StaticData(types::StaticDataTag::RawU8, 1)), index)),
+        _ => Execution::Faulted,
+    }
+}
+
 fn compile_source_i64_literal_end(bytes: Bytes, last: TokenStart, value: i64) -> Execution {
     handle token_kind(next_token(bytes, last)) {
         TokenKind::End => compile_i64_literal(value, Type::I64),
@@ -894,7 +995,14 @@ fn emit_source_i64_binary_operator(input_bytes: Bytes, operator: TokenStart, lef
 // authority to select bytecode.
 pub fn compile_source_i64_arithmetic_entry(input: SourceInput) -> ArtifactEmission {
     handle token_stream_checked(input) {
-        TokenStreamAdmission::Valid => compile_signed_i64_arithmetic_artifact(source::bytes(input)),
+        TokenStreamAdmission::Valid => emit_i64_literal_arithmetic_body(lower_i64_literal_arithmetic(source::bytes(input))),
+        _ => ArtifactEmission::Rejected,
+    }
+}
+
+fn emit_i64_literal_arithmetic_body(value: I64LiteralArithmeticAdmission) -> ArtifactEmission {
+    handle value {
+        I64LiteralArithmeticAdmission::Value(expression) => emit_g1_for_i64_arithmetic_body(expression, Type::I64),
         _ => ArtifactEmission::Rejected,
     }
 }
@@ -2157,10 +2265,8 @@ fn compile_named_i64_add_function(input: SourceInput, prefix: header::HeaderPref
 }
 
 fn compile_declared_i64_add_function(input: SourceInput, left_value: i64, right_value: i64) -> Execution {
-    let input_bytes = source::bytes(input);
-    let public = first_token(input_bytes);
-    handle token_matches(input_bytes, public, "pub") {
-        true => compile_i64_add_keyword(input_bytes, next_token(input_bytes, public), left_value, right_value),
+    handle lower_i64_parameter_binary(source::bytes(input), left_value, right_value) {
+        I64ParameterBinaryAdmission::Value(expression) => execute_i64_arithmetic_lowering(mir::lower_i64_arithmetic(lower(expression, Type::I64))),
         _ => Execution::Faulted,
     }
 }
@@ -2646,13 +2752,13 @@ fn compile_i64_function_body(input: SourceInput, input_bytes: Bytes, open: Token
         true => compile_i64_function_return_literal(input, input_bytes, next_token(input_bytes, literal)),
         false => handle label_i64_transfer_at(input_bytes, literal) {
             LabelI64TransferAdmission::Value(value, label_close) => compile_i64_function_label_close(input_bytes, label_close, value),
-            LabelI64TransferAdmission::NotLabel => handle let_i64_assignment_at(input_bytes, literal) {
-                LetI64AssignmentAdmission::Value(initial, replacement, last) => compile_i64_function_let_close(input_bytes, last, initial, replacement),
-                LetI64AssignmentAdmission::NotLet => handle signed_i64_literal_at_checked(input, literal) {
+            LabelI64TransferAdmission::NotLabel => handle lower_let_i64_assignment_at(input_bytes, literal) {
+                LetI64ExpressionAdmission::Value(expression, last) => compile_i64_function_let_close(input_bytes, last, expression),
+                LetI64ExpressionAdmission::NotLet => handle signed_i64_literal_at_checked(input, literal) {
                     SignedI64LiteralAdmission::Value(value, last) => compile_i64_function_after_left(input, input_bytes, last, value),
                     _ => Execution::Faulted,
                 },
-                LetI64AssignmentAdmission::Rejected => Execution::Faulted,
+                LetI64ExpressionAdmission::Rejected => Execution::Faulted,
                 _ => Execution::Faulted,
             },
             LabelI64TransferAdmission::Rejected => Execution::Faulted,
@@ -2678,11 +2784,11 @@ fn compile_i64_function_label_close(input_bytes: Bytes, label_close: TokenStart,
 // assignment, and final-read spellings refer to one lexical binding. Service
 // contributes only the enclosing function boundary before lowering the
 // selected value through the normal scalar IR pipeline.
-fn compile_i64_function_let_close(input_bytes: Bytes, read: TokenStart, initial: i64, replacement: i64) -> Execution {
+fn compile_i64_function_let_close(input_bytes: Bytes, read: TokenStart, expression: Expression) -> Execution {
     let function_close = next_token(input_bytes, read);
     handle token_matches(input_bytes, function_close, "}") {
         true => handle token_kind(next_token(input_bytes, function_close)) {
-            TokenKind::End => compile_i64_assignment(initial, replacement, Type::I64),
+            TokenKind::End => compile_i64_assignment_expression(expression, Type::I64),
             _ => Execution::Faulted,
         },
         _ => Execution::Faulted,
@@ -2830,7 +2936,14 @@ pub fn compile_source_bool_literal(input: SourceInput) -> Execution {
 
 pub fn compile_source_i64_arithmetic(input: SourceInput) -> Execution {
     handle token_stream_checked(input) {
-        TokenStreamAdmission::Valid => compile_signed_i64_arithmetic(source::bytes(input)),
+        TokenStreamAdmission::Valid => execute_i64_literal_arithmetic_body(lower_i64_literal_arithmetic(source::bytes(input))),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_i64_literal_arithmetic_body(value: I64LiteralArithmeticAdmission) -> Execution {
+    handle value {
+        I64LiteralArithmeticAdmission::Value(expression) => execute_i64_arithmetic_lowering(mir::lower_i64_arithmetic(lower(expression, Type::I64))),
         _ => Execution::Faulted,
     }
 }
@@ -2840,7 +2953,14 @@ pub fn compile_source_i64_arithmetic(input: SourceInput) -> Execution {
 // unsigned payload through Core, MIR, and verified execution.
 pub fn compile_source_u32_arithmetic(input: SourceInput) -> Execution {
     handle token_stream_checked(input) {
-        TokenStreamAdmission::Valid => compile_u32_arithmetic_source_bytes(source::bytes(input)),
+        TokenStreamAdmission::Valid => execute_u32_literal_arithmetic_body(lower_u32_literal_arithmetic(source::bytes(input))),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_u32_literal_arithmetic_body(value: U32LiteralArithmeticAdmission) -> Execution {
+    handle value {
+        U32LiteralArithmeticAdmission::Value(expression) => execute_u32_arithmetic_lowering(mir::lower_u32_arithmetic(lower(expression, Type::U32))),
         _ => Execution::Faulted,
     }
 }
@@ -3085,7 +3205,14 @@ fn compile_signed_i64_arithmetic_end(bytes: Bytes, operator: TokenStart, end: To
 
 pub fn compile_source_i64_comparison(input: SourceInput) -> Execution {
     handle token_stream_checked(input) {
-        TokenStreamAdmission::Valid => compile_signed_i64_comparison(source::bytes(input)),
+        TokenStreamAdmission::Valid => execute_i64_literal_comparison_body(lower_i64_literal_comparison(source::bytes(input))),
+        _ => Execution::Faulted,
+    }
+}
+
+fn execute_i64_literal_comparison_body(value: I64LiteralComparisonAdmission) -> Execution {
+    handle value {
+        I64LiteralComparisonAdmission::Value(expression) => execute_i64_comparison_lowering(mir::lower_i64_comparison(lower(expression, Type::Bool))),
         _ => Execution::Faulted,
     }
 }
@@ -3166,7 +3293,11 @@ pub fn compile_i64_literal(value: i64, expected: Type) -> Execution {
 }
 
 pub fn compile_i64_assignment(initial: i64, replacement: i64, expected: Type) -> Execution {
-    execute_i64_assignment_lowering(mir::lower_i64_assignment(lower(Expression::I64Assignment(initial, replacement), expected)))
+    compile_i64_assignment_expression(Expression::I64Assignment(initial, replacement), expected)
+}
+
+fn compile_i64_assignment_expression(expression: Expression, expected: Type) -> Execution {
+    execute_i64_assignment_storage_lowering(mir::lower_i64_assignment_storage(lower(expression, expected)))
 }
 
 pub fn compile_u32_literal(value: u32, expected: Type) -> Execution {

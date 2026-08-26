@@ -41,6 +41,8 @@ use core::parameter_i64;
 use core::ParameterI64Value;
 use core::parameter_u32;
 use core::ParameterU32Value;
+use core::static_data;
+use core::StaticDataValue;
 use body::Arithmetic;
 use body::Comparison;
 use signature::Callable;
@@ -112,6 +114,14 @@ pub enum BoolLiteralLowering { Return(Bool), Trap }
 pub enum BoolNotLowering { Return(Bool), Trap }
 pub enum ParameterI64Lowering { Return(i64), Trap }
 pub enum ParameterU32Lowering { Return(u32), Trap }
+// Static-data operations are intentionally a small sealed family. The
+// complete VM will encode these as ConstStaticData/StaticLen/StaticSubslice/
+// StaticGetBorrowShared; keeping the window and tag intact here prevents a
+// later backend from receiving an erased Bytes value.
+pub enum StaticDataLowering { Return(types::StaticData), Trap }
+pub enum StaticLengthLowering { Return(usize), Trap }
+pub enum StaticSubsliceLowering { Return(types::StaticData), OutOfBounds, Trap }
+pub enum StaticGetLowering { Return(u8), OutOfBounds, Trap }
 
 pub fn lower_i64_arithmetic(value: CoreResult) -> I64ArithmeticLowering {
     handle value {
@@ -267,6 +277,57 @@ pub fn lower_parameter_i64(value: CoreResult) -> ParameterI64Lowering { handle v
 fn lower_parameter_i64_value(value: ParameterI64Value) -> ParameterI64Lowering { handle value { ParameterI64Value::Value(number) => ParameterI64Lowering::Return(number), _ => ParameterI64Lowering::Trap } }
 pub fn lower_parameter_u32(value: CoreResult) -> ParameterU32Lowering { handle value { CoreResult::Value(core) => lower_parameter_u32_value(parameter_u32(core)), _ => ParameterU32Lowering::Trap } }
 fn lower_parameter_u32_value(value: ParameterU32Value) -> ParameterU32Lowering { handle value { ParameterU32Value::Value(number) => ParameterU32Lowering::Return(number), _ => ParameterU32Lowering::Trap } }
+
+pub fn lower_static_data(value: CoreResult) -> StaticDataLowering {
+    handle value {
+        CoreResult::Value(core) => lower_static_data_value(static_data(core)),
+        _ => StaticDataLowering::Trap,
+    }
+}
+
+fn lower_static_data_value(value: StaticDataValue) -> StaticDataLowering {
+    handle value {
+        StaticDataValue::Value(data) => StaticDataLowering::Return(data),
+        _ => StaticDataLowering::Trap,
+    }
+}
+
+pub fn lower_static_len(value: CoreResult) -> StaticLengthLowering {
+    handle lower_static_data(value) {
+        StaticDataLowering::Return(data) => StaticLengthLowering::Return(types::static_len(&data)),
+        _ => StaticLengthLowering::Trap,
+    }
+}
+
+pub fn lower_static_subslice(value: CoreResult, start: usize, length: usize) -> StaticSubsliceLowering {
+    handle lower_static_data(value) {
+        StaticDataLowering::Return(data) => lower_static_subslice_value(types::static_subslice(data, start, length)),
+        _ => StaticSubsliceLowering::Trap,
+    }
+}
+
+fn lower_static_subslice_value(value: types::StaticDataAdmission) -> StaticSubsliceLowering {
+    handle value {
+        types::StaticDataAdmission::Value(data) => StaticSubsliceLowering::Return(data),
+        types::StaticDataAdmission::OutOfBounds => StaticSubsliceLowering::OutOfBounds,
+        _ => StaticSubsliceLowering::Trap,
+    }
+}
+
+pub fn lower_static_get_shared(value: CoreResult, index: usize) -> StaticGetLowering {
+    handle lower_static_data(value) {
+        StaticDataLowering::Return(data) => lower_static_get_value(types::static_get_shared(&data, index)),
+        _ => StaticGetLowering::Trap,
+    }
+}
+
+fn lower_static_get_value(value: types::StaticByteAdmission) -> StaticGetLowering {
+    handle value {
+        types::StaticByteAdmission::Value(byte) => StaticGetLowering::Return(byte),
+        types::StaticByteAdmission::OutOfBounds => StaticGetLowering::OutOfBounds,
+        _ => StaticGetLowering::Trap,
+    }
+}
 pub fn lower(value: CoreResult) -> Terminator {
     handle value {
         CoreResult::Value(core) => handle is_call(core) {

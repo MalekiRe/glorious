@@ -18,6 +18,9 @@ use mir::BoolNotLowering;
 use mir::ParameterI64Lowering;
 use mir::ParameterU32Lowering;
 use mir::CallLowering;
+use mir::StaticLengthLowering;
+use mir::StaticSubsliceLowering;
+use mir::StaticGetLowering;
 use core::lower as lower_core;
 use body::Expression;
 use types::Type;
@@ -99,6 +102,16 @@ pub enum G1DirectoryRead { Value(G1DirectoryRecord), Truncated, InvalidSection }
 // supplies an admitted lowering; the backend maps that value to its
 // candidate/verified instruction family and never reconstructs operands from
 // request-side state.
+pub fn execute_i64_arithmetic_lowering(lowering: I64ArithmeticLowering) -> Execution {
+    handle lowering {
+        I64ArithmeticLowering::Return(body::Arithmetic::Add, left, right) => execute_candidate(CandidateProgram::Arithmetic(ArithmeticInstruction::WrappingAdd(left, right))),
+        I64ArithmeticLowering::Return(body::Arithmetic::Subtract, left, right) => execute_candidate(CandidateProgram::Arithmetic(ArithmeticInstruction::WrappingSub(left, right))),
+        I64ArithmeticLowering::Return(body::Arithmetic::Multiply, left, right) => execute_candidate(CandidateProgram::Arithmetic(ArithmeticInstruction::WrappingMul(left, right))),
+        I64ArithmeticLowering::Return(body::Arithmetic::Divide, left, right) => execute_candidate(CandidateProgram::Arithmetic(ArithmeticInstruction::CheckedDiv(left, right))),
+        _ => Execution::Faulted,
+    }
+}
+
 pub fn execute_i64_comparison_lowering(lowering: I64ComparisonLowering) -> Execution {
     handle lowering {
         I64ComparisonLowering::Return(body::Comparison::Equal, left, right) => execute_candidate(CandidateProgram::Comparison(ComparisonInstruction::EqualI64(left, right))),
@@ -239,6 +252,31 @@ pub fn execute_parameter_i64_lowering(lowering: ParameterI64Lowering) -> Executi
 pub fn execute_parameter_u32_lowering(lowering: ParameterU32Lowering) -> Execution {
     handle lowering {
         ParameterU32Lowering::Return(value) => execute_candidate(CandidateProgram::U32Terminal(Terminator::ParameterReturn, value)),
+        _ => Execution::Faulted,
+    }
+}
+
+// The temporary evaluator observes only scalar results, but these paths keep
+// the sealed static handle alive through MIR until the final operation. A
+// static subslice is never reinterpreted as ordinary Bytes merely to measure
+// it, and both out-of-bounds cases become normal backend faults.
+pub fn execute_static_len_lowering(lowering: StaticLengthLowering) -> Execution {
+    handle lowering {
+        StaticLengthLowering::Return(length) => Execution::ReturnedUsize(length),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_static_subslice_len_lowering(lowering: StaticSubsliceLowering) -> Execution {
+    handle lowering {
+        StaticSubsliceLowering::Return(data) => Execution::ReturnedUsize(types::static_len(&data)),
+        _ => Execution::Faulted,
+    }
+}
+
+pub fn execute_static_get_shared_lowering(lowering: StaticGetLowering) -> Execution {
+    handle lowering {
+        StaticGetLowering::Return(byte) => Execution::ReturnedU32(__g1_int_convert_wrapping_to_u32<u8>(byte)),
         _ => Execution::Faulted,
     }
 }

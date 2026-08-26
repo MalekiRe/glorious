@@ -11,7 +11,7 @@ use body::BodyAdmission;
 use body::admit;
 use types::Type;
 
-pub enum CoreKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, Assignment, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
+pub enum CoreKind { Literal, StaticData, Parameter, Boolean, ParameterBoolean, Arithmetic, Assignment, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
 // Body owns syntax selection; Core carries that decision forward until typed
 // elaboration can construct full CoreExpr nodes. This prevents later passes
 // from recovering closures, postfixes, labels, or structural tests from raw
@@ -82,6 +82,7 @@ pub enum BoolLiteralValue { Value(Bool), NotBoolLiteral }
 pub enum BoolNotValue { Value(Bool), NotBoolNot }
 pub enum ParameterI64Value { Value(i64), NotParameter }
 pub enum ParameterU32Value { Value(u32), NotParameter }
+pub enum StaticDataValue { Value(types::StaticData), NotStaticData }
 
 pub fn i64_arithmetic(value: CoreValue) -> I64ArithmeticValue {
     handle value.body_value {
@@ -174,9 +175,17 @@ pub fn parameter_u32(value: CoreValue) -> ParameterU32Value {
     handle value.body_value { Expression::ParameterU32(number) => ParameterU32Value::Value(number), _ => ParameterU32Value::NotParameter }
 }
 
+pub fn static_data(value: CoreValue) -> StaticDataValue {
+    handle value.body_value {
+        Expression::StaticData(data) => StaticDataValue::Value(data),
+        _ => StaticDataValue::NotStaticData,
+    }
+}
+
 fn core_kind(kind: BodyKind) -> CoreKind {
     handle kind {
         BodyKind::Literal => CoreKind::Literal,
+        BodyKind::StaticData => CoreKind::StaticData,
         BodyKind::Parameter => CoreKind::Parameter,
         BodyKind::Boolean => CoreKind::Boolean,
         BodyKind::ParameterBoolean => CoreKind::ParameterBoolean,

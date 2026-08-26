@@ -4,5 +4,5 @@ set -euo pipefail
 
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GRANDIOSE_STAGE0_SERVICE_PROBE="$root/self-host-stage0/probes/service_literal.glorious" \
-GRANDIOSE_STAGE0_SERVICE_EXPECTED=3077 \
+GRANDIOSE_STAGE0_SERVICE_EXPECTED=3291 \
 "$root/tooling/self-host-stage0-service-check.sh"

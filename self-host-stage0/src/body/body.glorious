@@ -18,6 +18,11 @@ use scanner::token_matches;
 use scanner::token_start;
 use scanner::SignedI64LiteralAdmission;
 use scanner::signed_i64_literal_at;
+use scanner::U32LiteralAdmission;
+use scanner::u32_literal_at;
+use scanner::ByteLiteralAdmission;
+use scanner::string_literal_at;
+use scanner::byte_string_literal_at;
 use placeflow::PlaceState;
 use placeflow::ClosureCaptureMode;
 use placeflow::ClosureCaptureAdmission;
@@ -56,19 +61,34 @@ pub enum Expression {
     Usize(usize),
     UsizeArithmetic(Arithmetic, usize, usize),
     UsizeComparison(Comparison, usize, usize),
+    // A quoted literal is lowered to the sealed compiler backing handle, not
+    // to a public Str/Slice representation.  Std owns those wrappers.
+    StaticData(types::StaticData),
     Call1(Callable, Type),
     Call2(Callable, Type, Type),
     ClosureCapture(PlaceState, ClosureCaptureMode, Type),
     PatternTest(Pattern, Value),
 }
 
-pub enum BodyKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, Assignment, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
+pub enum BodyKind { Literal, StaticData, Parameter, Boolean, ParameterBoolean, Arithmetic, Assignment, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
 pub enum BodyAdmission { Value(BodyKind), TypeError }
 // A reusable, source-owned declaration parser for the first scalar function
 // family.  Service used to duplicate this state machine for every scalar
 // width.  Keeping the grammatical shape here makes new scalar lowerings a
 // type-directed choice rather than another handwritten parser.
 pub enum ScalarBinaryAdmission { Value(Arithmetic), Rejected }
+// A declaration-level binary body has already established its two binder
+// identities.  Pair that parser proof with the invocation values once, so
+// Core receives the parameter expression rather than Service rebuilding it
+// from an operator side channel.
+pub enum I64ParameterBinaryAdmission { Value(Expression), Rejected }
+// A complete free scalar expression is useful to both execution and artifact
+// emission. It keeps the signed scanner values and selected operator in one
+// Body node before either downstream consumer sees the expression.
+pub enum I64LiteralArithmeticAdmission { Value(Expression), Rejected }
+pub enum I64LiteralComparisonAdmission { Value(Expression), Rejected }
+pub enum U32LiteralArithmeticAdmission { Value(Expression), Rejected }
+pub enum StaticLiteralAdmission { Value(Expression), Rejected }
 pub enum MoveCaptureClosureSyntax { Captures(i64), NotMoveClosure, Rejected }
 // A compact closure begins with a block delimiter, so its first two tokens
 // decide whether it owns the closure grammar or remains an ordinary block.
@@ -118,6 +138,11 @@ pub enum LabelI64TransferAdmission { Value(i64, TokenStart), NotLabel, Rejected 
 // `let value = initial; value = replacement; value` before full general
 // place/MIR statement lowering lands.
 pub enum LetI64AssignmentAdmission { Value(i64, i64, TokenStart), NotLet, Rejected }
+// Keep the parser-owned expression node paired with the final lexical read.
+// The enclosing declaration parser needs that token to check its closing
+// delimiter, while Core/MIR must receive the Body node itself rather than
+// having Service reconstruct one from extracted scalar payloads.
+pub enum LetI64ExpressionAdmission { Value(Expression, TokenStart), NotLet, Rejected }
 enum MoveCaptureNames { Empty, Node(TokenStart, Bool, Array<MoveCaptureNames>) }
 enum MoveCaptureNameInsert { Added(MoveCaptureNames), Duplicate }
 enum PatternBindingNames { Empty, Node(TokenStart, Bool, Array<PatternBindingNames>) }
@@ -274,8 +299,8 @@ fn source_expression_label(input: Bytes) -> SourceExpressionSyntax {
 }
 
 fn source_expression_let(input: Bytes, token: TokenStart) -> SourceExpressionSyntax {
-    handle let_i64_assignment_at(input, token) {
-        LetI64AssignmentAdmission::Value(_, _, _) => SourceExpressionSyntax::LetAssignment,
+    handle lower_let_i64_assignment_at(input, token) {
+        LetI64ExpressionAdmission::Value(_, _) => SourceExpressionSyntax::LetAssignment,
         _ => SourceExpressionSyntax::Rejected,
     }
 }
@@ -1242,6 +1267,22 @@ pub fn let_i64_assignment_at(input: Bytes, token: TokenStart) -> LetI64Assignmen
     let_i64_start(input, token)
 }
 
+// This is the first source parser entrypoint that produces a value-carrying
+// Body expression. The raw admission remains available for delimiter-aware
+// callers, but normal source lowering crosses into Core through this node.
+pub fn lower_let_i64_assignment_at(input: Bytes, token: TokenStart) -> LetI64ExpressionAdmission {
+    handle let_i64_assignment_at(input, token) {
+        LetI64AssignmentAdmission::Value(initial, replacement, read) => LetI64ExpressionAdmission::Value(Expression::I64Assignment(initial, replacement), read),
+        LetI64AssignmentAdmission::NotLet => LetI64ExpressionAdmission::NotLet,
+        LetI64AssignmentAdmission::Rejected => LetI64ExpressionAdmission::Rejected,
+        _ => LetI64ExpressionAdmission::Rejected,
+    }
+}
+
+pub fn lower_let_i64_assignment(input: Bytes) -> LetI64ExpressionAdmission {
+    lower_let_i64_assignment_at(input, first_token(input))
+}
+
 fn let_i64_start(input: Bytes, token: TokenStart) -> LetI64AssignmentAdmission {
     handle token_matches(input, token, "let") {
         true => let_i64_name(input, next_token(input, token)),
@@ -1447,6 +1488,158 @@ pub fn scalar_binary_arithmetic(input: Bytes, scalar: Text) -> ScalarBinaryAdmis
     scalar_binary_first(input, first_token(input), scalar)
 }
 
+pub fn lower_i64_parameter_binary(input: Bytes, left: i64, right: i64) -> I64ParameterBinaryAdmission {
+    handle scalar_binary_arithmetic(input, "i64") {
+        ScalarBinaryAdmission::Value(operation) => I64ParameterBinaryAdmission::Value(Expression::ParameterI64Arithmetic(operation, left, right)),
+        _ => I64ParameterBinaryAdmission::Rejected,
+    }
+}
+
+pub fn lower_i64_literal_arithmetic(input: Bytes) -> I64LiteralArithmeticAdmission {
+    lower_i64_literal_arithmetic_left(input, first_token(input))
+}
+
+fn lower_i64_literal_arithmetic_left(input: Bytes, left: TokenStart) -> I64LiteralArithmeticAdmission {
+    handle signed_i64_literal_at(input, left) {
+        SignedI64LiteralAdmission::Value(left_value, last) => lower_i64_literal_arithmetic_operator(input, next_token(input, last), left_value),
+        _ => I64LiteralArithmeticAdmission::Rejected,
+    }
+}
+
+fn lower_i64_literal_arithmetic_operator(input: Bytes, token: TokenStart, left: i64) -> I64LiteralArithmeticAdmission {
+    handle scalar_arithmetic_operator(input, token) {
+        ScalarBinaryAdmission::Value(operation) => lower_i64_literal_arithmetic_right(input, next_token(input, token), operation, left),
+        _ => I64LiteralArithmeticAdmission::Rejected,
+    }
+}
+
+fn lower_i64_literal_arithmetic_right(input: Bytes, token: TokenStart, operation: Arithmetic, left: i64) -> I64LiteralArithmeticAdmission {
+    handle signed_i64_literal_at(input, token) {
+        SignedI64LiteralAdmission::Value(right, last) => lower_i64_literal_arithmetic_end(input, next_token(input, last), operation, left, right),
+        _ => I64LiteralArithmeticAdmission::Rejected,
+    }
+}
+
+fn lower_i64_literal_arithmetic_end(input: Bytes, token: TokenStart, operation: Arithmetic, left: i64, right: i64) -> I64LiteralArithmeticAdmission {
+    handle token_kind(token) {
+        TokenKind::End => I64LiteralArithmeticAdmission::Value(Expression::I64Arithmetic(operation, left, right)),
+        _ => I64LiteralArithmeticAdmission::Rejected,
+    }
+}
+
+pub fn lower_i64_literal_comparison(input: Bytes) -> I64LiteralComparisonAdmission {
+    lower_i64_literal_comparison_left(input, first_token(input))
+}
+
+fn lower_i64_literal_comparison_left(input: Bytes, left: TokenStart) -> I64LiteralComparisonAdmission {
+    handle signed_i64_literal_at(input, left) {
+        SignedI64LiteralAdmission::Value(left_value, last) => lower_i64_literal_comparison_operator(input, next_token(input, last), left_value),
+        _ => I64LiteralComparisonAdmission::Rejected,
+    }
+}
+
+fn lower_i64_literal_comparison_operator(input: Bytes, token: TokenStart, left: i64) -> I64LiteralComparisonAdmission {
+    handle i64_comparison_operator(input, token) {
+        I64ComparisonOperator::Value(operation) => lower_i64_literal_comparison_right(input, next_token(input, token), operation, left),
+        _ => I64LiteralComparisonAdmission::Rejected,
+    }
+}
+
+fn lower_i64_literal_comparison_right(input: Bytes, token: TokenStart, operation: Comparison, left: i64) -> I64LiteralComparisonAdmission {
+    handle signed_i64_literal_at(input, token) {
+        SignedI64LiteralAdmission::Value(right, last) => lower_i64_literal_comparison_end(input, next_token(input, last), operation, left, right),
+        _ => I64LiteralComparisonAdmission::Rejected,
+    }
+}
+
+fn lower_i64_literal_comparison_end(input: Bytes, token: TokenStart, operation: Comparison, left: i64, right: i64) -> I64LiteralComparisonAdmission {
+    handle token_kind(token) {
+        TokenKind::End => I64LiteralComparisonAdmission::Value(Expression::I64Comparison(operation, left, right)),
+        _ => I64LiteralComparisonAdmission::Rejected,
+    }
+}
+
+enum I64ComparisonOperator { Value(Comparison), Rejected }
+fn i64_comparison_operator(input: Bytes, token: TokenStart) -> I64ComparisonOperator {
+    handle token_matches(input, token, "==") {
+        true => I64ComparisonOperator::Value(Comparison::Equal),
+        false => handle token_matches(input, token, "<") {
+            true => I64ComparisonOperator::Value(Comparison::Less),
+            false => handle token_matches(input, token, ">") {
+                true => I64ComparisonOperator::Value(Comparison::Greater),
+                _ => I64ComparisonOperator::Rejected,
+            },
+            _ => I64ComparisonOperator::Rejected,
+        },
+        _ => I64ComparisonOperator::Rejected,
+    }
+}
+
+pub fn lower_u32_literal_arithmetic(input: Bytes) -> U32LiteralArithmeticAdmission {
+    lower_u32_literal_arithmetic_left(input, first_token(input))
+}
+
+// Literal source owns only spelling and decoding.  The hidden static handle
+// records a source-local segment identity; later artifact lowering interns it
+// into the immutable program-data table.
+pub fn lower_static_literal(input: Bytes) -> StaticLiteralAdmission {
+    let token = first_token(input);
+    handle string_literal_at(input, token) {
+        ByteLiteralAdmission::Value(bytes, last) => static_utf8_literal_end(input, token, bytes, last),
+        ByteLiteralAdmission::NotLiteral => static_raw_literal_start(input, token),
+        _ => StaticLiteralAdmission::Rejected,
+    }
+}
+
+fn static_utf8_literal_end(input: Bytes, first: TokenStart, bytes: Bytes, last: TokenStart) -> StaticLiteralAdmission {
+    handle token_kind(next_token(input, last)) {
+        TokenKind::End => StaticLiteralAdmission::Value(Expression::StaticData(types::static_utf8(token_start(first), bytes))),
+        _ => StaticLiteralAdmission::Rejected,
+    }
+}
+
+fn static_raw_literal_start(input: Bytes, token: TokenStart) -> StaticLiteralAdmission {
+    handle byte_string_literal_at(input, token) {
+        ByteLiteralAdmission::Value(bytes, last) => static_raw_literal_end(input, token, bytes, last),
+        _ => StaticLiteralAdmission::Rejected,
+    }
+}
+
+fn static_raw_literal_end(input: Bytes, first: TokenStart, bytes: Bytes, last: TokenStart) -> StaticLiteralAdmission {
+    handle token_kind(next_token(input, last)) {
+        TokenKind::End => StaticLiteralAdmission::Value(Expression::StaticData(types::static_raw_u8(token_start(first), bytes))),
+        _ => StaticLiteralAdmission::Rejected,
+    }
+}
+
+fn lower_u32_literal_arithmetic_left(input: Bytes, left: TokenStart) -> U32LiteralArithmeticAdmission {
+    handle u32_literal_at(input, left) {
+        U32LiteralAdmission::Value(left_value, last) => lower_u32_literal_arithmetic_operator(input, next_token(input, last), left_value),
+        _ => U32LiteralArithmeticAdmission::Rejected,
+    }
+}
+
+fn lower_u32_literal_arithmetic_operator(input: Bytes, token: TokenStart, left: u32) -> U32LiteralArithmeticAdmission {
+    handle scalar_arithmetic_operator(input, token) {
+        ScalarBinaryAdmission::Value(operation) => lower_u32_literal_arithmetic_right(input, next_token(input, token), operation, left),
+        _ => U32LiteralArithmeticAdmission::Rejected,
+    }
+}
+
+fn lower_u32_literal_arithmetic_right(input: Bytes, token: TokenStart, operation: Arithmetic, left: u32) -> U32LiteralArithmeticAdmission {
+    handle u32_literal_at(input, token) {
+        U32LiteralAdmission::Value(right, last) => lower_u32_literal_arithmetic_end(input, next_token(input, last), operation, left, right),
+        _ => U32LiteralArithmeticAdmission::Rejected,
+    }
+}
+
+fn lower_u32_literal_arithmetic_end(input: Bytes, token: TokenStart, operation: Arithmetic, left: u32, right: u32) -> U32LiteralArithmeticAdmission {
+    handle token_kind(token) {
+        TokenKind::End => U32LiteralArithmeticAdmission::Value(Expression::U32Arithmetic(operation, left, right)),
+        _ => U32LiteralArithmeticAdmission::Rejected,
+    }
+}
+
 fn scalar_binary_first(input: Bytes, token: TokenStart, scalar: Text) -> ScalarBinaryAdmission {
     handle token_matches(input, token, "pub") {
         true => scalar_binary_fn(input, next_token(input, token), scalar),
@@ -1567,10 +1760,19 @@ pub fn admit(expression: Expression, expected: Type) -> BodyAdmission {
         (Expression::Usize(_), Type::Usize) => BodyAdmission::Value(BodyKind::Literal),
         (Expression::UsizeArithmetic(_, _, _), Type::Usize) => BodyAdmission::Value(BodyKind::Arithmetic),
         (Expression::UsizeComparison(_, _, _), Type::Bool) => BodyAdmission::Value(BodyKind::Comparison),
+        (Expression::StaticData(value), Type::StaticData(tag, alignment)) => admit_static_data(value, tag, alignment),
         (Expression::Call1(callable, argument), result) => admit_call(callable, Arguments::One(argument), result),
         (Expression::Call2(callable, first, second), result) => admit_call(callable, Arguments::Two(first, second), result),
         (Expression::ClosureCapture(state, mode, result), expected) => admit_closure_capture(state, mode, result, expected),
         (Expression::PatternTest(_, _), Type::Bool) => BodyAdmission::Value(BodyKind::PatternTest),
+        _ => BodyAdmission::TypeError,
+    }
+}
+
+fn admit_static_data(value: types::StaticData, tag: types::StaticDataTag, alignment: u32) -> BodyAdmission {
+    handle types::static_matches_type(&value, tag, alignment) {
+        true => BodyAdmission::Value(BodyKind::StaticData),
+        false => BodyAdmission::TypeError,
         _ => BodyAdmission::TypeError,
     }
 }

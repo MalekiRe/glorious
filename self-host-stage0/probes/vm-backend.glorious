@@ -1,4 +1,4 @@
-use compiler_support::__g1_int_wrapping_add; use compiler_support::__g1_int_wrapping_sub; use compiler_support::__g1_bytes_len; use compiler_support::__g1_bytes_get; use compiler_support::__g1_bytes_from_array_move; use compiler_support::__g1_array_empty;
+use compiler_support::__g1_int_wrapping_add; use compiler_support::__g1_int_wrapping_sub; use compiler_support::__g1_bytes_len; use compiler_support::__g1_bytes_get; use compiler_support::__g1_bytes_from_array_move; use compiler_support::__g1_array_empty; use compiler_support::__g1_text_as_bytes;
 use vm_backend_library::types; use vm_backend_library::signature; use vm_backend_library::pattern; use vm_backend_library::body; use vm_backend_library::core; use vm_backend_library::mir_storage; use vm_backend_library::mir; use vm_backend_library::runtime_manifest; use vm_backend_library::vm_backend;
 pub fn score(value: vm_backend::Execution) -> i64 { handle value { vm_backend::Execution::Returned(_) => 1, vm_backend::Execution::Faulted => 0, _ => 0 } }
 pub fn score_u32(value: vm_backend::Execution) -> i64 { handle value { vm_backend::Execution::ReturnedU32(42) => 1, _ => 0 } }
@@ -14,6 +14,11 @@ pub fn score_read(value: vm_backend::G1U32Read) -> i64 { handle value { vm_backe
 pub fn score_directory(value: vm_backend::G1DirectoryRead) -> i64 { handle value { vm_backend::G1DirectoryRead::Value(_) => 1, vm_backend::G1DirectoryRead::Truncated => 10, vm_backend::G1DirectoryRead::InvalidSection => 100, _ => 0 } }
 pub fn score_false(value: Bool) -> i64 { handle value { true => 0, false => 10, _ => 0 } }
 pub fn score_directory_bounds(value: vm_backend::G1DirectoryRead, total: u64) -> i64 { handle value { vm_backend::G1DirectoryRead::Value(record) => handle vm_backend::g1_directory_record_within_artifact(record, total) { true => 1, false => 10, _ => 0 }, _ => 0 } }
+pub fn static_utf8_expression() -> body::Expression { handle body::lower_static_literal(__g1_text_as_bytes("\"sealed\"")) { body::StaticLiteralAdmission::Value(expression) => expression, _ => body::Expression::Unit } }
+pub fn static_utf8_core() -> core::CoreResult { core::lower(static_utf8_expression(), types::Type::StaticData(types::StaticDataTag::Utf8Bytes, 1)) }
+pub fn score_static_len(value: vm_backend::Execution) -> i64 { handle value { vm_backend::Execution::ReturnedUsize(6) => 1, _ => 0 } }
+pub fn score_static_subslice(value: vm_backend::Execution) -> i64 { handle value { vm_backend::Execution::ReturnedUsize(3) => 1, _ => 0 } }
+pub fn score_static_byte(value: vm_backend::Execution) -> i64 { handle value { vm_backend::Execution::ReturnedU32(97) => 1, _ => 0 } }
 pub fn main() -> i64 {
     score(vm_backend::execute(mir::lower(core::lower(body::Expression::I64(1), types::Type::I64))))
         + score(vm_backend::execute(mir::lower(core::lower(body::Expression::I64(1), types::Type::Bool))))
@@ -114,6 +119,7 @@ pub fn main() -> i64 {
         + score_bool(vm_backend::emit_g1_rejects_body_type_mismatch())
         + score_artifact(vm_backend::emit_g1_for_i64_arithmetic_body(body::Expression::I64Arithmetic(body::Arithmetic::Multiply, 6, 7), types::Type::I64))
         + score_rejection(vm_backend::emit_g1_for_i64_arithmetic_body(body::Expression::I64Arithmetic(body::Arithmetic::Divide, 6, 0), types::Type::I64))
+        + vm_backend::returned_value(vm_backend::execute_i64_arithmetic_lowering(mir::lower_i64_arithmetic(core::lower(body::Expression::ParameterI64Arithmetic(body::Arithmetic::Add, 20, 22), types::Type::I64))))
         + vm_backend::returned_value(vm_backend::execute_i64_comparison_lowering(mir::lower_i64_comparison(core::lower(body::Expression::I64Comparison(body::Comparison::Less, 6, 7), types::Type::Bool))))
         + vm_backend::returned_value(vm_backend::execute_i64_select_lowering(mir::lower_i64_select(core::lower(body::Expression::I64Select(false, 6, 7), types::Type::I64))))
         + vm_backend::returned_value(vm_backend::execute_i64_literal_lowering(mir::lower_i64_literal(core::lower(body::Expression::I64(42), types::Type::I64))))
@@ -128,4 +134,7 @@ pub fn main() -> i64 {
         + vm_backend::returned_value(vm_backend::execute_call_lowering(mir::lower_call(core::lower(body::Expression::Call1(signature::callable(types::Type::I64, types::Type::I64), types::Type::I64), types::Type::I64)), 12, 0))
         + vm_backend::returned_value(vm_backend::execute_call_lowering(mir::lower_call(core::lower(body::Expression::Call2(signature::binary(types::Type::I64, types::Type::I64, types::Type::I64), types::Type::I64, types::Type::I64), types::Type::I64)), 8, 4))
         + score_artifact(vm_backend::emit_g1_for_i64_select_body(body::Expression::I64Select(false, 6, 7), types::Type::I64))
+        + score_static_len(vm_backend::execute_static_len_lowering(mir::lower_static_len(static_utf8_core())))
+        + score_static_subslice(vm_backend::execute_static_subslice_len_lowering(mir::lower_static_subslice(static_utf8_core(), 1, 3)))
+        + score_static_byte(vm_backend::execute_static_get_shared_lowering(mir::lower_static_get_shared(static_utf8_core(), 2)))
 }

@@ -57,8 +57,8 @@ output="$("$compiler" \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "79" ]] || {
-    echo "self-host body check: expected scalar, bound parameter forms, unified prioritized source-expression classification including structural is-pattern tests and postfix calls/fields, direct call arity and named/positional field-chain recognition, structural wildcard/binding/literal/tuple/array pattern recognition with duplicate-binding rejection, default-move and borrowed closure-capture, delimiter-sensitive optional move-capture, compact and typed closure syntax, nested tuple/group/array/block structural recognition, prefix move/borrow/deref/operator recognition, flat infix-chain recognition before fixity, scoped label transfer, binder-preserving i64 let/assignment syntax, callable, and structural pattern-test admission, got $output" >&2
+[[ "$output" == "89" ]] || {
+    echo "self-host body check: expected scalar, bound parameter forms, unified prioritized source-expression classification including structural is-pattern tests and postfix calls/fields, direct call arity and named/positional field-chain recognition, structural wildcard/binding/literal/tuple/array pattern recognition with duplicate-binding rejection, default-move and borrowed closure-capture, delimiter-sensitive optional move-capture, compact and typed closure syntax, nested tuple/group/array/block structural recognition, prefix move/borrow/deref/operator recognition, flat infix-chain recognition before fixity, scoped label transfer, binder-preserving i64 let/assignment, binary-parameter, signed-literal arithmetic/comparison, and u32 arithmetic syntax that produces Body expressions, callable, and structural pattern-test admission, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"
