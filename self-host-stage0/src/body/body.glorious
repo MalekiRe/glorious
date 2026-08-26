@@ -3,8 +3,7 @@
 use types::Type;
 use signature::Callable;
 use signature::Arguments;
-use signature::accepts;
-use signature::result_matches;
+use signature::accepts_call;
 use compiler_support::branch_bool;
 use pattern::Pattern;
 use pattern::Value;
@@ -200,15 +199,7 @@ pub fn evaluate_pattern_test(expression: Expression) -> Bool {
 }
 
 fn admit_call(callable: Callable, arguments: Arguments, result: Type) -> BodyAdmission {
-    branch_bool(
-        accepts(callable, arguments),
-        () -> BodyAdmission { admit_call_result(callable, result) },
-        () -> BodyAdmission { BodyAdmission::TypeError },
-    )
-}
-
-fn admit_call_result(callable: Callable, result: Type) -> BodyAdmission {
-    handle result_matches(callable, result) {
+    handle accepts_call(callable, arguments, result) {
         true => BodyAdmission::Value(BodyKind::Call),
         false => BodyAdmission::TypeError,
         _ => BodyAdmission::TypeError,

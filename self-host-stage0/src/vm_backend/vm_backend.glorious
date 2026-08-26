@@ -225,8 +225,8 @@ pub fn execute_parameter_u32_lowering(lowering: ParameterU32Lowering) -> Executi
 
 pub fn execute_call_lowering(lowering: CallLowering, first: i64, second: i64) -> Execution {
     handle lowering {
-        CallLowering::Unary(signature::Callable::Unary(Type::I64, Type::I64), Type::I64) => execute_candidate(CandidateProgram::Call(CallInstruction::IdentityI64(first))),
-        CallLowering::Binary(signature::Callable::Binary(Type::I64, Type::I64, Type::I64), Type::I64, Type::I64) => execute_candidate(CandidateProgram::Call(CallInstruction::AddI64(first, second))),
+        CallLowering::Unary(signature::Callable::Unary(0, Type::I64, Type::I64, types::EffectRowIdentity::Empty, signature::Invocation::Once), Type::I64) => execute_candidate(CandidateProgram::Call(CallInstruction::IdentityI64(first))),
+        CallLowering::Binary(signature::Callable::Binary(0, Type::I64, Type::I64, Type::I64, types::EffectRowIdentity::Empty, signature::Invocation::Once), Type::I64, Type::I64) => execute_candidate(CandidateProgram::Call(CallInstruction::AddI64(first, second))),
         _ => Execution::Faulted,
     }
 }

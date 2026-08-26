@@ -16,6 +16,7 @@ pub struct Implementation {
     trait_name: Text,
     self_type: Type,
     polarity: ImplementationPolarity,
+    generic_self: Bool,
 }
 
 pub struct Goal {
@@ -45,11 +46,22 @@ pub fn negative_implementation(trait_name: Text, self_type: Type) -> Implementat
 // bootstrap form keeps it as an integer so candidate-set selection cannot
 // accidentally turn two distinct applicable implementations into one answer.
 pub fn identified_implementation(evidence: i64, trait_name: Text, self_type: Type) -> Implementation {
-    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Positive }
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Positive, generic_self: false }
 }
 
 pub fn identified_negative_implementation(evidence: i64, trait_name: Text, self_type: Type) -> Implementation {
-    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Negative }
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Negative, generic_self: false }
+}
+
+// A declared implementation binder is distinct from `Type::Generic` in an
+// ordinary goal: only this implementation form treats its Self slot as a
+// universal match. Where-obligation solving remains a later tabled slice.
+pub fn generic_implementation(evidence: i64, trait_name: Text) -> Implementation {
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: Type::Generic(0), polarity: ImplementationPolarity::Positive, generic_self: true }
+}
+
+pub fn generic_negative_implementation(evidence: i64, trait_name: Text) -> Implementation {
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: Type::Generic(0), polarity: ImplementationPolarity::Negative, generic_self: true }
 }
 
 pub fn goal(trait_name: Text, self_type: Type) -> Goal {
@@ -59,13 +71,14 @@ pub fn goal(trait_name: Text, self_type: Type) -> Goal {
 pub fn solve(candidate: Implementation, goal: Goal) -> Answer {
     handle (candidate, goal) {
         (
-            Implementation { evidence, trait_name, self_type, polarity },
+            Implementation { evidence, trait_name, self_type, polarity, generic_self },
             Goal { trait_name: requested_trait, self_type: requested_type },
         ) => solve_goal_parts(
             evidence,
             trait_name,
             self_type,
             polarity,
+            generic_self,
             requested_trait,
             requested_type,
         ),
@@ -81,11 +94,12 @@ fn solve_goal_parts(
     candidate_trait: Text,
     candidate_type: Type,
     polarity: ImplementationPolarity,
+    generic_self: Bool,
     requested_trait: Text,
     requested_type: Type,
 ) -> Answer {
     handle text_eq(candidate_trait, requested_trait) {
-        true => solve_same_trait_parts(evidence, candidate_type, polarity, requested_type),
+        true => solve_same_trait_parts(evidence, candidate_type, polarity, generic_self, requested_type),
         false => Answer::Unsatisfied,
         _ => Answer::Unsatisfied,
     }
@@ -153,6 +167,45 @@ pub fn solve_pair(
     second_goal: Goal,
 ) -> Answer {
     combine_answers(solve(first, first_goal), solve(second, second_goal))
+}
+
+// This is the bootstrap form of a generic implementation with one where
+// obligation. A tabled solver will discover and recurse through such
+// obligations from an implementation header; keeping the two candidate goals
+// explicit here preserves the crucial answer policy first: a selected generic
+// implementation is not evidence until its required trait goal succeeds.
+pub fn solve_generic_with_where(
+    generic_candidate: Implementation,
+    generic_goal: Goal,
+    required_candidate: Implementation,
+    required_goal: Goal,
+) -> Answer {
+    complete_where_obligation(
+        solve(generic_candidate, generic_goal),
+        solve(required_candidate, required_goal),
+    )
+}
+
+fn complete_where_obligation(selected: Answer, required: Answer) -> Answer {
+    handle selected {
+        Answer::Satisfied(evidence) => complete_selected_where(evidence, required),
+        Answer::Refuted(evidence) => Answer::Refuted(evidence),
+        Answer::Unsatisfied => Answer::Unsatisfied,
+        Answer::Ambiguous => Answer::Ambiguous,
+        Answer::Overflow => Answer::Overflow,
+        _ => Answer::Unsatisfied,
+    }
+}
+
+fn complete_selected_where(evidence: i64, required: Answer) -> Answer {
+    handle required {
+        Answer::Satisfied(_) => Answer::Satisfied(evidence),
+        Answer::Refuted(_) => Answer::Unsatisfied,
+        Answer::Unsatisfied => Answer::Unsatisfied,
+        Answer::Ambiguous => Answer::Ambiguous,
+        Answer::Overflow => Answer::Overflow,
+        _ => Answer::Unsatisfied,
+    }
 }
 
 // Preserve evaluation order under a finite budget.  A later candidate is not
@@ -245,8 +298,17 @@ fn solve_same_trait_parts(
     evidence: i64,
     candidate_type: Type,
     polarity: ImplementationPolarity,
+    generic_self: Bool,
     requested_type: Type,
 ) -> Answer {
+    handle generic_self {
+        true => answer_for_polarity(polarity, evidence),
+        false => solve_exact_self_type(evidence, candidate_type, polarity, requested_type),
+        _ => Answer::Unsatisfied,
+    }
+}
+
+fn solve_exact_self_type(evidence: i64, candidate_type: Type, polarity: ImplementationPolarity, requested_type: Type) -> Answer {
     handle same(candidate_type, requested_type) {
         true => answer_for_polarity(polarity, evidence),
         false => Answer::Unsatisfied,

@@ -14,6 +14,40 @@ pub fn main() -> i64 {
         + handle instance::admit(1, instance::ArgumentValue::Inferred(2), instance::ArgumentKind::EffectRow) { instance::InstanceAdmission::NonConcrete => 1, instance::InstanceAdmission::Value(_) => 0, _ => 0 }
         + score_invalid(instance::admit(1, instance::ArgumentValue::Concrete(-1), instance::ArgumentKind::ConstU32))
         + score_invalid(instance::admit(1, instance::ArgumentValue::Concrete(-1), instance::ArgumentKind::Quantity))
+        + score(instance::same_generic_instance(
+            instance::generic_instance(7, instance::prepend_argument(
+                instance::ArgumentKind::Type,
+                instance::ArgumentValue::Concrete(1),
+                instance::single_argument(
+                    instance::ArgumentKind::Lifetime,
+                    instance::ArgumentValue::Concrete(2)))),
+            instance::generic_instance(7, instance::prepend_argument(
+                instance::ArgumentKind::Type,
+                instance::ArgumentValue::Concrete(1),
+                instance::single_argument(
+                    instance::ArgumentKind::Lifetime,
+                    instance::ArgumentValue::Concrete(2))))))
+        + score_generic_admission(instance::admit_generic(7, instance::prepend_argument(
+            instance::ArgumentKind::EffectRow,
+            instance::ArgumentValue::Concrete(3),
+            instance::single_argument(
+                instance::ArgumentKind::ConstU32,
+                instance::ArgumentValue::Concrete(4)))))
+        + score_generic_non_concrete(instance::admit_generic(7, instance::prepend_argument(
+            instance::ArgumentKind::Type,
+            instance::ArgumentValue::Concrete(1),
+            instance::single_argument(
+                instance::ArgumentKind::EffectRow,
+                instance::ArgumentValue::Open(2)))))
+        + score_generic_invalid(instance::admit_generic(7, instance::prepend_argument(
+            instance::ArgumentKind::Type,
+            instance::ArgumentValue::Concrete(1),
+            instance::single_argument(
+                instance::ArgumentKind::Quantity,
+                instance::ArgumentValue::Concrete(-1)))))
 }
 
 pub fn score_invalid(value: instance::InstanceAdmission) -> i64 { handle value { instance::InstanceAdmission::InvalidValue => 10, instance::InstanceAdmission::Value(_) => 0, instance::InstanceAdmission::NonConcrete => 0, _ => 0 } }
+pub fn score_generic_admission(value: instance::GenericInstanceAdmission) -> i64 { handle value { instance::GenericInstanceAdmission::Value(_) => 1, instance::GenericInstanceAdmission::NonConcrete => 0, instance::GenericInstanceAdmission::InvalidValue => 0, _ => 0 } }
+pub fn score_generic_non_concrete(value: instance::GenericInstanceAdmission) -> i64 { handle value { instance::GenericInstanceAdmission::NonConcrete => 1, instance::GenericInstanceAdmission::Value(_) => 0, instance::GenericInstanceAdmission::InvalidValue => 0, _ => 0 } }
+pub fn score_generic_invalid(value: instance::GenericInstanceAdmission) -> i64 { handle value { instance::GenericInstanceAdmission::InvalidValue => 10, instance::GenericInstanceAdmission::Value(_) => 0, instance::GenericInstanceAdmission::NonConcrete => 0, _ => 0 } }

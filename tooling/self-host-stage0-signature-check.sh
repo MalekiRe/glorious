@@ -31,8 +31,8 @@ output="$("$compiler" \
     --runtime-leaf array-empty crate __g1_array_empty --runtime-leaf array-len crate __g1_array_len --runtime-leaf array-get-move crate __g1_array_get_move \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
-[[ "$output" == "6" ]] || {
-    echo "self-host signature check: expected exact unary/binary callable contracts, got $output" >&2
+[[ "$output" == "9" ]] || {
+    echo "self-host signature check: expected exact unary/binary callable parameter/result/effect/invocation/lifetime-binder contracts, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"

@@ -7,8 +7,8 @@ pub fn score_move(value: mir::StorageLowering) -> i64 { handle value { mir::Stor
 pub fn score_i64(value: mir::I64ArithmeticLowering) -> i64 { handle value { mir::I64ArithmeticLowering::Return(body::Arithmetic::Multiply, 6, 7) => 1, _ => 0 } }
 pub fn score_comparison(value: mir::I64ComparisonLowering) -> i64 { handle value { mir::I64ComparisonLowering::Return(body::Comparison::Less, 6, 7) => 1, _ => 0 } }
 pub fn score_select(value: mir::I64SelectLowering) -> i64 { handle value { mir::I64SelectLowering::Return(false, 6, 7) => 1, _ => 0 } }
-pub fn score_unary_call(value: mir::CallLowering) -> i64 { handle value { mir::CallLowering::Unary(signature::Callable::Unary(types::Type::I64, types::Type::I64), types::Type::I64) => 1, _ => 0 } }
-pub fn score_binary_call(value: mir::CallLowering) -> i64 { handle value { mir::CallLowering::Binary(signature::Callable::Binary(types::Type::I64, types::Type::I64, types::Type::I64), types::Type::I64, types::Type::I64) => 1, _ => 0 } }
+pub fn score_unary_call(value: mir::CallLowering) -> i64 { handle value { mir::CallLowering::Unary(signature::Callable::Unary(0, types::Type::I64, types::Type::I64, types::EffectRowIdentity::Empty, signature::Invocation::Once), types::Type::I64) => 1, _ => 0 } }
+pub fn score_binary_call(value: mir::CallLowering) -> i64 { handle value { mir::CallLowering::Binary(signature::Callable::Binary(0, types::Type::I64, types::Type::I64, types::Type::I64, types::EffectRowIdentity::Empty, signature::Invocation::Once), types::Type::I64, types::Type::I64) => 1, _ => 0 } }
 pub fn score_literal(value: mir::I64LiteralLowering) -> i64 { handle value { mir::I64LiteralLowering::Return(42) => 1, _ => 0 } }
 pub fn score_u32_literal(value: mir::U32LiteralLowering) -> i64 { handle value { mir::U32LiteralLowering::Return(42) => 1, _ => 0 } }
 pub fn score_u32_arithmetic(value: mir::U32ArithmeticLowering) -> i64 { handle value { mir::U32ArithmeticLowering::Return(body::Arithmetic::Add, 20, 22) => 1, _ => 0 } }

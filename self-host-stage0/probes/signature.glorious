@@ -31,6 +31,61 @@ pub fn main() -> i64 {
         + score(signature::same_callable(signature::callable(types::Type::I64, types::Type::Bool), signature::binary(types::Type::I64, types::Type::U8, types::Type::Bool)))
         + score(signature::same_callable(signature::binary(types::Type::I64, types::Type::U8, types::Type::Bool), signature::binary(types::Type::I64, types::Type::U8, types::Type::Bool)))
         + score(signature::same_callable(signature::binary(types::Type::I64, types::Type::U8, types::Type::Bool), signature::binary(types::Type::I64, types::Type::U64, types::Type::Bool)))
+        + score(signature::same_callable(
+            signature::callable(types::Type::I64, types::Type::Bool),
+            signature::callable_with_contract(
+                types::Type::I64,
+                types::Type::Bool,
+                types::empty_effect_identity(),
+                signature::Invocation::Once)))
+        + score(signature::same_callable(
+            signature::callable_with_contract(
+                types::Type::I64,
+                types::Type::Bool,
+                types::empty_effect_identity(),
+                signature::Invocation::Once),
+            signature::callable_with_contract(
+                types::Type::I64,
+                types::Type::Bool,
+                types::canonical_effect_identity(7),
+                signature::Invocation::Once)))
+        + score(signature::same_callable(
+            signature::callable_with_contract(
+                types::Type::I64,
+                types::Type::Bool,
+                types::empty_effect_identity(),
+                signature::Invocation::Once),
+            signature::callable_with_contract(
+                types::Type::I64,
+                types::Type::Bool,
+                types::empty_effect_identity(),
+                signature::Invocation::Affine)))
+        + score(signature::same_callable(
+            signature::callable_with_lifetime_binders(
+                1,
+                types::Type::I64,
+                types::Type::Bool,
+                types::empty_effect_identity(),
+                signature::Invocation::Once),
+            signature::callable_with_lifetime_binders(
+                1,
+                types::Type::I64,
+                types::Type::Bool,
+                types::empty_effect_identity(),
+                signature::Invocation::Once)))
+        + score(signature::same_callable(
+            signature::callable_with_lifetime_binders(
+                1,
+                types::Type::I64,
+                types::Type::Bool,
+                types::empty_effect_identity(),
+                signature::Invocation::Once),
+            signature::callable_with_lifetime_binders(
+                2,
+                types::Type::I64,
+                types::Type::Bool,
+                types::empty_effect_identity(),
+                signature::Invocation::Once)))
         + score(signature::accepts_argument(signature::callable(types::Type::Projection("Item", 2), types::Type::Bool), types::Type::Projection("Item", 2)))
         + score(signature::accepts_argument(signature::callable(types::Type::Projection("Item", 2), types::Type::Bool), types::Type::Projection("Other", 2)))
 }

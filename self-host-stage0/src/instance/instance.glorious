@@ -2,12 +2,61 @@
 // SCC discovery, and summary fixed points extend this source-owned key.
 // Argument kind is identity-bearing: the same payload in a type, lifetime,
 // effect-row, or structural-constant slot must never share an instance.
+use compiler_support::__g1_array_pop_move;
 pub enum ArgumentKind { Type, Lifetime, EffectRow, ConstU32, Quantity }
 pub enum ArgumentValue { Concrete(i64), Open(i64), Inferred(i64) }
 pub struct Instance { definition: i64, argument: i64, kind: ArgumentKind }
 pub enum InstanceAdmission { Value(Instance), NonConcrete, InvalidValue }
+
+// A specialization may carry more than one declared generic kind. The
+// persistent chain owns that complete source-order substitution; an admitted
+// GenericInstance is the key a later worklist/cache layer may intern.
+pub enum InstanceArguments {
+    Empty,
+    Node(ArgumentKind, ArgumentValue, Bool, Array<InstanceArguments>),
+}
+
+pub struct GenericInstance {
+    definition: i64,
+    arguments: InstanceArguments,
+}
+
+pub enum GenericInstanceAdmission {
+    Value(GenericInstance),
+    NonConcrete,
+    InvalidValue,
+}
+
+pub enum ArgumentValidation {
+    Valid(InstanceArguments),
+    NonConcrete,
+    InvalidValue,
+}
 pub fn instance(definition: i64, argument: i64) -> Instance { Instance { definition: definition, argument: argument, kind: ArgumentKind::Type } }
 pub fn typed_instance(definition: i64, argument: i64, kind: ArgumentKind) -> Instance { Instance { definition: definition, argument: argument, kind: kind } }
+
+pub fn empty_arguments() -> InstanceArguments { InstanceArguments::Empty }
+
+pub fn single_argument(kind: ArgumentKind, value: ArgumentValue) -> InstanceArguments {
+    InstanceArguments::Node(kind, value, false, [])
+}
+
+pub fn prepend_argument(kind: ArgumentKind, value: ArgumentValue, tail: InstanceArguments) -> InstanceArguments {
+    InstanceArguments::Node(kind, value, true, [tail])
+}
+
+pub fn generic_instance(definition: i64, arguments: InstanceArguments) -> GenericInstance {
+    GenericInstance { definition: definition, arguments: arguments }
+}
+
+pub fn admit_generic(definition: i64, arguments: InstanceArguments) -> GenericInstanceAdmission {
+    handle validate_arguments(arguments) {
+        ArgumentValidation::Valid(arguments) => GenericInstanceAdmission::Value(generic_instance(definition, arguments)),
+        ArgumentValidation::NonConcrete => GenericInstanceAdmission::NonConcrete,
+        ArgumentValidation::InvalidValue => GenericInstanceAdmission::InvalidValue,
+        _ => GenericInstanceAdmission::NonConcrete,
+    }
+}
 
 // Executable specializations cannot retain declaration-local generic or
 // inference variables.  The result keeps rejection explicit so worklist and
@@ -39,6 +88,72 @@ fn nonnegative_instance(definition: i64, value: i64, kind: ArgumentKind) -> Inst
         _ => InstanceAdmission::InvalidValue,
     }
 }
+
+fn validate_arguments(arguments: InstanceArguments) -> ArgumentValidation {
+    handle arguments {
+        InstanceArguments::Empty => ArgumentValidation::Valid(InstanceArguments::Empty),
+        InstanceArguments::Node(kind, value, has_tail, tail) => validate_argument_node(kind, value, has_tail, tail),
+        _ => ArgumentValidation::NonConcrete,
+    }
+}
+
+fn validate_argument_node(kind: ArgumentKind, value: ArgumentValue, has_tail: Bool, tail: Array<InstanceArguments>) -> ArgumentValidation {
+    handle admit(0, value, kind) {
+        InstanceAdmission::Value(_) => validate_argument_tail(kind, value, has_tail, tail),
+        InstanceAdmission::NonConcrete => reject_non_concrete_tail(has_tail, tail),
+        InstanceAdmission::InvalidValue => reject_invalid_tail(has_tail, tail),
+        _ => reject_non_concrete_tail(has_tail, tail),
+    }
+}
+
+fn validate_argument_tail(kind: ArgumentKind, value: ArgumentValue, has_tail: Bool, tail: Array<InstanceArguments>) -> ArgumentValidation {
+    handle has_tail {
+        true => rebuild_validated_argument(kind, value, validate_arguments(__g1_array_pop_move<InstanceArguments>(&mut tail))),
+        false => ArgumentValidation::Valid(InstanceArguments::Node(kind, value, false, tail)),
+        _ => ArgumentValidation::NonConcrete,
+    }
+}
+
+fn rebuild_validated_argument(kind: ArgumentKind, value: ArgumentValue, tail: ArgumentValidation) -> ArgumentValidation {
+    handle tail {
+        ArgumentValidation::Valid(next) => ArgumentValidation::Valid(InstanceArguments::Node(kind, value, true, [next])),
+        ArgumentValidation::NonConcrete => ArgumentValidation::NonConcrete,
+        ArgumentValidation::InvalidValue => ArgumentValidation::InvalidValue,
+        _ => ArgumentValidation::NonConcrete,
+    }
+}
+
+fn reject_non_concrete_tail(has_tail: Bool, tail: Array<InstanceArguments>) -> ArgumentValidation {
+    handle has_tail {
+        true => reject_non_concrete_after_discard(discard_arguments(__g1_array_pop_move<InstanceArguments>(&mut tail))),
+        false => ArgumentValidation::NonConcrete,
+        _ => ArgumentValidation::NonConcrete,
+    }
+}
+
+fn reject_non_concrete_after_discard(_: Bool) -> ArgumentValidation { ArgumentValidation::NonConcrete }
+
+fn reject_invalid_tail(has_tail: Bool, tail: Array<InstanceArguments>) -> ArgumentValidation {
+    handle has_tail {
+        true => reject_invalid_after_discard(discard_arguments(__g1_array_pop_move<InstanceArguments>(&mut tail))),
+        false => ArgumentValidation::InvalidValue,
+        _ => ArgumentValidation::InvalidValue,
+    }
+}
+
+fn reject_invalid_after_discard(_: Bool) -> ArgumentValidation { ArgumentValidation::InvalidValue }
+
+fn discard_arguments(arguments: InstanceArguments) -> Bool {
+    handle arguments {
+        InstanceArguments::Empty => true,
+        InstanceArguments::Node(_, _, has_tail, tail) => handle has_tail {
+            true => discard_arguments(__g1_array_pop_move<InstanceArguments>(&mut tail)),
+            false => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
 pub fn same(left: Instance, right: Instance) -> Bool {
     compiler_support::branch_bool(left.definition == right.definition,
         () -> Bool { same_argument(left, right) },
@@ -58,6 +173,93 @@ fn same_kind(left: ArgumentKind, right: ArgumentKind) -> Bool {
         (ArgumentKind::EffectRow, ArgumentKind::EffectRow) => true,
         (ArgumentKind::ConstU32, ArgumentKind::ConstU32) => true,
         (ArgumentKind::Quantity, ArgumentKind::Quantity) => true,
+        _ => false,
+    }
+}
+
+pub fn same_generic_instance(left: GenericInstance, right: GenericInstance) -> Bool {
+    handle (left, right) {
+        (
+            GenericInstance { definition: left_definition, arguments: left_arguments },
+            GenericInstance { definition: right_definition, arguments: right_arguments },
+        ) => handle left_definition == right_definition {
+            true => same_instance_arguments(left_arguments, right_arguments),
+            false => discard_instance_argument_pair(left_arguments, right_arguments),
+            _ => false,
+        },
+    }
+}
+
+fn same_instance_arguments(left: InstanceArguments, right: InstanceArguments) -> Bool {
+    handle (left, right) {
+        (InstanceArguments::Empty, InstanceArguments::Empty) => true,
+        (InstanceArguments::Node(left_kind, left_value, left_has_tail, left_tail), InstanceArguments::Node(right_kind, right_value, right_has_tail, right_tail)) => same_instance_argument_node(left_kind, left_value, left_has_tail, left_tail, right_kind, right_value, right_has_tail, right_tail),
+        (left, right) => discard_instance_argument_pair(left, right),
+    }
+}
+
+fn same_instance_argument_node(
+    left_kind: ArgumentKind,
+    left_value: ArgumentValue,
+    left_has_tail: Bool,
+    left_tail: Array<InstanceArguments>,
+    right_kind: ArgumentKind,
+    right_value: ArgumentValue,
+    right_has_tail: Bool,
+    right_tail: Array<InstanceArguments>,
+) -> Bool {
+    handle same_kind(left_kind, right_kind) {
+        true => handle same_argument_value(left_value, right_value) {
+            true => same_instance_argument_tails(left_has_tail, left_tail, right_has_tail, right_tail),
+            false => discard_instance_argument_tails(left_has_tail, left_tail, right_has_tail, right_tail),
+            _ => false,
+        },
+        false => discard_instance_argument_tails(left_has_tail, left_tail, right_has_tail, right_tail),
+        _ => false,
+    }
+}
+
+fn same_argument_value(left: ArgumentValue, right: ArgumentValue) -> Bool {
+    handle (left, right) {
+        (ArgumentValue::Concrete(left), ArgumentValue::Concrete(right)) => left == right,
+        (ArgumentValue::Open(left), ArgumentValue::Open(right)) => left == right,
+        (ArgumentValue::Inferred(left), ArgumentValue::Inferred(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn same_instance_argument_tails(left_has_tail: Bool, left_tail: Array<InstanceArguments>, right_has_tail: Bool, right_tail: Array<InstanceArguments>) -> Bool {
+    handle (left_has_tail, right_has_tail) {
+        (false, false) => true,
+        (true, true) => same_instance_arguments(
+            __g1_array_pop_move<InstanceArguments>(&mut left_tail),
+            __g1_array_pop_move<InstanceArguments>(&mut right_tail)),
+        (true, false) => discard_single_instance_argument_tail(left_tail),
+        (false, true) => discard_single_instance_argument_tail(right_tail),
+        _ => false,
+    }
+}
+
+fn discard_instance_argument_tails(left_has_tail: Bool, left_tail: Array<InstanceArguments>, right_has_tail: Bool, right_tail: Array<InstanceArguments>) -> Bool {
+    handle (left_has_tail, right_has_tail) {
+        (false, false) => false,
+        (true, true) => discard_instance_argument_pair(
+            __g1_array_pop_move<InstanceArguments>(&mut left_tail),
+            __g1_array_pop_move<InstanceArguments>(&mut right_tail)),
+        (true, false) => discard_single_instance_argument_tail(left_tail),
+        (false, true) => discard_single_instance_argument_tail(right_tail),
+        _ => false,
+    }
+}
+
+fn discard_single_instance_argument_tail(tail: Array<InstanceArguments>) -> Bool {
+    discard_arguments(__g1_array_pop_move<InstanceArguments>(&mut tail))
+}
+
+fn discard_instance_argument_pair(left: InstanceArguments, right: InstanceArguments) -> Bool {
+    handle discard_arguments(left) {
+        true => handle discard_arguments(right) { true => false, false => false, _ => false },
+        false => handle discard_arguments(right) { true => false, false => false, _ => false },
         _ => false,
     }
 }

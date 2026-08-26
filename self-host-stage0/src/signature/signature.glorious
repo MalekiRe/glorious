@@ -1,22 +1,49 @@
-// M15's initial callable contract. Effects, generics, lifetimes, quantities,
-// and trait bounds extend this source-defined parameter/result boundary.
+// M15's callable contract. Generics, lifetimes, and trait bounds extend this
+// source-defined parameter/result/effect/invocation boundary.
 use types::Type;
 use types::same;
+use types::EffectRowIdentity;
+use types::empty_effect_identity;
+use types::same_effect_identity;
 use compiler_support::branch_bool;
 
 pub enum Callable {
-    Unary(Type, Type),
-    Binary(Type, Type, Type),
+    Unary(i64, Type, Type, EffectRowIdentity, Invocation),
+    Binary(i64, Type, Type, Type, EffectRowIdentity, Invocation),
 }
 
 pub enum Arguments { One(Type), Two(Type, Type) }
 
+// This is the invocation portion of the frozen callable signature. It is a
+// contract identity, not a property inferred from a body call site.
+pub enum Invocation {
+    Once,
+    Affine,
+    Unrestricted,
+}
+
 pub fn callable(parameter: Type, result: Type) -> Callable {
-    Callable::Unary(parameter, result)
+    callable_with_contract(parameter, result, empty_effect_identity(), Invocation::Once)
 }
 
 pub fn binary(first: Type, second: Type, result: Type) -> Callable {
-    Callable::Binary(first, second, result)
+    binary_with_contract(first, second, result, empty_effect_identity(), Invocation::Once)
+}
+
+pub fn callable_with_contract(parameter: Type, result: Type, effects: EffectRowIdentity, invocation: Invocation) -> Callable {
+    callable_with_lifetime_binders(0, parameter, result, effects, invocation)
+}
+
+pub fn binary_with_contract(first: Type, second: Type, result: Type, effects: EffectRowIdentity, invocation: Invocation) -> Callable {
+    binary_with_lifetime_binders(0, first, second, result, effects, invocation)
+}
+
+pub fn callable_with_lifetime_binders(lifetime_binders: i64, parameter: Type, result: Type, effects: EffectRowIdentity, invocation: Invocation) -> Callable {
+    Callable::Unary(lifetime_binders, parameter, result, effects, invocation)
+}
+
+pub fn binary_with_lifetime_binders(lifetime_binders: i64, first: Type, second: Type, result: Type, effects: EffectRowIdentity, invocation: Invocation) -> Callable {
+    Callable::Binary(lifetime_binders, first, second, result, effects, invocation)
 }
 
 pub fn accepts_argument(callable: Callable, argument: Type) -> Bool {
@@ -28,16 +55,96 @@ pub fn accepts_argument(callable: Callable, argument: Type) -> Bool {
 // one parameter's type happens to match.
 pub fn accepts(callable: Callable, arguments: Arguments) -> Bool {
     handle callable {
-        Callable::Unary(parameter, _) => handle arguments {
+        Callable::Unary(_, parameter, _, _, _) => handle arguments {
             Arguments::One(argument) => same(parameter, argument),
             Arguments::Two(_, _) => false,
             _ => false,
         },
-        Callable::Binary(first, second, _) => handle arguments {
+        Callable::Binary(_, first, second, _, _, _) => handle arguments {
             Arguments::One(_) => false,
             Arguments::Two(left, right) => binary_arguments_match(first, second, left, right),
             _ => false,
         },
+        _ => false,
+    }
+}
+
+// Body lowering needs one affine pass over a callable: asking separately
+// whether its arguments and result match would consume an effect-bearing
+// callable twice. This fused admission checks arity, parameters, result, and
+// consumes the retained declaration contract exactly once.
+pub fn accepts_call(callable: Callable, arguments: Arguments, result: Type) -> Bool {
+    handle callable {
+        Callable::Unary(_, parameter, expected, effects, invocation) => accepts_unary_call(parameter, expected, effects, invocation, arguments, result),
+        Callable::Binary(_, first, second, expected, effects, invocation) => accepts_binary_call(first, second, expected, effects, invocation, arguments, result),
+        _ => false,
+    }
+}
+
+fn accepts_unary_call(
+    parameter: Type,
+    expected: Type,
+    effects: EffectRowIdentity,
+    invocation: Invocation,
+    arguments: Arguments,
+    result: Type,
+) -> Bool {
+    handle arguments {
+        Arguments::One(argument) => handle same(parameter, argument) {
+            true => accepts_call_result(expected, effects, invocation, result),
+            false => false,
+            _ => false,
+        },
+        Arguments::Two(_, _) => false,
+        _ => false,
+    }
+}
+
+fn accepts_binary_call(
+    first: Type,
+    second: Type,
+    expected: Type,
+    effects: EffectRowIdentity,
+    invocation: Invocation,
+    arguments: Arguments,
+    result: Type,
+) -> Bool {
+    handle arguments {
+        Arguments::One(_) => false,
+        Arguments::Two(left, right) => handle same(first, left) {
+            true => handle same(second, right) {
+                true => accepts_call_result(expected, effects, invocation, result),
+                false => false,
+                _ => false,
+            },
+            false => false,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn accepts_call_result(expected: Type, effects: EffectRowIdentity, invocation: Invocation, result: Type) -> Bool {
+    handle same(expected, result) {
+        true => consume_callable_contract(effects, invocation),
+        false => false,
+        _ => false,
+    }
+}
+
+fn consume_callable_contract(effects: EffectRowIdentity, invocation: Invocation) -> Bool {
+    handle invocation {
+        Invocation::Once => consume_effect_identity(effects),
+        Invocation::Affine => consume_effect_identity(effects),
+        Invocation::Unrestricted => consume_effect_identity(effects),
+        _ => false,
+    }
+}
+
+fn consume_effect_identity(value: EffectRowIdentity) -> Bool {
+    handle value {
+        EffectRowIdentity::Empty => true,
+        EffectRowIdentity::Canonical(_) => true,
         _ => false,
     }
 }
@@ -52,25 +159,129 @@ fn binary_arguments_match(first: Type, second: Type, left: Type, right: Type) ->
 
 pub fn result_matches(callable: Callable, result: Type) -> Bool {
     handle callable {
-        Callable::Unary(_, expected) => same(expected, result),
-        Callable::Binary(_, _, expected) => same(expected, result),
+        Callable::Unary(_, _, expected, _, _) => same(expected, result),
+        Callable::Binary(_, _, _, expected, _, _) => same(expected, result),
         _ => false,
     }
 }
 
 pub fn same_callable(left: Callable, right: Callable) -> Bool {
     handle (left, right) {
-        (Callable::Unary(left_parameter, left_result), Callable::Unary(right_parameter, right_result)) => branch_bool(same(left_parameter, right_parameter), () -> Bool { same(left_result, right_result) }, () -> Bool { false }),
-        (Callable::Binary(left_first, left_second, left_result), Callable::Binary(right_first, right_second, right_result)) => same_binary(first_same(left_first, right_first), left_second, left_result, right_second, right_result),
+        (Callable::Unary(left_binders, left_parameter, left_result, left_effects, left_invocation), Callable::Unary(right_binders, right_parameter, right_result, right_effects, right_invocation)) => same_unary_binders(left_binders, left_parameter, left_result, left_effects, left_invocation, right_binders, right_parameter, right_result, right_effects, right_invocation),
+        (Callable::Binary(left_binders, left_first, left_second, left_result, left_effects, left_invocation), Callable::Binary(right_binders, right_first, right_second, right_result, right_effects, right_invocation)) => same_binary_binders(left_binders, left_first, left_second, left_result, left_effects, left_invocation, right_binders, right_first, right_second, right_result, right_effects, right_invocation),
         _ => false,
     }
 }
 
 fn first_same(left: Type, right: Type) -> Bool { same(left, right) }
-fn same_binary(first: Bool, left_second: Type, left_result: Type, right_second: Type, right_result: Type) -> Bool {
-    handle first {
-        true => handle same(left_second, right_second) { true => same(left_result, right_result), false => false, _ => false },
+fn same_unary_binders(
+    left_binders: i64,
+    left_parameter: Type,
+    left_result: Type,
+    left_effects: EffectRowIdentity,
+    left_invocation: Invocation,
+    right_binders: i64,
+    right_parameter: Type,
+    right_result: Type,
+    right_effects: EffectRowIdentity,
+    right_invocation: Invocation,
+) -> Bool {
+    handle left_binders == right_binders {
+        true => same_unary(left_parameter, left_result, left_effects, left_invocation, right_parameter, right_result, right_effects, right_invocation),
         false => false,
+        _ => false,
+    }
+}
+
+fn same_unary(
+    left_parameter: Type,
+    left_result: Type,
+    left_effects: EffectRowIdentity,
+    left_invocation: Invocation,
+    right_parameter: Type,
+    right_result: Type,
+    right_effects: EffectRowIdentity,
+    right_invocation: Invocation,
+) -> Bool {
+    handle same(left_parameter, right_parameter) {
+        true => same_callable_result(left_result, left_effects, left_invocation, right_result, right_effects, right_invocation),
+        false => false,
+        _ => false,
+    }
+}
+
+fn same_binary_binders(
+    left_binders: i64,
+    left_first: Type,
+    left_second: Type,
+    left_result: Type,
+    left_effects: EffectRowIdentity,
+    left_invocation: Invocation,
+    right_binders: i64,
+    right_first: Type,
+    right_second: Type,
+    right_result: Type,
+    right_effects: EffectRowIdentity,
+    right_invocation: Invocation,
+) -> Bool {
+    handle left_binders == right_binders {
+        true => same_binary(first_same(left_first, right_first), left_second, left_result, left_effects, left_invocation, right_second, right_result, right_effects, right_invocation),
+        false => false,
+        _ => false,
+    }
+}
+
+fn same_binary(
+    first: Bool,
+    left_second: Type,
+    left_result: Type,
+    left_effects: EffectRowIdentity,
+    left_invocation: Invocation,
+    right_second: Type,
+    right_result: Type,
+    right_effects: EffectRowIdentity,
+    right_invocation: Invocation,
+) -> Bool {
+    handle first {
+        true => handle same(left_second, right_second) { true => same_callable_result(left_result, left_effects, left_invocation, right_result, right_effects, right_invocation), false => false, _ => false },
+        false => false,
+        _ => false,
+    }
+}
+
+fn same_callable_result(
+    left_result: Type,
+    left_effects: EffectRowIdentity,
+    left_invocation: Invocation,
+    right_result: Type,
+    right_effects: EffectRowIdentity,
+    right_invocation: Invocation,
+) -> Bool {
+    handle same(left_result, right_result) {
+        true => same_callable_effects(left_effects, left_invocation, right_effects, right_invocation),
+        false => false,
+        _ => false,
+    }
+}
+
+fn same_callable_effects(
+    left_effects: EffectRowIdentity,
+    left_invocation: Invocation,
+    right_effects: EffectRowIdentity,
+    right_invocation: Invocation,
+) -> Bool {
+    handle same_effect_identity(left_effects, right_effects) {
+        true => same_invocation(left_invocation, right_invocation),
+        false => false,
+        _ => false,
+    }
+}
+
+fn same_invocation(left: Invocation, right: Invocation) -> Bool {
+    handle (left, right) {
+        (Invocation::Once, Invocation::Once) => true,
+        (Invocation::Affine, Invocation::Affine) => true,
+        (Invocation::Unrestricted, Invocation::Unrestricted) => true,
         _ => false,
     }
 }

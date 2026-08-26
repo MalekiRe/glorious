@@ -24,6 +24,56 @@ pub fn duplicate_score(value: types::TypeArenaAdmission) -> i64 {
     }
 }
 
+pub fn unification_score(value: types::ShapeUnification, expected: types::Type) -> i64 {
+    handle value {
+        types::ShapeUnification::Unified(found) => score(types::same(found, expected)),
+        types::ShapeUnification::Mismatch => 0,
+        _ => 0,
+    }
+}
+
+pub fn inference_zonk_score(value: types::InferenceUnification, wanted: types::Type, expected: types::Type) -> i64 {
+    handle value {
+        types::InferenceUnification::Unified(state) => handle types::zonk_inference(state, wanted) {
+            types::InferenceZonk::Value(found, _) => score(types::same(found, expected)),
+            types::InferenceZonk::Unresolved(_) => 0,
+            _ => 0,
+        },
+        types::InferenceUnification::Mismatch(_) => 0,
+        _ => 0,
+    }
+}
+
+pub fn inference_mismatch_score(value: types::InferenceUnification) -> i64 {
+    handle value {
+        types::InferenceUnification::Mismatch(_) => 1,
+        types::InferenceUnification::Unified(_) => 0,
+        types::InferenceUnification::Occurs(_) => 0,
+        _ => 0,
+    }
+}
+
+pub fn inference_occurs_score(value: types::InferenceUnification) -> i64 {
+    handle value {
+        types::InferenceUnification::Occurs(_) => 1,
+        types::InferenceUnification::Unified(_) => 0,
+        types::InferenceUnification::Mismatch(_) => 0,
+        _ => 0,
+    }
+}
+
+pub fn nested_inference_occurs_score(value: types::TypeArenaAdmission) -> i64 {
+    handle value {
+        types::TypeArenaAdmission::Value(arena) => inference_occurs_score(types::unify_inference_with_occurs(
+            types::empty_inference(),
+            arena,
+            types::inference_variable(4),
+            types::array_type(10))),
+        types::TypeArenaAdmission::DuplicateNode => 0,
+        _ => 0,
+    }
+}
+
 pub fn admitted_lookup_score(
     admission: types::TypeArenaAdmission,
     node: i64,
@@ -48,23 +98,130 @@ pub fn main() -> i64 {
         + score(types::same(types::Type::Char, types::Type::Char))
         + score(types::same(types::Type::Bytes, types::Type::Bytes))
         + score(types::same(types::Type::Named("Node"), types::Type::Named("Node")))
+        + score(types::same(types::nominal(7, 2), types::nominal(7, 2)))
         + score(types::same(types::Type::Generic(2), types::Type::Generic(2)))
         + score(types::same(types::Type::Projection("Item", 2), types::Type::Projection("Item", 2)))
+        + score(types::same(
+            types::shared_borrow(types::Lifetime::Static, 64),
+            types::shared_borrow(types::Lifetime::Static, 64)))
+        + score(types::same(
+            types::mutable_borrow(types::Lifetime::Generic(2), 64),
+            types::mutable_borrow(types::Lifetime::Generic(2), 64)))
         + score(types::same(types::Type::Named("Node"), types::Type::Named("Other")))
+        + score(types::same(types::nominal(7, 2), types::nominal(7, 3)))
         + score(types::same(types::Type::Generic(2), types::Type::Generic(3)))
         + score(types::same(types::Type::Projection("Item", 2), types::Type::Projection("Other", 2)))
+        + score(types::same(
+            types::shared_borrow(types::Lifetime::Static, 64),
+            types::mutable_borrow(types::Lifetime::Static, 64)))
+        + score(types::same(
+            types::shared_borrow(types::Lifetime::Bound(0, 0), 64),
+            types::shared_borrow(types::Lifetime::Bound(1, 0), 64)))
         + score(types::same(types::Type::Never, types::Type::I64))
         + score(types::same(types::Type::U8, types::Type::Usize))
         + score(types::same(types::Type::F32, types::Type::F64))
+        + unification_score(types::unify_expected(types::Type::I64, types::Type::Never), types::Type::I64)
+        + unification_score(types::unify_expected(types::Type::Never, types::Type::Text), types::Type::Text)
+        + unification_score(types::unify_expected(types::Type::I64, types::Type::Text), types::Type::I64)
+        + score(types::same_generic_argument(
+            types::type_argument(types::Type::I64),
+            types::type_argument(types::Type::I64)))
+        + score(types::same_generic_argument(
+            types::effect_row_argument(types::empty_effect_identity()),
+            types::lifetime_argument(types::Lifetime::Static)))
+        + inference_zonk_score(
+            types::unify_inference(
+                types::empty_inference(),
+                types::inference_variable(1),
+                types::Type::I64),
+            types::inference_variable(1),
+            types::Type::I64)
+        + inference_zonk_score(
+            types::continue_unification(
+                types::unify_inference(
+                    types::empty_inference(),
+                    types::inference_variable(1),
+                    types::inference_variable(2)),
+                types::inference_variable(2),
+                types::Type::I64),
+            types::inference_variable(1),
+            types::Type::I64)
+        + inference_mismatch_score(types::continue_unification(
+            types::unify_inference(
+                types::empty_inference(),
+                types::inference_variable(1),
+                types::Type::I64),
+            types::inference_variable(1),
+            types::Type::Text))
+        + inference_occurs_score(types::unify_inference_with_occurs(
+            types::empty_inference(),
+            types::singleton_type(9, types::inference_variable(3)),
+            types::inference_variable(3),
+            types::array_type(9)))
+        + nested_inference_occurs_score(types::checked_insert_type(
+            types::singleton_type(9, types::inference_variable(4)),
+            10,
+            types::array_type(9)))
         + score(types::same_term(types::Term::ValueType(types::Type::I64), types::Term::ValueType(types::Type::I64)))
-        + score(types::same_term(types::Term::EffectRow(3), types::Term::EffectRow(3)))
+        + score(types::same_term(
+            types::Term::EffectRow(types::empty_effect_row()),
+            types::Term::EffectRow(types::empty_effect_row())))
+        + score(types::same_term(
+            types::Term::EffectRow(types::singleton_effect_row(types::named_effect(3))),
+            types::Term::EffectRow(types::singleton_effect_row(types::named_effect(3)))))
+        + score(types::same_term(
+            types::Term::EffectRow(types::singleton_effect_row(types::applied_effect(3, 1))),
+            types::Term::EffectRow(types::singleton_effect_row(types::applied_effect(3, 1)))))
+        + score(types::same_term(
+            types::Term::EffectRow(types::singleton_effect_row(
+                types::projected_effect_row(7, 3, 1, 9))),
+            types::Term::EffectRow(types::singleton_effect_row(
+                types::projected_effect_row(7, 3, 1, 9)))))
+        + score(types::same_term(
+            types::Term::EffectRow(types::prepend_effect(
+                types::named_effect(3),
+                types::generic_effect_tail(1))),
+            types::Term::EffectRow(types::prepend_effect(
+                types::named_effect(3),
+                types::generic_effect_tail(1)))))
+        + score(types::same_term(
+            types::Term::EffectRow(types::prepend_effect(
+                types::named_effect(5),
+                types::singleton_effect_row(types::named_effect(3)))),
+            types::Term::EffectRow(types::prepend_effect(
+                types::named_effect(3),
+                types::singleton_effect_row(types::named_effect(5))))))
+        + score(types::same_term(
+            types::Term::EffectRow(types::prepend_effect(
+                types::named_effect(3),
+                types::singleton_effect_row(types::named_effect(3)))),
+            types::Term::EffectRow(types::singleton_effect_row(types::named_effect(3)))))
+        + score(types::same_term(
+            types::Term::EffectRow(types::generic_effect_tail(1)),
+            types::Term::EffectRow(types::inferred_effect_tail(1))))
         + score(types::same_lifetime(types::Lifetime::Static, types::Lifetime::Static))
         + score(types::same_lifetime(types::Lifetime::Bound(0, 1), types::Lifetime::Bound(0, 1)))
         + score(types::same_lifetime(types::Lifetime::Bound(0, 1), types::Lifetime::Bound(1, 1)))
         + score(types::same_term(types::Term::Lifetime(types::Lifetime::Generic(4)), types::Term::Lifetime(types::Lifetime::Generic(4))) )
-        + score(types::same_term(types::Term::StructuralConstant(5), types::Term::StructuralConstant(5)))
-        + score(types::same_term(types::Term::EffectRow(3), types::Term::Lifetime(types::Lifetime::Generic(3))))
-        + score(types::same_term(types::Term::StructuralConstant(5), types::Term::StructuralConstant(6)))
+        + score(types::same_term(
+            types::Term::StructuralConstant(types::u32_constant(types::structural_u32_literal(5))),
+            types::Term::StructuralConstant(types::u32_constant(types::structural_u32_literal(5)))))
+        + score(types::same_term(
+            types::Term::StructuralConstant(types::u32_constant(types::u32_add(
+                types::structural_u32_literal(2),
+                types::structural_u32_generic(1)))),
+            types::Term::StructuralConstant(types::u32_constant(types::u32_add(
+                types::structural_u32_literal(2),
+                types::structural_u32_generic(1))))))
+        + score(types::same_term(
+            types::Term::StructuralConstant(types::quantity_constant(5)),
+            types::Term::StructuralConstant(types::quantity_constant(5))))
+        + score(types::same_term(
+            types::Term::EffectRow(types::singleton_effect_row(types::named_effect(3))),
+            types::Term::Lifetime(types::Lifetime::Generic(3))))
+        + score(types::same_term(
+            types::Term::StructuralConstant(types::u32_constant(types::structural_u32_literal(5))),
+            types::Term::StructuralConstant(types::quantity_constant(5))))
         + lookup_score(
             types::resolve_reference(
                 types::singleton_type(64, types::Type::I64),

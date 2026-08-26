@@ -28,4 +28,13 @@ pub fn main() -> i64 {
         + score(coherence::overlap(
             coherence::implementation("Show", types::Type::Projection("Item", 2)),
             coherence::implementation("Show", types::Type::Projection("Item", 2))))
+        + score(coherence::overlap(
+            coherence::generic_implementation("Show"),
+            coherence::implementation("Show", types::Type::I64)))
+        + score(coherence::overlap(
+            coherence::generic_implementation("Show"),
+            coherence::generic_negative_implementation("Show")))
+        + score(coherence::overlap(
+            coherence::generic_implementation("Show"),
+            coherence::implementation("Eq", types::Type::I64)))
 }
