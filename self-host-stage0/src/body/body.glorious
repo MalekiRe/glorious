@@ -15,6 +15,7 @@ use scanner::next_token;
 use scanner::token_equals;
 use scanner::token_kind;
 use scanner::token_matches;
+use scanner::token_start;
 use scanner::SignedI64LiteralAdmission;
 use scanner::signed_i64_literal_at;
 use placeflow::PlaceState;
@@ -22,6 +23,8 @@ use placeflow::ClosureCaptureMode;
 use placeflow::ClosureCaptureAdmission;
 use placeflow::capture_for_closure;
 use compiler_support::__g1_array_pop_move;
+use compiler_support::__g1_bytes_len;
+use compiler_support::__g1_bytes_slice;
 
 pub enum Arithmetic { Add, Subtract, Multiply, Divide, Remainder }
 pub enum Comparison { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual }
@@ -78,6 +81,35 @@ pub enum TypedClosureSyntax { Parameters(i64), NotTypedClosure, Rejected }
 // `@name` is a first-class label value; adding `:` creates a label binder,
 // while adding `(` transfers to an already active label.
 pub enum LabelSyntax { Binder, Transfer, Value, NotLabel, Rejected }
+// A demand-driven structural slice of BodySyntax. It deliberately records
+// only container shape and element count: expression allocation, fixity, and
+// type elaboration stay in later parser/Core work just as they do in stage0.
+// `Group` is distinct from a one-element tuple, whose comma is source-significant.
+pub enum DelimitedExpressionSyntax { Tuple(i64), Group, Array(i64), Block(i64), NotDelimitedExpression, Rejected }
+// Body preserves source-order infix chains. Fixity resolves this form later;
+// choosing precedence while scanning would make module-declared operators
+// impossible to elaborate faithfully.
+pub enum FlatOperatorChainSyntax { Operators(i64), NotOperatorChain, Rejected }
+// Prefix shape is retained independently from ownership/type interpretation.
+// `move` is the ordinary expression-level transfer; a capture list followed
+// by a block is separately recognized as a move-capture closure.
+pub enum PrefixExpressionSyntax { Move, SharedBorrow, UniqueBorrow, Deref, Operator, NotPrefix, Rejected }
+// One prioritized entrypoint for the currently ported expression grammar.
+// Its result is deliberately a syntax category, not an elaborated type or
+// value. The eventual BodySyntax arena will allocate the corresponding node
+// from this decision and retain token spans/children.
+pub enum SourceExpressionSyntax { Atom, Delimited, Prefix, Postfix, PatternTest, FlatOperatorChain, CompactClosure, TypedClosure, MoveCaptureClosure, Label, LetAssignment, Rejected }
+// Pattern spelling remains structural until Core resolves nominal paths and
+// assigns binding environments. This covers the fixed-shape syntax families
+// that do not require namespace lookup.
+pub enum SourcePatternSyntax { Wildcard, Binding, Literal, Tuple(i64), Array(i64), NotPattern, Rejected }
+pub enum PatternBindingValidation { Valid, DuplicateBinding, Rejected }
+// Direct calls and fields are parser structure only. Namespace and layout
+// resolution remain Core responsibilities, so positional `.0` and named
+// `.field` travel through one syntax category.
+pub enum PostfixExpressionSyntax { Value(i64, i64), NotPostfix, Rejected }
+pub enum StructuralIsSyntax { Value, NotIs, Rejected }
+enum DelimitedMode { Tuple, Array, Block }
 // A narrow value-carrying label form is sufficient to connect compact label
 // syntax to the existing scalar Body/Core/MIR route while the complete body
 // arena and arbitrary label result elaboration are ported.
@@ -88,6 +120,745 @@ pub enum LabelI64TransferAdmission { Value(i64, TokenStart), NotLabel, Rejected 
 pub enum LetI64AssignmentAdmission { Value(i64, i64, TokenStart), NotLet, Rejected }
 enum MoveCaptureNames { Empty, Node(TokenStart, Bool, Array<MoveCaptureNames>) }
 enum MoveCaptureNameInsert { Added(MoveCaptureNames), Duplicate }
+enum PatternBindingNames { Empty, Node(TokenStart, Bool, Array<PatternBindingNames>) }
+enum PatternBindingInsert { Added(PatternBindingNames), Duplicate }
+enum PostfixBase { Next(TokenStart), Rejected, NotBase }
+enum CallArguments { Value(i64, TokenStart), Rejected }
+
+pub fn prefix_expression_syntax(input: Bytes) -> PrefixExpressionSyntax {
+    prefix_expression_start(input, first_token(input))
+}
+
+fn prefix_expression_start(input: Bytes, token: TokenStart) -> PrefixExpressionSyntax {
+    handle token_matches(input, token, "move") {
+        true => prefix_expression_value(input, next_token(input, token), PrefixExpressionSyntax::Move),
+        false => handle token_matches(input, token, "&") {
+            true => prefix_expression_borrow(input, next_token(input, token)),
+            false => handle token_matches(input, token, "*") {
+                true => prefix_expression_value(input, next_token(input, token), PrefixExpressionSyntax::Deref),
+                false => prefix_expression_operator(input, token),
+                _ => PrefixExpressionSyntax::Rejected,
+            },
+            _ => PrefixExpressionSyntax::Rejected,
+        },
+        _ => PrefixExpressionSyntax::Rejected,
+    }
+}
+
+fn prefix_expression_borrow(input: Bytes, token: TokenStart) -> PrefixExpressionSyntax {
+    handle token_matches(input, token, "mut") {
+        true => prefix_expression_value(input, next_token(input, token), PrefixExpressionSyntax::UniqueBorrow),
+        false => prefix_expression_value(input, token, PrefixExpressionSyntax::SharedBorrow),
+        _ => PrefixExpressionSyntax::Rejected,
+    }
+}
+
+fn prefix_expression_operator(input: Bytes, token: TokenStart) -> PrefixExpressionSyntax {
+    handle token_kind(token) {
+        TokenKind::Operator => prefix_expression_value(input, next_token(input, token), PrefixExpressionSyntax::Operator),
+        _ => PrefixExpressionSyntax::NotPrefix,
+    }
+}
+
+fn prefix_expression_value(input: Bytes, token: TokenStart, syntax: PrefixExpressionSyntax) -> PrefixExpressionSyntax {
+    handle token_matches(input, token, "(") {
+        true => prefix_expression_after_nested(input, skip_nested_delimiter(input, token), syntax),
+        false => handle token_matches(input, token, "[") {
+            true => prefix_expression_after_nested(input, skip_nested_delimiter(input, token), syntax),
+            false => handle token_matches(input, token, "{") {
+                true => prefix_expression_after_nested(input, skip_nested_delimiter(input, token), syntax),
+                false => prefix_expression_scalar_value(input, token, syntax),
+                _ => PrefixExpressionSyntax::Rejected,
+            },
+            _ => PrefixExpressionSyntax::Rejected,
+        },
+        _ => PrefixExpressionSyntax::Rejected,
+    }
+}
+
+fn prefix_expression_after_nested(input: Bytes, nested: DelimitedSkip, syntax: PrefixExpressionSyntax) -> PrefixExpressionSyntax {
+    handle nested {
+        DelimitedSkip::Close(close) => prefix_expression_end(input, next_token(input, close), syntax),
+        DelimitedSkip::Rejected => PrefixExpressionSyntax::Rejected,
+        _ => PrefixExpressionSyntax::Rejected,
+    }
+}
+
+fn prefix_expression_scalar_value(input: Bytes, token: TokenStart, syntax: PrefixExpressionSyntax) -> PrefixExpressionSyntax {
+    handle token_kind(token) {
+        TokenKind::Identifier => prefix_expression_end(input, next_token(input, token), syntax),
+        TokenKind::Integer => prefix_expression_end(input, next_token(input, token), syntax),
+        TokenKind::Float => prefix_expression_end(input, next_token(input, token), syntax),
+        TokenKind::String => prefix_expression_end(input, next_token(input, token), syntax),
+        TokenKind::Character => prefix_expression_end(input, next_token(input, token), syntax),
+        _ => PrefixExpressionSyntax::Rejected,
+    }
+}
+
+fn prefix_expression_end(input: Bytes, token: TokenStart, syntax: PrefixExpressionSyntax) -> PrefixExpressionSyntax {
+    handle token_kind(token) {
+        TokenKind::End => syntax,
+        _ => PrefixExpressionSyntax::Rejected,
+    }
+}
+
+// Preserve the source parser's contextual ordering: a leading `move` may be
+// a capture closure, `{` may be a compact closure, and `(` may be a typed
+// closure before any of those delimiters are treated as ordinary expressions.
+pub fn source_expression_syntax(input: Bytes) -> SourceExpressionSyntax {
+    source_expression_start(input, first_token(input))
+}
+
+fn source_expression_start(input: Bytes, token: TokenStart) -> SourceExpressionSyntax {
+    handle token_matches(input, token, "move") {
+        true => source_expression_move(input),
+        false => handle token_matches(input, token, "{") {
+            true => source_expression_compact_or_delimited(input),
+            false => handle token_matches(input, token, "(") {
+                true => source_expression_typed_or_delimited(input),
+                false => handle token_matches(input, token, "[") {
+                    true => source_expression_delimited(input),
+                    false => handle token_matches(input, token, "@") {
+                        true => source_expression_label(input),
+                        false => handle token_matches(input, token, "let") {
+                            true => source_expression_let(input, token),
+                            false => source_expression_prefix_or_chain(input),
+                            _ => SourceExpressionSyntax::Rejected,
+                        },
+                        _ => SourceExpressionSyntax::Rejected,
+                    },
+                    _ => SourceExpressionSyntax::Rejected,
+                },
+                _ => SourceExpressionSyntax::Rejected,
+            },
+            _ => SourceExpressionSyntax::Rejected,
+        },
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+fn source_expression_move(input: Bytes) -> SourceExpressionSyntax {
+    handle move_capture_closure_syntax(input) {
+        MoveCaptureClosureSyntax::Captures(_) => SourceExpressionSyntax::MoveCaptureClosure,
+        MoveCaptureClosureSyntax::NotMoveClosure => source_expression_prefix_or_chain(input),
+        MoveCaptureClosureSyntax::Rejected => SourceExpressionSyntax::Rejected,
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+fn source_expression_compact_or_delimited(input: Bytes) -> SourceExpressionSyntax {
+    handle compact_closure_syntax(input) {
+        CompactClosureSyntax::Parameters(_) => SourceExpressionSyntax::CompactClosure,
+        CompactClosureSyntax::NotCompactClosure => source_expression_delimited(input),
+        CompactClosureSyntax::Rejected => SourceExpressionSyntax::Rejected,
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+fn source_expression_typed_or_delimited(input: Bytes) -> SourceExpressionSyntax {
+    handle typed_closure_syntax(input) {
+        TypedClosureSyntax::Parameters(_) => SourceExpressionSyntax::TypedClosure,
+        TypedClosureSyntax::NotTypedClosure => source_expression_delimited(input),
+        TypedClosureSyntax::Rejected => SourceExpressionSyntax::Rejected,
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+fn source_expression_label(input: Bytes) -> SourceExpressionSyntax {
+    handle label_syntax(input) {
+        LabelSyntax::Binder => SourceExpressionSyntax::Label,
+        LabelSyntax::Transfer => SourceExpressionSyntax::Label,
+        LabelSyntax::Value => SourceExpressionSyntax::Label,
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+fn source_expression_let(input: Bytes, token: TokenStart) -> SourceExpressionSyntax {
+    handle let_i64_assignment_at(input, token) {
+        LetI64AssignmentAdmission::Value(_, _, _) => SourceExpressionSyntax::LetAssignment,
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+fn source_expression_delimited(input: Bytes) -> SourceExpressionSyntax {
+    handle delimited_expression_syntax(input) {
+        DelimitedExpressionSyntax::Tuple(_) => SourceExpressionSyntax::Delimited,
+        DelimitedExpressionSyntax::Group => SourceExpressionSyntax::Delimited,
+        DelimitedExpressionSyntax::Array(_) => SourceExpressionSyntax::Delimited,
+        DelimitedExpressionSyntax::Block(_) => SourceExpressionSyntax::Delimited,
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+fn source_expression_prefix_or_chain(input: Bytes) -> SourceExpressionSyntax {
+    handle prefix_expression_syntax(input) {
+        PrefixExpressionSyntax::Move => SourceExpressionSyntax::Prefix,
+        PrefixExpressionSyntax::SharedBorrow => SourceExpressionSyntax::Prefix,
+        PrefixExpressionSyntax::UniqueBorrow => SourceExpressionSyntax::Prefix,
+        PrefixExpressionSyntax::Deref => SourceExpressionSyntax::Prefix,
+        PrefixExpressionSyntax::Operator => SourceExpressionSyntax::Prefix,
+        PrefixExpressionSyntax::NotPrefix => source_expression_is_postfix_or_chain(input),
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+fn source_expression_is_postfix_or_chain(input: Bytes) -> SourceExpressionSyntax {
+    handle structural_is_syntax(input) {
+        StructuralIsSyntax::Value => SourceExpressionSyntax::PatternTest,
+        StructuralIsSyntax::NotIs => source_expression_postfix_or_chain(input),
+        StructuralIsSyntax::Rejected => SourceExpressionSyntax::Rejected,
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+fn source_expression_postfix_or_chain(input: Bytes) -> SourceExpressionSyntax {
+    handle postfix_expression_syntax(input) {
+        PostfixExpressionSyntax::Value(_, _) => SourceExpressionSyntax::Postfix,
+        PostfixExpressionSyntax::NotPostfix => source_expression_chain_or_atom(input),
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+// `is` is the parser-known structural test. The subject is still an
+// unresolved source name; the pattern half is parsed and duplicate-checked
+// before Core assigns binding or nominal semantics.
+pub fn structural_is_syntax(input: Bytes) -> StructuralIsSyntax {
+    structural_is_subject(input, first_token(input))
+}
+
+fn structural_is_subject(input: Bytes, subject: TokenStart) -> StructuralIsSyntax {
+    handle token_kind(subject) {
+        TokenKind::Identifier => structural_is_keyword(input, next_token(input, subject)),
+        _ => StructuralIsSyntax::NotIs,
+    }
+}
+
+fn structural_is_keyword(input: Bytes, keyword: TokenStart) -> StructuralIsSyntax {
+    handle token_matches(input, keyword, "is") {
+        true => structural_is_pattern(input, next_token(input, keyword)),
+        false => StructuralIsSyntax::NotIs,
+        _ => StructuralIsSyntax::Rejected,
+    }
+}
+
+fn structural_is_pattern(input: Bytes, pattern: TokenStart) -> StructuralIsSyntax {
+    let suffix = __g1_bytes_slice(input, token_start(pattern), __g1_bytes_len(input));
+    handle validate_pattern_bindings(suffix) {
+        PatternBindingValidation::Valid => StructuralIsSyntax::Value,
+        PatternBindingValidation::DuplicateBinding => StructuralIsSyntax::Rejected,
+        PatternBindingValidation::Rejected => StructuralIsSyntax::Rejected,
+        _ => StructuralIsSyntax::Rejected,
+    }
+}
+
+fn source_expression_chain_or_atom(input: Bytes) -> SourceExpressionSyntax {
+    handle flat_operator_chain_syntax(input) {
+        FlatOperatorChainSyntax::Operators(_) => SourceExpressionSyntax::FlatOperatorChain,
+        FlatOperatorChainSyntax::NotOperatorChain => SourceExpressionSyntax::Atom,
+        _ => SourceExpressionSyntax::Rejected,
+    }
+}
+
+pub fn source_pattern_syntax(input: Bytes) -> SourcePatternSyntax {
+    source_pattern_start(input, first_token(input))
+}
+
+fn source_pattern_start(input: Bytes, token: TokenStart) -> SourcePatternSyntax {
+    handle token_matches(input, token, "_") {
+        true => source_pattern_end(input, next_token(input, token), SourcePatternSyntax::Wildcard),
+        false => handle token_matches(input, token, "(") {
+            true => source_pattern_delimited(input),
+            false => handle token_matches(input, token, "[") {
+                true => source_pattern_delimited(input),
+                false => source_pattern_scalar(input, token),
+                _ => SourcePatternSyntax::Rejected,
+            },
+            _ => SourcePatternSyntax::Rejected,
+        },
+        _ => SourcePatternSyntax::Rejected,
+    }
+}
+
+fn source_pattern_scalar(input: Bytes, token: TokenStart) -> SourcePatternSyntax {
+    handle token_kind(token) {
+        TokenKind::Identifier => source_pattern_identifier(input, token),
+        TokenKind::Integer => source_pattern_end(input, next_token(input, token), SourcePatternSyntax::Literal),
+        TokenKind::Float => source_pattern_end(input, next_token(input, token), SourcePatternSyntax::Literal),
+        TokenKind::String => source_pattern_end(input, next_token(input, token), SourcePatternSyntax::Literal),
+        TokenKind::Character => source_pattern_end(input, next_token(input, token), SourcePatternSyntax::Literal),
+        _ => SourcePatternSyntax::NotPattern,
+    }
+}
+
+fn source_pattern_identifier(input: Bytes, token: TokenStart) -> SourcePatternSyntax {
+    handle token_matches(input, token, "true") {
+        true => source_pattern_end(input, next_token(input, token), SourcePatternSyntax::Literal),
+        false => handle token_matches(input, token, "false") {
+            true => source_pattern_end(input, next_token(input, token), SourcePatternSyntax::Literal),
+            false => source_pattern_end(input, next_token(input, token), SourcePatternSyntax::Binding),
+            _ => SourcePatternSyntax::Rejected,
+        },
+        _ => SourcePatternSyntax::Rejected,
+    }
+}
+
+fn source_pattern_end(input: Bytes, token: TokenStart, syntax: SourcePatternSyntax) -> SourcePatternSyntax {
+    handle token_kind(token) {
+        TokenKind::End => syntax,
+        _ => SourcePatternSyntax::Rejected,
+    }
+}
+
+fn source_pattern_delimited(input: Bytes) -> SourcePatternSyntax {
+    handle delimited_expression_syntax(input) {
+        DelimitedExpressionSyntax::Tuple(count) => SourcePatternSyntax::Tuple(count),
+        DelimitedExpressionSyntax::Array(count) => SourcePatternSyntax::Array(count),
+        _ => SourcePatternSyntax::Rejected,
+    }
+}
+
+// Binding identity is a parser invariant: duplicate names in one structural
+// pattern are rejected before Core tries to build a binding environment.
+// Nominal record/enum paths are intentionally outside this fixed-shape slice.
+pub fn validate_pattern_bindings(input: Bytes) -> PatternBindingValidation {
+    handle source_pattern_syntax(input) {
+        SourcePatternSyntax::Wildcard => pattern_binding_tokens(input, first_token(input), PatternBindingNames::Empty),
+        SourcePatternSyntax::Binding => pattern_binding_tokens(input, first_token(input), PatternBindingNames::Empty),
+        SourcePatternSyntax::Literal => pattern_binding_tokens(input, first_token(input), PatternBindingNames::Empty),
+        SourcePatternSyntax::Tuple(_) => pattern_binding_tokens(input, first_token(input), PatternBindingNames::Empty),
+        SourcePatternSyntax::Array(_) => pattern_binding_tokens(input, first_token(input), PatternBindingNames::Empty),
+        _ => PatternBindingValidation::Rejected,
+    }
+}
+
+fn pattern_binding_tokens(input: Bytes, token: TokenStart, names: PatternBindingNames) -> PatternBindingValidation {
+    handle token_kind(token) {
+        TokenKind::End => PatternBindingValidation::Valid,
+        TokenKind::Invalid => PatternBindingValidation::Rejected,
+        TokenKind::Identifier => pattern_binding_identifier(input, token, names),
+        _ => pattern_binding_tokens(input, next_token(input, token), names),
+    }
+}
+
+fn pattern_binding_identifier(input: Bytes, token: TokenStart, names: PatternBindingNames) -> PatternBindingValidation {
+    handle token_matches(input, token, "_") {
+        true => pattern_binding_tokens(input, next_token(input, token), names),
+        false => handle token_matches(input, token, "true") {
+            true => pattern_binding_tokens(input, next_token(input, token), names),
+            false => handle token_matches(input, token, "false") {
+                true => pattern_binding_tokens(input, next_token(input, token), names),
+                false => handle pattern_binding_insert(input, names, token) {
+                    PatternBindingInsert::Added(next_names) => pattern_binding_tokens(input, next_token(input, token), next_names),
+                    PatternBindingInsert::Duplicate => PatternBindingValidation::DuplicateBinding,
+                    _ => PatternBindingValidation::Rejected,
+                },
+                _ => PatternBindingValidation::Rejected,
+            },
+            _ => PatternBindingValidation::Rejected,
+        },
+        _ => PatternBindingValidation::Rejected,
+    }
+}
+
+fn pattern_binding_insert(input: Bytes, names: PatternBindingNames, wanted: TokenStart) -> PatternBindingInsert {
+    handle names {
+        PatternBindingNames::Empty => PatternBindingInsert::Added(PatternBindingNames::Node(wanted, false, [])),
+        PatternBindingNames::Node(name, has_tail, tail) => handle token_equals(input, name, wanted) {
+            true => PatternBindingInsert::Duplicate,
+            false => pattern_binding_insert_tail(input, name, has_tail, tail, wanted),
+            _ => PatternBindingInsert::Duplicate,
+        },
+        _ => PatternBindingInsert::Duplicate,
+    }
+}
+
+fn pattern_binding_insert_tail(input: Bytes, name: TokenStart, has_tail: Bool, tail: Array<PatternBindingNames>, wanted: TokenStart) -> PatternBindingInsert {
+    handle has_tail {
+        true => handle pattern_binding_insert(input, __g1_array_pop_move<PatternBindingNames>(&mut tail), wanted) {
+            PatternBindingInsert::Added(next_tail) => PatternBindingInsert::Added(PatternBindingNames::Node(name, true, [next_tail])),
+            PatternBindingInsert::Duplicate => PatternBindingInsert::Duplicate,
+            _ => PatternBindingInsert::Duplicate,
+        },
+        false => PatternBindingInsert::Added(PatternBindingNames::Node(name, true, [PatternBindingNames::Node(wanted, false, [])])),
+        _ => PatternBindingInsert::Duplicate,
+    }
+}
+
+pub fn postfix_expression_syntax(input: Bytes) -> PostfixExpressionSyntax {
+    postfix_expression_base(input, first_token(input), 0, 0)
+}
+
+fn postfix_expression_base(input: Bytes, token: TokenStart, calls: i64, fields: i64) -> PostfixExpressionSyntax {
+    handle postfix_base(input, token) {
+        PostfixBase::Next(next) => postfix_expression_tail(input, next, calls, fields),
+        PostfixBase::Rejected => PostfixExpressionSyntax::Rejected,
+        PostfixBase::NotBase => PostfixExpressionSyntax::NotPostfix,
+        _ => PostfixExpressionSyntax::Rejected,
+    }
+}
+
+fn postfix_base(input: Bytes, token: TokenStart) -> PostfixBase {
+    handle token_matches(input, token, "(") {
+        true => postfix_base_nested(input, skip_nested_delimiter(input, token)),
+        false => handle token_matches(input, token, "[") {
+            true => postfix_base_nested(input, skip_nested_delimiter(input, token)),
+            false => handle token_matches(input, token, "{") {
+                true => postfix_base_nested(input, skip_nested_delimiter(input, token)),
+                false => postfix_base_scalar(input, token),
+                _ => PostfixBase::Rejected,
+            },
+            _ => PostfixBase::Rejected,
+        },
+        _ => PostfixBase::Rejected,
+    }
+}
+
+fn postfix_base_nested(input: Bytes, nested: DelimitedSkip) -> PostfixBase {
+    handle nested {
+        DelimitedSkip::Close(close) => PostfixBase::Next(next_token(input, close)),
+        DelimitedSkip::Rejected => PostfixBase::Rejected,
+        _ => PostfixBase::Rejected,
+    }
+}
+
+fn postfix_base_scalar(input: Bytes, token: TokenStart) -> PostfixBase {
+    handle token_kind(token) {
+        TokenKind::Identifier => PostfixBase::Next(next_token(input, token)),
+        TokenKind::Integer => PostfixBase::Next(next_token(input, token)),
+        TokenKind::Float => PostfixBase::Next(next_token(input, token)),
+        TokenKind::String => PostfixBase::Next(next_token(input, token)),
+        TokenKind::Character => PostfixBase::Next(next_token(input, token)),
+        _ => PostfixBase::NotBase,
+    }
+}
+
+fn postfix_expression_tail(input: Bytes, token: TokenStart, calls: i64, fields: i64) -> PostfixExpressionSyntax {
+    handle token_kind(token) {
+        TokenKind::End => handle calls == 0 {
+            true => handle fields == 0 { true => PostfixExpressionSyntax::NotPostfix, false => PostfixExpressionSyntax::Value(calls, fields), _ => PostfixExpressionSyntax::Rejected },
+            false => PostfixExpressionSyntax::Value(calls, fields),
+            _ => PostfixExpressionSyntax::Rejected,
+        },
+        _ => handle token_matches(input, token, ".") {
+            true => postfix_expression_field(input, next_token(input, token), calls, fields),
+            false => handle token_matches(input, token, "(") {
+                true => postfix_expression_call(input, token, calls, fields),
+                false => postfix_expression_non_tail(calls, fields),
+                _ => PostfixExpressionSyntax::Rejected,
+            },
+            _ => PostfixExpressionSyntax::Rejected,
+        },
+    }
+}
+
+fn postfix_expression_non_tail(calls: i64, fields: i64) -> PostfixExpressionSyntax {
+    handle calls == 0 {
+        true => handle fields == 0 {
+            true => PostfixExpressionSyntax::NotPostfix,
+            false => PostfixExpressionSyntax::Rejected,
+            _ => PostfixExpressionSyntax::Rejected,
+        },
+        false => PostfixExpressionSyntax::Rejected,
+        _ => PostfixExpressionSyntax::Rejected,
+    }
+}
+
+fn postfix_expression_field(input: Bytes, token: TokenStart, calls: i64, fields: i64) -> PostfixExpressionSyntax {
+    handle token_kind(token) {
+        TokenKind::Identifier => postfix_expression_tail(input, next_token(input, token), calls, fields + 1),
+        TokenKind::Integer => postfix_expression_tail(input, next_token(input, token), calls, fields + 1),
+        _ => PostfixExpressionSyntax::Rejected,
+    }
+}
+
+fn postfix_expression_call(input: Bytes, open: TokenStart, calls: i64, fields: i64) -> PostfixExpressionSyntax {
+    handle call_arguments(input, next_token(input, open), 0, false) {
+        CallArguments::Value(_, close) => postfix_expression_tail(input, next_token(input, close), calls + 1, fields),
+        CallArguments::Rejected => PostfixExpressionSyntax::Rejected,
+        _ => PostfixExpressionSyntax::Rejected,
+    }
+}
+
+// Count source-order direct-call arguments without interpreting their
+// expressions. Nested delimiters are atomic at this parser layer.
+fn call_arguments(input: Bytes, token: TokenStart, count: i64, has_argument: Bool) -> CallArguments {
+    handle token_matches(input, token, ")") {
+        true => call_arguments_finish(token, count, has_argument),
+        false => handle token_kind(token) {
+            TokenKind::End => CallArguments::Rejected,
+            _ => handle token_matches(input, token, ",") {
+                true => handle has_argument { true => call_arguments(input, next_token(input, token), count + 1, false), false => CallArguments::Rejected, _ => CallArguments::Rejected },
+                false => call_arguments_value(input, token, count, has_argument),
+                _ => CallArguments::Rejected,
+            },
+        },
+        _ => CallArguments::Rejected,
+    }
+}
+
+fn call_arguments_finish(close: TokenStart, count: i64, has_argument: Bool) -> CallArguments {
+    handle has_argument {
+        true => CallArguments::Value(count + 1, close),
+        false => CallArguments::Value(count, close),
+        _ => CallArguments::Rejected,
+    }
+}
+
+fn call_arguments_value(input: Bytes, token: TokenStart, count: i64, has_argument: Bool) -> CallArguments {
+    handle token_matches(input, token, "(") {
+        true => call_arguments_after_nested(input, skip_nested_delimiter(input, token), count),
+        false => handle token_matches(input, token, "[") {
+            true => call_arguments_after_nested(input, skip_nested_delimiter(input, token), count),
+            false => handle token_matches(input, token, "{") {
+                true => call_arguments_after_nested(input, skip_nested_delimiter(input, token), count),
+                false => call_arguments(input, next_token(input, token), count, true),
+                _ => CallArguments::Rejected,
+            },
+            _ => CallArguments::Rejected,
+        },
+        _ => CallArguments::Rejected,
+    }
+}
+
+fn call_arguments_after_nested(input: Bytes, nested: DelimitedSkip, count: i64) -> CallArguments {
+    handle nested {
+        DelimitedSkip::Close(close) => call_arguments(input, next_token(input, close), count, true),
+        DelimitedSkip::Rejected => CallArguments::Rejected,
+        _ => CallArguments::Rejected,
+    }
+}
+
+pub fn flat_operator_chain_syntax(input: Bytes) -> FlatOperatorChainSyntax {
+    flat_operator_chain_first(input, first_token(input))
+}
+
+fn flat_operator_chain_first(input: Bytes, token: TokenStart) -> FlatOperatorChainSyntax {
+    flat_operator_chain_operand(input, token, 0, false)
+}
+
+fn flat_operator_chain_operand(input: Bytes, token: TokenStart, operators: i64, saw_operator: Bool) -> FlatOperatorChainSyntax {
+    handle token_matches(input, token, "(") {
+        true => flat_operator_chain_after_nested(input, skip_nested_delimiter(input, token), operators, saw_operator),
+        false => handle token_matches(input, token, "[") {
+            true => flat_operator_chain_after_nested(input, skip_nested_delimiter(input, token), operators, saw_operator),
+            false => handle token_matches(input, token, "{") {
+                true => flat_operator_chain_after_nested(input, skip_nested_delimiter(input, token), operators, saw_operator),
+                false => flat_operator_chain_scalar_operand(input, token, operators, saw_operator),
+                _ => FlatOperatorChainSyntax::Rejected,
+            },
+            _ => FlatOperatorChainSyntax::Rejected,
+        },
+        _ => FlatOperatorChainSyntax::Rejected,
+    }
+}
+
+fn flat_operator_chain_after_nested(input: Bytes, nested: DelimitedSkip, operators: i64, saw_operator: Bool) -> FlatOperatorChainSyntax {
+    handle nested {
+        DelimitedSkip::Close(close) => flat_operator_chain_after_operand(input, next_token(input, close), operators, saw_operator),
+        DelimitedSkip::Rejected => FlatOperatorChainSyntax::Rejected,
+        _ => FlatOperatorChainSyntax::Rejected,
+    }
+}
+
+fn flat_operator_chain_scalar_operand(input: Bytes, token: TokenStart, operators: i64, saw_operator: Bool) -> FlatOperatorChainSyntax {
+    handle token_kind(token) {
+        TokenKind::Identifier => flat_operator_chain_after_operand(input, next_token(input, token), operators, saw_operator),
+        TokenKind::Integer => flat_operator_chain_after_operand(input, next_token(input, token), operators, saw_operator),
+        TokenKind::Float => flat_operator_chain_after_operand(input, next_token(input, token), operators, saw_operator),
+        TokenKind::String => flat_operator_chain_after_operand(input, next_token(input, token), operators, saw_operator),
+        TokenKind::Character => flat_operator_chain_after_operand(input, next_token(input, token), operators, saw_operator),
+        _ => handle saw_operator { true => FlatOperatorChainSyntax::Rejected, false => FlatOperatorChainSyntax::NotOperatorChain, _ => FlatOperatorChainSyntax::Rejected },
+    }
+}
+
+fn flat_operator_chain_after_operand(input: Bytes, token: TokenStart, operators: i64, saw_operator: Bool) -> FlatOperatorChainSyntax {
+    handle token_kind(token) {
+        TokenKind::End => handle saw_operator { true => FlatOperatorChainSyntax::Operators(operators), false => FlatOperatorChainSyntax::NotOperatorChain, _ => FlatOperatorChainSyntax::Rejected },
+        TokenKind::Operator => flat_operator_chain_operand(input, next_token(input, token), operators + 1, true),
+        _ => handle saw_operator { true => FlatOperatorChainSyntax::Rejected, false => FlatOperatorChainSyntax::NotOperatorChain, _ => FlatOperatorChainSyntax::Rejected },
+    }
+}
+
+// Recognize the parser's three ordinary delimited expression surfaces with
+// exact nesting validation. This is intentionally not a substitute for the
+// arena parser: it is the shared structural boundary on which tuple/array/
+// block AST allocation can be built without each later feature reimplementing
+// bracket matching.
+pub fn delimited_expression_syntax(input: Bytes) -> DelimitedExpressionSyntax {
+    delimited_expression_start(input, first_token(input))
+}
+
+fn delimited_expression_start(input: Bytes, token: TokenStart) -> DelimitedExpressionSyntax {
+    handle token_matches(input, token, "(") {
+        true => delimited_expression_items(input, next_token(input, token), DelimitedMode::Tuple, 0, false, false),
+        false => handle token_matches(input, token, "[") {
+            true => delimited_expression_items(input, next_token(input, token), DelimitedMode::Array, 0, false, false),
+            false => handle token_matches(input, token, "{") {
+                true => delimited_expression_items(input, next_token(input, token), DelimitedMode::Block, 0, false, false),
+                false => DelimitedExpressionSyntax::NotDelimitedExpression,
+                _ => DelimitedExpressionSyntax::Rejected,
+            },
+            _ => DelimitedExpressionSyntax::Rejected,
+        },
+        _ => DelimitedExpressionSyntax::Rejected,
+    }
+}
+
+// `count` contains completed elements; `has_element` says the current
+// top-level element has at least one token; `saw_separator` retains the comma
+// needed to distinguish `(value)` from `(value,)`.
+fn delimited_expression_items(input: Bytes, token: TokenStart, mode: DelimitedMode, count: i64, has_element: Bool, saw_separator: Bool) -> DelimitedExpressionSyntax {
+    handle delimited_expression_close(input, token, mode) {
+        true => delimited_expression_finish(mode, count, has_element, saw_separator),
+        false => delimited_expression_item(input, token, mode, count, has_element, saw_separator),
+        _ => DelimitedExpressionSyntax::Rejected,
+    }
+}
+
+fn delimited_expression_item(input: Bytes, token: TokenStart, mode: DelimitedMode, count: i64, has_element: Bool, saw_separator: Bool) -> DelimitedExpressionSyntax {
+    handle token_kind(token) {
+        TokenKind::End => DelimitedExpressionSyntax::Rejected,
+        _ => handle delimited_expression_separator(input, token, mode) {
+            true => delimited_expression_after_separator(input, token, mode, count, has_element),
+            false => delimited_expression_non_separator(input, token, mode, count, has_element, saw_separator),
+            _ => DelimitedExpressionSyntax::Rejected,
+        },
+    }
+}
+
+fn delimited_expression_after_separator(input: Bytes, token: TokenStart, mode: DelimitedMode, count: i64, has_element: Bool) -> DelimitedExpressionSyntax {
+    handle has_element {
+        true => delimited_expression_items(input, next_token(input, token), mode, count + 1, false, true),
+        false => DelimitedExpressionSyntax::Rejected,
+        _ => DelimitedExpressionSyntax::Rejected,
+    }
+}
+
+fn delimited_expression_non_separator(input: Bytes, token: TokenStart, mode: DelimitedMode, count: i64, has_element: Bool, saw_separator: Bool) -> DelimitedExpressionSyntax {
+    handle token_matches(input, token, "(") {
+        true => delimited_expression_after_nested(input, skip_nested_delimiter(input, token), mode, count, saw_separator),
+        false => handle token_matches(input, token, "[") {
+            true => delimited_expression_after_nested(input, skip_nested_delimiter(input, token), mode, count, saw_separator),
+            false => handle token_matches(input, token, "{") {
+                true => delimited_expression_after_nested(input, skip_nested_delimiter(input, token), mode, count, saw_separator),
+                false => delimited_expression_items(input, next_token(input, token), mode, count, true, saw_separator),
+                _ => DelimitedExpressionSyntax::Rejected,
+            },
+            _ => DelimitedExpressionSyntax::Rejected,
+        },
+        _ => DelimitedExpressionSyntax::Rejected,
+    }
+}
+
+fn delimited_expression_after_nested(input: Bytes, skipped: DelimitedSkip, mode: DelimitedMode, count: i64, saw_separator: Bool) -> DelimitedExpressionSyntax {
+    handle skipped {
+        DelimitedSkip::Close(token) => delimited_expression_items(input, next_token(input, token), mode, count, true, saw_separator),
+        DelimitedSkip::Rejected => DelimitedExpressionSyntax::Rejected,
+        _ => DelimitedExpressionSyntax::Rejected,
+    }
+}
+
+fn delimited_expression_close(input: Bytes, token: TokenStart, mode: DelimitedMode) -> Bool {
+    handle mode {
+        DelimitedMode::Tuple => token_matches(input, token, ")"),
+        DelimitedMode::Array => token_matches(input, token, "]"),
+        DelimitedMode::Block => token_matches(input, token, "}"),
+        _ => false,
+    }
+}
+
+fn delimited_expression_separator(input: Bytes, token: TokenStart, mode: DelimitedMode) -> Bool {
+    handle mode {
+        DelimitedMode::Tuple => token_matches(input, token, ","),
+        DelimitedMode::Array => token_matches(input, token, ","),
+        DelimitedMode::Block => token_matches(input, token, ";"),
+        _ => false,
+    }
+}
+
+fn delimited_expression_finish(mode: DelimitedMode, count: i64, has_element: Bool, saw_separator: Bool) -> DelimitedExpressionSyntax {
+    handle has_element {
+        true => delimited_expression_finish_count(mode, count + 1, saw_separator),
+        false => handle count == 0 {
+            true => delimited_expression_finish_count(mode, 0, saw_separator),
+            // A completed element followed by the delimiter's own separator
+            // is valid for tuples, arrays, and block statements. In
+            // particular `(value,)` must remain distinct from `(value)`.
+            false => delimited_expression_finish_count(mode, count, saw_separator),
+            _ => DelimitedExpressionSyntax::Rejected,
+        },
+        _ => DelimitedExpressionSyntax::Rejected,
+    }
+}
+
+fn delimited_expression_finish_count(mode: DelimitedMode, count: i64, saw_separator: Bool) -> DelimitedExpressionSyntax {
+    handle mode {
+        DelimitedMode::Tuple => handle count == 1 {
+            true => handle saw_separator { true => DelimitedExpressionSyntax::Tuple(1), false => DelimitedExpressionSyntax::Group, _ => DelimitedExpressionSyntax::Rejected },
+            false => DelimitedExpressionSyntax::Tuple(count),
+            _ => DelimitedExpressionSyntax::Rejected,
+        },
+        DelimitedMode::Array => DelimitedExpressionSyntax::Array(count),
+        DelimitedMode::Block => DelimitedExpressionSyntax::Block(count),
+        _ => DelimitedExpressionSyntax::Rejected,
+    }
+}
+
+enum DelimitedSkip { Close(TokenStart), Rejected }
+
+// Consume one nested delimiter exactly, recursively checking its own nested
+// delimiters. Scanner emits strings as single tokens, so punctuation in a
+// string cannot affect this structural pass.
+fn skip_nested_delimiter(input: Bytes, open: TokenStart) -> DelimitedSkip {
+    handle token_matches(input, open, "(") {
+        true => skip_nested_until(input, next_token(input, open), ")"),
+        false => handle token_matches(input, open, "[") {
+            true => skip_nested_until(input, next_token(input, open), "]"),
+            false => handle token_matches(input, open, "{") {
+                true => skip_nested_until(input, next_token(input, open), "}"),
+                false => DelimitedSkip::Rejected,
+                _ => DelimitedSkip::Rejected,
+            },
+            _ => DelimitedSkip::Rejected,
+        },
+        _ => DelimitedSkip::Rejected,
+    }
+}
+
+fn skip_nested_until(input: Bytes, token: TokenStart, close: Text) -> DelimitedSkip {
+    handle token_matches(input, token, close) {
+        true => DelimitedSkip::Close(token),
+        false => handle token_kind(token) {
+            TokenKind::End => DelimitedSkip::Rejected,
+            _ => skip_nested_next(input, token, close),
+        },
+        _ => DelimitedSkip::Rejected,
+    }
+}
+
+fn skip_nested_next(input: Bytes, token: TokenStart, close: Text) -> DelimitedSkip {
+    handle token_matches(input, token, "(") {
+        true => skip_nested_continue(input, skip_nested_delimiter(input, token), close),
+        false => handle token_matches(input, token, "[") {
+            true => skip_nested_continue(input, skip_nested_delimiter(input, token), close),
+            false => handle token_matches(input, token, "{") {
+                true => skip_nested_continue(input, skip_nested_delimiter(input, token), close),
+                false => skip_nested_until(input, next_token(input, token), close),
+                _ => DelimitedSkip::Rejected,
+            },
+            _ => DelimitedSkip::Rejected,
+        },
+        _ => DelimitedSkip::Rejected,
+    }
+}
+
+fn skip_nested_continue(input: Bytes, nested: DelimitedSkip, close: Text) -> DelimitedSkip {
+    handle nested {
+        DelimitedSkip::Close(token) => skip_nested_until(input, next_token(input, token), close),
+        DelimitedSkip::Rejected => DelimitedSkip::Rejected,
+        _ => DelimitedSkip::Rejected,
+    }
+}
 
 // Mirror the frozen parser's deliberately narrow lookahead: `{ => body }`,
 // `{ name => body }`, and `{ name, ... => body }` are compact closures;

@@ -3166,7 +3166,7 @@ pub fn compile_i64_literal(value: i64, expected: Type) -> Execution {
 }
 
 pub fn compile_i64_assignment(initial: i64, replacement: i64, expected: Type) -> Execution {
-    execute_i64_assignment_storage_lowering(mir::lower_i64_assignment_storage(lower(Expression::I64Assignment(initial, replacement), expected)))
+    execute_i64_assignment_lowering(mir::lower_i64_assignment(lower(Expression::I64Assignment(initial, replacement), expected)))
 }
 
 pub fn compile_u32_literal(value: u32, expected: Type) -> Execution {

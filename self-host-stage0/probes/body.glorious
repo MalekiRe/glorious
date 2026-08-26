@@ -25,6 +25,30 @@ pub fn score_label_binder(value: body::LabelSyntax) -> i64 { handle value { body
 pub fn score_label_transfer(value: body::LabelSyntax) -> i64 { handle value { body::LabelSyntax::Transfer => 1, _ => 0 } }
 pub fn score_label_value(value: body::LabelSyntax) -> i64 { handle value { body::LabelSyntax::Value => 1, _ => 0 } }
 pub fn score_rejected_label(value: body::LabelSyntax) -> i64 { handle value { body::LabelSyntax::Rejected => 1, _ => 0 } }
+pub fn score_empty_tuple(value: body::DelimitedExpressionSyntax) -> i64 { handle value { body::DelimitedExpressionSyntax::Tuple(0) => 1, _ => 0 } }
+pub fn score_single_tuple(value: body::DelimitedExpressionSyntax) -> i64 { handle value { body::DelimitedExpressionSyntax::Tuple(1) => 1, _ => 0 } }
+pub fn score_group(value: body::DelimitedExpressionSyntax) -> i64 { handle value { body::DelimitedExpressionSyntax::Group => 1, _ => 0 } }
+pub fn score_tuple(value: body::DelimitedExpressionSyntax) -> i64 { handle value { body::DelimitedExpressionSyntax::Tuple(2) => 1, _ => 0 } }
+pub fn score_array(value: body::DelimitedExpressionSyntax) -> i64 { handle value { body::DelimitedExpressionSyntax::Array(2) => 1, _ => 0 } }
+pub fn score_block(value: body::DelimitedExpressionSyntax) -> i64 { handle value { body::DelimitedExpressionSyntax::Block(2) => 1, _ => 0 } }
+pub fn score_rejected_delimited(value: body::DelimitedExpressionSyntax) -> i64 { handle value { body::DelimitedExpressionSyntax::Rejected => 1, _ => 0 } }
+pub fn score_operator_chain(value: body::FlatOperatorChainSyntax) -> i64 { handle value { body::FlatOperatorChainSyntax::Operators(2) => 1, _ => 0 } }
+pub fn score_not_operator_chain(value: body::FlatOperatorChainSyntax) -> i64 { handle value { body::FlatOperatorChainSyntax::NotOperatorChain => 1, _ => 0 } }
+pub fn score_rejected_operator_chain(value: body::FlatOperatorChainSyntax) -> i64 { handle value { body::FlatOperatorChainSyntax::Rejected => 1, _ => 0 } }
+pub fn score_move_prefix(value: body::PrefixExpressionSyntax) -> i64 { handle value { body::PrefixExpressionSyntax::Move => 1, _ => 0 } }
+pub fn score_shared_borrow_prefix(value: body::PrefixExpressionSyntax) -> i64 { handle value { body::PrefixExpressionSyntax::SharedBorrow => 1, _ => 0 } }
+pub fn score_unique_borrow_prefix(value: body::PrefixExpressionSyntax) -> i64 { handle value { body::PrefixExpressionSyntax::UniqueBorrow => 1, _ => 0 } }
+pub fn score_deref_prefix(value: body::PrefixExpressionSyntax) -> i64 { handle value { body::PrefixExpressionSyntax::Deref => 1, _ => 0 } }
+pub fn score_operator_prefix(value: body::PrefixExpressionSyntax) -> i64 { handle value { body::PrefixExpressionSyntax::Operator => 1, _ => 0 } }
+pub fn source_expression_score(value: body::SourceExpressionSyntax) -> i64 { handle value { body::SourceExpressionSyntax::Atom => 1, body::SourceExpressionSyntax::Delimited => 2, body::SourceExpressionSyntax::Prefix => 3, body::SourceExpressionSyntax::Postfix => 4, body::SourceExpressionSyntax::PatternTest => 5, body::SourceExpressionSyntax::FlatOperatorChain => 6, body::SourceExpressionSyntax::CompactClosure => 7, body::SourceExpressionSyntax::TypedClosure => 8, body::SourceExpressionSyntax::MoveCaptureClosure => 9, body::SourceExpressionSyntax::Label => 10, body::SourceExpressionSyntax::LetAssignment => 11, _ => 0 } }
+pub fn score_structural_is(value: body::StructuralIsSyntax) -> i64 { handle value { body::StructuralIsSyntax::Value => 1, _ => 0 } }
+pub fn source_pattern_score(value: body::SourcePatternSyntax) -> i64 { handle value { body::SourcePatternSyntax::Wildcard => 1, body::SourcePatternSyntax::Binding => 2, body::SourcePatternSyntax::Literal => 3, body::SourcePatternSyntax::Tuple(2) => 4, body::SourcePatternSyntax::Array(2) => 5, _ => 0 } }
+pub fn score_pattern_bindings(value: body::PatternBindingValidation) -> i64 { handle value { body::PatternBindingValidation::Valid => 1, _ => 0 } }
+pub fn score_duplicate_pattern_bindings(value: body::PatternBindingValidation) -> i64 { handle value { body::PatternBindingValidation::DuplicateBinding => 1, _ => 0 } }
+pub fn score_postfix_field(value: body::PostfixExpressionSyntax) -> i64 { handle value { body::PostfixExpressionSyntax::Value(0, 1) => 1, _ => 0 } }
+pub fn score_postfix_call(value: body::PostfixExpressionSyntax) -> i64 { handle value { body::PostfixExpressionSyntax::Value(1, 0) => 1, _ => 0 } }
+pub fn score_postfix_mixed(value: body::PostfixExpressionSyntax) -> i64 { handle value { body::PostfixExpressionSyntax::Value(2, 1) => 1, _ => 0 } }
+pub fn score_rejected_postfix(value: body::PostfixExpressionSyntax) -> i64 { handle value { body::PostfixExpressionSyntax::Rejected => 1, _ => 0 } }
 pub fn score_label_i64_transfer(value: body::LabelI64TransferAdmission) -> i64 { handle value { body::LabelI64TransferAdmission::Value(42, _) => 1, _ => 0 } }
 pub fn score_rejected_label_i64_transfer(value: body::LabelI64TransferAdmission) -> i64 { handle value { body::LabelI64TransferAdmission::Rejected => 1, _ => 0 } }
 pub fn score_let_i64_assignment(value: body::LetI64AssignmentAdmission) -> i64 { handle value { body::LetI64AssignmentAdmission::Value(1, 42, _) => 1, _ => 0 } }
@@ -72,6 +96,45 @@ pub fn main() -> i64 {
         + score_label_transfer(body::label_syntax(__g1_text_as_bytes("@done(call(42))")))
         + score_label_value(body::label_syntax(__g1_text_as_bytes("@done")))
         + score_rejected_label(body::label_syntax(__g1_text_as_bytes("@done: { value }")))
+        + score_empty_tuple(body::delimited_expression_syntax(__g1_text_as_bytes("()")))
+        + score_single_tuple(body::delimited_expression_syntax(__g1_text_as_bytes("(value,)")))
+        + score_group(body::delimited_expression_syntax(__g1_text_as_bytes("(value)")))
+        + score_tuple(body::delimited_expression_syntax(__g1_text_as_bytes("(left, [right, nested])")))
+        + score_array(body::delimited_expression_syntax(__g1_text_as_bytes("[left, { right; nested }]")))
+        + score_block(body::delimited_expression_syntax(__g1_text_as_bytes("{ first; second }")))
+        + score_rejected_delimited(body::delimited_expression_syntax(__g1_text_as_bytes("[value, )")))
+        + score_operator_chain(body::flat_operator_chain_syntax(__g1_text_as_bytes("left + middle * final")))
+        + score_not_operator_chain(body::flat_operator_chain_syntax(__g1_text_as_bytes("value")))
+        + score_rejected_operator_chain(body::flat_operator_chain_syntax(__g1_text_as_bytes("value +")))
+        + score_move_prefix(body::prefix_expression_syntax(__g1_text_as_bytes("move value")))
+        + score_shared_borrow_prefix(body::prefix_expression_syntax(__g1_text_as_bytes("& value")))
+        + score_unique_borrow_prefix(body::prefix_expression_syntax(__g1_text_as_bytes("&mut value")))
+        + score_deref_prefix(body::prefix_expression_syntax(__g1_text_as_bytes("*value")))
+        + score_operator_prefix(body::prefix_expression_syntax(__g1_text_as_bytes("~value")))
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("value"))) == 1)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("[value, other]"))) == 2)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("&mut value"))) == 3)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("factory(1).field"))) == 4)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("subject is (left, right)"))) == 5)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("left + right"))) == 6)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("{ value => value }"))) == 7)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("() -> i64 { 0 }"))) == 8)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("move (config) { config }"))) == 9)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("@done"))) == 10)
+        + score(source_expression_score(body::source_expression_syntax(__g1_text_as_bytes("let value = 1; value = 42; value"))) == 11)
+        + score(source_pattern_score(body::source_pattern_syntax(__g1_text_as_bytes("_"))) == 1)
+        + score(source_pattern_score(body::source_pattern_syntax(__g1_text_as_bytes("value"))) == 2)
+        + score(source_pattern_score(body::source_pattern_syntax(__g1_text_as_bytes("42"))) == 3)
+        + score(source_pattern_score(body::source_pattern_syntax(__g1_text_as_bytes("(left, right)"))) == 4)
+        + score(source_pattern_score(body::source_pattern_syntax(__g1_text_as_bytes("[left, right]"))) == 5)
+        + score_pattern_bindings(body::validate_pattern_bindings(__g1_text_as_bytes("(left, [right, _])")))
+        + score_duplicate_pattern_bindings(body::validate_pattern_bindings(__g1_text_as_bytes("(value, value)")))
+        + score_pattern_bindings(body::validate_pattern_bindings(__g1_text_as_bytes("(true, false)")))
+        + score_structural_is(body::structural_is_syntax(__g1_text_as_bytes("subject is [left, right]")))
+        + score_postfix_field(body::postfix_expression_syntax(__g1_text_as_bytes("result.0")))
+        + score_postfix_call(body::postfix_expression_syntax(__g1_text_as_bytes("call(first, [nested, item])")))
+        + score_postfix_mixed(body::postfix_expression_syntax(__g1_text_as_bytes("factory(1).field(2, 3)")))
+        + score_rejected_postfix(body::postfix_expression_syntax(__g1_text_as_bytes("pair.")))
         + score_label_i64_transfer(body::label_i64_transfer_at(__g1_text_as_bytes("@done: i64 { @done(42) }"), scanner::first_token(__g1_text_as_bytes("@done: i64 { @done(42) }"))))
         + score_rejected_label_i64_transfer(body::label_i64_transfer_at(__g1_text_as_bytes("@done: i64 { @other(42) }"), scanner::first_token(__g1_text_as_bytes("@done: i64 { @other(42) }"))))
         + score_let_i64_assignment(body::let_i64_assignment_at(__g1_text_as_bytes("let value = 1; value = 42; value"), scanner::first_token(__g1_text_as_bytes("let value = 1; value = 42; value"))))

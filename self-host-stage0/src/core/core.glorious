@@ -2,6 +2,7 @@
 // calls, effects, handlers, labels, and ownership evidence; this first gate
 // ensures only a body expression matching its expected type is admitted.
 use body::Expression;
+use body::SourceExpressionSyntax;
 use body::Arithmetic;
 use body::Comparison;
 use signature::Callable;
@@ -11,6 +12,12 @@ use body::admit;
 use types::Type;
 
 pub enum CoreKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, Assignment, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
+// Body owns syntax selection; Core carries that decision forward until typed
+// elaboration can construct full CoreExpr nodes. This prevents later passes
+// from recovering closures, postfixes, labels, or structural tests from raw
+// scanner spellings.
+pub enum SourceSyntaxKind { Atom, Delimited, Prefix, Postfix, PatternTest, FlatOperatorChain, CompactClosure, TypedClosure, MoveCaptureClosure, Label, LetAssignment }
+pub enum SourceSyntaxAdmission { Value(SourceSyntaxKind), Rejected }
 
 pub struct CoreValue {
     result: Type,
@@ -27,6 +34,24 @@ pub enum CoreResult {
 
 pub fn lower(expression: Expression, expected: Type) -> CoreResult {
     if_matches(expression, expected)
+}
+
+pub fn lower_source_syntax(syntax: SourceExpressionSyntax) -> SourceSyntaxAdmission {
+    handle syntax {
+        SourceExpressionSyntax::Atom => SourceSyntaxAdmission::Value(SourceSyntaxKind::Atom),
+        SourceExpressionSyntax::Delimited => SourceSyntaxAdmission::Value(SourceSyntaxKind::Delimited),
+        SourceExpressionSyntax::Prefix => SourceSyntaxAdmission::Value(SourceSyntaxKind::Prefix),
+        SourceExpressionSyntax::Postfix => SourceSyntaxAdmission::Value(SourceSyntaxKind::Postfix),
+        SourceExpressionSyntax::PatternTest => SourceSyntaxAdmission::Value(SourceSyntaxKind::PatternTest),
+        SourceExpressionSyntax::FlatOperatorChain => SourceSyntaxAdmission::Value(SourceSyntaxKind::FlatOperatorChain),
+        SourceExpressionSyntax::CompactClosure => SourceSyntaxAdmission::Value(SourceSyntaxKind::CompactClosure),
+        SourceExpressionSyntax::TypedClosure => SourceSyntaxAdmission::Value(SourceSyntaxKind::TypedClosure),
+        SourceExpressionSyntax::MoveCaptureClosure => SourceSyntaxAdmission::Value(SourceSyntaxKind::MoveCaptureClosure),
+        SourceExpressionSyntax::Label => SourceSyntaxAdmission::Value(SourceSyntaxKind::Label),
+        SourceExpressionSyntax::LetAssignment => SourceSyntaxAdmission::Value(SourceSyntaxKind::LetAssignment),
+        SourceExpressionSyntax::Rejected => SourceSyntaxAdmission::Rejected,
+        _ => SourceSyntaxAdmission::Rejected,
+    }
 }
 
 fn if_matches(expression: Expression, expected: Type) -> CoreResult {
