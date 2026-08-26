@@ -22,5 +22,6 @@ document explicitly links a claim to current code or a checked ledger.
 Chapters 03, 04, and 06–32 have not been split into maintained chapter files.
 The roadmap therefore describes an intended corpus, not a completed one.
 
-The original generated compendium and the old Stage1 readiness report are
-preserved under [`../archive/`](../archive/).
+The original generated compendium remains available in Git history at baseline
+`3fd2e0ddf3c10e2d558ad21190b975500374ed71`. The old Stage1 readiness report
+is preserved under [`../archive/`](../archive/).

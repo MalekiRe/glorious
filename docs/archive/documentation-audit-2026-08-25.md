@@ -123,8 +123,8 @@ Existing chapters also link to removed paths or present implementation-shaped
 APIs without current-code evidence.
 
 **Resolution:** classify the series as an incomplete proposal, add a directory
-index, preserve the generated compendium in the archive, and replace its former
-path with a concise index.
+index, retain the generated compendium in Git history at the audited baseline,
+and replace its former path with a concise index.
 
 ### 9. The tutorial presents a retired workflow as currently checked
 
@@ -215,8 +215,8 @@ This is intentionally a general list rather than a full compiler review.
 - Move retired compiler, tooling, backend, parity, report, tutorial, and design
   documents under `docs/archive/` without editing their historical contents.
 - Replace the duplicate standard-library document with a supersession notice.
-- Replace the large generated compendium with a concise index while preserving
-  the original.
+- Replace the large generated compendium with a concise index; the original
+  remains recoverable from the audited baseline instead of inflating this PR.
 - Rewrite editor Markdown so syntax support is not confused with a supported
   LSP.
 - Replace the runnable-looking historical tutorial with a status page.
@@ -253,7 +253,7 @@ This is intentionally a general list rather than a full compiler review.
 | `docs/self-host-test-parity.md` | Old completed-parity claim | Archive under `pre-stage0/`. |
 | `docs/self-hosted-compiler-snowflake-stage-one.md` | Future self-host architecture proposal | Retain and classify as proposal. |
 | `docs/self-hosted-compiler/00-snowflake-document-roadmap.md` | Incomplete 32-chapter proposal roadmap | Retain with an index that states the series is incomplete. |
-| `docs/self-hosted-compiler/00-snowflake-synopsis-compendium.md` | 1.4 MB generated duplicate corpus | Archive original and replace with a concise index. |
+| `docs/self-hosted-compiler/00-snowflake-synopsis-compendium.md` | 1.4 MB generated duplicate corpus | Replace with a concise index; retain the original in Git history at the audited baseline. |
 | `docs/self-hosted-compiler/01-architecture-and-trust-boundaries.md` | Proposal chapter with stale current-code links | Retain as proposal; do not use for current status. |
 | `docs/self-hosted-compiler/02-compilation-inputs-revisions-and-session-ownership.md` | Proposal chapter with stale current-code links | Retain as proposal; do not use for current status. |
 | `docs/self-hosted-compiler/05-dependency-tracking-and-invalidation.md` | Proposal chapter with inconsistent series/status framing | Retain as proposal and index it. |

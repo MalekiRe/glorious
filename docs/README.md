@@ -87,9 +87,9 @@ of implementation:
 - [`self-hosted-compiler/README.md`](self-hosted-compiler/README.md) and the
   incomplete snowflake chapter series it indexes
 
-The original 1.4 MB generated snowflake compendium is preserved in the archive.
-The file at its former path is a small index so generated prose is not mistaken
-for maintained current documentation.
+The former 1.4 MB generated snowflake compendium remains available in Git
+history at the audited baseline. The file at its path is now a small index so
+generated prose is not mistaken for maintained current documentation.
 
 ## Local and historical guides
 

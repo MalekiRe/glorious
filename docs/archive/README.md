@@ -16,8 +16,6 @@ claims, and measurements may be stale.
   overlap current specifications.
 - `tutorial/` preserves the tutorial for the retired `grand`/`grandfmt`/old
   compiler workflow.
-- `proposals/` contains generated or superseded proposal material, including
-  the original large snowflake compendium.
 
 Archived documents are intentionally not corrected in place. Follow
 [`../README.md`](../README.md) for current documentation and
