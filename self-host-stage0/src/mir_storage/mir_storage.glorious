@@ -4,9 +4,33 @@
 pub enum Slot { Uninitialized, Value(i64), Moved }
 pub enum TakeResult { Value(i64), Empty }
 pub enum MoveResult { Value(i64, Slot), Empty(Slot) }
+pub enum CleanupResult { Dropped(i64), Skipped }
+pub enum ReplaceResult { Written(Slot), Replaced(i64, Slot) }
 pub fn empty() -> Slot { Slot::Uninitialized }
 pub fn write(slot: Slot, value: i64) -> Slot { handle slot { Slot::Uninitialized => Slot::Value(value), Slot::Moved => Slot::Value(value), Slot::Value(_) => Slot::Value(value), _ => Slot::Value(value) } }
 pub fn take(slot: Slot) -> TakeResult { handle slot { Slot::Uninitialized => TakeResult::Empty, Slot::Moved => TakeResult::Empty, Slot::Value(value) => TakeResult::Value(value), _ => TakeResult::Empty } }
+
+// Storage cleanup is driven by the explicit slot state, never by the type or
+// a reconstructed source place. An unwritten/moved slot has no resident value
+// to drop; overwriting a live slot retains that displaced value as an explicit
+// event for later MIR cleanup ordering.
+pub fn cleanup(slot: Slot) -> CleanupResult {
+    handle slot {
+        Slot::Value(value) => CleanupResult::Dropped(value),
+        Slot::Uninitialized => CleanupResult::Skipped,
+        Slot::Moved => CleanupResult::Skipped,
+        _ => CleanupResult::Skipped,
+    }
+}
+
+pub fn replace(slot: Slot, value: i64) -> ReplaceResult {
+    handle slot {
+        Slot::Value(previous) => ReplaceResult::Replaced(previous, Slot::Value(value)),
+        Slot::Uninitialized => ReplaceResult::Written(Slot::Value(value)),
+        Slot::Moved => ReplaceResult::Written(Slot::Value(value)),
+        _ => ReplaceResult::Written(Slot::Value(value)),
+    }
+}
 
 // A MIR move exposes both the moved payload and the replacement slot. This
 // keeps the post-state explicit so later place/projection storage cannot

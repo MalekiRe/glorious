@@ -7,10 +7,13 @@ use compiler_support::__g1_int_wrapping_sub;
 use compiler_support::__g1_int_wrapping_add;
 use compiler_support::__g1_int_wrapping_mul;
 use compiler_support::__g1_int_convert_wrapping_to_u32;
+use compiler_support::__g1_bytes_slice;
 use source::SourceInput;
 use source::bytes;
 use source::FirstByte;
 use source::digest_matches_bytes;
+use identity::Digest;
+use identity::digest_of_bytes;
 
 pub enum FirstByteClass { Empty, LineFeed, Whitespace, AsciiLetter, AsciiDigit, Underscore, Other }
 pub enum TokenKind { End, Identifier, Integer, Float, String, Character, Operator, Punctuation, Invalid, Other }
@@ -1203,6 +1206,14 @@ fn is_punctuation_colon(value: u8) -> Bool {
 pub fn token_kind(token: TokenStart) -> TokenKind { token.kind }
 pub fn token_start(token: TokenStart) -> usize { token.start }
 pub fn token_end(token: TokenStart) -> usize { token.end }
+
+// Header/interface/resolution need a stable source name without allocating a
+// host Text. Hash the exact already-scanned token span; callers retain the
+// token kind separately, so an arbitrary byte range cannot masquerade as an
+// admitted identifier declaration.
+pub fn token_digest(input: Bytes, token: TokenStart) -> Digest {
+    digest_of_bytes(__g1_bytes_slice(input, token.start, token.end))
+}
 
 // Compare source-defined identifiers, operators, and punctuation against
 // arbitrary source text using only the bounded byte cursor. This keeps parser

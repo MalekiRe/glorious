@@ -1,6 +1,8 @@
 use useflow_library::useflow;
 use useflow_library::placeflow;
 pub fn score(value: useflow::ConsumeResult) -> i64 { handle value { useflow::ConsumeResult::Value(state) => useflow::remaining(state), useflow::ConsumeResult::Exhausted => 0, _ => 0 } }
+pub fn bool_score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn false_score(value: Bool) -> i64 { handle value { true => 0, false => 1, _ => 0 } }
 pub fn main() -> i64 {
     score(useflow::consume(useflow::uses(2)))
         + score(useflow::consume(useflow::uses(0)))
@@ -13,6 +15,15 @@ pub fn main() -> i64 {
         + score_place_consume(useflow::consume_from_place(placeflow::available(), useflow::uses(1)))
         + score_place_consume(useflow::consume_from_place(placeflow::move_out(placeflow::available()), useflow::uses(1)))
         + score_place_consume(useflow::consume_from_place(placeflow::available(), useflow::uses(0)))
+        + bool_score(useflow::contains(useflow::bounded_value(0, 1), useflow::uses(0)))
+        + bool_score(useflow::contains(useflow::bounded_value(0, 1), useflow::uses(1)))
+        + false_score(useflow::contains(useflow::bounded_value(0, 1), useflow::uses(2)))
+        + false_score(useflow::contains(useflow::uses(1), useflow::bounded_value(0, 1)))
+        + bool_score(useflow::contains(useflow::at_least(0), useflow::uses(3)))
+        + bool_score(useflow::is_public_principal_use(useflow::at_least(0)))
+        + bool_score(useflow::is_public_principal_use(useflow::bounded_value(0, 1)))
+        + bool_score(useflow::is_public_principal_use(useflow::uses(1)))
+        + false_score(useflow::is_public_principal_use(useflow::uses(0)))
 }
 
 pub fn score_place_consume(value: useflow::PlaceConsume) -> i64 { handle value { useflow::PlaceConsume::Value(_) => 1, useflow::PlaceConsume::PlaceUnavailable => 10, useflow::PlaceConsume::Exhausted => 100, _ => 0 } }

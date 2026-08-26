@@ -1,7 +1,9 @@
 use placeflow_library::placeflow;
 pub fn score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn false_score(value: Bool) -> i64 { handle value { true => 0, false => 1, _ => 0 } }
 pub fn score_call(value: placeflow::CallAdmission) -> i64 { handle value { placeflow::CallAdmission::Value(state) => score(placeflow::can_read(state)), placeflow::CallAdmission::Rejected => 1, _ => 0 } }
 pub fn score_move(value: placeflow::MoveAdmission) -> i64 { handle value { placeflow::MoveAdmission::Value(_) => 1, placeflow::MoveAdmission::BorrowConflict => 10, placeflow::MoveAdmission::AlreadyMoved => 100, _ => 0 } }
+pub fn score_pair_move(value: placeflow::PairMoveAdmission) -> i64 { handle value { placeflow::PairMoveAdmission::Value(_) => 1, placeflow::PairMoveAdmission::BorrowConflict => 10, placeflow::PairMoveAdmission::AlreadyMoved => 100, _ => 0 } }
 pub fn main() -> i64 {
     score(placeflow::can_read(placeflow::available()))
         + score(placeflow::can_read(placeflow::move_out(placeflow::available())))
@@ -22,4 +24,16 @@ pub fn main() -> i64 {
         + score_move(placeflow::move_checked(placeflow::borrow_shared(placeflow::available())))
         + score_move(placeflow::move_checked(placeflow::borrow_unique(placeflow::available())))
         + score_move(placeflow::move_checked(placeflow::move_out(placeflow::available())))
+        + false_score(placeflow::can_read_first(placeflow::move_first(placeflow::pair_available())))
+        + score(placeflow::can_read_second(placeflow::move_first(placeflow::pair_available())))
+        + false_score(placeflow::can_escape_pair_owned(placeflow::move_first(placeflow::pair_available())))
+        + score_pair_move(placeflow::move_pair_checked(placeflow::pair_available()))
+        + score_pair_move(placeflow::move_pair_checked(placeflow::pair(placeflow::move_out(placeflow::available()), placeflow::available())))
+        + score_pair_move(placeflow::move_pair_checked(placeflow::pair(placeflow::borrow_shared(placeflow::available()), placeflow::available())))
+        + false_score(placeflow::can_read_first(placeflow::join_pair(
+            placeflow::pair_available(),
+            placeflow::move_first(placeflow::pair_available()))))
+        + score(placeflow::can_read_second(placeflow::join_pair(
+            placeflow::pair_available(),
+            placeflow::move_first(placeflow::pair_available()))))
 }

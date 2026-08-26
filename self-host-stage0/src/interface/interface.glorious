@@ -2,8 +2,16 @@
 // attach stable identities, header fingerprints, diagnostics, and transactional
 // publication to these declaration facts.
 use compiler_support::branch_bool;
+use compiler_support::text_eq;
+use compiler_support::__g1_array_pop_move;
 use header::HeaderLead;
 use header::HeaderPrefix;
+use header::NamedHeaderAdmission;
+use header::NamedHeaderParts;
+use source::SourceInput;
+use scanner::TokenStart;
+use identity::Digest;
+use identity::equals;
 
 pub enum DefinitionNamespace {
     Type,
@@ -37,13 +45,146 @@ pub struct Definition {
     public: Bool,
 }
 
+// Interface collection owns a namespace index separately from later
+// signature data. The source name and namespace are enough to reject a
+// duplicate declaration deterministically without making a value and type
+// with the same spelling collide. Implementations/imports have namespace
+// code zero and therefore deliberately do not participate in this check.
+pub enum DefinitionSet {
+    Empty,
+    Node(Text, i64, Bool, Array<DefinitionSet>),
+}
+
+pub enum DefinitionSetAdmission {
+    Value(DefinitionSet),
+    Duplicate,
+}
+
 pub enum DefinitionAdmission {
     Value(Definition),
     NotDeclaration,
 }
 
+pub struct NamedDefinition {
+    definition: Definition,
+    name: TokenStart,
+    name_digest: Digest,
+}
+
+pub enum NamedDefinitionAdmission {
+    Value(NamedDefinition),
+    NotDeclaration,
+}
+
+pub enum NamedDefinitionParts { Value(Definition, Digest) }
+
+// Stable source-name identities are derived from the exact admitted token
+// bytes. This is the collection form used before Text allocation/interning:
+// names from separate source inputs can still participate in one namespace
+// duplicate check without relying on byte offsets or host strings.
+pub enum SourceDefinitionSet {
+    Empty,
+    Node(Digest, i64, Bool, Array<SourceDefinitionSet>),
+}
+
+pub enum SourceDefinitionSetAdmission {
+    Value(SourceDefinitionSet),
+    Duplicate,
+}
+
 pub fn definition(kind: DefinitionKind, public: Bool) -> Definition {
     Definition { kind: kind, public: public }
+}
+
+pub fn empty_definitions() -> DefinitionSet { DefinitionSet::Empty }
+
+pub fn insert_definition(set: DefinitionSet, name: Text, definition: Definition) -> DefinitionSetAdmission {
+    insert_named(set, name, namespace_code(definition))
+}
+
+fn insert_named(set: DefinitionSet, name: Text, namespace: i64) -> DefinitionSetAdmission {
+    handle set {
+        DefinitionSet::Empty => DefinitionSetAdmission::Value(DefinitionSet::Node(name, namespace, false, [])),
+        DefinitionSet::Node(existing_name, existing_namespace, has_tail, tail) => insert_definition_node(existing_name, existing_namespace, has_tail, tail, name, namespace),
+        _ => DefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn insert_definition_node(existing_name: Text, existing_namespace: i64, has_tail: Bool, tail: Array<DefinitionSet>, name: Text, namespace: i64) -> DefinitionSetAdmission {
+    handle text_eq(existing_name, name) {
+        true => insert_same_name(existing_name, existing_namespace, has_tail, tail, name, namespace),
+        false => insert_after_distinct_name(existing_name, existing_namespace, has_tail, tail, name, namespace),
+        _ => DefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn insert_same_name(existing_name: Text, existing_namespace: i64, has_tail: Bool, tail: Array<DefinitionSet>, name: Text, namespace: i64) -> DefinitionSetAdmission {
+    handle duplicate_namespace(existing_namespace, namespace) {
+        true => reject_duplicate_tail(has_tail, tail),
+        false => insert_after_distinct_name(existing_name, existing_namespace, has_tail, tail, name, namespace),
+        _ => DefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn insert_after_distinct_name(existing_name: Text, existing_namespace: i64, has_tail: Bool, tail: Array<DefinitionSet>, name: Text, namespace: i64) -> DefinitionSetAdmission {
+    handle has_tail {
+        true => rebuild_inserted_definition(existing_name, existing_namespace, insert_named(__g1_array_pop_move<DefinitionSet>(&mut tail), name, namespace)),
+        false => DefinitionSetAdmission::Value(DefinitionSet::Node(existing_name, existing_namespace, true, [DefinitionSet::Node(name, namespace, false, [])])),
+        _ => DefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn rebuild_inserted_definition(existing_name: Text, existing_namespace: i64, result: DefinitionSetAdmission) -> DefinitionSetAdmission {
+    handle result {
+        DefinitionSetAdmission::Value(next) => DefinitionSetAdmission::Value(DefinitionSet::Node(existing_name, existing_namespace, true, [next])),
+        DefinitionSetAdmission::Duplicate => DefinitionSetAdmission::Duplicate,
+        _ => DefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn reject_duplicate_tail(has_tail: Bool, tail: Array<DefinitionSet>) -> DefinitionSetAdmission {
+    handle has_tail {
+        true => reject_after_discard(discard_definitions(__g1_array_pop_move<DefinitionSet>(&mut tail))),
+        false => DefinitionSetAdmission::Duplicate,
+        _ => DefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn reject_after_discard(_: Bool) -> DefinitionSetAdmission { DefinitionSetAdmission::Duplicate }
+
+fn discard_definitions(value: DefinitionSet) -> Bool {
+    handle value {
+        DefinitionSet::Empty => true,
+        DefinitionSet::Node(_, _, has_tail, tail) => handle has_tail {
+            true => discard_definitions(__g1_array_pop_move<DefinitionSet>(&mut tail)),
+            false => true,
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+fn duplicate_namespace(existing: i64, incoming: i64) -> Bool {
+    handle existing == 0 {
+        true => false,
+        false => existing == incoming,
+        _ => false,
+    }
+}
+
+fn namespace_code(definition: Definition) -> i64 { namespace_code_of(namespace(definition)) }
+
+fn namespace_code_of(value: DefinitionNamespace) -> i64 {
+    handle value {
+        DefinitionNamespace::None => 0,
+        DefinitionNamespace::Type => 1,
+        DefinitionNamespace::Value => 2,
+        DefinitionNamespace::Trait => 3,
+        DefinitionNamespace::Effect => 4,
+        DefinitionNamespace::Module => 5,
+        DefinitionNamespace::Operator => 6,
+        _ => 0,
+    }
 }
 
 // Interface collection consumes the header-owned declaration lead rather than
@@ -79,6 +220,101 @@ pub fn definition_from_lead(lead: HeaderLead, public: Bool) -> DefinitionAdmissi
 // collectors, but take visibility from the parsed prefix at the source edge.
 pub fn definition_from_header(input: Bytes) -> DefinitionAdmission {
     definition_from_prefix(header::declaration(input))
+}
+
+// The scanner-owned identifier span travels with the classified declaration.
+// This lets a later collector intern a stable source name without reparsing
+// bytes or accepting a host-provided spelling.
+pub fn named_definition_from_header_checked(input: SourceInput) -> NamedDefinitionAdmission {
+    handle header::named_header_checked(input) {
+        NamedHeaderAdmission::Value(named) => named_definition_from_parts(header::named_header_parts(named)),
+        NamedHeaderAdmission::Unadmitted => NamedDefinitionAdmission::NotDeclaration,
+        _ => NamedDefinitionAdmission::NotDeclaration,
+    }
+}
+
+fn named_definition_from_parts(parts: NamedHeaderParts) -> NamedDefinitionAdmission {
+    handle parts {
+        NamedHeaderParts::Value(prefix, name, name_digest) => handle definition_from_prefix(prefix) {
+            DefinitionAdmission::Value(definition) => NamedDefinitionAdmission::Value(NamedDefinition { definition: definition, name: name, name_digest: name_digest }),
+            DefinitionAdmission::NotDeclaration => NamedDefinitionAdmission::NotDeclaration,
+            _ => NamedDefinitionAdmission::NotDeclaration,
+        },
+        _ => NamedDefinitionAdmission::NotDeclaration,
+    }
+}
+
+pub fn named_definition_name_start(value: NamedDefinition) -> usize { scanner::token_start(value.name) }
+pub fn named_definition_parts(value: NamedDefinition) -> NamedDefinitionParts {
+    NamedDefinitionParts::Value(value.definition, value.name_digest)
+}
+
+pub fn empty_source_definitions() -> SourceDefinitionSet { SourceDefinitionSet::Empty }
+
+pub fn insert_named_definition(set: SourceDefinitionSet, value: NamedDefinition) -> SourceDefinitionSetAdmission {
+    insert_source_name(set, value.name_digest, namespace_code(value.definition))
+}
+
+fn insert_source_name(set: SourceDefinitionSet, name: Digest, namespace: i64) -> SourceDefinitionSetAdmission {
+    handle set {
+        SourceDefinitionSet::Empty => SourceDefinitionSetAdmission::Value(SourceDefinitionSet::Node(name, namespace, false, [])),
+        SourceDefinitionSet::Node(existing_name, existing_namespace, has_tail, tail) => insert_source_definition_node(existing_name, existing_namespace, has_tail, tail, name, namespace),
+        _ => SourceDefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn insert_source_definition_node(existing_name: Digest, existing_namespace: i64, has_tail: Bool, tail: Array<SourceDefinitionSet>, name: Digest, namespace: i64) -> SourceDefinitionSetAdmission {
+    handle equals(existing_name, name) {
+        true => insert_same_source_name(existing_name, existing_namespace, has_tail, tail, name, namespace),
+        false => insert_after_distinct_source_name(existing_name, existing_namespace, has_tail, tail, name, namespace),
+        _ => SourceDefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn insert_same_source_name(existing_name: Digest, existing_namespace: i64, has_tail: Bool, tail: Array<SourceDefinitionSet>, name: Digest, namespace: i64) -> SourceDefinitionSetAdmission {
+    handle duplicate_namespace(existing_namespace, namespace) {
+        true => reject_source_duplicate_tail(has_tail, tail),
+        false => insert_after_distinct_source_name(existing_name, existing_namespace, has_tail, tail, name, namespace),
+        _ => SourceDefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn insert_after_distinct_source_name(existing_name: Digest, existing_namespace: i64, has_tail: Bool, tail: Array<SourceDefinitionSet>, name: Digest, namespace: i64) -> SourceDefinitionSetAdmission {
+    handle has_tail {
+        true => rebuild_inserted_source_definition(existing_name, existing_namespace, insert_source_name(__g1_array_pop_move<SourceDefinitionSet>(&mut tail), name, namespace)),
+        false => SourceDefinitionSetAdmission::Value(SourceDefinitionSet::Node(existing_name, existing_namespace, true, [SourceDefinitionSet::Node(name, namespace, false, [])])),
+        _ => SourceDefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn rebuild_inserted_source_definition(existing_name: Digest, existing_namespace: i64, result: SourceDefinitionSetAdmission) -> SourceDefinitionSetAdmission {
+    handle result {
+        SourceDefinitionSetAdmission::Value(next) => SourceDefinitionSetAdmission::Value(SourceDefinitionSet::Node(existing_name, existing_namespace, true, [next])),
+        SourceDefinitionSetAdmission::Duplicate => SourceDefinitionSetAdmission::Duplicate,
+        _ => SourceDefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn reject_source_duplicate_tail(has_tail: Bool, tail: Array<SourceDefinitionSet>) -> SourceDefinitionSetAdmission {
+    handle has_tail {
+        true => reject_source_after_discard(discard_source_definitions(__g1_array_pop_move<SourceDefinitionSet>(&mut tail))),
+        false => SourceDefinitionSetAdmission::Duplicate,
+        _ => SourceDefinitionSetAdmission::Duplicate,
+    }
+}
+
+fn reject_source_after_discard(_: Bool) -> SourceDefinitionSetAdmission { SourceDefinitionSetAdmission::Duplicate }
+
+fn discard_source_definitions(value: SourceDefinitionSet) -> Bool {
+    handle value {
+        SourceDefinitionSet::Empty => true,
+        SourceDefinitionSet::Node(_, _, has_tail, tail) => handle has_tail {
+            true => discard_source_definitions(__g1_array_pop_move<SourceDefinitionSet>(&mut tail)),
+            false => true,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 pub fn definition_from_prefix(prefix: HeaderPrefix) -> DefinitionAdmission {

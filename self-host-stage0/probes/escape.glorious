@@ -1,5 +1,6 @@
 use escape_library::escape; use escape_library::placeflow;
 pub fn score(value: escape::EscapeResult) -> i64 { handle value { escape::EscapeResult::Allowed => 1, escape::EscapeResult::Rejected => 0, _ => 0 } }
+pub fn rejection_score(value: escape::EscapeResult) -> i64 { handle value { escape::EscapeResult::Allowed => 0, escape::EscapeResult::Rejected => 1, _ => 0 } }
 pub fn main() -> i64 {
     score(escape::return_place(placeflow::available()))
         + score(escape::return_place(placeflow::move_out(placeflow::available())))
@@ -18,4 +19,22 @@ pub fn main() -> i64 {
         + score(escape::suspend_reference(escape::ReferenceOrigin::LocalBorrow))
         + score(escape::store_reference(escape::ReferenceOrigin::Owned))
         + score(escape::store_reference(escape::ReferenceOrigin::LocalBorrow))
+        + score(escape::return_value(escape::reference_pair(
+            escape::ReferenceOrigin::ExternalBorrow,
+            escape::ReferenceOrigin::Owned)))
+        + rejection_score(escape::return_value(escape::reference_pair(
+            escape::ReferenceOrigin::ExternalBorrow,
+            escape::ReferenceOrigin::LocalBorrow)))
+        + score(escape::return_reference(escape::first_reference(escape::reference_pair(
+            escape::ReferenceOrigin::ExternalBorrow,
+            escape::ReferenceOrigin::LocalBorrow))))
+        + rejection_score(escape::return_reference(escape::second_reference(escape::reference_pair(
+            escape::ReferenceOrigin::ExternalBorrow,
+            escape::ReferenceOrigin::LocalBorrow))))
+        + rejection_score(escape::store_value(escape::replace_first(
+            escape::reference_pair(escape::ReferenceOrigin::ExternalBorrow, escape::ReferenceOrigin::Owned),
+            escape::ReferenceOrigin::LocalBorrow)))
+        + score(escape::store_reference(escape::second_reference(escape::replace_first(
+            escape::reference_pair(escape::ReferenceOrigin::ExternalBorrow, escape::ReferenceOrigin::Owned),
+            escape::ReferenceOrigin::LocalBorrow))))
 }

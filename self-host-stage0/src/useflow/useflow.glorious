@@ -26,6 +26,13 @@ pub fn bounded(lower: i64, upper: i64) -> UseConstruction {
     )
 }
 
+// Internal phases only call this after their own bound arithmetic; this
+// direct helper gives the use-summary checker a concrete interval value once
+// those bounds are already known valid.
+pub fn bounded_value(lower: i64, upper: i64) -> UseState {
+    UseState { lower: lower, upper: UseUpper::Finite(upper) }
+}
+
 pub fn at_least(lower: i64) -> UseState {
     branch_bool(lower < 0,
         () -> UseState { UseState { lower: 0, upper: UseUpper::Infinite } },
@@ -61,6 +68,31 @@ fn consume_readable(state: UseState) -> PlaceConsume {
 pub fn remaining(state: UseState) -> i64 { state.lower }
 pub fn permits_another(state: UseState) -> Bool {
     handle state.upper { UseUpper::Finite(0) => false, UseUpper::Finite(_) => true, UseUpper::Infinite => true, _ => false }
+}
+
+// A declaration is a principal interval and an observed control-flow summary
+// is permitted exactly when every possible observed use count lies inside it.
+// This is deliberately distinct from `join`: exclusive branches form a hull,
+// then the declaration checks that hull once at the callable boundary.
+pub fn contains(principal: UseState, actual: UseState) -> Bool {
+    branch_bool(
+        principal.lower <= actual.lower,
+        () -> Bool { upper_contains(principal.upper, actual.upper) },
+        () -> Bool { false },
+    )
+}
+
+// Only the ownership-relevant three intervals are legal source principal
+// declarations. Zero remains a real flow result for an unselected branch,
+// but a user cannot declare a permanently unusable value just to bypass
+// ownership checking.
+pub fn is_public_principal_use(value: UseState) -> Bool {
+    handle (value.lower, value.upper) {
+        (0, UseUpper::Infinite) => true,
+        (0, UseUpper::Finite(1)) => true,
+        (1, UseUpper::Finite(1)) => true,
+        _ => false,
+    }
 }
 
 // A value that may have travelled through either branch is usable only as
@@ -99,5 +131,14 @@ fn greater_upper(left: UseUpper, right: UseUpper) -> UseUpper {
             () -> UseUpper { UseUpper::Finite(right) },
             () -> UseUpper { UseUpper::Finite(left) }),
         _ => UseUpper::Finite(0),
+    }
+}
+
+fn upper_contains(principal: UseUpper, actual: UseUpper) -> Bool {
+    handle (principal, actual) {
+        (UseUpper::Infinite, _) => true,
+        (UseUpper::Finite(_), UseUpper::Infinite) => false,
+        (UseUpper::Finite(principal), UseUpper::Finite(actual)) => actual <= principal,
+        _ => false,
     }
 }

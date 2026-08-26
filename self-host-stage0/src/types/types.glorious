@@ -373,6 +373,14 @@ fn occurs_in_type(arena: TypeArena, variable: i64, value: Type) -> Bool {
     handle value {
         Type::Inference(found) => found == variable,
         Type::Array(element_node) => occurs_in_array_element(arena, variable, element_node),
+        // Every indirect type constructor has the same recursive ownership
+        // boundary as Array. Leaving references, borrows, or delayed
+        // projections opaque here would admit `?T = &?T` (or a recursive
+        // projection) and let a cyclic inference term cross a frozen type
+        // boundary.
+        Type::Reference(referent_node) => occurs_in_array_element(arena, variable, referent_node),
+        Type::Borrowed(_, _, referent_node) => occurs_in_array_element(arena, variable, referent_node),
+        Type::Projection(_, subject_node) => occurs_in_array_element(arena, variable, subject_node),
         _ => false,
     }
 }

@@ -37,8 +37,8 @@ output="$("$compiler" \
     --runtime-leaf bytes-slice crate __g1_bytes_slice --runtime-leaf bytes-concat crate __g1_bytes_concat --runtime-leaf bytes-from-array-move crate __g1_bytes_from_array_move --runtime-leaf int-shr crate __g1_int_shr --runtime-leaf int-convert-wrapping-to-u32 crate __g1_int_convert_wrapping_to_u32 --runtime-leaf int-convert-wrapping-to-u64 crate __g1_int_convert_wrapping_to_u64 --runtime-leaf int-convert-wrapping-to-u8 crate __g1_int_convert_wrapping_to_u8 --runtime-leaf int-convert-checked-to-i64 crate __g1_int_convert_checked_to_i64 \
     --runtime-leaf int-wrapping-add crate __g1_int_wrapping_add --runtime-leaf int-wrapping-sub crate __g1_int_wrapping_sub --runtime-leaf int-wrapping-mul crate __g1_int_wrapping_mul --runtime-leaf int-checked-div crate __g1_int_checked_div \
     run "$probe")"
-[[ "$output" == "8" ]] || {
-    echo "self-host interface check: expected public declarations, fixities, host imports, aliases, and preserved auto-trait identity, got $output" >&2
+[[ "$output" == "34" ]] || {
+    echo "self-host interface check: expected public declarations, source-token-digest namespace-aware duplicate checks, fixities, host imports, aliases, and preserved auto-trait identity, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"

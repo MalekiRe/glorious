@@ -1,6 +1,14 @@
 use mir_storage_library::mir_storage;
 pub fn score(value: mir_storage::TakeResult) -> i64 { handle value { mir_storage::TakeResult::Value(value) => value, mir_storage::TakeResult::Empty => 0, _ => 0 } }
 pub fn score_bool(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
+pub fn score_cleanup(value: mir_storage::CleanupResult) -> i64 { handle value { mir_storage::CleanupResult::Dropped(value) => value, mir_storage::CleanupResult::Skipped => 1, _ => 0 } }
+pub fn score_replace(value: mir_storage::ReplaceResult) -> i64 {
+    handle value {
+        mir_storage::ReplaceResult::Written(slot) => score(mir_storage::take(slot)),
+        mir_storage::ReplaceResult::Replaced(previous, slot) => previous + score(mir_storage::take(slot)),
+        _ => 0,
+    }
+}
 pub fn score_move(value: mir_storage::MoveResult) -> i64 {
     handle value {
         mir_storage::MoveResult::Value(value, remainder) => value + score_bool(mir_storage::is_empty(remainder)) + score_bool(mir_storage::was_moved(remainder)),
@@ -17,4 +25,9 @@ pub fn main() -> i64 {
         + score(mir_storage::take(mir_storage::write_after_move(mir_storage::move_out(mir_storage::write(mir_storage::empty(), 2)), 1)))
         + score_move(mir_storage::move_out(mir_storage::Slot::Moved))
         + score(mir_storage::take(mir_storage::write(mir_storage::Slot::Moved, 9)))
+        + score_cleanup(mir_storage::cleanup(mir_storage::write(mir_storage::empty(), 7)))
+        + score_cleanup(mir_storage::cleanup(mir_storage::empty()))
+        + score_cleanup(mir_storage::cleanup(mir_storage::Slot::Moved))
+        + score_replace(mir_storage::replace(mir_storage::empty(), 3))
+        + score_replace(mir_storage::replace(mir_storage::write(mir_storage::empty(), 5), 9))
 }

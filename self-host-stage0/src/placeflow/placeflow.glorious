@@ -4,6 +4,14 @@ pub enum PlaceState { Available, SharedBorrowed, UniqueBorrowed, Moved }
 pub enum ArgumentMode { Move, Borrow, UniqueBorrow }
 pub enum CallAdmission { Value(PlaceState), Rejected }
 pub enum MoveAdmission { Value(PlaceState), BorrowConflict, AlreadyMoved }
+
+// A frozen Core projection tracks the state of the selected place, not just
+// its root. This fixed pair is the bootstrap aggregate layout: moving `.0`
+// leaves `.1` readable, while moving the complete aggregate still requires
+// both fields to be available.
+pub struct PairPlaceState { first: PlaceState, second: PlaceState }
+pub enum PairMoveAdmission { Value(PairPlaceState), BorrowConflict, AlreadyMoved }
+
 pub fn available() -> PlaceState { PlaceState::Available }
 pub fn move_out(state: PlaceState) -> PlaceState { handle state { PlaceState::Available => PlaceState::Moved, PlaceState::SharedBorrowed => PlaceState::SharedBorrowed, PlaceState::UniqueBorrowed => PlaceState::UniqueBorrowed, PlaceState::Moved => PlaceState::Moved, _ => PlaceState::Moved } }
 
@@ -29,6 +37,49 @@ pub fn can_read(state: PlaceState) -> Bool { handle state { PlaceState::Availabl
 // boundary is not. EscapeFlow consumes this stronger predicate rather than
 // mistaking loan readability for ownership availability.
 pub fn can_escape_owned(state: PlaceState) -> Bool { handle state { PlaceState::Available => true, PlaceState::SharedBorrowed => false, PlaceState::UniqueBorrowed => false, PlaceState::Moved => false, _ => false } }
+
+pub fn pair(first: PlaceState, second: PlaceState) -> PairPlaceState {
+    PairPlaceState { first: first, second: second }
+}
+
+pub fn pair_available() -> PairPlaceState { pair(available(), available()) }
+
+pub fn move_first(value: PairPlaceState) -> PairPlaceState {
+    PairPlaceState { first: move_out(value.first), second: value.second }
+}
+
+pub fn move_second(value: PairPlaceState) -> PairPlaceState {
+    PairPlaceState { first: value.first, second: move_out(value.second) }
+}
+
+pub fn first_state(value: PairPlaceState) -> PlaceState { value.first }
+pub fn second_state(value: PairPlaceState) -> PlaceState { value.second }
+pub fn can_read_first(value: PairPlaceState) -> Bool { can_read(value.first) }
+pub fn can_read_second(value: PairPlaceState) -> Bool { can_read(value.second) }
+
+// Returning or moving the whole pair is valid only if every owned field is
+// still available. Borrowed or moved projection states cannot be erased by
+// reconstructing the root aggregate.
+pub fn can_escape_pair_owned(value: PairPlaceState) -> Bool {
+    handle can_escape_owned(value.first) {
+        true => can_escape_owned(value.second),
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn move_pair_checked(value: PairPlaceState) -> PairMoveAdmission {
+    handle (value.first, value.second) {
+        (PlaceState::Available, PlaceState::Available) => PairMoveAdmission::Value(pair(PlaceState::Moved, PlaceState::Moved)),
+        (PlaceState::Moved, _) => PairMoveAdmission::AlreadyMoved,
+        (_, PlaceState::Moved) => PairMoveAdmission::AlreadyMoved,
+        _ => PairMoveAdmission::BorrowConflict,
+    }
+}
+
+pub fn join_pair(left: PairPlaceState, right: PairPlaceState) -> PairPlaceState {
+    PairPlaceState { first: join(left.first, right.first), second: join(left.second, right.second) }
+}
 
 // A call boundary consumes an owned argument but only observes a borrowed
 // one. Both modes require a live source place, so an already moved value

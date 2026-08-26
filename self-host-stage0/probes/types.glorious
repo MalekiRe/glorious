@@ -74,6 +74,42 @@ pub fn nested_inference_occurs_score(value: types::TypeArenaAdmission) -> i64 {
     }
 }
 
+pub fn reference_inference_occurs_score(value: types::TypeArenaAdmission) -> i64 {
+    handle value {
+        types::TypeArenaAdmission::Value(arena) => inference_occurs_score(types::unify_inference_with_occurs(
+            types::empty_inference(),
+            arena,
+            types::inference_variable(5),
+            types::reference(11))),
+        types::TypeArenaAdmission::DuplicateNode => 0,
+        _ => 0,
+    }
+}
+
+pub fn borrowed_inference_occurs_score(value: types::TypeArenaAdmission) -> i64 {
+    handle value {
+        types::TypeArenaAdmission::Value(arena) => inference_occurs_score(types::unify_inference_with_occurs(
+            types::empty_inference(),
+            arena,
+            types::inference_variable(6),
+            types::shared_borrow(types::Lifetime::Static, 12))),
+        types::TypeArenaAdmission::DuplicateNode => 0,
+        _ => 0,
+    }
+}
+
+pub fn projection_inference_occurs_score(value: types::TypeArenaAdmission) -> i64 {
+    handle value {
+        types::TypeArenaAdmission::Value(arena) => inference_occurs_score(types::unify_inference_with_occurs(
+            types::empty_inference(),
+            arena,
+            types::inference_variable(7),
+            types::Type::Projection("Item", 13))),
+        types::TypeArenaAdmission::DuplicateNode => 0,
+        _ => 0,
+    }
+}
+
 pub fn admitted_lookup_score(
     admission: types::TypeArenaAdmission,
     node: i64,
@@ -162,6 +198,12 @@ pub fn main() -> i64 {
             types::singleton_type(9, types::inference_variable(4)),
             10,
             types::array_type(9)))
+        + reference_inference_occurs_score(types::checked_insert_type(
+            types::empty_arena(), 11, types::inference_variable(5)))
+        + borrowed_inference_occurs_score(types::checked_insert_type(
+            types::empty_arena(), 12, types::inference_variable(6)))
+        + projection_inference_occurs_score(types::checked_insert_type(
+            types::empty_arena(), 13, types::inference_variable(7)))
         + score(types::same_term(types::Term::ValueType(types::Type::I64), types::Term::ValueType(types::Type::I64)))
         + score(types::same_term(
             types::Term::EffectRow(types::empty_effect_row()),

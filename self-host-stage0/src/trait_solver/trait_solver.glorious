@@ -3,9 +3,13 @@
 // explanations extend this deterministic source-owned answer shape.
 use compiler_support::branch_bool;
 use compiler_support::text_eq;
+use compiler_support::__g1_array_pop_move;
 use types::Type;
 use types::same;
 use coherence::ImplementationPolarity;
+use coherence::TraitArguments;
+use coherence::empty_trait_arguments;
+use coherence::same_trait_arguments;
 use operation::Budget;
 use operation::BudgetResult;
 use operation::budget;
@@ -15,6 +19,7 @@ pub struct Implementation {
     evidence: i64,
     trait_name: Text,
     self_type: Type,
+    trait_arguments: TraitArguments,
     polarity: ImplementationPolarity,
     generic_self: Bool,
 }
@@ -22,6 +27,21 @@ pub struct Implementation {
 pub struct Goal {
     trait_name: Text,
     self_type: Type,
+    trait_arguments: TraitArguments,
+}
+
+// Candidate enumeration is persistent and source-owned. The full solver
+// populates this from frozen interfaces and tables; this bootstrap worklist
+// retains every candidate/goal pair so ambiguity and contradiction are folded
+// over an arbitrary set rather than only the historical pair/three helpers.
+pub struct CandidateQuery {
+    candidate: Implementation,
+    goal: Goal,
+}
+
+pub enum CandidateSet {
+    Empty,
+    Node(CandidateQuery, Bool, Array<CandidateSet>),
 }
 
 pub enum Answer {
@@ -46,41 +66,77 @@ pub fn negative_implementation(trait_name: Text, self_type: Type) -> Implementat
 // bootstrap form keeps it as an integer so candidate-set selection cannot
 // accidentally turn two distinct applicable implementations into one answer.
 pub fn identified_implementation(evidence: i64, trait_name: Text, self_type: Type) -> Implementation {
-    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Positive, generic_self: false }
+    identified_implementation_with_arguments(evidence, trait_name, self_type, empty_trait_arguments())
 }
 
 pub fn identified_negative_implementation(evidence: i64, trait_name: Text, self_type: Type) -> Implementation {
-    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Negative, generic_self: false }
+    identified_negative_implementation_with_arguments(evidence, trait_name, self_type, empty_trait_arguments())
+}
+
+pub fn identified_implementation_with_arguments(evidence: i64, trait_name: Text, self_type: Type, trait_arguments: TraitArguments) -> Implementation {
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, trait_arguments: trait_arguments, polarity: ImplementationPolarity::Positive, generic_self: false }
+}
+
+pub fn identified_negative_implementation_with_arguments(evidence: i64, trait_name: Text, self_type: Type, trait_arguments: TraitArguments) -> Implementation {
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: self_type, trait_arguments: trait_arguments, polarity: ImplementationPolarity::Negative, generic_self: false }
 }
 
 // A declared implementation binder is distinct from `Type::Generic` in an
 // ordinary goal: only this implementation form treats its Self slot as a
 // universal match. Where-obligation solving remains a later tabled slice.
 pub fn generic_implementation(evidence: i64, trait_name: Text) -> Implementation {
-    Implementation { evidence: evidence, trait_name: trait_name, self_type: Type::Generic(0), polarity: ImplementationPolarity::Positive, generic_self: true }
+    generic_implementation_with_arguments(evidence, trait_name, empty_trait_arguments())
 }
 
 pub fn generic_negative_implementation(evidence: i64, trait_name: Text) -> Implementation {
-    Implementation { evidence: evidence, trait_name: trait_name, self_type: Type::Generic(0), polarity: ImplementationPolarity::Negative, generic_self: true }
+    generic_negative_implementation_with_arguments(evidence, trait_name, empty_trait_arguments())
+}
+
+pub fn generic_implementation_with_arguments(evidence: i64, trait_name: Text, trait_arguments: TraitArguments) -> Implementation {
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: Type::Generic(0), trait_arguments: trait_arguments, polarity: ImplementationPolarity::Positive, generic_self: true }
+}
+
+pub fn generic_negative_implementation_with_arguments(evidence: i64, trait_name: Text, trait_arguments: TraitArguments) -> Implementation {
+    Implementation { evidence: evidence, trait_name: trait_name, self_type: Type::Generic(0), trait_arguments: trait_arguments, polarity: ImplementationPolarity::Negative, generic_self: true }
 }
 
 pub fn goal(trait_name: Text, self_type: Type) -> Goal {
-    Goal { trait_name: trait_name, self_type: self_type }
+    goal_with_arguments(trait_name, self_type, empty_trait_arguments())
+}
+
+pub fn goal_with_arguments(trait_name: Text, self_type: Type, trait_arguments: TraitArguments) -> Goal {
+    Goal { trait_name: trait_name, self_type: self_type, trait_arguments: trait_arguments }
+}
+
+pub fn candidate_query(candidate: Implementation, goal: Goal) -> CandidateQuery {
+    CandidateQuery { candidate: candidate, goal: goal }
+}
+
+pub fn empty_candidates() -> CandidateSet { CandidateSet::Empty }
+
+pub fn single_candidate(candidate: Implementation, goal: Goal) -> CandidateSet {
+    CandidateSet::Node(candidate_query(candidate, goal), false, [])
+}
+
+pub fn prepend_candidate(candidate: Implementation, goal: Goal, tail: CandidateSet) -> CandidateSet {
+    CandidateSet::Node(candidate_query(candidate, goal), true, [tail])
 }
 
 pub fn solve(candidate: Implementation, goal: Goal) -> Answer {
     handle (candidate, goal) {
         (
-            Implementation { evidence, trait_name, self_type, polarity, generic_self },
-            Goal { trait_name: requested_trait, self_type: requested_type },
+            Implementation { evidence, trait_name, self_type, trait_arguments, polarity, generic_self },
+            Goal { trait_name: requested_trait, self_type: requested_type, trait_arguments: requested_arguments },
         ) => solve_goal_parts(
             evidence,
             trait_name,
             self_type,
+            trait_arguments,
             polarity,
             generic_self,
             requested_trait,
             requested_type,
+            requested_arguments,
         ),
     }
 }
@@ -93,12 +149,22 @@ fn solve_goal_parts(
     evidence: i64,
     candidate_trait: Text,
     candidate_type: Type,
+    candidate_arguments: TraitArguments,
     polarity: ImplementationPolarity,
     generic_self: Bool,
     requested_trait: Text,
     requested_type: Type,
+    requested_arguments: TraitArguments,
 ) -> Answer {
     handle text_eq(candidate_trait, requested_trait) {
+        true => solve_same_trait_arguments(evidence, candidate_type, candidate_arguments, polarity, generic_self, requested_type, requested_arguments),
+        false => Answer::Unsatisfied,
+        _ => Answer::Unsatisfied,
+    }
+}
+
+fn solve_same_trait_arguments(evidence: i64, candidate_type: Type, candidate_arguments: TraitArguments, polarity: ImplementationPolarity, generic_self: Bool, requested_type: Type, requested_arguments: TraitArguments) -> Answer {
+    handle same_trait_arguments(candidate_arguments, requested_arguments) {
         true => solve_same_trait_parts(evidence, candidate_type, polarity, generic_self, requested_type),
         false => Answer::Unsatisfied,
         _ => Answer::Unsatisfied,
@@ -169,6 +235,67 @@ pub fn solve_pair(
     combine_answers(solve(first, first_goal), solve(second, second_goal))
 }
 
+pub fn solve_candidates(candidates: CandidateSet) -> Answer {
+    handle candidates {
+        CandidateSet::Empty => Answer::Unsatisfied,
+        CandidateSet::Node(query, has_tail, tail) => solve_candidate_node(query, has_tail, tail),
+        _ => Answer::Unsatisfied,
+    }
+}
+
+// Worklist search consumes one shared step per inspected candidate. An empty
+// tail is not work, but every candidate is charged before it can contribute
+// evidence; this prevents a finite budget from publishing a partial answer.
+pub fn solve_candidates_with_step_limit(limit: i64, candidates: CandidateSet) -> Answer {
+    solve_candidates_with_budget(budget(limit), candidates)
+}
+
+fn solve_candidates_with_budget(steps: Budget, candidates: CandidateSet) -> Answer {
+    handle candidates {
+        CandidateSet::Empty => Answer::Unsatisfied,
+        CandidateSet::Node(query, has_tail, tail) => solve_candidate_with_budget(steps, query, has_tail, tail),
+        _ => Answer::Unsatisfied,
+    }
+}
+
+fn solve_candidate_with_budget(steps: Budget, query: CandidateQuery, has_tail: Bool, tail: Array<CandidateSet>) -> Answer {
+    handle charge(steps, 1) {
+        BudgetResult::Value(next) => solve_charged_candidate(next, query, has_tail, tail),
+        BudgetResult::Error(_) => Answer::Overflow,
+        _ => Answer::Overflow,
+    }
+}
+
+fn solve_charged_candidate(steps: Budget, query: CandidateQuery, has_tail: Bool, tail: Array<CandidateSet>) -> Answer {
+    handle query {
+        CandidateQuery { candidate, goal } => handle has_tail {
+            true => combine_budgeted_answers(solve(candidate, goal), solve_candidates_with_budget(steps, __g1_array_pop_move<CandidateSet>(&mut tail))),
+            false => solve(candidate, goal),
+            _ => Answer::Unsatisfied,
+        },
+    }
+}
+
+// Search exhaustion is terminal. The ordinary candidate fold intentionally
+// lets a satisfied answer dominate an unrelated unsatisfied candidate, but
+// it must never dominate an uninspected tail whose budget was exhausted.
+fn combine_budgeted_answers(first: Answer, second: Answer) -> Answer {
+    handle second {
+        Answer::Overflow => Answer::Overflow,
+        value => combine_answers(first, value),
+    }
+}
+
+fn solve_candidate_node(query: CandidateQuery, has_tail: Bool, tail: Array<CandidateSet>) -> Answer {
+    handle query {
+        CandidateQuery { candidate, goal } => handle has_tail {
+            true => combine_answers(solve(candidate, goal), solve_candidates(__g1_array_pop_move<CandidateSet>(&mut tail))),
+            false => solve(candidate, goal),
+            _ => Answer::Unsatisfied,
+        },
+    }
+}
+
 // This is the bootstrap form of a generic implementation with one where
 // obligation. A tabled solver will discover and recurse through such
 // obligations from an implementation header; keeping the two candidate goals
@@ -184,6 +311,68 @@ pub fn solve_generic_with_where(
         solve(generic_candidate, generic_goal),
         solve(required_candidate, required_goal),
     )
+}
+
+// An implementation may have more than one where-bound. Reuse the same
+// candidate/goal worklist representation, but require every obligation to
+// prove before the selected generic evidence can be published.
+pub fn solve_generic_with_obligations(
+    generic_candidate: Implementation,
+    generic_goal: Goal,
+    obligations: CandidateSet,
+) -> Answer {
+    complete_where_obligation(solve(generic_candidate, generic_goal), solve_obligations(obligations))
+}
+
+fn solve_obligations(obligations: CandidateSet) -> Answer {
+    handle obligations {
+        CandidateSet::Empty => Answer::Satisfied(0),
+        CandidateSet::Node(query, has_tail, tail) => solve_obligation_node(query, has_tail, tail),
+        _ => Answer::Unsatisfied,
+    }
+}
+
+fn solve_obligation_node(query: CandidateQuery, has_tail: Bool, tail: Array<CandidateSet>) -> Answer {
+    handle query {
+        CandidateQuery { candidate, goal } => continue_obligation_answer(solve(candidate, goal), has_tail, tail),
+    }
+}
+
+fn continue_obligation_answer(answer: Answer, has_tail: Bool, tail: Array<CandidateSet>) -> Answer {
+    handle answer {
+        Answer::Satisfied(_) => handle has_tail {
+            true => solve_obligations(__g1_array_pop_move<CandidateSet>(&mut tail)),
+            false => Answer::Satisfied(0),
+            _ => Answer::Unsatisfied,
+        },
+        Answer::Refuted(_) => discard_obligation_tail(has_tail, tail, Answer::Refuted(0)),
+        Answer::Unsatisfied => discard_obligation_tail(has_tail, tail, Answer::Unsatisfied),
+        Answer::Ambiguous => discard_obligation_tail(has_tail, tail, Answer::Ambiguous),
+        Answer::Overflow => discard_obligation_tail(has_tail, tail, Answer::Overflow),
+        _ => Answer::Unsatisfied,
+    }
+}
+
+fn discard_obligation_tail(has_tail: Bool, tail: Array<CandidateSet>, answer: Answer) -> Answer {
+    handle has_tail {
+        true => discard_obligation_tail_after(discard_candidates(__g1_array_pop_move<CandidateSet>(&mut tail)), answer),
+        false => answer,
+        _ => Answer::Unsatisfied,
+    }
+}
+
+fn discard_obligation_tail_after(_: Bool, answer: Answer) -> Answer { answer }
+
+fn discard_candidates(value: CandidateSet) -> Bool {
+    handle value {
+        CandidateSet::Empty => true,
+        CandidateSet::Node(_, has_tail, tail) => handle has_tail {
+            true => discard_candidates(__g1_array_pop_move<CandidateSet>(&mut tail)),
+            false => true,
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 fn complete_where_obligation(selected: Answer, required: Answer) -> Answer {

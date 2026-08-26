@@ -7,12 +7,34 @@ use placeflow::can_read;
 pub enum EscapeResult { Allowed, Rejected }
 pub enum ReferenceOrigin { Owned, ExternalBorrow, LocalBorrow }
 
+// Escape provenance is structural. A caller may pass an aggregate carrying
+// borrowed fields, and selecting or overwriting one field must not erase
+// whether that field is caller-owned or body-local. The fixed pair is the
+// bootstrap aggregate shape used by Core's record/tuple projection path; a
+// later layout layer can map arbitrary nominal fields onto this same result.
+pub enum ReferenceValue {
+    Origin(ReferenceOrigin),
+    Pair(ReferenceOrigin, ReferenceOrigin),
+}
+
 pub fn return_place(state: PlaceState) -> EscapeResult {
     handle can_escape_owned(state) { true => EscapeResult::Allowed, false => EscapeResult::Rejected, _ => EscapeResult::Rejected }
 }
 
 pub fn return_reference(origin: ReferenceOrigin) -> EscapeResult {
     boundary(origin)
+}
+
+pub fn reference_value(origin: ReferenceOrigin) -> ReferenceValue {
+    ReferenceValue::Origin(origin)
+}
+
+pub fn reference_pair(first: ReferenceOrigin, second: ReferenceOrigin) -> ReferenceValue {
+    ReferenceValue::Pair(first, second)
+}
+
+pub fn return_value(value: ReferenceValue) -> EscapeResult {
+    value_boundary(value)
 }
 
 // Borrow provenance and place liveness are independent requirements. An
@@ -31,11 +53,74 @@ pub fn suspend_reference(origin: ReferenceOrigin) -> EscapeResult {
     boundary(origin)
 }
 
+pub fn suspend_value(value: ReferenceValue) -> EscapeResult {
+    value_boundary(value)
+}
+
 // External storage is a second escape boundary.  It shares the same
 // provenance rule now; later aggregate projection paths refine the origin
 // without weakening this fail-closed admission.
 pub fn store_reference(origin: ReferenceOrigin) -> EscapeResult {
     boundary(origin)
+}
+
+pub fn store_value(value: ReferenceValue) -> EscapeResult {
+    value_boundary(value)
+}
+
+// Field selection models reading a frozen Core projection. It returns the
+// exact selected provenance, rather than treating every aggregate access as
+// an external borrow and thereby letting `&local` escape through `slot.0`.
+pub fn first_reference(value: ReferenceValue) -> ReferenceOrigin {
+    handle value {
+        ReferenceValue::Origin(origin) => origin,
+        ReferenceValue::Pair(first, _) => first,
+        _ => ReferenceOrigin::LocalBorrow,
+    }
+}
+
+pub fn second_reference(value: ReferenceValue) -> ReferenceOrigin {
+    handle value {
+        ReferenceValue::Origin(origin) => origin,
+        ReferenceValue::Pair(_, second) => second,
+        _ => ReferenceOrigin::LocalBorrow,
+    }
+}
+
+// Assignment into a projected aggregate field replaces only that field's
+// provenance. This is the key outlives invariant for an incoming pair such
+// as `(external, external)` followed by `slot.0 = &local`.
+pub fn replace_first(value: ReferenceValue, replacement: ReferenceOrigin) -> ReferenceValue {
+    handle value {
+        ReferenceValue::Origin(_) => ReferenceValue::Origin(replacement),
+        ReferenceValue::Pair(_, second) => ReferenceValue::Pair(replacement, second),
+        _ => ReferenceValue::Origin(replacement),
+    }
+}
+
+fn value_boundary(value: ReferenceValue) -> EscapeResult {
+    handle value {
+        ReferenceValue::Origin(origin) => boundary(origin),
+        ReferenceValue::Pair(first, second) => pair_boundary(first, second),
+        _ => EscapeResult::Rejected,
+    }
+}
+
+fn pair_boundary(first: ReferenceOrigin, second: ReferenceOrigin) -> EscapeResult {
+    handle boundary(first) {
+        EscapeResult::Allowed => boundary(second),
+        EscapeResult::Rejected => discard_origin(second),
+        _ => EscapeResult::Rejected,
+    }
+}
+
+fn discard_origin(origin: ReferenceOrigin) -> EscapeResult {
+    handle origin {
+        ReferenceOrigin::Owned => EscapeResult::Rejected,
+        ReferenceOrigin::ExternalBorrow => EscapeResult::Rejected,
+        ReferenceOrigin::LocalBorrow => EscapeResult::Rejected,
+        _ => EscapeResult::Rejected,
+    }
 }
 
 fn boundary(origin: ReferenceOrigin) -> EscapeResult {

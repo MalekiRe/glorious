@@ -60,7 +60,14 @@ pub fn main() -> i64 {
         + sequence_score(header::declaration_sequence_checked(source::input("package", "src/bad.glorious", __g1_text_as_bytes("fn main() -> Unit { ()"), identity::digest_of_text("fn main() -> Unit { ()"))))
         + sequence_score(header::declaration_sequence_checked(source::input("package", "src/forged.glorious", __g1_text_as_bytes("mod nested;"), identity::digest_of_text("wrong"))))
         + sequence_score(header::declaration_sequence_checked(source::input("package", "src/empty.glorious", __g1_text_as_bytes(""), identity::digest_of_text(""))))
+        + sequence_score(header::declaration_sequence_checked(source::input("package", "src/trailing-invalid.glorious", __g1_text_as_bytes("use crate::a; 42;"), identity::digest_of_text("use crate::a; 42;"))))
+        + named_info_score(header::named_header_checked(source::input("package", "src/named.glorious", __g1_text_as_bytes("pub fn main"), identity::digest_of_text("pub fn main"))), 7)
+        + named_info_score(header::named_header_checked(source::input("package", "src/auto.glorious", __g1_text_as_bytes("auto trait Marker"), identity::digest_of_text("auto trait Marker"))), 11)
+        + named_info_score(header::named_header_checked(source::input("package", "src/host.glorious", __g1_text_as_bytes("host io fn read"), identity::digest_of_text("host io fn read"))), 11)
+        + named_info_unadmitted_score(header::named_header_checked(source::input("package", "src/missing.glorious", __g1_text_as_bytes("pub fn"), identity::digest_of_text("pub fn"))))
 }
 
 pub fn checked_lead_score(value: header::SourceHeaderAdmission) -> i64 { handle value { header::SourceHeaderAdmission::Value(prefix) => score_lead(header::lead(prefix)), header::SourceHeaderAdmission::Unadmitted => 1, _ => 0 } }
 pub fn sequence_score(value: header::HeaderSequenceAdmission) -> i64 { handle value { header::HeaderSequenceAdmission::Value(count) => count, header::HeaderSequenceAdmission::Rejected => 10, header::HeaderSequenceAdmission::Unadmitted => 100, _ => 0 } }
+pub fn named_info_score(value: header::NamedHeaderAdmission, expected_start: usize) -> i64 { handle value { header::NamedHeaderAdmission::Value(named) => handle header::named_token_start(named) == expected_start { true => 1, false => 0, _ => 0 }, header::NamedHeaderAdmission::Unadmitted => 0, _ => 0 } }
+pub fn named_info_unadmitted_score(value: header::NamedHeaderAdmission) -> i64 { handle value { header::NamedHeaderAdmission::Value(_) => 0, header::NamedHeaderAdmission::Unadmitted => 1, _ => 0 } }

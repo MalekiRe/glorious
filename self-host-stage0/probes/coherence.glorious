@@ -9,6 +9,14 @@ pub fn score(value: coherence::Overlap) -> i64 {
     }
 }
 
+pub fn orphan_score(value: coherence::ImplementationAdmission) -> i64 {
+    handle value {
+        coherence::ImplementationAdmission::Value(_) => 1,
+        coherence::ImplementationAdmission::OrphanViolation => 10,
+        _ => 0,
+    }
+}
+
 pub fn main() -> i64 {
     score(coherence::overlap(
         coherence::implementation("Show", types::Type::I64),
@@ -37,4 +45,50 @@ pub fn main() -> i64 {
         + score(coherence::overlap(
             coherence::generic_implementation("Show"),
             coherence::implementation("Eq", types::Type::I64)))
+        + score(coherence::overlap(
+            coherence::implementation_with_arguments(
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::I64))),
+            coherence::negative_implementation_with_arguments(
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::I64)))))
+        + score(coherence::overlap(
+            coherence::implementation_with_arguments(
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::I64))),
+            coherence::implementation_with_arguments(
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::U64)))) )
+        + score(coherence::overlap(
+            coherence::generic_implementation_with_arguments(
+                "Convert",
+                coherence::single_trait_argument(types::lifetime_argument(types::Lifetime::Static))),
+            coherence::implementation_with_arguments(
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::lifetime_argument(types::Lifetime::Static)))))
+        + score(coherence::overlap(
+            coherence::generic_implementation_with_arguments(
+                "Convert",
+                coherence::single_trait_argument(types::lifetime_argument(types::Lifetime::Static))),
+            coherence::implementation_with_arguments(
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::lifetime_argument(types::Lifetime::Generic(0))))))
+        + orphan_score(coherence::implementation_with_origins(
+            "Foreign", types::Type::I64,
+            coherence::ImplementationOrigin::Foreign,
+            coherence::ImplementationOrigin::Foreign))
+        + orphan_score(coherence::implementation_with_origins(
+            "LocalTrait", types::Type::I64,
+            coherence::ImplementationOrigin::Local,
+            coherence::ImplementationOrigin::Foreign))
+        + orphan_score(coherence::implementation_with_origins(
+            "Foreign", types::Type::I64,
+            coherence::ImplementationOrigin::Foreign,
+            coherence::ImplementationOrigin::Local))
 }

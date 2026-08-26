@@ -1,5 +1,6 @@
 use trait_solver_library::trait_solver;
 use trait_solver_library::types;
+use trait_solver_library::coherence;
 
 pub fn score(value: trait_solver::Answer) -> i64 {
     handle value {
@@ -8,6 +9,13 @@ pub fn score(value: trait_solver::Answer) -> i64 {
         trait_solver::Answer::Unsatisfied => 0,
         trait_solver::Answer::Ambiguous => 100,
         trait_solver::Answer::Overflow => 1000,
+        _ => 0,
+    }
+}
+
+pub fn unsatisfied_score(value: trait_solver::Answer) -> i64 {
+    handle value {
+        trait_solver::Answer::Unsatisfied => 1,
         _ => 0,
     }
 }
@@ -112,4 +120,72 @@ pub fn main() -> i64 {
         + score(trait_solver::solve(
             trait_solver::identified_implementation(34, "Show", types::shared_borrow(types::Lifetime::Static, 64)),
             trait_solver::goal("Show", types::shared_borrow(types::Lifetime::Static, 65))))
+        + score(trait_solver::solve(
+            trait_solver::identified_implementation_with_arguments(
+                50,
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::I64))),
+            trait_solver::goal_with_arguments(
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::I64)))))
+        + unsatisfied_score(trait_solver::solve(
+            trait_solver::identified_implementation_with_arguments(
+                51,
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::I64))),
+            trait_solver::goal_with_arguments(
+                "Convert",
+                types::Type::I64,
+                coherence::single_trait_argument(types::type_argument(types::Type::U64)))))
+        + score(trait_solver::solve_candidates(trait_solver::prepend_candidate(
+            trait_solver::identified_implementation(60, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
+            trait_solver::single_candidate(
+                trait_solver::generic_implementation(60, "Show"),
+                trait_solver::goal("Show", types::Type::I64)))))
+        + score(trait_solver::solve_candidates(trait_solver::prepend_candidate(
+            trait_solver::identified_implementation(61, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
+            trait_solver::single_candidate(
+                trait_solver::identified_implementation(62, "Show", types::Type::I64),
+                trait_solver::goal("Show", types::Type::I64)))))
+        + unsatisfied_score(trait_solver::solve_candidates(trait_solver::prepend_candidate(
+            trait_solver::identified_implementation(63, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
+            trait_solver::single_candidate(
+                trait_solver::negative_implementation("Show", types::Type::I64),
+                trait_solver::goal("Show", types::Type::I64)))))
+        + score(trait_solver::solve_candidates_with_step_limit(1, trait_solver::prepend_candidate(
+            trait_solver::identified_implementation(64, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
+            trait_solver::single_candidate(
+                trait_solver::identified_implementation(64, "Show", types::Type::I64),
+                trait_solver::goal("Show", types::Type::I64)))))
+        + score(trait_solver::solve_candidates_with_step_limit(2, trait_solver::prepend_candidate(
+            trait_solver::identified_implementation(65, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
+            trait_solver::single_candidate(
+                trait_solver::identified_implementation(65, "Show", types::Type::I64),
+                trait_solver::goal("Show", types::Type::I64)))))
+        + score(trait_solver::solve_generic_with_obligations(
+            trait_solver::generic_implementation(70, "Show"),
+            trait_solver::goal("Show", types::Type::I64),
+            trait_solver::prepend_candidate(
+                trait_solver::implementation("Bound", types::Type::I64),
+                trait_solver::goal("Bound", types::Type::I64),
+                trait_solver::single_candidate(
+                    trait_solver::implementation("Other", types::Type::I64),
+                    trait_solver::goal("Other", types::Type::I64)))))
+        + unsatisfied_score(trait_solver::solve_generic_with_obligations(
+            trait_solver::generic_implementation(71, "Show"),
+            trait_solver::goal("Show", types::Type::I64),
+            trait_solver::prepend_candidate(
+                trait_solver::implementation("Bound", types::Type::I64),
+                trait_solver::goal("Bound", types::Type::I64),
+                trait_solver::single_candidate(
+                    trait_solver::implementation("Other", types::Type::I64),
+                    trait_solver::goal("Other", types::Type::U8)))))
 }

@@ -2,11 +2,17 @@
 // package/module names, never from host paths or ambient process state.
 use compiler_support::branch_bool;
 use compiler_support::text_eq;
+use compiler_support::__g1_array_pop_move;
 use interface::Definition;
 use interface::DefinitionAdmission;
+use interface::NamedDefinitionAdmission;
+use interface::NamedDefinitionParts;
 use interface::is_exported;
+use source::SourceInput;
 use identity::PackageKey;
 use identity::ModuleKey;
+use identity::Digest;
+use identity::equals;
 use identity::package_key;
 use identity::module_key;
 use identity::same_package;
@@ -28,10 +34,26 @@ pub struct Binding {
 // the distinction between a known-but-inaccessible name and a name that was
 // never declared in this namespace.
 pub struct NamedBinding { name: Text, binding: Binding }
+pub struct SourceBinding { name: Digest, binding: Binding }
+
+// The interface supplies namespace-unique declarations; resolution retains
+// them as one immutable sequence so a lookup can walk past unrelated names
+// without collapsing an inaccessible matching declaration into `Missing`.
+pub enum BindingSet {
+    Empty,
+    Node(NamedBinding, Bool, Array<BindingSet>),
+}
 
 pub enum BindingAdmission {
     Value(Binding),
     NotDeclaration,
+}
+
+pub enum SourceBindingAdmission { Value(SourceBinding), NotDeclaration }
+
+pub enum SourceBindingSet {
+    Empty,
+    Node(SourceBinding, Bool, Array<SourceBindingSet>),
 }
 
 // Preserve a denied lookup separately from an absent header.  Downstream
@@ -46,6 +68,20 @@ pub fn binding(package: Text, module: Text, visibility: Visibility) -> Binding {
 pub fn named_binding(name: Text, package: Text, module: Text, visibility: Visibility) -> NamedBinding {
     NamedBinding { name: name, binding: binding(package, module, visibility) }
 }
+
+pub fn empty_bindings() -> BindingSet { BindingSet::Empty }
+
+pub fn prepend_binding(value: NamedBinding, tail: BindingSet) -> BindingSet {
+    BindingSet::Node(value, true, [tail])
+}
+
+pub fn single_binding(value: NamedBinding) -> BindingSet {
+    BindingSet::Node(value, false, [])
+}
+
+pub fn empty_source_bindings() -> SourceBindingSet { SourceBindingSet::Empty }
+pub fn single_source_binding(value: SourceBinding) -> SourceBindingSet { SourceBindingSet::Node(value, false, []) }
+pub fn prepend_source_binding(value: SourceBinding, tail: SourceBindingSet) -> SourceBindingSet { SourceBindingSet::Node(value, true, [tail]) }
 
 // Resolution consumes the interface's export decision instead of maintaining
 // a second public-declaration rule. Non-exportable declarations remain local
@@ -66,6 +102,25 @@ pub fn binding_from_header(package: Text, module: Text, input: Bytes) -> Binding
         DefinitionAdmission::Value(definition) => BindingAdmission::Value(binding_from_definition(package, module, definition)),
         DefinitionAdmission::NotDeclaration => BindingAdmission::NotDeclaration,
         _ => BindingAdmission::NotDeclaration,
+    }
+}
+
+// The ordinary header facade remains useful for callers with an already
+// interned text name. Source collection instead retains the exact scanned
+// token digest supplied by M09/M10, so resolution cannot accept a separately
+// fabricated spelling for a declaration it did not parse.
+pub fn source_binding_from_header_checked(package: Text, module: Text, input: SourceInput) -> SourceBindingAdmission {
+    handle interface::named_definition_from_header_checked(input) {
+        NamedDefinitionAdmission::Value(named) => source_binding_from_parts(package, module, interface::named_definition_parts(named)),
+        NamedDefinitionAdmission::NotDeclaration => SourceBindingAdmission::NotDeclaration,
+        _ => SourceBindingAdmission::NotDeclaration,
+    }
+}
+
+fn source_binding_from_parts(package: Text, module: Text, parts: NamedDefinitionParts) -> SourceBindingAdmission {
+    handle parts {
+        NamedDefinitionParts::Value(definition, name) => SourceBindingAdmission::Value(SourceBinding { name: name, binding: binding_from_definition(package, module, definition) }),
+        _ => SourceBindingAdmission::NotDeclaration,
     }
 }
 
@@ -90,6 +145,54 @@ pub fn lookup_named(value: NamedBinding, name: Text, package: Text, module: Text
         () -> Lookup { lookup(value.binding, package, module) },
         () -> Lookup { Lookup::Missing },
     )
+}
+
+pub fn lookup_bindings(values: BindingSet, name: Text, package: Text, module: Text) -> Lookup {
+    handle values {
+        BindingSet::Empty => Lookup::Missing,
+        BindingSet::Node(value, has_tail, tail) => lookup_binding_node(value, has_tail, tail, name, package, module),
+        _ => Lookup::Missing,
+    }
+}
+
+pub fn lookup_source_bindings(values: SourceBindingSet, name: Digest, package: Text, module: Text) -> Lookup {
+    handle values {
+        SourceBindingSet::Empty => Lookup::Missing,
+        SourceBindingSet::Node(value, has_tail, tail) => lookup_source_binding_node(value, has_tail, tail, name, package, module),
+        _ => Lookup::Missing,
+    }
+}
+
+fn lookup_source_binding_node(value: SourceBinding, has_tail: Bool, tail: Array<SourceBindingSet>, name: Digest, package: Text, module: Text) -> Lookup {
+    handle equals(value.name, name) {
+        true => lookup(value.binding, package, module),
+        false => lookup_source_binding_tail(has_tail, tail, name, package, module),
+        _ => Lookup::Missing,
+    }
+}
+
+fn lookup_source_binding_tail(has_tail: Bool, tail: Array<SourceBindingSet>, name: Digest, package: Text, module: Text) -> Lookup {
+    handle has_tail {
+        true => lookup_source_bindings(__g1_array_pop_move<SourceBindingSet>(&mut tail), name, package, module),
+        false => Lookup::Missing,
+        _ => Lookup::Missing,
+    }
+}
+
+fn lookup_binding_node(value: NamedBinding, has_tail: Bool, tail: Array<BindingSet>, name: Text, package: Text, module: Text) -> Lookup {
+    handle text_eq(value.name, name) {
+        true => lookup(value.binding, package, module),
+        false => lookup_binding_tail(has_tail, tail, name, package, module),
+        _ => Lookup::Missing,
+    }
+}
+
+fn lookup_binding_tail(has_tail: Bool, tail: Array<BindingSet>, name: Text, package: Text, module: Text) -> Lookup {
+    handle has_tail {
+        true => lookup_bindings(__g1_array_pop_move<BindingSet>(&mut tail), name, package, module),
+        false => Lookup::Missing,
+        _ => Lookup::Missing,
+    }
 }
 
 fn private_visible(owner_package: PackageKey, owner_module: ModuleKey, package: Text, module: Text) -> Bool {

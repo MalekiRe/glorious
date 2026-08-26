@@ -4,12 +4,15 @@ use diagnostic::SourceSpan;
 use scanner::TokenKind;
 use scanner::first_token;
 use scanner::token_kind;
+use scanner::token_start;
+use scanner::token_digest;
 use scanner::token_matches;
 use scanner::next_token;
 use scanner::TokenStart;
 use source::SourceInput;
 use source::bytes;
 use source::digest_matches_bytes;
+use identity::Digest;
 use compiler_support::__g1_int_wrapping_add;
 use compiler_support::__g1_int_wrapping_sub;
 
@@ -68,6 +71,19 @@ pub struct HeaderPrefix {
     public: Bool,
 }
 
+// The source name remains a scanner-owned byte span rather than an eagerly
+// allocated Text. This lets interface collection compare identifiers through
+// the admitted source buffer while the standard-library Text conversion path
+// is still being ported. The prefix and name therefore share one provenance.
+pub struct NamedHeader {
+    prefix: HeaderPrefix,
+    name: TokenStart,
+    name_digest: Digest,
+}
+
+pub enum NamedHeaderAdmission { Value(NamedHeader), Unadmitted }
+pub enum NamedHeaderParts { Value(HeaderPrefix, TokenStart, Digest) }
+
 // Header parsing begins only at an identifier token. Keyword and complete
 // declaration grammar remain the M09 corpus, but numeric/punctuation/empty
 // input cannot enter it as an invented declaration.
@@ -91,9 +107,17 @@ pub fn leading(input: Bytes) -> HeaderLead {
 }
 
 pub fn declaration(input: Bytes) -> HeaderPrefix {
-    handle token_matches(input, first_token(input), "pub") {
-        true => HeaderPrefix { lead: leading_token(input, next_token(input, first_token(input))), public: true },
-        false => HeaderPrefix { lead: leading_token(input, first_token(input)), public: false },
+    declaration_at(input, first_token(input))
+}
+
+// Sequence admission must classify the declaration that actually begins at
+// `token`. Reusing `first_token(input)` here made every later fragment inherit
+// the first declaration's lead, so `use path; 42;` could be counted as two
+// declarations. Visibility remains local to this cursor as well.
+fn declaration_at(input: Bytes, token: TokenStart) -> HeaderPrefix {
+    handle token_matches(input, token, "pub") {
+        true => HeaderPrefix { lead: leading_token(input, next_token(input, token)), public: true },
+        false => HeaderPrefix { lead: leading_token(input, token), public: false },
         _ => HeaderPrefix { lead: HeaderLead::NotDeclaration, public: false },
     }
 }
@@ -117,6 +141,18 @@ pub fn named_declaration_checked(input: SourceInput) -> SourceHeaderAdmission {
     }
 }
 
+// Unlike `named_declaration_checked`, which retains the historical prefix
+// facade for callers that only need classification, this entry preserves the
+// token span of a real declaration name. Import/implementation/fixity forms
+// have no one identifier name at this layer and are intentionally rejected.
+pub fn named_header_checked(input: SourceInput) -> NamedHeaderAdmission {
+    handle digest_matches_bytes(input) {
+        true => named_header(bytes(input)),
+        false => NamedHeaderAdmission::Unadmitted,
+        _ => NamedHeaderAdmission::Unadmitted,
+    }
+}
+
 // Whole-source header admission is deliberately delimiter-aware. A semicolon
 // ends imports/module leaves and a balanced outer brace ends functions,
 // nominal declarations, traits, and implementations; punctuation inside a
@@ -137,7 +173,7 @@ fn declaration_sequence(input: Bytes, token: TokenStart, count: i64) -> HeaderSe
 }
 
 fn declaration_sequence_lead(input: Bytes, token: TokenStart, count: i64) -> HeaderSequenceAdmission {
-    handle lead(declaration(input)) {
+    handle lead(declaration_at(input, token)) {
         HeaderLead::NotDeclaration => HeaderSequenceAdmission::Rejected,
         _ => declaration_end(input, token, 0, count),
     }
@@ -180,6 +216,62 @@ fn named_declaration(input: Bytes) -> SourceHeaderAdmission {
         true => named_after_keyword(input, next_token(input, first)),
         false => named_after_keyword(input, first),
         _ => SourceHeaderAdmission::Unadmitted,
+    }
+}
+
+fn named_header(input: Bytes) -> NamedHeaderAdmission {
+    let first = first_token(input);
+    handle token_matches(input, first, "pub") {
+        true => named_header_after_keyword(input, next_token(input, first)),
+        false => named_header_after_keyword(input, first),
+        _ => NamedHeaderAdmission::Unadmitted,
+    }
+}
+
+fn named_header_after_keyword(input: Bytes, keyword: TokenStart) -> NamedHeaderAdmission {
+    handle leading_token(input, keyword) {
+        HeaderLead::Function => named_header_prefix(input, keyword),
+        HeaderLead::Struct => named_header_prefix(input, keyword),
+        HeaderLead::Enum => named_header_prefix(input, keyword),
+        HeaderLead::Trait => named_header_prefix(input, keyword),
+        HeaderLead::Effect => named_header_prefix(input, keyword),
+        HeaderLead::Type => named_header_prefix(input, keyword),
+        HeaderLead::Constant => named_header_prefix(input, keyword),
+        HeaderLead::Module => named_header_prefix(input, keyword),
+        HeaderLead::ValueAlias => named_header_prefix(input, keyword),
+        HeaderLead::AutoTrait => named_auto_trait_header(input, keyword),
+        HeaderLead::HostImport => named_host_header(input, keyword),
+        _ => NamedHeaderAdmission::Unadmitted,
+    }
+}
+
+fn named_header_prefix(input: Bytes, keyword: TokenStart) -> NamedHeaderAdmission {
+    let name = next_token(input, keyword);
+    handle token_kind(name) {
+        TokenKind::Identifier => NamedHeaderAdmission::Value(NamedHeader { prefix: declaration(input), name: name, name_digest: token_digest(input, name) }),
+        _ => NamedHeaderAdmission::Unadmitted,
+    }
+}
+
+fn named_auto_trait_header(input: Bytes, auto_keyword: TokenStart) -> NamedHeaderAdmission {
+    let trait_keyword = next_token(input, auto_keyword);
+    handle token_matches(input, trait_keyword, "trait") {
+        true => named_header_prefix(input, trait_keyword),
+        false => NamedHeaderAdmission::Unadmitted,
+        _ => NamedHeaderAdmission::Unadmitted,
+    }
+}
+
+fn named_host_header(input: Bytes, host_keyword: TokenStart) -> NamedHeaderAdmission {
+    let capability = next_token(input, host_keyword);
+    let function_keyword = next_token(input, capability);
+    handle token_kind(capability) {
+        TokenKind::Identifier => handle token_matches(input, function_keyword, "fn") {
+            true => named_header_prefix(input, function_keyword),
+            false => NamedHeaderAdmission::Unadmitted,
+            _ => NamedHeaderAdmission::Unadmitted,
+        },
+        _ => NamedHeaderAdmission::Unadmitted,
     }
 }
 
@@ -243,6 +335,12 @@ fn named_host_function(input: Bytes, function_keyword: TokenStart) -> SourceHead
 
 pub fn lead(prefix: HeaderPrefix) -> HeaderLead { prefix.lead }
 pub fn is_public(prefix: HeaderPrefix) -> Bool { prefix.public }
+pub fn named_header_declaration_prefix(value: NamedHeader) -> HeaderPrefix { value.prefix }
+pub fn named_token(value: NamedHeader) -> TokenStart { value.name }
+pub fn named_token_start(value: NamedHeader) -> usize { token_start(value.name) }
+pub fn named_token_digest(value: NamedHeader) -> Digest { value.name_digest }
+pub fn named_header_parts(value: NamedHeader) -> NamedHeaderParts { NamedHeaderParts::Value(value.prefix, value.name, value.name_digest) }
+
 
 fn leading_token(input: Bytes, token: TokenStart) -> HeaderLead {
     handle token_matches(input, token, "fn") {

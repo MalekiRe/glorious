@@ -1,16 +1,33 @@
 // M16 starts with concrete and generic-Self implementation-head overlap.
-// Generic argument unification, orphan checks, and where-bound
-// satisfiability extend this same source-owned decision boundary.
+// The frozen trait-argument sequence is part of that head: implementations
+// of `Trait<I64>` and `Trait<U64>` are disjoint, even when their Self type is
+// identical. Orphan anchors are admitted before overlap; generic argument
+// unification and where-bound satisfiability extend this same boundary.
 use compiler_support::branch_bool;
 use compiler_support::text_eq;
+use compiler_support::__g1_array_pop_move;
 use types::Type;
 use types::same;
+use types::GenericArgument;
+use types::same_generic_argument;
 
 pub struct ImplementationHead {
     trait_name: Text,
     self_type: Type,
+    trait_arguments: TraitArguments,
     polarity: ImplementationPolarity,
     generic_self: Bool,
+    trait_origin: ImplementationOrigin,
+    self_origin: ImplementationOrigin,
+}
+
+// This persistent sequence retains every mixed-kind argument in declared
+// order. It deliberately reuses M14's `GenericArgument`, so a type, effect
+// row, lifetime, or structural constant can never collide merely because its
+// immediate numeric payload happens to match.
+pub enum TraitArguments {
+    Empty,
+    Node(GenericArgument, Bool, Array<TraitArguments>),
 }
 
 // Positive and negative declarations occupy the same coherence namespace:
@@ -22,42 +39,97 @@ pub enum ImplementationPolarity {
     Negative,
 }
 
+pub enum ImplementationOrigin { Local, Foreign }
+
+pub enum ImplementationAdmission {
+    Value(ImplementationHead),
+    OrphanViolation,
+}
+
 pub enum Overlap {
     Disjoint,
     Conflict,
 }
 
 pub fn implementation(trait_name: Text, self_type: Type) -> ImplementationHead {
-    ImplementationHead { trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Positive, generic_self: false }
+    implementation_with_arguments(trait_name, self_type, empty_trait_arguments())
 }
 
 pub fn negative_implementation(trait_name: Text, self_type: Type) -> ImplementationHead {
-    ImplementationHead { trait_name: trait_name, self_type: self_type, polarity: ImplementationPolarity::Negative, generic_self: false }
+    negative_implementation_with_arguments(trait_name, self_type, empty_trait_arguments())
 }
 
 pub fn generic_implementation(trait_name: Text) -> ImplementationHead {
-    ImplementationHead { trait_name: trait_name, self_type: Type::Generic(0), polarity: ImplementationPolarity::Positive, generic_self: true }
+    generic_implementation_with_arguments(trait_name, empty_trait_arguments())
 }
 
 pub fn generic_negative_implementation(trait_name: Text) -> ImplementationHead {
-    ImplementationHead { trait_name: trait_name, self_type: Type::Generic(0), polarity: ImplementationPolarity::Negative, generic_self: true }
+    generic_negative_implementation_with_arguments(trait_name, empty_trait_arguments())
+}
+
+pub fn implementation_with_arguments(trait_name: Text, self_type: Type, trait_arguments: TraitArguments) -> ImplementationHead {
+    ImplementationHead { trait_name: trait_name, self_type: self_type, trait_arguments: trait_arguments, polarity: ImplementationPolarity::Positive, generic_self: false, trait_origin: ImplementationOrigin::Local, self_origin: ImplementationOrigin::Local }
+}
+
+pub fn negative_implementation_with_arguments(trait_name: Text, self_type: Type, trait_arguments: TraitArguments) -> ImplementationHead {
+    ImplementationHead { trait_name: trait_name, self_type: self_type, trait_arguments: trait_arguments, polarity: ImplementationPolarity::Negative, generic_self: false, trait_origin: ImplementationOrigin::Local, self_origin: ImplementationOrigin::Local }
+}
+
+pub fn generic_implementation_with_arguments(trait_name: Text, trait_arguments: TraitArguments) -> ImplementationHead {
+    ImplementationHead { trait_name: trait_name, self_type: Type::Generic(0), trait_arguments: trait_arguments, polarity: ImplementationPolarity::Positive, generic_self: true, trait_origin: ImplementationOrigin::Local, self_origin: ImplementationOrigin::Local }
+}
+
+pub fn generic_negative_implementation_with_arguments(trait_name: Text, trait_arguments: TraitArguments) -> ImplementationHead {
+    ImplementationHead { trait_name: trait_name, self_type: Type::Generic(0), trait_arguments: trait_arguments, polarity: ImplementationPolarity::Negative, generic_self: true, trait_origin: ImplementationOrigin::Local, self_origin: ImplementationOrigin::Local }
+}
+
+// A package may implement a foreign trait for a local Self type, or a local
+// trait for a foreign Self type. If both are foreign, no local coherence
+// authority exists and the head must not enter overlap collection.
+pub fn implementation_with_origins(trait_name: Text, self_type: Type, trait_origin: ImplementationOrigin, self_origin: ImplementationOrigin) -> ImplementationAdmission {
+    admit_implementation(ImplementationHead { trait_name: trait_name, self_type: self_type, trait_arguments: empty_trait_arguments(), polarity: ImplementationPolarity::Positive, generic_self: false, trait_origin: trait_origin, self_origin: self_origin })
+}
+
+fn admit_implementation(head: ImplementationHead) -> ImplementationAdmission {
+    handle (head.trait_origin, head.self_origin) {
+        (ImplementationOrigin::Foreign, ImplementationOrigin::Foreign) => ImplementationAdmission::OrphanViolation,
+        _ => ImplementationAdmission::Value(head),
+    }
+}
+
+pub fn empty_trait_arguments() -> TraitArguments { TraitArguments::Empty }
+
+pub fn single_trait_argument(value: GenericArgument) -> TraitArguments {
+    TraitArguments::Node(value, false, [])
+}
+
+pub fn prepend_trait_argument(value: GenericArgument, tail: TraitArguments) -> TraitArguments {
+    TraitArguments::Node(value, true, [tail])
 }
 
 pub fn overlap(left: ImplementationHead, right: ImplementationHead) -> Overlap {
     handle (left, right) {
         (
-            ImplementationHead { trait_name: left_trait, self_type: left_type, polarity: _, generic_self: left_generic },
-            ImplementationHead { trait_name: right_trait, self_type: right_type, polarity: _, generic_self: right_generic },
-        ) => overlap_parts(left_trait, left_type, left_generic, right_trait, right_type, right_generic),
+            ImplementationHead { trait_name: left_trait, self_type: left_type, trait_arguments: left_arguments, polarity: _, generic_self: left_generic, trait_origin: _, self_origin: _ },
+            ImplementationHead { trait_name: right_trait, self_type: right_type, trait_arguments: right_arguments, polarity: _, generic_self: right_generic, trait_origin: _, self_origin: _ },
+        ) => overlap_parts(left_trait, left_type, left_arguments, left_generic, right_trait, right_type, right_arguments, right_generic),
     }
 }
 
-fn overlap_parts(left_trait: Text, left_type: Type, left_generic: Bool, right_trait: Text, right_type: Type, right_generic: Bool) -> Overlap {
+fn overlap_parts(left_trait: Text, left_type: Type, left_arguments: TraitArguments, left_generic: Bool, right_trait: Text, right_type: Type, right_arguments: TraitArguments, right_generic: Bool) -> Overlap {
     branch_bool(
         text_eq(left_trait, right_trait),
-        () -> Overlap { overlap_same_trait(left_type, left_generic, right_type, right_generic) },
+        () -> Overlap { overlap_same_trait_arguments(left_type, left_arguments, left_generic, right_type, right_arguments, right_generic) },
         () -> Overlap { Overlap::Disjoint },
     )
+}
+
+fn overlap_same_trait_arguments(left_type: Type, left_arguments: TraitArguments, left_generic: Bool, right_type: Type, right_arguments: TraitArguments, right_generic: Bool) -> Overlap {
+    handle same_trait_arguments(left_arguments, right_arguments) {
+        true => overlap_same_trait(left_type, left_generic, right_type, right_generic),
+        false => Overlap::Disjoint,
+        _ => Overlap::Disjoint,
+    }
 }
 
 fn overlap_same_trait(left: Type, left_generic: Bool, right: Type, right_generic: Bool) -> Overlap {
@@ -78,4 +150,64 @@ fn overlap_exact_self_type(left: Type, right: Type) -> Overlap {
         () -> Overlap { Overlap::Conflict },
         () -> Overlap { Overlap::Disjoint },
     )
+}
+
+pub fn same_trait_arguments(left: TraitArguments, right: TraitArguments) -> Bool {
+    handle (left, right) {
+        (TraitArguments::Empty, TraitArguments::Empty) => true,
+        (TraitArguments::Node(left_value, left_has_tail, left_tail), TraitArguments::Node(right_value, right_has_tail, right_tail)) => same_trait_argument_node(left_value, left_has_tail, left_tail, right_value, right_has_tail, right_tail),
+        (left, right) => discard_trait_argument_pair(left, right),
+    }
+}
+
+fn same_trait_argument_node(left_value: GenericArgument, left_has_tail: Bool, left_tail: Array<TraitArguments>, right_value: GenericArgument, right_has_tail: Bool, right_tail: Array<TraitArguments>) -> Bool {
+    handle same_generic_argument(left_value, right_value) {
+        true => same_trait_argument_tails(left_has_tail, left_tail, right_has_tail, right_tail),
+        false => discard_trait_argument_tails(left_has_tail, left_tail, right_has_tail, right_tail),
+        _ => false,
+    }
+}
+
+fn same_trait_argument_tails(left_has_tail: Bool, left_tail: Array<TraitArguments>, right_has_tail: Bool, right_tail: Array<TraitArguments>) -> Bool {
+    handle (left_has_tail, right_has_tail) {
+        (false, false) => true,
+        (true, true) => same_trait_arguments(__g1_array_pop_move<TraitArguments>(&mut left_tail), __g1_array_pop_move<TraitArguments>(&mut right_tail)),
+        (true, false) => discard_single_trait_argument_tail(left_tail),
+        (false, true) => discard_single_trait_argument_tail(right_tail),
+        _ => false,
+    }
+}
+
+fn discard_trait_argument_tails(left_has_tail: Bool, left_tail: Array<TraitArguments>, right_has_tail: Bool, right_tail: Array<TraitArguments>) -> Bool {
+    handle (left_has_tail, right_has_tail) {
+        (false, false) => false,
+        (true, true) => discard_trait_argument_pair(__g1_array_pop_move<TraitArguments>(&mut left_tail), __g1_array_pop_move<TraitArguments>(&mut right_tail)),
+        (true, false) => discard_single_trait_argument_tail(left_tail),
+        (false, true) => discard_single_trait_argument_tail(right_tail),
+        _ => false,
+    }
+}
+
+fn discard_single_trait_argument_tail(tail: Array<TraitArguments>) -> Bool {
+    discard_trait_arguments(__g1_array_pop_move<TraitArguments>(&mut tail))
+}
+
+fn discard_trait_argument_pair(left: TraitArguments, right: TraitArguments) -> Bool {
+    handle discard_trait_arguments(left) {
+        true => handle discard_trait_arguments(right) { true => false, false => false, _ => false },
+        false => handle discard_trait_arguments(right) { true => false, false => false, _ => false },
+        _ => false,
+    }
+}
+
+fn discard_trait_arguments(value: TraitArguments) -> Bool {
+    handle value {
+        TraitArguments::Empty => true,
+        TraitArguments::Node(_, has_tail, tail) => handle has_tail {
+            true => discard_trait_arguments(__g1_array_pop_move<TraitArguments>(&mut tail)),
+            false => true,
+            _ => false,
+        },
+        _ => false,
+    }
 }

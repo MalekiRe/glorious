@@ -35,8 +35,8 @@ output="$("$compiler" \
     --runtime-leaf array-empty crate __g1_array_empty --runtime-leaf array-len crate __g1_array_len --runtime-leaf array-get-move crate __g1_array_get_move \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
-[[ "$output" == "2330" ]] || {
-    echo "self-host trait solver check: expected stable evidence, ambiguity, candidate-conflict, positive, negative, projection, and exact-reference receiver goals, got $output" >&2
+[[ "$output" == "3437" ]] || {
+    echo "self-host trait solver check: expected stable evidence, mixed-kind trait arguments, budgeted candidate-set ambiguity/conflict, multi-obligation generic completion, positive, negative, projection, and exact-reference receiver goals, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"
