@@ -120,11 +120,13 @@ The roadmap specifies a 32-chapter corpus, but only chapters 01, 02, and 05 are
 maintained as separate files. A roughly 1.4 MB generated compendium duplicates
 a full dossier-like corpus in one file, making review and authority unclear.
 Existing chapters also link to removed paths or present implementation-shaped
-APIs without current-code evidence.
+APIs without current-code evidence. The expanded stage-one workbook additionally
+links to the roadmap at the wrong relative path.
 
-**Resolution:** classify the series as an incomplete proposal, add a directory
-index, retain the generated compendium in Git history at the audited baseline,
-and replace its former path with a concise index.
+**Resolution:** reduce the active series to an index, roadmap, generated
+semantic map, and compendium notice; archive the three split chapters, replace
+the expanded workbook with a concise pointer, and retain generated predecessors
+in Git history at the audited baseline.
 
 ### 9. The tutorial presents a retired workflow as currently checked
 
@@ -211,7 +213,8 @@ This is intentionally a general list rather than a full compiler review.
   parser.
 - Add one current architecture overview and one current self-hosting overview.
 - Retain canonical specifications and current local contracts.
-- Reclassify frontend, MIR, and snowflake material as proposals.
+- Reclassify frontend and MIR material as proposals; reduce the snowflake
+  corpus to an index/roadmap and archive its three stale split chapters.
 - Move retired compiler, tooling, backend, parity, report, tutorial, and design
   documents under `docs/archive/` without editing their historical contents.
 - Replace the duplicate standard-library document with a supersession notice.
@@ -251,12 +254,12 @@ This is intentionally a general list rather than a full compiler review.
 | `docs/self-host-stage0/performance-baseline.md` | Measured snapshot | Retain, but classify as dated evidence rather than current status. |
 | `docs/self-host-stage0/primitive-boundary.md` | Current self-host boundary | Retain. |
 | `docs/self-host-test-parity.md` | Old completed-parity claim | Archive under `pre-stage0/`. |
-| `docs/self-hosted-compiler-snowflake-stage-one.md` | Future self-host architecture proposal | Retain and classify as proposal. |
+| `docs/self-hosted-compiler-snowflake-stage-one.md` | Expanded future workbook with a broken roadmap link | Replace with a concise proposal index; retain the expanded predecessor in Git history. |
 | `docs/self-hosted-compiler/00-snowflake-document-roadmap.md` | Incomplete 32-chapter proposal roadmap | Retain with an index that states the series is incomplete. |
 | `docs/self-hosted-compiler/00-snowflake-synopsis-compendium.md` | 1.4 MB generated duplicate corpus | Replace with a concise index; retain the original in Git history at the audited baseline. |
-| `docs/self-hosted-compiler/01-architecture-and-trust-boundaries.md` | Proposal chapter with stale current-code links | Retain as proposal; do not use for current status. |
-| `docs/self-hosted-compiler/02-compilation-inputs-revisions-and-session-ownership.md` | Proposal chapter with stale current-code links | Retain as proposal; do not use for current status. |
-| `docs/self-hosted-compiler/05-dependency-tracking-and-invalidation.md` | Proposal chapter with inconsistent series/status framing | Retain as proposal and index it. |
+| `docs/self-hosted-compiler/01-architecture-and-trust-boundaries.md` | Proposal chapter with stale current-code links | Archive under `archive/proposals/snowflake/`. |
+| `docs/self-hosted-compiler/02-compilation-inputs-revisions-and-session-ownership.md` | Proposal chapter with stale current-code links | Archive under `archive/proposals/snowflake/`. |
+| `docs/self-hosted-compiler/05-dependency-tracking-and-invalidation.md` | Proposal chapter with inconsistent series/status framing | Archive under `archive/proposals/snowflake/`. |
 | `docs/self-hosted-compiler/stage0-semantic-test-map.md` | Generated current inventory | Retain; explicitly not a completion score. |
 | `docs/self-hosted-compiler/stage1-readiness.md` | Historical readiness snapshot | Archive under `pre-stage0/`. |
 | `docs/selfhost-parity-audit.md` | Old self-host audit | Archive under `pre-stage0/`. |

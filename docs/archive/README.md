@@ -14,6 +14,8 @@ claims, and measurements may be stale.
   documents for the removed pre-Stage0 compiler.
 - `design-records/` contains superseded or incomplete design decisions that
   overlap current specifications.
+- `proposals/` contains proposal fragments removed from the active navigation
+  surface because they have stale links or ambiguous implementation status.
 - `tutorial/` preserves the tutorial for the retired `grand`/`grandfmt`/old
   compiler workflow.
 
