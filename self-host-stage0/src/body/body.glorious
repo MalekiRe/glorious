@@ -15,6 +15,11 @@ use scanner::next_token;
 use scanner::token_equals;
 use scanner::token_kind;
 use scanner::token_matches;
+use placeflow::PlaceState;
+use placeflow::ClosureCaptureMode;
+use placeflow::ClosureCaptureAdmission;
+use placeflow::capture_for_closure;
+use compiler_support::__g1_array_pop_move;
 
 pub enum Arithmetic { Add, Subtract, Multiply, Divide, Remainder }
 pub enum Comparison { Equal, NotEqual, Less, LessEqual, Greater, GreaterEqual }
@@ -44,16 +49,137 @@ pub enum Expression {
     UsizeComparison(Comparison, usize, usize),
     Call1(Callable, Type),
     Call2(Callable, Type, Type),
+    ClosureCapture(PlaceState, ClosureCaptureMode, Type),
     PatternTest(Pattern, Value),
 }
 
-pub enum BodyKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, PatternTest }
+pub enum BodyKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
 pub enum BodyAdmission { Value(BodyKind), TypeError }
 // A reusable, source-owned declaration parser for the first scalar function
 // family.  Service used to duplicate this state machine for every scalar
 // width.  Keeping the grammatical shape here makes new scalar lowerings a
 // type-directed choice rather than another handwritten parser.
 pub enum ScalarBinaryAdmission { Value(Arithmetic), Rejected }
+pub enum MoveCaptureClosureSyntax { Captures(i64), NotMoveClosure, Rejected }
+enum MoveCaptureNames { Empty, Node(TokenStart, Bool, Array<MoveCaptureNames>) }
+enum MoveCaptureNameInsert { Added(MoveCaptureNames), Duplicate }
+
+// Recognize the real optional-capture surface without confusing it with the
+// ordinary expression-level `move (value)`: only a capture list immediately
+// followed by `{` forms a closure. The body remains opaque at this grammar
+// gate; full expression parsing owns its contents.
+pub fn move_capture_closure_syntax(input: Bytes) -> MoveCaptureClosureSyntax {
+    move_capture_start(input, first_token(input))
+}
+
+fn move_capture_start(input: Bytes, token: TokenStart) -> MoveCaptureClosureSyntax {
+    handle token_matches(input, token, "move") {
+        true => move_capture_open(input, next_token(input, token)),
+        false => MoveCaptureClosureSyntax::NotMoveClosure,
+        _ => MoveCaptureClosureSyntax::Rejected,
+    }
+}
+
+fn move_capture_open(input: Bytes, token: TokenStart) -> MoveCaptureClosureSyntax {
+    handle token_matches(input, token, "(") {
+        true => move_capture_items(input, next_token(input, token), 0, MoveCaptureNames::Empty),
+        false => MoveCaptureClosureSyntax::NotMoveClosure,
+        _ => MoveCaptureClosureSyntax::Rejected,
+    }
+}
+
+fn move_capture_items(input: Bytes, token: TokenStart, count: i64, names: MoveCaptureNames) -> MoveCaptureClosureSyntax {
+    handle token_matches(input, token, ")") {
+        true => move_capture_body_open(input, next_token(input, token), count),
+        false => handle token_kind(token) {
+            TokenKind::Identifier => move_capture_item_name(input, token, next_token(input, token), count, names),
+            _ => MoveCaptureClosureSyntax::Rejected,
+        },
+        _ => MoveCaptureClosureSyntax::Rejected,
+    }
+}
+
+fn move_capture_item_name(input: Bytes, name: TokenStart, token: TokenStart, count: i64, names: MoveCaptureNames) -> MoveCaptureClosureSyntax {
+    handle move_capture_name_insert(input, names, name) {
+        MoveCaptureNameInsert::Added(next_names) => move_capture_separator(input, token, count + 1, next_names),
+        MoveCaptureNameInsert::Duplicate => MoveCaptureClosureSyntax::Rejected,
+        _ => MoveCaptureClosureSyntax::Rejected,
+    }
+}
+
+fn move_capture_name_insert(input: Bytes, names: MoveCaptureNames, wanted: TokenStart) -> MoveCaptureNameInsert {
+    handle names {
+        MoveCaptureNames::Empty => MoveCaptureNameInsert::Added(MoveCaptureNames::Node(wanted, false, [])),
+        MoveCaptureNames::Node(name, has_tail, tail) => handle token_equals(input, name, wanted) {
+            true => MoveCaptureNameInsert::Duplicate,
+            false => move_capture_name_insert_tail(input, name, has_tail, tail, wanted),
+            _ => MoveCaptureNameInsert::Duplicate,
+        },
+        _ => MoveCaptureNameInsert::Duplicate,
+    }
+}
+
+fn move_capture_name_insert_tail(input: Bytes, name: TokenStart, has_tail: Bool, tail: Array<MoveCaptureNames>, wanted: TokenStart) -> MoveCaptureNameInsert {
+    handle has_tail {
+        true => handle move_capture_name_insert(input, __g1_array_pop_move<MoveCaptureNames>(&mut tail), wanted) {
+            MoveCaptureNameInsert::Added(next_tail) => MoveCaptureNameInsert::Added(MoveCaptureNames::Node(name, true, [next_tail])),
+            MoveCaptureNameInsert::Duplicate => MoveCaptureNameInsert::Duplicate,
+            _ => MoveCaptureNameInsert::Duplicate,
+        },
+        false => MoveCaptureNameInsert::Added(MoveCaptureNames::Node(name, true, [MoveCaptureNames::Node(wanted, false, [])])),
+        _ => MoveCaptureNameInsert::Duplicate,
+    }
+}
+
+fn move_capture_separator(input: Bytes, token: TokenStart, count: i64, names: MoveCaptureNames) -> MoveCaptureClosureSyntax {
+    handle token_matches(input, token, ",") {
+        true => move_capture_items_with_tail(input, next_token(input, token), count, names),
+        false => handle token_matches(input, token, ")") {
+            true => move_capture_body_open(input, next_token(input, token), count),
+            false => MoveCaptureClosureSyntax::Rejected,
+            _ => MoveCaptureClosureSyntax::Rejected,
+        },
+        _ => MoveCaptureClosureSyntax::Rejected,
+    }
+}
+
+fn move_capture_items_with_tail(input: Bytes, token: TokenStart, count: i64, names: MoveCaptureNames) -> MoveCaptureClosureSyntax {
+    move_capture_items(input, token, count, names)
+}
+
+fn move_capture_body_open(input: Bytes, token: TokenStart, count: i64) -> MoveCaptureClosureSyntax {
+    handle token_matches(input, token, "{") {
+        true => move_capture_body(input, next_token(input, token), count, 1),
+        false => MoveCaptureClosureSyntax::NotMoveClosure,
+        _ => MoveCaptureClosureSyntax::Rejected,
+    }
+}
+
+fn move_capture_body(input: Bytes, token: TokenStart, count: i64, depth: i64) -> MoveCaptureClosureSyntax {
+    handle token_matches(input, token, "{") {
+        true => move_capture_body(input, next_token(input, token), count, depth + 1),
+        false => move_capture_body_non_open(input, token, count, depth),
+        _ => MoveCaptureClosureSyntax::Rejected,
+    }
+}
+
+fn move_capture_body_non_open(input: Bytes, token: TokenStart, count: i64, depth: i64) -> MoveCaptureClosureSyntax {
+    handle token_matches(input, token, "}") {
+        true => handle depth == 1 {
+            true => handle token_kind(next_token(input, token)) {
+                TokenKind::End => MoveCaptureClosureSyntax::Captures(count),
+                _ => MoveCaptureClosureSyntax::Rejected,
+            },
+            false => move_capture_body(input, next_token(input, token), count, depth - 1),
+            _ => MoveCaptureClosureSyntax::Rejected,
+        },
+        false => handle token_kind(token) {
+            TokenKind::End => MoveCaptureClosureSyntax::Rejected,
+            _ => move_capture_body(input, next_token(input, token), count, depth),
+        },
+        _ => MoveCaptureClosureSyntax::Rejected,
+    }
+}
 
 // Admit exactly `pub? fn name(left: T, right: T) -> T { return? left OP right ;? }`.
 // The returned operator is intentionally syntax-only: type checking and VM
@@ -184,7 +310,20 @@ pub fn admit(expression: Expression, expected: Type) -> BodyAdmission {
         (Expression::UsizeComparison(_, _, _), Type::Bool) => BodyAdmission::Value(BodyKind::Comparison),
         (Expression::Call1(callable, argument), result) => admit_call(callable, Arguments::One(argument), result),
         (Expression::Call2(callable, first, second), result) => admit_call(callable, Arguments::Two(first, second), result),
+        (Expression::ClosureCapture(state, mode, result), expected) => admit_closure_capture(state, mode, result, expected),
         (Expression::PatternTest(_, _), Type::Bool) => BodyAdmission::Value(BodyKind::PatternTest),
+        _ => BodyAdmission::TypeError,
+    }
+}
+
+fn admit_closure_capture(state: PlaceState, mode: ClosureCaptureMode, result: Type, expected: Type) -> BodyAdmission {
+    handle capture_for_closure(state, mode) {
+        ClosureCaptureAdmission::Captured(_) => handle types::same(result, expected) {
+            true => BodyAdmission::Value(BodyKind::ClosureCapture),
+            false => BodyAdmission::TypeError,
+            _ => BodyAdmission::TypeError,
+        },
+        ClosureCaptureAdmission::Rejected => BodyAdmission::TypeError,
         _ => BodyAdmission::TypeError,
     }
 }

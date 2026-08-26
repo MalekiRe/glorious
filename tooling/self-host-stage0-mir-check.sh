@@ -13,6 +13,7 @@ readonly scanner="$root/self-host-stage0/src/scanner/scanner.glorious"
 readonly types="$root/self-host-stage0/src/types/types.glorious"
 readonly signature="$root/self-host-stage0/src/signature/signature.glorious"
 readonly pattern="$root/self-host-stage0/src/pattern/pattern.glorious"
+readonly placeflow="$root/self-host-stage0/src/placeflow/placeflow.glorious"
 readonly body="$root/self-host-stage0/src/body/body.glorious"
 readonly core="$root/self-host-stage0/src/core/core.glorious"
 readonly storage="$root/self-host-stage0/src/mir_storage/mir_storage.glorious"
@@ -32,6 +33,7 @@ output="$("$compiler" \
     --source mir-library@0.1.0 src/types/types.glorious "$types" \
     --source mir-library@0.1.0 src/signature/signature.glorious "$signature" \
     --source mir-library@0.1.0 src/pattern/pattern.glorious "$pattern" \
+    --source mir-library@0.1.0 src/placeflow/placeflow.glorious "$placeflow" \
     --source mir-library@0.1.0 src/body/body.glorious "$body" \
     --source mir-library@0.1.0 src/core/core.glorious "$core" \
     --source mir-library@0.1.0 src/mir_storage/mir_storage.glorious "$storage" \
@@ -61,8 +63,8 @@ output="$("$compiler" \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "28" ]] || {
-    echo "self-host mir check: expected terminals, typed unsigned literal/arithmetic lowering, value-carrying scalar/call lowering, root-and-field moved/empty storage lowering, and exactly-one operation/liveness validation, got $output" >&2
+[[ "$output" == "29" ]] || {
+    echo "self-host mir check: expected terminals, typed unsigned literal/arithmetic lowering, value-carrying scalar/call lowering, root-and-nested-field moved/empty storage lowering, and exactly-one operation/liveness validation, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"

@@ -3,6 +3,13 @@ pub fn score(value: escape::EscapeResult) -> i64 { handle value { escape::Escape
 pub fn rejection_score(value: escape::EscapeResult) -> i64 { handle value { escape::EscapeResult::Allowed => 0, escape::EscapeResult::Rejected => 1, _ => 0 } }
 pub fn moved_field_escape(value: placeflow::FieldMoveAdmission) -> escape::EscapeResult { handle value { placeflow::FieldMoveAdmission::Value(fields) => escape::return_fields(fields), _ => escape::EscapeResult::Rejected } }
 pub fn available_fields() -> placeflow::FieldStates { placeflow::prepend_field(placeflow::available(), placeflow::prepend_field(placeflow::available(), placeflow::single_field(placeflow::available()))) }
+pub fn nested_fields() -> placeflow::NestedFieldStates { placeflow::nested_prepend_field(placeflow::available(), placeflow::nested_prepend_field(placeflow::available(), placeflow::nested_empty_fields(), placeflow::nested_single_field(placeflow::available())), placeflow::nested_single_field(placeflow::available())) }
+pub fn nested_target() -> placeflow::ProjectionPath { placeflow::path_then(0, placeflow::path_field(1)) }
+pub fn moved_nested_escape(value: placeflow::NestedMoveAdmission) -> escape::EscapeResult { handle value { placeflow::NestedMoveAdmission::Value(fields) => escape::return_nested_fields(fields), _ => escape::EscapeResult::Rejected } }
+pub fn reinitialized_nested_escape(value: placeflow::NestedMoveAdmission) -> escape::EscapeResult { handle value { placeflow::NestedMoveAdmission::Value(fields) => escape::return_nested_fields(placeflow::initialize_path(fields, nested_target())), _ => escape::EscapeResult::Rejected } }
+pub fn nested_reference_fields() -> escape::NestedReferenceFields { escape::nested_prepend_reference_field(escape::ReferenceOrigin::ExternalBorrow, escape::nested_prepend_reference_field(escape::ReferenceOrigin::ExternalBorrow, escape::nested_empty_reference_fields(), escape::nested_single_reference_field(escape::ReferenceOrigin::ExternalBorrow)), escape::nested_single_reference_field(escape::ReferenceOrigin::Owned)) }
+pub fn nested_reference_target() -> placeflow::ProjectionPath { placeflow::path_then(0, placeflow::path_field(1)) }
+pub fn nested_reference_sibling() -> placeflow::ProjectionPath { placeflow::path_then(0, placeflow::path_field(0)) }
 pub fn external_reference_fields() -> escape::ReferenceFields { escape::prepend_reference_field(escape::ReferenceOrigin::ExternalBorrow, escape::prepend_reference_field(escape::ReferenceOrigin::Owned, escape::single_reference_field(escape::ReferenceOrigin::ExternalBorrow))) }
 pub fn main() -> i64 {
     score(escape::return_place(placeflow::available()))
@@ -52,4 +59,13 @@ pub fn main() -> i64 {
             1,
             escape::ReferenceOrigin::LocalBorrow)))
         + score(escape::return_reference(escape::reference_field(external_reference_fields(), 2)))
+        + score(escape::return_nested_fields(nested_fields()))
+        + rejection_score(moved_nested_escape(placeflow::move_path_checked(nested_fields(), nested_target())))
+        + score(reinitialized_nested_escape(placeflow::move_path_checked(nested_fields(), nested_target())))
+        + rejection_score(escape::store_nested_fields(placeflow::nested_prepend_field(placeflow::borrow_shared(placeflow::available()), placeflow::nested_empty_fields(), placeflow::nested_single_field(placeflow::available()))))
+        + score(escape::return_nested_reference_fields(nested_reference_fields()))
+        + score(escape::return_reference(escape::reference_path(nested_reference_fields(), nested_reference_target())))
+        + rejection_score(escape::store_nested_reference_fields(escape::replace_reference_path(nested_reference_fields(), nested_reference_target(), escape::ReferenceOrigin::LocalBorrow)))
+        + score(escape::return_reference(escape::reference_path(escape::replace_reference_path(nested_reference_fields(), nested_reference_target(), escape::ReferenceOrigin::LocalBorrow), nested_reference_sibling())))
+        + rejection_score(escape::return_reference(escape::reference_path(nested_reference_fields(), placeflow::path_then(0, placeflow::path_field(9)))))
 }

@@ -10,7 +10,7 @@ use body::BodyAdmission;
 use body::admit;
 use types::Type;
 
-pub enum CoreKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, PatternTest }
+pub enum CoreKind { Literal, Parameter, Boolean, ParameterBoolean, Arithmetic, ParameterArithmetic, Comparison, Conditional, ParameterConditional, Call, ClosureCapture, PatternTest }
 
 pub struct CoreValue {
     result: Type,
@@ -153,6 +153,7 @@ fn core_kind(kind: BodyKind) -> CoreKind {
         BodyKind::Conditional => CoreKind::Conditional,
         BodyKind::ParameterConditional => CoreKind::ParameterConditional,
         BodyKind::Call => CoreKind::Call,
+        BodyKind::ClosureCapture => CoreKind::ClosureCapture,
         BodyKind::PatternTest => CoreKind::PatternTest,
         _ => CoreKind::Literal,
     }
@@ -177,6 +178,10 @@ pub fn is_call(value: CoreValue) -> Bool {
         CoreKind::Call => true,
         _ => false,
     }
+}
+
+pub fn is_closure_capture(value: CoreValue) -> Bool {
+    handle value.kind { CoreKind::ClosureCapture => true, _ => false }
 }
 
 pub fn is_parameter(value: CoreValue) -> Bool {

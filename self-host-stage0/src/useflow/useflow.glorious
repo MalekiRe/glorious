@@ -6,6 +6,9 @@ use placeflow::PlaceState;
 use placeflow::can_read;
 use placeflow::FieldStates;
 use placeflow::can_read_field;
+use placeflow::NestedFieldStates;
+use placeflow::ProjectionPath;
+use placeflow::can_read_path;
 pub enum UseUpper { Finite(i64), Infinite }
 pub struct UseState { lower: i64, upper: UseUpper }
 pub enum ConsumeResult { Value(UseState), Exhausted }
@@ -64,6 +67,15 @@ pub fn consume_from_place(place: PlaceState, state: UseState) -> PlaceConsume {
 // one aggregate root.
 pub fn consume_from_field(place: FieldStates, index: i64, state: UseState) -> PlaceConsume {
     branch_bool(can_read_field(place, index),
+        () -> PlaceConsume { consume_readable(state) },
+        () -> PlaceConsume { PlaceConsume::PlaceUnavailable })
+}
+
+// The quantitative contract follows the complete frozen projection path, not
+// merely its root or first field. A callable moved from `slot.inner.callback`
+// cannot regain an invocation through a readable sibling or ancestor.
+pub fn consume_from_path(place: NestedFieldStates, path: ProjectionPath, state: UseState) -> PlaceConsume {
+    branch_bool(can_read_path(place, path),
         () -> PlaceConsume { consume_readable(state) },
         () -> PlaceConsume { PlaceConsume::PlaceUnavailable })
 }

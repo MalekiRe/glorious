@@ -13,6 +13,7 @@ readonly scanner="$root/self-host-stage0/src/scanner/scanner.glorious"
 readonly types="$root/self-host-stage0/src/types/types.glorious"
 readonly signature="$root/self-host-stage0/src/signature/signature.glorious"
 readonly pattern="$root/self-host-stage0/src/pattern/pattern.glorious"
+readonly placeflow="$root/self-host-stage0/src/placeflow/placeflow.glorious"
 readonly body="$root/self-host-stage0/src/body/body.glorious"
 
 if [[ "${GRANDIOSE_STAGE0_ALREADY_BUILT:-0}" != 1 ]]; then
@@ -29,6 +30,7 @@ output="$("$compiler" \
     --source body-library@0.1.0 src/types/types.glorious "$types" \
     --source body-library@0.1.0 src/signature/signature.glorious "$signature" \
     --source body-library@0.1.0 src/pattern/pattern.glorious "$pattern" \
+    --source body-library@0.1.0 src/placeflow/placeflow.glorious "$placeflow" \
     --source body-library@0.1.0 src/body/body.glorious "$body" \
     --runtime-standard-library compiler_support@0.1.0 \
     --runtime-leaf branch-bool crate branch_bool \
@@ -55,8 +57,8 @@ output="$("$compiler" \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "16" ]] || {
-    echo "self-host body check: expected scalar, bound parameter forms, callable, and structural pattern-test admission, got $output" >&2
+[[ "$output" == "23" ]] || {
+    echo "self-host body check: expected scalar, bound parameter forms, default-move and borrowed closure-capture, delimiter-sensitive optional move-capture syntax, callable, and structural pattern-test admission, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"

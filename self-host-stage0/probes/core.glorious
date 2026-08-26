@@ -3,6 +3,7 @@ use core_library::core;
 use core_library::types;
 use core_library::signature;
 use core_library::pattern;
+use core_library::placeflow;
 pub fn score(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(_) => 1, core::CoreResult::TypeError => 0, _ => 0 } }
 pub fn score_call(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_call(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
 pub fn score_pattern(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_pattern_test(value) { true => 1, false => 0, _ => 0 }, core::CoreResult::TypeError => 0, _ => 0 } }
@@ -17,6 +18,7 @@ pub fn score_u32_literal(result: core::CoreResult) -> i64 { handle result { core
 pub fn score_u32_arithmetic(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::u32_arithmetic(value) { core::U32ArithmeticValue::Value(body::Arithmetic::Add, 20, 22) => 1, _ => 0 }, _ => 0 } }
 pub fn score_unary_call_contract(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::call(value) { core::CallValue::Unary(signature::Callable::Unary(0, types::Type::I64, types::Type::I64, types::EffectRowIdentity::Empty, signature::Invocation::Once), types::Type::I64) => 1, _ => 0 }, _ => 0 } }
 pub fn score_binary_call_contract(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::call(value) { core::CallValue::Binary(signature::Callable::Binary(0, types::Type::I64, types::Type::I64, types::Type::I64, types::EffectRowIdentity::Empty, signature::Invocation::Once), types::Type::I64, types::Type::I64) => 1, _ => 0 }, _ => 0 } }
+pub fn score_capture(result: core::CoreResult) -> i64 { handle result { core::CoreResult::Value(value) => handle core::is_closure_capture(value) { true => 1, false => 0, _ => 0 }, _ => 0 } }
 pub fn main() -> i64 {
     score(core::lower(body::Expression::I64(1), types::Type::I64))
         + score_parameter(core::lower(body::Expression::ParameterI64(1), types::Type::I64))
@@ -42,4 +44,5 @@ pub fn main() -> i64 {
         + score_u32_arithmetic(core::lower(body::Expression::U32Arithmetic(body::Arithmetic::Add, 20, 22), types::Type::U32))
         + score_unary_call_contract(core::lower(body::Expression::Call1(signature::callable(types::Type::I64, types::Type::I64), types::Type::I64), types::Type::I64))
         + score_binary_call_contract(core::lower(body::Expression::Call2(signature::binary(types::Type::I64, types::Type::I64, types::Type::I64), types::Type::I64, types::Type::I64), types::Type::I64))
+        + score_capture(core::lower(body::Expression::ClosureCapture(placeflow::available(), placeflow::ClosureCaptureMode::ExplicitMove, types::Type::I64), types::Type::I64))
 }

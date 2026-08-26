@@ -5,6 +5,11 @@ pub fn bool_score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ 
 pub fn false_score(value: Bool) -> i64 { handle value { true => 0, false => 1, _ => 0 } }
 pub fn field_states() -> placeflow::FieldStates { placeflow::prepend_field(placeflow::available(), placeflow::prepend_field(placeflow::available(), placeflow::single_field(placeflow::available()))) }
 pub fn moved_field_states(value: placeflow::FieldMoveAdmission) -> placeflow::FieldStates { handle value { placeflow::FieldMoveAdmission::Value(fields) => fields, _ => placeflow::empty_fields() } }
+pub fn nested_fields() -> placeflow::NestedFieldStates { placeflow::nested_prepend_field(placeflow::available(), placeflow::nested_prepend_field(placeflow::available(), placeflow::nested_empty_fields(), placeflow::nested_single_field(placeflow::available())), placeflow::nested_single_field(placeflow::available())) }
+pub fn nested_target() -> placeflow::ProjectionPath { placeflow::path_then(0, placeflow::path_field(1)) }
+pub fn nested_sibling() -> placeflow::ProjectionPath { placeflow::path_then(0, placeflow::path_field(0)) }
+pub fn moved_nested_fields(value: placeflow::NestedMoveAdmission) -> placeflow::NestedFieldStates { handle value { placeflow::NestedMoveAdmission::Value(fields) => fields, _ => placeflow::nested_empty_fields() } }
+pub fn reinitialized_nested_fields(value: placeflow::NestedMoveAdmission) -> placeflow::NestedFieldStates { handle value { placeflow::NestedMoveAdmission::Value(fields) => placeflow::initialize_path(fields, nested_target()), _ => placeflow::nested_empty_fields() } }
 pub fn main() -> i64 {
     score(useflow::consume(useflow::uses(2)))
         + score(useflow::consume(useflow::uses(0)))
@@ -29,6 +34,10 @@ pub fn main() -> i64 {
         + score_place_consume(useflow::consume_from_field(field_states(), 2, useflow::uses(1)))
         + score_place_consume(useflow::consume_from_field(moved_field_states(placeflow::move_field_checked(field_states(), 1)), 1, useflow::uses(1)))
         + score_place_consume(useflow::consume_from_field(moved_field_states(placeflow::move_field_checked(field_states(), 1)), 2, useflow::uses(1)))
+        + score_place_consume(useflow::consume_from_path(nested_fields(), nested_target(), useflow::uses(1)))
+        + score_place_consume(useflow::consume_from_path(moved_nested_fields(placeflow::move_path_checked(nested_fields(), nested_target())), nested_target(), useflow::uses(1)))
+        + score_place_consume(useflow::consume_from_path(moved_nested_fields(placeflow::move_path_checked(nested_fields(), nested_target())), nested_sibling(), useflow::uses(1)))
+        + score_place_consume(useflow::consume_from_path(reinitialized_nested_fields(placeflow::move_path_checked(nested_fields(), nested_target())), nested_target(), useflow::uses(1)))
 }
 
 pub fn score_place_consume(value: useflow::PlaceConsume) -> i64 { handle value { useflow::PlaceConsume::Value(_) => 1, useflow::PlaceConsume::PlaceUnavailable => 10, useflow::PlaceConsume::Exhausted => 100, _ => 0 } }

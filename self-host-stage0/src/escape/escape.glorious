@@ -6,6 +6,9 @@ use placeflow::PlaceState;
 use placeflow::FieldStates;
 use placeflow::can_escape_owned;
 use placeflow::can_escape_fields_owned;
+use placeflow::NestedFieldStates;
+use placeflow::can_escape_nested_owned;
+use placeflow::ProjectionPath;
 use placeflow::can_read;
 pub enum EscapeResult { Allowed, Rejected }
 pub enum ReferenceOrigin { Owned, ExternalBorrow, LocalBorrow }
@@ -28,6 +31,15 @@ pub enum ReferenceFields {
     Node(ReferenceOrigin, Bool, Array<ReferenceFields>),
 }
 
+// Reference provenance follows the same full projection path as ownership.
+// Each node records the provenance of that exact projected reference, while
+// child and sibling trees retain the independent facts needed after a nested
+// assignment such as `slot.inner.value = &local`.
+pub enum NestedReferenceFields {
+    Empty,
+    Node(ReferenceOrigin, Bool, Array<NestedReferenceFields>, Bool, Array<NestedReferenceFields>),
+}
+
 pub fn return_place(state: PlaceState) -> EscapeResult {
     handle can_escape_owned(state) { true => EscapeResult::Allowed, false => EscapeResult::Rejected, _ => EscapeResult::Rejected }
 }
@@ -41,6 +53,17 @@ pub fn return_fields(value: FieldStates) -> EscapeResult {
 
 pub fn store_fields(value: FieldStates) -> EscapeResult {
     return_fields(value)
+}
+
+// This is the place-flow half of nested aggregate escape. Reference
+// provenance below remains separately tracked, but ownership must first prove
+// that every nested projection is still an owned available place.
+pub fn return_nested_fields(value: NestedFieldStates) -> EscapeResult {
+    handle can_escape_nested_owned(value) { true => EscapeResult::Allowed, false => EscapeResult::Rejected, _ => EscapeResult::Rejected }
+}
+
+pub fn store_nested_fields(value: NestedFieldStates) -> EscapeResult {
+    return_nested_fields(value)
 }
 
 pub fn return_reference(origin: ReferenceOrigin) -> EscapeResult {
@@ -63,6 +86,101 @@ pub fn single_reference_field(origin: ReferenceOrigin) -> ReferenceFields {
 
 pub fn prepend_reference_field(origin: ReferenceOrigin, tail: ReferenceFields) -> ReferenceFields {
     ReferenceFields::Node(origin, true, [tail])
+}
+
+pub fn nested_empty_reference_fields() -> NestedReferenceFields { NestedReferenceFields::Empty }
+pub fn nested_single_reference_field(origin: ReferenceOrigin) -> NestedReferenceFields { NestedReferenceFields::Node(origin, false, [], false, []) }
+pub fn nested_prepend_reference_field(origin: ReferenceOrigin, children: NestedReferenceFields, tail: NestedReferenceFields) -> NestedReferenceFields { NestedReferenceFields::Node(origin, true, [children], true, [tail]) }
+
+pub fn return_nested_reference_fields(value: NestedReferenceFields) -> EscapeResult {
+    nested_reference_boundary(value)
+}
+
+pub fn store_nested_reference_fields(value: NestedReferenceFields) -> EscapeResult {
+    nested_reference_boundary(value)
+}
+
+// An absent/invalid projection is conservatively local. It can never turn an
+// arbitrary path into permission to return a caller-owned reference.
+pub fn reference_path(value: NestedReferenceFields, path: ProjectionPath) -> ReferenceOrigin {
+    handle path {
+        ProjectionPath::Field(index, has_tail, tail) => handle index < 0 {
+            true => ReferenceOrigin::LocalBorrow,
+            false => reference_path_at(value, index, has_tail, tail),
+            _ => ReferenceOrigin::LocalBorrow,
+        },
+        _ => ReferenceOrigin::LocalBorrow,
+    }
+}
+
+fn reference_path_at(value: NestedReferenceFields, index: i64, has_path_tail: Bool, path_tail: Array<ProjectionPath>) -> ReferenceOrigin {
+    handle value {
+        NestedReferenceFields::Empty => ReferenceOrigin::LocalBorrow,
+        NestedReferenceFields::Node(origin, has_children, children, has_sibling, sibling) => handle index == 0 {
+            true => handle has_path_tail {
+                false => origin,
+                true => handle has_children {
+                    true => reference_path(__g1_array_pop_move<NestedReferenceFields>(&mut children), __g1_array_pop_move<ProjectionPath>(&mut path_tail)),
+                    false => ReferenceOrigin::LocalBorrow,
+                    _ => ReferenceOrigin::LocalBorrow,
+                },
+                _ => ReferenceOrigin::LocalBorrow,
+            },
+            false => handle has_sibling {
+                true => reference_path_at(__g1_array_pop_move<NestedReferenceFields>(&mut sibling), index - 1, has_path_tail, path_tail),
+                false => ReferenceOrigin::LocalBorrow,
+                _ => ReferenceOrigin::LocalBorrow,
+            },
+            _ => ReferenceOrigin::LocalBorrow,
+        },
+        _ => ReferenceOrigin::LocalBorrow,
+    }
+}
+
+// Replacing a nested projection rebuilds exactly the selected path. Missing
+// children/indices preserve the original tree rather than adding a forged
+// field with caller-owned provenance.
+pub fn replace_reference_path(value: NestedReferenceFields, path: ProjectionPath, replacement: ReferenceOrigin) -> NestedReferenceFields {
+    handle path {
+        ProjectionPath::Field(index, has_tail, tail) => handle index < 0 {
+            true => value,
+            false => replace_reference_path_at(value, index, has_tail, tail, replacement),
+            _ => value,
+        },
+        _ => value,
+    }
+}
+
+fn replace_reference_path_at(value: NestedReferenceFields, index: i64, has_path_tail: Bool, path_tail: Array<ProjectionPath>, replacement: ReferenceOrigin) -> NestedReferenceFields {
+    handle value {
+        NestedReferenceFields::Empty => NestedReferenceFields::Empty,
+        NestedReferenceFields::Node(origin, has_children, children, has_sibling, sibling) => handle index == 0 {
+            true => handle has_path_tail {
+                false => NestedReferenceFields::Node(replacement, has_children, children, has_sibling, sibling),
+                true => replace_reference_child(origin, has_children, children, has_sibling, sibling, path_tail, replacement),
+                _ => NestedReferenceFields::Node(origin, has_children, children, has_sibling, sibling),
+            },
+            false => replace_reference_sibling(origin, has_children, children, has_sibling, sibling, index, has_path_tail, path_tail, replacement),
+            _ => NestedReferenceFields::Node(origin, has_children, children, has_sibling, sibling),
+        },
+        _ => NestedReferenceFields::Empty,
+    }
+}
+
+fn replace_reference_child(origin: ReferenceOrigin, has_children: Bool, children: Array<NestedReferenceFields>, has_sibling: Bool, sibling: Array<NestedReferenceFields>, path_tail: Array<ProjectionPath>, replacement: ReferenceOrigin) -> NestedReferenceFields {
+    handle has_children {
+        true => NestedReferenceFields::Node(origin, true, [replace_reference_path(__g1_array_pop_move<NestedReferenceFields>(&mut children), __g1_array_pop_move<ProjectionPath>(&mut path_tail), replacement)], has_sibling, sibling),
+        false => NestedReferenceFields::Node(origin, false, children, has_sibling, sibling),
+        _ => NestedReferenceFields::Node(origin, has_children, children, has_sibling, sibling),
+    }
+}
+
+fn replace_reference_sibling(origin: ReferenceOrigin, has_children: Bool, children: Array<NestedReferenceFields>, has_sibling: Bool, sibling: Array<NestedReferenceFields>, index: i64, has_path_tail: Bool, path_tail: Array<ProjectionPath>, replacement: ReferenceOrigin) -> NestedReferenceFields {
+    handle has_sibling {
+        true => NestedReferenceFields::Node(origin, has_children, children, true, [replace_reference_path_at(__g1_array_pop_move<NestedReferenceFields>(&mut sibling), index - 1, has_path_tail, path_tail, replacement)]),
+        false => NestedReferenceFields::Node(origin, has_children, children, false, sibling),
+        _ => NestedReferenceFields::Node(origin, has_children, children, has_sibling, sibling),
+    }
 }
 
 pub fn return_reference_fields(value: ReferenceFields) -> EscapeResult {
@@ -226,6 +344,38 @@ fn reference_fields_boundary(value: ReferenceFields) -> EscapeResult {
             EscapeResult::Rejected => reject_after_discard_fields(has_tail, tail),
             _ => EscapeResult::Rejected,
         },
+        _ => EscapeResult::Rejected,
+    }
+}
+
+fn nested_reference_boundary(value: NestedReferenceFields) -> EscapeResult {
+    handle value {
+        NestedReferenceFields::Empty => EscapeResult::Allowed,
+        NestedReferenceFields::Node(origin, has_children, children, has_sibling, sibling) => handle boundary(origin) {
+            EscapeResult::Allowed => handle nested_reference_children_boundary(has_children, children) {
+                EscapeResult::Allowed => nested_reference_sibling_boundary(has_sibling, sibling),
+                EscapeResult::Rejected => EscapeResult::Rejected,
+                _ => EscapeResult::Rejected,
+            },
+            EscapeResult::Rejected => EscapeResult::Rejected,
+            _ => EscapeResult::Rejected,
+        },
+        _ => EscapeResult::Rejected,
+    }
+}
+
+fn nested_reference_children_boundary(has_children: Bool, children: Array<NestedReferenceFields>) -> EscapeResult {
+    handle has_children {
+        true => nested_reference_boundary(__g1_array_pop_move<NestedReferenceFields>(&mut children)),
+        false => EscapeResult::Allowed,
+        _ => EscapeResult::Rejected,
+    }
+}
+
+fn nested_reference_sibling_boundary(has_sibling: Bool, sibling: Array<NestedReferenceFields>) -> EscapeResult {
+    handle has_sibling {
+        true => nested_reference_boundary(__g1_array_pop_move<NestedReferenceFields>(&mut sibling)),
+        false => EscapeResult::Allowed,
         _ => EscapeResult::Rejected,
     }
 }

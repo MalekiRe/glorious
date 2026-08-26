@@ -4,6 +4,9 @@ pub fn false_score(value: Bool) -> i64 { handle value { true => 0, false => 1, _
 pub fn score_call(value: placeflow::CallAdmission) -> i64 { handle value { placeflow::CallAdmission::Value(state) => score(placeflow::can_read(state)), placeflow::CallAdmission::Rejected => 1, _ => 0 } }
 pub fn score_move(value: placeflow::MoveAdmission) -> i64 { handle value { placeflow::MoveAdmission::Value(_) => 1, placeflow::MoveAdmission::BorrowConflict => 10, placeflow::MoveAdmission::AlreadyMoved => 100, _ => 0 } }
 pub fn score_pair_move(value: placeflow::PairMoveAdmission) -> i64 { handle value { placeflow::PairMoveAdmission::Value(_) => 1, placeflow::PairMoveAdmission::BorrowConflict => 10, placeflow::PairMoveAdmission::AlreadyMoved => 100, _ => 0 } }
+pub fn capture_unreadable(value: placeflow::ClosureCaptureAdmission) -> i64 { handle value { placeflow::ClosureCaptureAdmission::Captured(state) => false_score(placeflow::can_read(state)), placeflow::ClosureCaptureAdmission::Rejected => 0, _ => 0 } }
+pub fn capture_readable(value: placeflow::ClosureCaptureAdmission) -> i64 { handle value { placeflow::ClosureCaptureAdmission::Captured(state) => score(placeflow::can_read(state)), placeflow::ClosureCaptureAdmission::Rejected => 0, _ => 0 } }
+pub fn capture_rejected(value: placeflow::ClosureCaptureAdmission) -> i64 { handle value { placeflow::ClosureCaptureAdmission::Rejected => 1, _ => 0 } }
 pub fn score_field_move(value: placeflow::FieldMoveAdmission) -> i64 { handle value { placeflow::FieldMoveAdmission::Value(_) => 1, placeflow::FieldMoveAdmission::Missing => 1, placeflow::FieldMoveAdmission::BorrowConflict => 1, placeflow::FieldMoveAdmission::AlreadyMoved => 1, _ => 0 } }
 pub fn moved_field_unreadable(value: placeflow::FieldMoveAdmission) -> i64 { handle value { placeflow::FieldMoveAdmission::Value(fields) => false_score(placeflow::can_read_field(fields, 1)), _ => 0 } }
 pub fn moved_field_keeps_sibling(value: placeflow::FieldMoveAdmission) -> i64 { handle value { placeflow::FieldMoveAdmission::Value(fields) => score(placeflow::can_read_field(fields, 2)), _ => 0 } }
@@ -14,6 +17,29 @@ pub fn joined_field_unreadable(value: placeflow::FieldJoin) -> i64 { handle valu
 pub fn joined_field_keeps_sibling(value: placeflow::FieldJoin) -> i64 { handle value { placeflow::FieldJoin::Value(fields) => score(placeflow::can_read_field(fields, 2)), _ => 0 } }
 pub fn joined_field_blocks_escape(value: placeflow::FieldJoin) -> i64 { handle value { placeflow::FieldJoin::Value(fields) => false_score(placeflow::can_escape_fields_owned(fields)), _ => 0 } }
 pub fn shape_score(value: placeflow::FieldJoin) -> i64 { handle value { placeflow::FieldJoin::ShapeMismatch => 1, placeflow::FieldJoin::Value(_) => 0, _ => 0 } }
+pub fn nested_fields() -> placeflow::NestedFieldStates {
+    placeflow::nested_prepend_field(
+        placeflow::available(),
+        placeflow::nested_prepend_field(
+            placeflow::available(),
+            placeflow::nested_empty_fields(),
+            placeflow::nested_single_field(placeflow::available())),
+        placeflow::nested_single_field(placeflow::available()))
+}
+pub fn nested_target_path() -> placeflow::ProjectionPath { placeflow::path_then(0, placeflow::path_field(1)) }
+pub fn nested_first_child_path() -> placeflow::ProjectionPath { placeflow::path_then(0, placeflow::path_field(0)) }
+pub fn nested_outer_sibling_path() -> placeflow::ProjectionPath { placeflow::path_field(1) }
+pub fn nested_move_score(value: placeflow::NestedMoveAdmission) -> i64 { handle value { placeflow::NestedMoveAdmission::Value(_) => 1, placeflow::NestedMoveAdmission::Missing => 0, placeflow::NestedMoveAdmission::BorrowConflict => 0, placeflow::NestedMoveAdmission::AlreadyMoved => 0, _ => 0 } }
+pub fn nested_target_unreadable(value: placeflow::NestedMoveAdmission) -> i64 { handle value { placeflow::NestedMoveAdmission::Value(fields) => false_score(placeflow::can_read_path(fields, nested_target_path())), _ => 0 } }
+pub fn nested_first_child_readable(value: placeflow::NestedMoveAdmission) -> i64 { handle value { placeflow::NestedMoveAdmission::Value(fields) => score(placeflow::can_read_path(fields, nested_first_child_path())), _ => 0 } }
+pub fn nested_outer_sibling_readable(value: placeflow::NestedMoveAdmission) -> i64 { handle value { placeflow::NestedMoveAdmission::Value(fields) => score(placeflow::can_read_path(fields, nested_outer_sibling_path())), _ => 0 } }
+pub fn nested_parent_move_rejected(value: placeflow::NestedMoveAdmission) -> i64 { handle value { placeflow::NestedMoveAdmission::Value(fields) => handle placeflow::move_path_checked(fields, placeflow::path_field(0)) { placeflow::NestedMoveAdmission::AlreadyMoved => 1, _ => 0 }, _ => 0 } }
+pub fn nested_parent_move_keeps_outer_sibling(value: placeflow::NestedMoveAdmission) -> i64 { handle value { placeflow::NestedMoveAdmission::Value(fields) => score(placeflow::can_read_path(fields, nested_outer_sibling_path())), _ => 0 } }
+pub fn nested_moved_fields(value: placeflow::NestedMoveAdmission) -> placeflow::NestedFieldStates { handle value { placeflow::NestedMoveAdmission::Value(fields) => fields, _ => placeflow::nested_empty_fields() } }
+pub fn joined_nested_target_unreadable(value: placeflow::NestedFieldJoin) -> i64 { handle value { placeflow::NestedFieldJoin::Value(fields) => false_score(placeflow::can_read_path(fields, nested_target_path())), _ => 0 } }
+pub fn joined_nested_sibling_readable(value: placeflow::NestedFieldJoin) -> i64 { handle value { placeflow::NestedFieldJoin::Value(fields) => score(placeflow::can_read_path(fields, nested_first_child_path())), _ => 0 } }
+pub fn nested_shape_score(value: placeflow::NestedFieldJoin) -> i64 { handle value { placeflow::NestedFieldJoin::ShapeMismatch => 1, placeflow::NestedFieldJoin::Value(_) => 0, _ => 0 } }
+pub fn reinitialize_nested(value: placeflow::NestedMoveAdmission) -> placeflow::NestedFieldStates { handle value { placeflow::NestedMoveAdmission::Value(fields) => placeflow::initialize_path(fields, nested_target_path()), _ => placeflow::nested_empty_fields() } }
 pub fn main() -> i64 {
     score(placeflow::can_read(placeflow::available()))
         + score(placeflow::can_read(placeflow::move_out(placeflow::available())))
@@ -56,4 +82,21 @@ pub fn main() -> i64 {
         + joined_field_keeps_sibling(placeflow::join_fields(three_available_fields(), moved_field_states(placeflow::move_field_checked(three_available_fields(), 1))))
         + joined_field_blocks_escape(placeflow::join_fields(three_available_fields(), moved_field_states(placeflow::move_field_checked(three_available_fields(), 1))))
         + shape_score(placeflow::join_fields(three_available_fields(), placeflow::single_field(placeflow::available())))
+        + nested_move_score(placeflow::move_path_checked(nested_fields(), nested_target_path()))
+        + nested_target_unreadable(placeflow::move_path_checked(nested_fields(), nested_target_path()))
+        + nested_first_child_readable(placeflow::move_path_checked(nested_fields(), nested_target_path()))
+        + nested_outer_sibling_readable(placeflow::move_path_checked(nested_fields(), nested_target_path()))
+        + nested_parent_move_rejected(placeflow::move_path_checked(nested_fields(), nested_target_path()))
+        + nested_parent_move_keeps_outer_sibling(placeflow::move_path_checked(nested_fields(), placeflow::path_field(0)))
+        + joined_nested_target_unreadable(placeflow::join_nested_fields(nested_fields(), nested_moved_fields(placeflow::move_path_checked(nested_fields(), nested_target_path()))))
+        + joined_nested_sibling_readable(placeflow::join_nested_fields(nested_fields(), nested_moved_fields(placeflow::move_path_checked(nested_fields(), nested_target_path()))))
+        + nested_shape_score(placeflow::join_nested_fields(nested_fields(), placeflow::nested_single_field(placeflow::available())))
+        + score(placeflow::can_read_path(reinitialize_nested(placeflow::move_path_checked(nested_fields(), nested_target_path())), nested_target_path()))
+        + nested_move_score(placeflow::move_path_checked(reinitialize_nested(placeflow::move_path_checked(nested_fields(), nested_target_path())), placeflow::path_field(0)))
+        + score(placeflow::can_escape_nested_owned(reinitialize_nested(placeflow::move_path_checked(nested_fields(), nested_target_path()))))
+        + capture_unreadable(placeflow::capture_for_closure(placeflow::available(), placeflow::ClosureCaptureMode::DefaultMove))
+        + capture_unreadable(placeflow::capture_for_closure(placeflow::available(), placeflow::ClosureCaptureMode::ExplicitMove))
+        + capture_readable(placeflow::capture_for_closure(placeflow::available(), placeflow::ClosureCaptureMode::SharedBorrow))
+        + capture_readable(placeflow::capture_for_closure(placeflow::available(), placeflow::ClosureCaptureMode::UniqueBorrow))
+        + capture_rejected(placeflow::capture_for_closure(placeflow::borrow_shared(placeflow::available()), placeflow::ClosureCaptureMode::DefaultMove))
 }

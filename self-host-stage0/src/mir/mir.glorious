@@ -49,6 +49,10 @@ use mir_storage::move_out;
 use mir_storage::FieldSlots;
 use mir_storage::FieldMoveResult;
 use mir_storage::move_field;
+use mir_storage::NestedFieldSlots;
+use mir_storage::NestedStoragePath;
+use mir_storage::NestedFieldMoveResult;
+use mir_storage::move_nested_field;
 pub enum Terminator { Return, ParameterReturn, BooleanReturn, ArithmeticReturn, ComparisonReturn, ConditionalReturn, CallReturn, PatternReturn, Trap }
 
 // These compact validators preserve the two invariants which make operation
@@ -289,6 +293,11 @@ pub enum FieldStorageLowering {
     Trap(FieldSlots),
 }
 
+pub enum NestedStorageLowering {
+    ReturnValue(i64, NestedFieldSlots),
+    Trap(NestedFieldSlots),
+}
+
 pub fn lower_move(slot: Slot) -> StorageLowering {
     lower_move_result(move_out(slot))
 }
@@ -314,5 +323,21 @@ fn lower_move_field_result(result: FieldMoveResult) -> FieldStorageLowering {
         FieldMoveResult::Empty(post_move) => FieldStorageLowering::Trap(post_move),
         FieldMoveResult::Missing => FieldStorageLowering::Trap(FieldSlots::Empty),
         _ => FieldStorageLowering::Trap(FieldSlots::Empty),
+    }
+}
+
+// Nested source paths use the same explicit normal/trap split. The post-move
+// tree includes `Partial` ancestors, which prevents later cleanup/lowering
+// from treating an aggregate containing a moved descendant as fully live.
+pub fn lower_move_nested_field(fields: NestedFieldSlots, path: NestedStoragePath) -> NestedStorageLowering {
+    lower_move_nested_field_result(move_nested_field(fields, path))
+}
+
+fn lower_move_nested_field_result(result: NestedFieldMoveResult) -> NestedStorageLowering {
+    handle result {
+        NestedFieldMoveResult::Value(value, post_move) => NestedStorageLowering::ReturnValue(value, post_move),
+        NestedFieldMoveResult::Empty(post_move) => NestedStorageLowering::Trap(post_move),
+        NestedFieldMoveResult::Missing => NestedStorageLowering::Trap(NestedFieldSlots::Empty),
+        _ => NestedStorageLowering::Trap(NestedFieldSlots::Empty),
     }
 }

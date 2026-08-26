@@ -2,9 +2,16 @@ use body_library::body;
 use body_library::types;
 use body_library::signature;
 use body_library::pattern;
+use body_library::placeflow;
+use compiler_support::__g1_text_as_bytes;
 pub fn score(value: Bool) -> i64 { handle value { true => 1, false => 0, _ => 0 } }
 pub fn score_admission(value: body::BodyAdmission) -> i64 { handle value { body::BodyAdmission::Value(body::BodyKind::Call) => 1, body::BodyAdmission::Value(body::BodyKind::Literal) => 0, body::BodyAdmission::TypeError => 0, _ => 0 } }
 pub fn score_pattern_admission(value: body::BodyAdmission) -> i64 { handle value { body::BodyAdmission::Value(body::BodyKind::PatternTest) => 1, _ => 0 } }
+pub fn score_capture_admission(value: body::BodyAdmission) -> i64 { handle value { body::BodyAdmission::Value(body::BodyKind::ClosureCapture) => 1, _ => 0 } }
+pub fn score_move_capture_syntax(value: body::MoveCaptureClosureSyntax) -> i64 { handle value { body::MoveCaptureClosureSyntax::Captures(2) => 1, _ => 0 } }
+pub fn score_nested_move_capture_syntax(value: body::MoveCaptureClosureSyntax) -> i64 { handle value { body::MoveCaptureClosureSyntax::Captures(1) => 1, _ => 0 } }
+pub fn score_not_move_capture(value: body::MoveCaptureClosureSyntax) -> i64 { handle value { body::MoveCaptureClosureSyntax::NotMoveClosure => 1, _ => 0 } }
+pub fn score_rejected_move_capture(value: body::MoveCaptureClosureSyntax) -> i64 { handle value { body::MoveCaptureClosureSyntax::Rejected => 1, _ => 0 } }
 pub fn main() -> i64 {
     score(body::has_type(body::Expression::I64(7), types::Type::I64))
         + score(body::has_type(body::Expression::ParameterI64(7), types::Type::I64))
@@ -28,4 +35,11 @@ pub fn main() -> i64 {
         + score(body::evaluate_pattern_test(body::Expression::PatternTest(pattern::Pattern::PairFirst(3), pattern::Value::Pair(3, 9))))
         + score(body::evaluate_pattern_test(body::Expression::PatternTest(pattern::Pattern::Variant(2, 7), pattern::Value::Variant(2, 8))))
         + score_pattern_admission(body::admit(body::Expression::PatternTest(pattern::Pattern::PairFirst(3), pattern::Value::Pair(3, 9)), types::Type::Bool))
+        + score_capture_admission(body::admit(body::Expression::ClosureCapture(placeflow::available(), placeflow::ClosureCaptureMode::DefaultMove, types::Type::I64), types::Type::I64))
+        + score_capture_admission(body::admit(body::Expression::ClosureCapture(placeflow::available(), placeflow::ClosureCaptureMode::SharedBorrow, types::Type::I64), types::Type::I64))
+        + score_move_capture_syntax(body::move_capture_closure_syntax(__g1_text_as_bytes("move (config, job) { job }")))
+        + score_nested_move_capture_syntax(body::move_capture_closure_syntax(__g1_text_as_bytes("move (config) { { config } }")))
+        + score_rejected_move_capture(body::move_capture_closure_syntax(__g1_text_as_bytes("move (config, config) { config }")))
+        + score_not_move_capture(body::move_capture_closure_syntax(__g1_text_as_bytes("move (value)")))
+        + score_not_move_capture(body::move_capture_closure_syntax(__g1_text_as_bytes("value")))
 }

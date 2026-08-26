@@ -13,6 +13,7 @@ readonly scanner="$root/self-host-stage0/src/scanner/scanner.glorious"
 readonly types="$root/self-host-stage0/src/types/types.glorious"
 readonly signature="$root/self-host-stage0/src/signature/signature.glorious"
 readonly pattern="$root/self-host-stage0/src/pattern/pattern.glorious"
+readonly placeflow="$root/self-host-stage0/src/placeflow/placeflow.glorious"
 readonly body="$root/self-host-stage0/src/body/body.glorious"
 readonly core="$root/self-host-stage0/src/core/core.glorious"
 
@@ -30,6 +31,7 @@ output="$("$compiler" \
     --source core-library@0.1.0 src/types/types.glorious "$types" \
     --source core-library@0.1.0 src/signature/signature.glorious "$signature" \
     --source core-library@0.1.0 src/pattern/pattern.glorious "$pattern" \
+    --source core-library@0.1.0 src/placeflow/placeflow.glorious "$placeflow" \
     --source core-library@0.1.0 src/body/body.glorious "$body" \
     --source core-library@0.1.0 src/core/core.glorious "$core" \
     --runtime-standard-library compiler_support@0.1.0 \
@@ -57,8 +59,8 @@ output="$("$compiler" \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "22" ]] || {
-    echo "self-host core check: expected scalar, bound parameter forms, typed unsigned literal/arithmetic payloads, call, pattern-test kind, scalar operands, and callable contracts, got $output" >&2
+[[ "$output" == "23" ]] || {
+    echo "self-host core check: expected scalar, bound parameter forms, closure-capture kind, typed unsigned literal/arithmetic payloads, call, pattern-test kind, scalar operands, and callable contracts, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"

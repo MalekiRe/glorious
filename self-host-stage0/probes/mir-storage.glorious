@@ -21,6 +21,14 @@ pub fn score_field_move(value: mir_storage::FieldMoveResult) -> i64 { handle val
 pub fn score_field_empty(value: mir_storage::FieldMoveResult) -> i64 { handle value { mir_storage::FieldMoveResult::Empty(_) => 1, _ => 0 } }
 pub fn move_field_again(value: mir_storage::FieldMoveResult, index: i64) -> mir_storage::FieldMoveResult { handle value { mir_storage::FieldMoveResult::Value(_, fields) => mir_storage::move_field(fields, index), mir_storage::FieldMoveResult::Empty(fields) => mir_storage::move_field(fields, index), mir_storage::FieldMoveResult::Missing => mir_storage::FieldMoveResult::Missing, _ => mir_storage::FieldMoveResult::Missing } }
 pub fn write_after_field_move(value: mir_storage::FieldMoveResult, index: i64, replacement: i64) -> mir_storage::FieldSlots { handle value { mir_storage::FieldMoveResult::Value(_, fields) => mir_storage::write_field(fields, index, replacement), mir_storage::FieldMoveResult::Empty(fields) => mir_storage::write_field(fields, index, replacement), mir_storage::FieldMoveResult::Missing => mir_storage::empty_fields(), _ => mir_storage::empty_fields() } }
+pub fn nested_slots() -> mir_storage::NestedFieldSlots { mir_storage::nested_prepend_field(mir_storage::write(mir_storage::empty(), 11), mir_storage::nested_prepend_field(mir_storage::write(mir_storage::empty(), 3), mir_storage::nested_empty_fields(), mir_storage::nested_single_field(mir_storage::write(mir_storage::empty(), 5))), mir_storage::nested_single_field(mir_storage::write(mir_storage::empty(), 7))) }
+pub fn nested_target() -> mir_storage::NestedStoragePath { mir_storage::storage_path_then(0, mir_storage::storage_path_field(1)) }
+pub fn nested_first_child() -> mir_storage::NestedStoragePath { mir_storage::storage_path_then(0, mir_storage::storage_path_field(0)) }
+pub fn nested_parent() -> mir_storage::NestedStoragePath { mir_storage::storage_path_field(0) }
+pub fn score_nested_move(value: mir_storage::NestedFieldMoveResult) -> i64 { handle value { mir_storage::NestedFieldMoveResult::Value(number, _) => number, mir_storage::NestedFieldMoveResult::Empty(_) => 0, mir_storage::NestedFieldMoveResult::Missing => 0, _ => 0 } }
+pub fn nested_again(value: mir_storage::NestedFieldMoveResult, path: mir_storage::NestedStoragePath) -> mir_storage::NestedFieldMoveResult { handle value { mir_storage::NestedFieldMoveResult::Value(_, fields) => mir_storage::move_nested_field(fields, path), mir_storage::NestedFieldMoveResult::Empty(fields) => mir_storage::move_nested_field(fields, path), mir_storage::NestedFieldMoveResult::Missing => mir_storage::NestedFieldMoveResult::Missing, _ => mir_storage::NestedFieldMoveResult::Missing } }
+pub fn nested_empty_score(value: mir_storage::NestedFieldMoveResult) -> i64 { handle value { mir_storage::NestedFieldMoveResult::Empty(_) => 1, _ => 0 } }
+pub fn write_nested_again(value: mir_storage::NestedFieldMoveResult, path: mir_storage::NestedStoragePath, replacement: i64) -> mir_storage::NestedFieldSlots { handle value { mir_storage::NestedFieldMoveResult::Value(_, fields) => mir_storage::write_nested_field(fields, path, replacement), mir_storage::NestedFieldMoveResult::Empty(fields) => mir_storage::write_nested_field(fields, path, replacement), mir_storage::NestedFieldMoveResult::Missing => mir_storage::nested_empty_fields(), _ => mir_storage::nested_empty_fields() } }
 pub fn main() -> i64 {
     score(mir_storage::take(mir_storage::write(mir_storage::empty(), 7)))
         + score(mir_storage::take(mir_storage::empty()))
@@ -39,4 +47,9 @@ pub fn main() -> i64 {
         + score_field_move(move_field_again(mir_storage::move_field(field_slots(), 1), 2))
         + score_field_move(mir_storage::move_field(write_after_field_move(mir_storage::move_field(field_slots(), 1), 1, 9), 1))
         + score_field_empty(move_field_again(mir_storage::move_field(field_slots(), 1), 1))
+        + score_nested_move(mir_storage::move_nested_field(nested_slots(), nested_target()))
+        + score_nested_move(nested_again(mir_storage::move_nested_field(nested_slots(), nested_target()), nested_first_child()))
+        + nested_empty_score(nested_again(mir_storage::move_nested_field(nested_slots(), nested_target()), nested_parent()))
+        + score_nested_move(mir_storage::move_nested_field(write_nested_again(mir_storage::move_nested_field(nested_slots(), nested_target()), nested_target(), 9), nested_target()))
+        + score_nested_move(mir_storage::move_nested_field(write_nested_again(mir_storage::move_nested_field(nested_slots(), nested_target()), nested_target(), 9), nested_parent()))
 }
