@@ -30,28 +30,36 @@ pub fn main() -> i64 {
             trait_solver::goal("Show", types::Type::Projection("Item", 2))))
         + score(trait_solver::solve_pair(
             trait_solver::implementation("Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::negative_implementation("Show", types::Type::I64),
             trait_solver::goal("Show", types::Type::I64)))
         + score(trait_solver::solve_pair(
             trait_solver::implementation("Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::negative_implementation("Show", types::Type::U8),
             trait_solver::goal("Show", types::Type::I64)))
         + score(trait_solver::solve_pair(
             trait_solver::identified_implementation(11, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::identified_implementation(12, "Show", types::Type::I64),
             trait_solver::goal("Show", types::Type::I64)))
         + score(trait_solver::solve_pair(
             trait_solver::identified_implementation(13, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::identified_implementation(13, "Show", types::Type::I64),
             trait_solver::goal("Show", types::Type::I64)))
         + score(trait_solver::solve_three(
             trait_solver::identified_implementation(21, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::identified_implementation(22, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::negative_implementation("Show", types::Type::U8),
             trait_solver::goal("Show", types::Type::I64)))
         + score(trait_solver::solve_three(
             trait_solver::identified_implementation(23, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::identified_implementation(23, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::identified_implementation(23, "Show", types::Type::I64),
             trait_solver::goal("Show", types::Type::I64)))
         + score(trait_solver::solve_with_step_limit(
@@ -61,11 +69,26 @@ pub fn main() -> i64 {
         + score(trait_solver::solve_pair_with_step_limit(
             1,
             trait_solver::implementation("Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::implementation("Show", types::Type::I64),
             trait_solver::goal("Show", types::Type::I64)))
         + score(trait_solver::solve_pair_with_step_limit(
             2,
             trait_solver::implementation("Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64),
             trait_solver::implementation("Show", types::Type::I64),
             trait_solver::goal("Show", types::Type::I64)))
+        + score(trait_solver::solve_prefer_exact_receiver(
+            trait_solver::identified_implementation(30, "Show", types::reference(64)),
+            trait_solver::goal("Show", types::reference(64)),
+            trait_solver::identified_implementation(31, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64)))
+        + score(trait_solver::solve_prefer_exact_receiver(
+            trait_solver::identified_implementation(32, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::reference(64)),
+            trait_solver::identified_implementation(33, "Show", types::Type::I64),
+            trait_solver::goal("Show", types::Type::I64)))
+        + score(trait_solver::solve(
+            trait_solver::identified_implementation(34, "Show", types::reference(64)),
+            trait_solver::goal("Show", types::reference(65))))
 }

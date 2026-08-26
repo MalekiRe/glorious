@@ -8,6 +8,34 @@ pub fn score(value: Bool) -> i64 {
     }
 }
 
+pub fn lookup_score(value: types::TypeLookup, expected: types::Type) -> i64 {
+    handle value {
+        types::TypeLookup::Found(found) => score(types::same(found, expected)),
+        types::TypeLookup::Missing => 0,
+        _ => 0,
+    }
+}
+
+pub fn duplicate_score(value: types::TypeArenaAdmission) -> i64 {
+    handle value {
+        types::TypeArenaAdmission::DuplicateNode => 1,
+        types::TypeArenaAdmission::Value(_) => 0,
+        _ => 0,
+    }
+}
+
+pub fn admitted_lookup_score(
+    admission: types::TypeArenaAdmission,
+    node: i64,
+    expected: types::Type,
+) -> i64 {
+    handle admission {
+        types::TypeArenaAdmission::Value(arena) => lookup_score(types::resolve_reference(arena, types::reference(node)), expected),
+        types::TypeArenaAdmission::DuplicateNode => 0,
+        _ => 0,
+    }
+}
+
 pub fn main() -> i64 {
     score(types::same(types::Type::I64, types::Type::I64))
         + score(types::same(types::Type::Never, types::Type::Never))
@@ -30,8 +58,36 @@ pub fn main() -> i64 {
         + score(types::same(types::Type::F32, types::Type::F64))
         + score(types::same_term(types::Term::ValueType(types::Type::I64), types::Term::ValueType(types::Type::I64)))
         + score(types::same_term(types::Term::EffectRow(3), types::Term::EffectRow(3)))
-        + score(types::same_term(types::Term::Lifetime(4), types::Term::Lifetime(4)))
+        + score(types::same_lifetime(types::Lifetime::Static, types::Lifetime::Static))
+        + score(types::same_lifetime(types::Lifetime::Bound(0, 1), types::Lifetime::Bound(0, 1)))
+        + score(types::same_lifetime(types::Lifetime::Bound(0, 1), types::Lifetime::Bound(1, 1)))
+        + score(types::same_term(types::Term::Lifetime(types::Lifetime::Generic(4)), types::Term::Lifetime(types::Lifetime::Generic(4))) )
         + score(types::same_term(types::Term::StructuralConstant(5), types::Term::StructuralConstant(5)))
-        + score(types::same_term(types::Term::EffectRow(3), types::Term::Lifetime(3)))
+        + score(types::same_term(types::Term::EffectRow(3), types::Term::Lifetime(types::Lifetime::Generic(3))))
         + score(types::same_term(types::Term::StructuralConstant(5), types::Term::StructuralConstant(6)))
+        + lookup_score(
+            types::resolve_reference(
+                types::singleton_type(64, types::Type::I64),
+                types::reference(64)),
+            types::Type::I64)
+        + lookup_score(
+            types::resolve_reference(
+                types::singleton_type(64, types::Type::I64),
+                types::reference(65)),
+            types::Type::I64)
+        + duplicate_score(types::checked_insert_type(
+            types::singleton_type(64, types::Type::I64),
+            64,
+            types::Type::U64))
+        + admitted_lookup_score(
+            types::checked_insert_type(
+                types::singleton_type(65, types::Type::U64),
+                64,
+                types::Type::I64),
+            64,
+            types::Type::I64)
+        + admitted_lookup_score(
+            types::checked_insert_type(types::empty_arena(), 64, types::Type::I64),
+            64,
+            types::Type::I64)
 }

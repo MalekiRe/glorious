@@ -2342,13 +2342,10 @@ impl StageZeroCompiler {
                     ) =>
                     {
                         arguments.first().map(|receiver| {
-                            match specialize_type(
+                            specialize_type(
                                 &body.expression(*receiver).ty,
                                 caller.arguments(),
-                            ) {
-                                crate::Type::Reference { referent, .. } => *referent,
-                                receiver => receiver,
-                            }
+                            )
                         }).or_else(|| match &body.expression(*callee).ty {
                             crate::Type::Callable { parameters, result, .. }
                                 if parameters.is_empty() =>
@@ -2469,6 +2466,18 @@ impl StageZeroCompiler {
                         } else {
                             (*evidence, *method)
                         };
+                        let trait_receiver = trait_method_executable_receiver(
+                            evidence,
+                            trait_receiver.as_ref(),
+                            &signatures,
+                        )
+                        .map_err(|message| {
+                            failed(
+                                input_fingerprint,
+                                vec![CompileDiagnostic::invariant("G7032", message)],
+                                &source_lengths,
+                            )
+                        })?;
                         trait_method_instance_key(
                             evidence,
                             method,
@@ -2783,10 +2792,7 @@ fn materialize_concrete_instances(
                     crate::MirInstruction::Call { arguments, dst, .. } => arguments
                         .first()
                         .and_then(|local| function.locals.get(local.0 as usize))
-                        .map(|local| match local.ty.clone() {
-                            crate::Type::Reference { referent, .. } => *referent,
-                            receiver => receiver,
-                        })
+                        .map(|local| local.ty.clone())
                         .or_else(|| function.locals.get(dst.0 as usize).map(|local| local.ty.clone())),
                     _ => None,
                 };
@@ -2861,7 +2867,12 @@ fn materialize_concrete_instances(
                         *callee,
                         &trait_arguments,
                         &method_arguments,
-                        receiver.as_ref(),
+                        trait_method_executable_receiver(
+                            evidence,
+                            receiver.as_ref(),
+                            signatures,
+                        )?
+                        .as_ref(),
                     );
                     let key = match key {
                         Ok(key) => key,
@@ -3311,6 +3322,44 @@ fn materialize_deferred_scalar_operations(function: &mut MirFunction) -> Result<
         }
     }
     Ok(())
+}
+
+/// Recover the `Self` type used by Core's successful method selection. A
+/// qualified call first tries its exact first-argument type, which is required
+/// for `impl Trait for &T`. It may then compatibly retry the referent for an
+/// older static-qualified shape whose first parameter is `&Self`. Instance
+/// materialization must make the same choice instead of unconditionally
+/// erasing one reference layer from the executable identity.
+fn trait_method_executable_receiver(
+    evidence: DefKey,
+    receiver: Option<&Type>,
+    signatures: &ElaboratedInterface,
+) -> Result<Option<Type>, String> {
+    let Some(receiver) = receiver else {
+        return Ok(None);
+    };
+    let Some(ElaboratedHeader::Implementation(implementation)) =
+        signatures.definitions.get(&evidence)
+    else {
+        return Err("selected trait method evidence does not name an implementation".into());
+    };
+    let matches_head = |candidate: &Type| {
+        bind_impl_head_type(
+            &implementation.self_ty,
+            candidate,
+            &mut BTreeMap::new(),
+        )
+        .is_ok()
+    };
+    if matches_head(receiver) {
+        return Ok(Some(receiver.clone()));
+    }
+    if let Type::Reference { referent, .. } = receiver
+        && matches_head(referent)
+    {
+        return Ok(Some((**referent).clone()));
+    }
+    Err("selected trait implementation Self type does not match its executable receiver".into())
 }
 
 /// Canonicalize a solver-selected trait method into the shared instance-key

@@ -57,11 +57,73 @@ pub fn goal(trait_name: Text, self_type: Type) -> Goal {
 }
 
 pub fn solve(candidate: Implementation, goal: Goal) -> Answer {
-    branch_bool(
-        text_eq(candidate.trait_name, goal.trait_name),
-        () -> Answer { solve_same_trait(candidate, goal) },
-        () -> Answer { Answer::Unsatisfied },
+    handle (candidate, goal) {
+        (
+            Implementation { evidence, trait_name, self_type, polarity },
+            Goal { trait_name: requested_trait, self_type: requested_type },
+        ) => solve_goal_parts(
+            evidence,
+            trait_name,
+            self_type,
+            polarity,
+            requested_trait,
+            requested_type,
+        ),
+    }
+}
+
+// Destructure the affine candidate and goal before branching. The old
+// closure-shaped form read `candidate.trait_name` and then tried to move the
+// complete candidate into the successful branch, which is valid only while
+// every field is implicitly copyable. Recursive `Type` terms are not.
+fn solve_goal_parts(
+    evidence: i64,
+    candidate_trait: Text,
+    candidate_type: Type,
+    polarity: ImplementationPolarity,
+    requested_trait: Text,
+    requested_type: Type,
+) -> Answer {
+    handle text_eq(candidate_trait, requested_trait) {
+        true => solve_same_trait_parts(evidence, candidate_type, polarity, requested_type),
+        false => Answer::Unsatisfied,
+        _ => Answer::Unsatisfied,
+    }
+}
+
+// A qualified call first selects on the exact supplied receiver type. This
+// admits `impl Trait for &T` without conflating it with `impl Trait for T`.
+// The caller supplies the optional legacy referent query separately because
+// the bootstrap language is affine: neither candidate nor goal may be reused
+// after the exact query consumes it. The fallback runs only when exact
+// selection has no solution, never after positive, negative, ambiguous, or
+// resource-limited evidence.
+pub fn solve_prefer_exact_receiver(
+    exact_candidate: Implementation,
+    exact_goal: Goal,
+    referent_candidate: Implementation,
+    referent_goal: Goal,
+) -> Answer {
+    fallback_after_exact(
+        solve(exact_candidate, exact_goal),
+        referent_candidate,
+        referent_goal,
     )
+}
+
+fn fallback_after_exact(
+    exact: Answer,
+    referent_candidate: Implementation,
+    referent_goal: Goal,
+) -> Answer {
+    handle exact {
+        Answer::Unsatisfied => solve(referent_candidate, referent_goal),
+        Answer::Satisfied(evidence) => Answer::Satisfied(evidence),
+        Answer::Refuted(evidence) => Answer::Refuted(evidence),
+        Answer::Ambiguous => Answer::Ambiguous,
+        Answer::Overflow => Answer::Overflow,
+        _ => Answer::Unsatisfied,
+    }
 }
 
 // The full tabled solver shares request-scoped step accounting with parsing,
@@ -84,29 +146,52 @@ fn solve_with_budget(steps: Budget, candidate: Implementation, goal: Goal) -> An
 // Candidate sets cannot silently choose a positive implementation over an
 // equally applicable negative one. The compact two-candidate form is the
 // bootstrap predecessor of the full worklist and explanation engine.
-pub fn solve_pair(first: Implementation, second: Implementation, goal: Goal) -> Answer {
-    combine_answers(solve(first, goal), solve(second, goal))
+pub fn solve_pair(
+    first: Implementation,
+    first_goal: Goal,
+    second: Implementation,
+    second_goal: Goal,
+) -> Answer {
+    combine_answers(solve(first, first_goal), solve(second, second_goal))
 }
 
 // Preserve evaluation order under a finite budget.  A later candidate is not
 // silently skipped when the budget runs out: the terminal resource outcome
 // wins over a partial selection, matching the stage0 solver's step-limit
 // contract.
-pub fn solve_pair_with_step_limit(limit: i64, first: Implementation, second: Implementation, goal: Goal) -> Answer {
-    solve_pair_with_budget(budget(limit), first, second, goal)
+pub fn solve_pair_with_step_limit(
+    limit: i64,
+    first: Implementation,
+    first_goal: Goal,
+    second: Implementation,
+    second_goal: Goal,
+) -> Answer {
+    solve_pair_with_budget(budget(limit), first, first_goal, second, second_goal)
 }
 
-fn solve_pair_with_budget(steps: Budget, first: Implementation, second: Implementation, goal: Goal) -> Answer {
+fn solve_pair_with_budget(
+    steps: Budget,
+    first: Implementation,
+    first_goal: Goal,
+    second: Implementation,
+    second_goal: Goal,
+) -> Answer {
     handle charge(steps, 1) {
-        BudgetResult::Value(after_first) => solve_second_with_budget(after_first, first, second, goal),
+        BudgetResult::Value(after_first) => solve_second_with_budget(after_first, first, first_goal, second, second_goal),
         BudgetResult::Error(_) => Answer::Overflow,
         _ => Answer::Overflow,
     }
 }
 
-fn solve_second_with_budget(steps: Budget, first: Implementation, second: Implementation, goal: Goal) -> Answer {
+fn solve_second_with_budget(
+    steps: Budget,
+    first: Implementation,
+    first_goal: Goal,
+    second: Implementation,
+    second_goal: Goal,
+) -> Answer {
     handle charge(steps, 1) {
-        BudgetResult::Value(_) => combine_answers(solve(first, goal), solve(second, goal)),
+        BudgetResult::Value(_) => combine_answers(solve(first, first_goal), solve(second, second_goal)),
         BudgetResult::Error(_) => Answer::Overflow,
         _ => Answer::Overflow,
     }
@@ -116,8 +201,18 @@ fn solve_second_with_budget(steps: Budget, first: Implementation, second: Implem
 // as two candidates.  It is the bounded bootstrap form of the tabled
 // worklist: adding an irrelevant candidate cannot erase ambiguity, while a
 // contradictory negative candidate cannot be hidden behind it.
-pub fn solve_three(first: Implementation, second: Implementation, third: Implementation, goal: Goal) -> Answer {
-    combine_answers(combine_answers(solve(first, goal), solve(second, goal)), solve(third, goal))
+pub fn solve_three(
+    first: Implementation,
+    first_goal: Goal,
+    second: Implementation,
+    second_goal: Goal,
+    third: Implementation,
+    third_goal: Goal,
+) -> Answer {
+    combine_answers(
+        combine_answers(solve(first, first_goal), solve(second, second_goal)),
+        solve(third, third_goal),
+    )
 }
 
 fn combine_answers(first: Answer, second: Answer) -> Answer {
@@ -146,12 +241,17 @@ fn combine_satisfied(first_evidence: i64, second_evidence: i64) -> Answer {
     )
 }
 
-fn solve_same_trait(candidate: Implementation, goal: Goal) -> Answer {
-    branch_bool(
-        same(candidate.self_type, goal.self_type),
-        () -> Answer { answer_for_polarity(candidate.polarity, candidate.evidence) },
-        () -> Answer { Answer::Unsatisfied },
-    )
+fn solve_same_trait_parts(
+    evidence: i64,
+    candidate_type: Type,
+    polarity: ImplementationPolarity,
+    requested_type: Type,
+) -> Answer {
+    handle same(candidate_type, requested_type) {
+        true => answer_for_polarity(polarity, evidence),
+        false => Answer::Unsatisfied,
+        _ => Answer::Unsatisfied,
+    }
 }
 
 fn answer_for_polarity(polarity: ImplementationPolarity, evidence: i64) -> Answer {

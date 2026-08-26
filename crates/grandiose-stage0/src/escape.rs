@@ -773,6 +773,16 @@ fn assign_field_path(value: &mut Value, path: &[(u32, u32)], replacement: Value)
         if matches!(current, Value::None) {
             *current = Value::Aggregate(vec![Value::None; *field_count as usize]);
         }
+        // A nominal parameter's private layout is opaque to escape analysis,
+        // but its source-level projection path is already sealed by Core.
+        // Opening that one path must retain the caller-owned provenance of
+        // untouched leaves: otherwise `slot.inner.value = &local` would be
+        // rejected as an unmodelled aggregate write before the returned local
+        // borrow can be diagnosed. The replacement leaf below overwrites the
+        // relevant external marker with its precise body-local provenance.
+        if matches!(current, Value::ExternalBorrowed) {
+            *current = Value::Aggregate(vec![Value::ExternalBorrowed; *field_count as usize]);
+        }
         let Value::Aggregate(fields) = current else {
             return false;
         };

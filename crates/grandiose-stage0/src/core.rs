@@ -10563,22 +10563,23 @@ impl Elaborator<'_> {
         ) else {
             return Some(self.fail(span, "G4168", "trait does not declare the requested method"));
         };
-        let (receiver, subject, remaining_arguments) = match supplied.split_first() {
+        let (receiver, subject, peeled_subject, remaining_arguments) = match supplied.split_first() {
             Some((receiver_source, remaining_arguments)) => {
                 let receiver = self.expression(*receiver_source);
                 let receiver_type =
                     self.zonk_type(self.expressions[receiver.0 as usize].ty.clone(), span);
-                // Qualified trait calls use their first source argument as
-                // the receiver. For the conventional `&Self` / `&mut Self`
-                // method forms, implementation selection is over `Self`,
-                // not over the loan type itself. Peeling precisely one
-                // receiver reference also preserves traits implemented for a
-                // reference type: `&&T` selects `Self = &T`.
-                let subject = match receiver_type {
-                    Type::Reference { referent, .. } => *referent,
-                    subject => subject,
+                // The first source argument determines `Self`. Preserve its
+                // exact type first: a trait can be implemented for `&T`, and
+                // selecting on `T` would make that implementation
+                // unreachable. For the conventional static-qualified shape
+                // whose first parameter is `&Self`, retain a one-reference
+                // fallback below for compatibility with its existing call
+                // surface.
+                let peeled_subject = match &receiver_type {
+                    Type::Reference { referent, .. } => Some((**referent).clone()),
+                    _ => None,
                 };
-                (Some(receiver), subject, remaining_arguments)
+                (Some(receiver), receiver_type, peeled_subject, remaining_arguments)
             }
             None => {
                 let Some(expected_result) = expected_result else {
@@ -10588,7 +10589,7 @@ impl Elaborator<'_> {
                         "receiver-less qualified trait method calls require an expected result type",
                     ));
                 };
-                (None, self.zonk_type(expected_result, span), &[] as &[ExprId])
+                (None, self.zonk_type(expected_result, span), None, &[] as &[ExprId])
             }
         };
         let method_arguments = if operation_arguments.is_empty() {
@@ -10610,18 +10611,35 @@ impl Elaborator<'_> {
             )?
         };
         let assumptions = self.ambient_trait_solver_assumptions();
-        let answer = self.trait_query().select_method_with_assumptions(
+        let relation = crate::ElaboratedTraitReference {
+            definition: trait_definition,
+            arguments: trait_arguments.clone(),
+        };
+        let mut selected_subject = subject.clone();
+        let mut answer = self.trait_query().select_method_with_assumptions(
             TraitGoal {
-                relation: crate::ElaboratedTraitReference {
-                    definition: trait_definition,
-                    arguments: trait_arguments.clone(),
-                },
-                subject: subject.clone(),
+                relation: relation.clone(),
+                subject: selected_subject.clone(),
             },
             name,
             &method_arguments,
             &assumptions,
         );
+        if matches!(answer, TraitMethodAnswer::NoSolution)
+            && let Some(peeled_subject) = peeled_subject
+            && peeled_subject != selected_subject
+        {
+            selected_subject = peeled_subject;
+            answer = self.trait_query().select_method_with_assumptions(
+                TraitGoal {
+                    relation: relation.clone(),
+                    subject: selected_subject.clone(),
+                },
+                name,
+                &method_arguments,
+                &assumptions,
+            );
+        }
         // A receiver-less trait method inside a generic declaration is
         // selected from the declaration's own ambient bound rather than from
         // a concrete implementation.  Keep that request deferred exactly as
@@ -10629,11 +10647,8 @@ impl Elaborator<'_> {
         // the eventual implementation evidence.
         if matches!(answer, TraitMethodAnswer::NoSolution) {
             let goal = TraitGoal {
-                relation: crate::ElaboratedTraitReference {
-                    definition: trait_definition,
-                    arguments: trait_arguments.clone(),
-                },
-                subject: subject.clone(),
+                relation: relation.clone(),
+                subject: selected_subject.clone(),
             };
             if assumptions.contains(&goal)
                 && let Some(signature) = self.trait_query().declared_method_signature(

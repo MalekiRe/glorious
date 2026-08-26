@@ -29,8 +29,8 @@ output="$("$compiler" \
     --runtime-leaf array-empty crate __g1_array_empty --runtime-leaf array-len crate __g1_array_len --runtime-leaf array-get-move crate __g1_array_get_move \
     --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
-[[ "$output" == "16" ]] || {
-    echo "self-host types check: expected equal scalar, named, generic, projection, and same-kind compiler terms only, got $output" >&2
+[[ "$output" == "22" ]] || {
+    echo "self-host types check: expected equal scalar, named, generic, projection, stable arena-reference, and same-kind compiler terms only, got $output" >&2
     exit 1
 }
 printf '%s\n' "$output"

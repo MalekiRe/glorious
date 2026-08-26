@@ -2,6 +2,7 @@
 // lifetimes, effects, projections, and structural constants extend this
 // source-owned equality boundary in later slices.
 use compiler_support::text_eq;
+use compiler_support::__g1_array_pop_move;
 
 pub enum Type {
     Unit,
@@ -25,8 +26,22 @@ pub enum Type {
     Text,
     Bytes,
     Named(Text),
+    // A reference names an immutable type-arena node. The arena owns the
+    // recursive graph; this term stays an unrestricted compiler handle rather
+    // than embedding an affine array in every type value.
+    Reference(i64),
     Generic(i64),
     Projection(Text, i64),
+}
+
+// Lifetimes are their own term kind. A region can never be encoded as an
+// ordinary type-generic slot: static, declaration-generic, higher-ranked
+// bound, and elided regions have distinct substitution and escape behavior.
+pub enum Lifetime {
+    Static,
+    Generic(i64),
+    Bound(i64, i64),
+    Elided,
 }
 
 // A compiler term has a kind.  Keeping the kinds explicit at the bootstrap
@@ -36,8 +51,27 @@ pub enum Type {
 pub enum Term {
     ValueType(Type),
     EffectRow(i64),
-    Lifetime(i64),
+    Lifetime(Lifetime),
     StructuralConstant(i64),
+}
+
+// Recursive type structure lives in a persistent arena rather than inside
+// `Type` itself. Each node owns at most one array-indirected predecessor,
+// making the representation finite while `Type::Reference` remains a cheap
+// immutable node handle suitable for solver keys and repeated inspection.
+pub enum TypeArena {
+    Empty,
+    Node(i64, Type, Bool, Array<TypeArena>),
+}
+
+pub enum TypeLookup {
+    Found(Type),
+    Missing,
+}
+
+pub enum TypeArenaAdmission {
+    Value(TypeArena),
+    DuplicateNode,
 }
 
 pub fn same(left: Type, right: Type) -> Bool {
@@ -63,9 +97,136 @@ pub fn same(left: Type, right: Type) -> Bool {
         (Type::Text, Type::Text) => true,
         (Type::Bytes, Type::Bytes) => true,
         (Type::Named(left), Type::Named(right)) => text_eq(left, right),
+        (Type::Reference(left), Type::Reference(right)) => left == right,
         (Type::Generic(left), Type::Generic(right)) => left == right,
         (Type::Projection(left_name, left_subject), Type::Projection(right_name, right_subject)) => projection_same(left_name, left_subject, right_name, right_subject),
         _ => false,
+    }
+}
+
+pub fn reference(referent_node: i64) -> Type { Type::Reference(referent_node) }
+
+pub fn same_lifetime(left: Lifetime, right: Lifetime) -> Bool {
+    handle (left, right) {
+        (Lifetime::Static, Lifetime::Static) => true,
+        (Lifetime::Generic(left), Lifetime::Generic(right)) => left == right,
+        (Lifetime::Bound(left_depth, left_index), Lifetime::Bound(right_depth, right_index)) => same_bound_lifetime(left_depth, left_index, right_depth, right_index),
+        (Lifetime::Elided, Lifetime::Elided) => true,
+        _ => false,
+    }
+}
+
+fn same_bound_lifetime(left_depth: i64, left_index: i64, right_depth: i64, right_index: i64) -> Bool {
+    handle left_depth == right_depth {
+        true => left_index == right_index,
+        false => false,
+        _ => false,
+    }
+}
+
+pub fn empty_arena() -> TypeArena { TypeArena::Empty }
+
+pub fn singleton_type(node: i64, value: Type) -> TypeArena {
+    TypeArena::Node(node, value, false, [])
+}
+
+// Checked insertion preserves the arena's stable node identity contract. It
+// never lets a later declaration shadow an existing recursive type node.
+pub fn checked_insert_type(arena: TypeArena, node: i64, value: Type) -> TypeArenaAdmission {
+    handle arena {
+        TypeArena::Empty => TypeArenaAdmission::Value(TypeArena::Node(node, value, false, [])),
+        TypeArena::Node(existing, existing_value, has_tail, tail) => checked_insert_head(existing, existing_value, has_tail, tail, node, value),
+        _ => TypeArenaAdmission::DuplicateNode,
+    }
+}
+
+pub fn lookup_type(arena: TypeArena, wanted: i64) -> TypeLookup {
+    handle arena {
+        TypeArena::Empty => TypeLookup::Missing,
+        TypeArena::Node(node, value, has_tail, tail) => lookup_type_node(node, value, has_tail, tail, wanted),
+        _ => TypeLookup::Missing,
+    }
+}
+
+pub fn resolve_reference(arena: TypeArena, value: Type) -> TypeLookup {
+    handle value {
+        Type::Reference(node) => lookup_type(arena, node),
+        _ => TypeLookup::Missing,
+    }
+}
+
+fn lookup_type_node(
+    node: i64,
+    value: Type,
+    has_tail: Bool,
+    tail: Array<TypeArena>,
+    wanted: i64,
+) -> TypeLookup {
+    handle node == wanted {
+        true => TypeLookup::Found(value),
+        false => lookup_type_tail(has_tail, tail, wanted),
+        _ => TypeLookup::Missing,
+    }
+}
+
+fn lookup_type_tail(has_tail: Bool, tail: Array<TypeArena>, wanted: i64) -> TypeLookup {
+    handle has_tail {
+        true => lookup_type(__g1_array_pop_move<TypeArena>(&mut tail), wanted),
+        false => TypeLookup::Missing,
+        _ => TypeLookup::Missing,
+    }
+}
+
+fn checked_insert_head(
+    existing: i64,
+    existing_value: Type,
+    has_tail: Bool,
+    tail: Array<TypeArena>,
+    node: i64,
+    value: Type,
+) -> TypeArenaAdmission {
+    handle existing == node {
+        true => TypeArenaAdmission::DuplicateNode,
+        false => checked_insert_tail(existing, existing_value, has_tail, tail, node, value),
+        _ => TypeArenaAdmission::DuplicateNode,
+    }
+}
+
+fn checked_insert_tail(
+    existing: i64,
+    existing_value: Type,
+    has_tail: Bool,
+    tail: Array<TypeArena>,
+    node: i64,
+    value: Type,
+) -> TypeArenaAdmission {
+    handle has_tail {
+        true => checked_insert_rebuild(
+            existing,
+            existing_value,
+            __g1_array_pop_move<TypeArena>(&mut tail),
+            node,
+            value),
+        false => TypeArenaAdmission::Value(TypeArena::Node(
+            existing,
+            existing_value,
+            true,
+            [TypeArena::Node(node, value, false, [])])),
+        _ => TypeArenaAdmission::DuplicateNode,
+    }
+}
+
+fn checked_insert_rebuild(
+    existing: i64,
+    existing_value: Type,
+    tail: TypeArena,
+    node: i64,
+    value: Type,
+) -> TypeArenaAdmission {
+    handle checked_insert_type(tail, node, value) {
+        TypeArenaAdmission::Value(next) => TypeArenaAdmission::Value(TypeArena::Node(existing, existing_value, true, [next])),
+        TypeArenaAdmission::DuplicateNode => TypeArenaAdmission::DuplicateNode,
+        _ => TypeArenaAdmission::DuplicateNode,
     }
 }
 
@@ -73,7 +234,7 @@ pub fn same_term(left: Term, right: Term) -> Bool {
     handle (left, right) {
         (Term::ValueType(left), Term::ValueType(right)) => same(left, right),
         (Term::EffectRow(left), Term::EffectRow(right)) => left == right,
-        (Term::Lifetime(left), Term::Lifetime(right)) => left == right,
+        (Term::Lifetime(left), Term::Lifetime(right)) => same_lifetime(left, right),
         (Term::StructuralConstant(left), Term::StructuralConstant(right)) => left == right,
         _ => false,
     }
