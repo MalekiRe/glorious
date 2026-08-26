@@ -4,7 +4,7 @@ set -euo pipefail
 readonly root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 readonly compiler="$root/target/debug/grc-stage0"
 readonly support="$root/self-host-stage0/runtime/compiler_support.glorious"
-readonly probe="$root/self-host-stage0/probes/vm-backend.glorious"
+readonly probe="${GRANDIOSE_STAGE0_VM_BACKEND_PROBE:-$root/self-host-stage0/probes/vm-backend.glorious}"
 readonly library="$root/self-host-stage0/probes/vm_backend_library.glorious"
 
 if [[ "${GRANDIOSE_STAGE0_ALREADY_BUILT:-0}" != 1 ]]; then
@@ -33,7 +33,8 @@ output="$(timeout --kill-after=5s --preserve-status 120s "$compiler" --root-pack
     --runtime-leaf array-get-move crate __g1_array_get_move --runtime-leaf array-pop-move crate __g1_array_pop_move \
     run "$probe")"
 
-[[ "$output" == "633" ]] || {
+readonly expected="${GRANDIOSE_STAGE0_VM_BACKEND_EXPECTED:-633}"
+[[ "$output" == "$expected" ]] || {
     echo "self-host vm backend check: expected canonical G1 schema admission, magic/header, manifest-bound imports, and verified execution paths, got $output" >&2
     exit 1
 }

@@ -1557,7 +1557,7 @@ fn g1_static_len_entry_directory_tail(protocol: usize, handler: usize, function:
                 ),
                 g1_directory_entry(11, g1_usize_as_u64(cleanup), 72, 3, 24),
             ),
-            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(total), 8, 0, 0))),
+            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 8, 0, 0))),
         ),
         __g1_bytes_from_array_move([]),
     )
@@ -1793,7 +1793,7 @@ fn g1_static_subslice_directory_tail(protocol: usize, handler: usize, function: 
                 ),
                 g1_directory_entry(11, g1_usize_as_u64(cleanup), 120, 5, 24),
             ),
-            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(total), 8, 0, 0))),
+            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 8, 0, 0))),
         ),
         __g1_bytes_from_array_move([]),
     )
@@ -1821,8 +1821,8 @@ fn g1_static_subslice_operands() -> Bytes {
     g1_append_field(
         g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(3), u32_le_bytes(1)),
         g1_append_field(
-            g1_concat4(u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(3), u32_le_bytes(2)),
-            g1_concat4(u32_le_bytes(1), u32_le_bytes(4), u32_le_bytes(3), u32_le_bytes(2)),
+            g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(2)),
+            g1_append_field(g1_concat4(u32_le_bytes(3), u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(3)), u32_le_bytes(4)),
         ),
     )
 }
@@ -2058,7 +2058,7 @@ fn g1_static_get_directory_tail(protocol: usize, handler: usize, function: usize
                 ),
                 g1_directory_entry(11, g1_usize_as_u64(cleanup), 144, 6, 24),
             ),
-            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(total), 8, 0, 0))),
+            g1_append_field(g1_directory_entry(12, g1_usize_as_u64(total), 0, 0, 16), g1_append_field(g1_directory_entry(13, g1_usize_as_u64(total), 0, 0, 16), g1_directory_entry(14, g1_usize_as_u64(__g1_int_wrapping_sub<usize>(total, 8)), 8, 0, 0))),
         ),
         __g1_bytes_from_array_move([]),
     )
@@ -2094,8 +2094,11 @@ fn g1_static_get_operands() -> Bytes {
     g1_append_field(
         g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(1), u32_le_bytes(2)),
         g1_append_field(
-            g1_concat4(u32_le_bytes(1), u32_le_bytes(3), u32_le_bytes(2), u32_le_bytes(1)),
-            g1_concat4(u32_le_bytes(4), u32_le_bytes(3), u32_le_bytes(2), u32_le_bytes(1)),
+            g1_concat4(u32_le_bytes(1), u32_le_bytes(2), u32_le_bytes(3), u32_le_bytes(1)),
+            g1_append_field(
+                g1_concat4(u32_le_bytes(2), u32_le_bytes(3), u32_le_bytes(1), u32_le_bytes(2)),
+                g1_concat3(u32_le_bytes(4), u32_le_bytes(1), u32_le_bytes(2)),
+            ),
         ),
     )
 }
