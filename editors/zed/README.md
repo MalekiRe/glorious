@@ -1,24 +1,16 @@
 # Grandiose for Zed
 
-This extension associates `*.glorious` files with Grandiose and starts
-`grand-lsp` over stdio. Its real Tree-sitter grammar lives at the repository
-root; it is not a Rust grammar alias.
+**Status:** syntax highlighting available; `grand-lsp` integration unsupported
 
-Zed requires a grammar repository and an immutable revision. The extension
-pins the first Grandiose commit containing the root grammar, so development
-extension installs fetch the native Grandiose parser reproducibly.
+This extension contains the Grandiose grammar and language configuration. Its
+manifest and Rust extension code also retain a pre-Stage0 `grand-lsp` launcher.
 
-The server path may be overridden in Zed settings:
+The active repository does not provide a supported language server:
+`tooling/lsp` is excluded from the root workspace and is marked as disabled
+pending a Stage0 redesign. Treat the extension as syntax support only.
+Diagnostics, navigation, formatting, and language-server download behavior are
+legacy and may fail.
 
-```jsonc
-"lsp": {
-  "grand-lsp": {
-    "binary": { "path": "/absolute/path/to/grand-lsp" }
-  }
-}
-```
-
-The server materializes its embedded standard library in grand's
-content-addressed cache. Go-to-definition returns an ordinary `file://` URI, so
-Zed can open definitions such as the library implementation of `if` without a
-custom content provider. The cached source is marked read-only.
+A future Stage0-native language server should update the manifest, launcher,
+release workflow, and all editor documentation together. Packaging the current
+extension is not evidence that the LSP is supported.
