@@ -71,9 +71,41 @@ solver, and VM backend suites before the coherence optimization. After that
 change, 1,069 library/coherence/conversion/service/signature/trait-solver tests
 and the lifecycle fixture pass. After the fixed-identity optimization, those
 suites plus resolution pass 1,097 tests, as does the lifecycle fixture.
-The full source-suite run was deliberately
-stopped at the user's request to pursue another optimization first; it is
-not a passing full-suite result.
+An earlier full source-suite run was deliberately stopped at the user's
+request to pursue another optimization first. The completed workspace run
+below supersedes that interrupted attempt.
+
+## Full Rust suite and ten-minute budget
+
+The full Rust workspace (`--workspace --all-targets`) passes after all four
+optimizations: **2,446 passed, zero failed, two ignored manual VM benchmarks**
+across 48 test binaries/targets. No additional tests were ignored or filtered.
+
+- Total wall time, including the Rust build: **99.402 seconds** (1m39s).
+- Rust build: 30.01 seconds.
+- Sum of reported test-binary execution times: 69.27 seconds.
+- All 46 GSC2 source tests: 61.27 seconds.
+- All 128 standard-library tests: 4.16 seconds.
+
+This is a local incremental-build measurement, not a clean-checkout CI build
+benchmark. CI now uses the same test optimization level and eight test threads.
+The ten-minute CI limit and the command guard (590 seconds plus ten seconds
+of termination grace) remain unchanged, as do debug assertions and VM budgets.
+
+Reproduce the full Rust run with:
+
+```sh
+CARGO_PROFILE_TEST_OPT_LEVEL=1 RUST_TEST_THREADS=8 \
+  tooling/test-with-budget.sh tooling/ram-gate.sh \
+  cargo test --workspace --all-targets
+```
+
+`tooling/compiler-audit.py` passes before and after the run, with unchanged
+source-lock SHA-256
+`dbee96f69e5e1175566db6ccab12b42e011eba576af27e14b01f92c8fb2f2144`.
+The run produced 48 source-execution records, including the same lifecycle
+artifact/counters listed above. Local timing, cargo output, and those records
+are in `/tmp/grandiose-performance-kKcUId/workspace/`.
 
 Reproduce the focused run with:
 
