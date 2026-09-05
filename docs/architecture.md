@@ -5,6 +5,11 @@ document are superseded by [GSC-2](../GSC-2-glorious-incremental-self-hosted-com
 Its demand-driven database serves every compilation mode. The G1 runtime and
 bytecode contracts below remain applicable.
 
+The [September 5 unsafe/native-ABI amendment](unsafe-memory-and-native-abi.md)
+supersedes this document's exclusion of unsafe/raw-pointer language support and
+handle-only representation as a universal future requirement. Current G1
+contracts remain unchanged until a versioned implementation lands.
+
 Status: normative architecture for bytecode generation 1. The binary contract is
 specified in [bytecode.md](bytecode.md). Language semantics are specified by
 [the language core](../glorious-branded-environment-core-spec.md); where this

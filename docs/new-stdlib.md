@@ -5,6 +5,11 @@ smaller generation-1 scope than the existing broad library contract. It records
 what is in scope now; it does not promise the deferred application-framework
 surface.
 
+The [unsafe/native-ABI amendment](unsafe-memory-and-native-abi.md) requires source
+collection, UTF-8, and hashing implementations over a small raw-memory layer.
+Private algorithmic leaves below describe the bootstrap, not the final boundary.
+Safe-only VM guests may call safe exports of trusted native library code.
+
 ## 1. Approved scope
 
 The initial standard library is limited to these groups from the review:

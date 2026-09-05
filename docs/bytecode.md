@@ -1,5 +1,9 @@
 # Grandiose Bytecode Generation 1
 
+The [unsafe/native-ABI amendment](unsafe-memory-and-native-abi.md) defines future
+versioned raw-memory, guest-safety, and shared-layout requirements. It does not
+reassign or weaken the existing G1 encodings and verifier contracts below.
+
 Status: normative. Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to
 be interpreted as requirements. Generation 1 is abbreviated G1.
 

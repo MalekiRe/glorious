@@ -16,6 +16,13 @@ Its storage, revision, and query machinery precedes the semantic port. The old
 `self-host-stage0` implementation and its build scripts have been retired;
 their historical coverage does not count toward GSC-2.
 
+The project also requires [raw memory, unsafe library implementations, and a
+shared native/VM ABI](docs/unsafe-memory-and-native-abi.md). Safe-only guest
+bytecode must be able to use safe exports of trusted native libraries without
+marshalling compatible values. This prerequisite is being implemented; source
+raw pointers/unsafe and general zero-marshalling interop are not available yet.
+See the [delivery gates](compiler/spec/unsafe-memory-progress.md).
+
 ## What makes the language different?
 
 ### Values describe how many times they may be used

@@ -11,6 +11,13 @@
 
 This specification supersedes GSC-1. It rejects GSC-1's batch-core/optional-query-wrapper architecture, its reduced classification of Rust-facing functionality, and its proposal to preserve adapters to the current self-host implementation.
 
+**September 5, 2026 amendment:** [Unsafe memory and the native/VM ABI](docs/unsafe-memory-and-native-abi.md)
+is an approved prerequisite. It supersedes the unsafe/raw-memory exclusion in
+section 13.2 and permanent algorithmic hashing/UTF-8/collection leaves in section
+13.4. Safe-only guest verification, trusted native library safe exports, and
+zero-marshalling compatible in-process values are targets. Existing artifact
+generations retain explicit compatibility; this is not an execution certificate.
+
 The required product is **a long-lived, demand-driven, incremental compiler database written from scratch in Glorious**. Command-line builds, inspection, IDE requests, tests, and self-compilation all use this database. Compactness comes from sharing algorithms, storage, and control—not from removing capabilities.
 
 The current self-host implementation is discarded in its entirety. Git history remains its archive. No old self-host source, runtime-support package, probes-as-implementation, artifact templates, source-path conventions, or claimed coverage is an implementation dependency of the replacement.

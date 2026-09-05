@@ -35,6 +35,13 @@ The remaining query families and their dependency projections, semantic
 compiler, G1 emitter, service, and bootstrap remain to be implemented.
 See [progress and next gates](spec/progress.md).
 
+Raw memory and unsafe support, a safe-only guest/trusted-native-library boundary,
+and a shared native/VM ABI are explicit prerequisites. Collections must become
+source implementations, not wrappers around specialized VM algorithms. See the
+[decision](../docs/unsafe-memory-and-native-abi.md) and
+[U0–U6 gates](spec/unsafe-memory-progress.md). These are requirements, not yet
+certified source or native capabilities.
+
 Development proceeds through the specification's executable M0–M10 gates. An
 executed substrate test is not language parity or a self-hosting claim. All old
 self-host coverage is historical. `spec/contracts.tsv` inventories the frozen

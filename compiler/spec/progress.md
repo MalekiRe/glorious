@@ -4,6 +4,15 @@ No milestone or compatibility contract is considered passed just because its
 types exist. The executable source tests currently exercise kernel components
 and initial source products, not a complete compilation pipeline.
 
+## Current prerequisite
+
+The September 5 direction adds [unsafe memory and shared native/VM library
+execution](unsafe-memory-progress.md) as prerequisite U0–U6 work. The library
+owns collection/UTF-8/hashing algorithms over a small raw-memory layer. Safe-only
+guests may use safe APIs of trusted native implementations containing unsafe;
+shared-layout interop targets zero marshalling. Existing tests do not certify
+these new capabilities, and recording the decision closes no compiler milestone.
+
 ## Present
 
 - Fresh source closure with no old self-host imports; canonical standard
