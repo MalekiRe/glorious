@@ -2888,6 +2888,11 @@ impl ElaboratedInterface {
         arguments: &[GenericArgument],
     ) -> Type {
         let field = substitute_alias_generic_identity(field.clone(), arguments);
+        // Most layout fields contain no type/const projection. Do not clone
+        // the entire interface into a solver just to rebuild the same type.
+        if crate::trait_solver::type_projection_normalization_is_identity(&field) {
+            return field;
+        }
         // Symbolic projections stay symbolic, while a field that became
         // concrete through this mixed-kind nominal application is reduced
         // before Core/MIR can consume the layout.

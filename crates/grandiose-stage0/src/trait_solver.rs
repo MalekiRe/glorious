@@ -349,6 +349,32 @@ enum SupertraitLookup<T> {
     Ambiguous,
 }
 
+/// True only when `normalize_type` would return this exact type without
+/// selecting evidence. Keep this walk aligned with that normalizer: callable
+/// effect rows and static-data elements are intentionally opaque there.
+pub(crate) fn type_projection_normalization_is_identity(value: &Type) -> bool {
+    match value {
+        Type::Projection { .. } => false,
+        Type::Nominal { arguments, .. } => arguments.iter().all(|argument| match argument {
+            GenericArgument::Type(value) => type_projection_normalization_is_identity(value),
+            GenericArgument::ConstProjection { .. } => false,
+            GenericArgument::EffectRow(_) | GenericArgument::Lifetime(_)
+            | GenericArgument::ConstU32(_) | GenericArgument::ConstU32Expr(_)
+            | GenericArgument::ConstQuantity(_) | GenericArgument::ConstGeneric { .. }
+            | GenericArgument::ConstInfer { .. } => true,
+        }),
+        Type::Tuple(values) => values.iter().all(type_projection_normalization_is_identity),
+        Type::Array(value) | Type::Reference { referent: value, .. } =>
+            type_projection_normalization_is_identity(value),
+        Type::Callable { parameters, result, .. } =>
+            parameters.iter().all(type_projection_normalization_is_identity)
+                && type_projection_normalization_is_identity(result),
+        Type::Unit | Type::Never | Type::Scalar(_) | Type::StaticData { .. }
+        | Type::ConstU32(_) | Type::ConstQuantity(_) | Type::ConstGeneric { .. }
+        | Type::Generic(_) | Type::Infer(_) | Type::Error => true,
+    }
+}
+
 fn trait_declares_associated_item(
     trait_header: &ElaboratedTrait,
     name: &str,
@@ -3764,6 +3790,66 @@ fn generic_argument_is_concrete_in_hrtb_scope(
 mod tests {
     use super::*;
     use crate::ScalarType;
+
+    #[test]
+    fn projection_free_type_fast_path_matches_normalization_under_every_container() {
+        let signatures = ElaboratedInterface::default();
+        let definition = DefKey(Digest::of_bytes(b"normalization-container"));
+        let leaves = [Type::Unit, Type::Never, Type::Scalar(ScalarType::I64), Type::Generic(0),
+            Type::Error, Type::Infer(crate::types::InferVar(0)), Type::ConstU32(7), Type::ConstQuantity(crate::Quantity::AFFINE),
+            Type::ConstGeneric { index: 1, kind: crate::ConstKind::U32 }];
+        let mut solver = TraitSolver::new(&signatures);
+        for leaf in leaves {
+            let variants = [leaf.clone(), Type::Tuple(vec![leaf.clone()]), Type::Array(Box::new(leaf.clone())),
+                Type::Reference { mutability: crate::Mutability::Unique, lifetime: crate::Lifetime::Generic(0), referent: Box::new(leaf.clone()) },
+                Type::Callable { lifetime_binders: 1, parameters: vec![leaf.clone()], result: Box::new(leaf.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::ONCE },
+                Type::StaticData { element: Box::new(leaf.clone()), tag: 7, alignment: 8 },
+                Type::Nominal { definition, arguments: vec![GenericArgument::Type(leaf), GenericArgument::Lifetime(crate::Lifetime::Static),
+                    GenericArgument::ConstU32(2), GenericArgument::ConstQuantity(crate::Quantity::AFFINE), GenericArgument::EffectRow(EffectRow::empty()),
+                    GenericArgument::ConstGeneric { index: 0, kind: crate::ConstKind::U32 },
+                    GenericArgument::ConstInfer { variable: crate::types::ConstInferVar(0), kind: crate::ConstKind::U32 },
+                    GenericArgument::ConstU32Expr(crate::StructuralU32Expr::Add(Box::new(crate::StructuralU32Expr::Literal(1)), Box::new(crate::StructuralU32Expr::Literal(2))))] }];
+            for value in variants {
+                assert!(type_projection_normalization_is_identity(&value), "{value:?}");
+                assert_eq!(solver.normalize_type(value.clone()).unwrap(), value);
+                assert_eq!(solver.steps, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn nested_type_and_const_projections_never_take_the_identity_fast_path() {
+        let definition = DefKey(Digest::of_bytes(b"missing-projection-evidence"));
+        let projection = Type::Projection { subject: Box::new(Type::Scalar(ScalarType::I64)), trait_definition: definition,
+            trait_arguments: vec![], name: "Item".into(), item_generic_kinds: vec![], item_arguments: vec![] };
+        let constant = Type::Nominal { definition, arguments: vec![GenericArgument::ConstProjection {
+            subject: Box::new(Type::Scalar(ScalarType::I64)), trait_definition: definition, trait_arguments: vec![], name: "Width".into(), kind: crate::ConstKind::U32,
+        }] };
+        for nested in [projection.clone(), constant] {
+            let variants = [nested.clone(), Type::Tuple(vec![nested.clone()]), Type::Array(Box::new(nested.clone())),
+                Type::Reference { mutability: crate::Mutability::Shared, lifetime: crate::Lifetime::Static, referent: Box::new(nested.clone()) },
+                Type::Callable { lifetime_binders: 0, parameters: vec![nested.clone()], result: Box::new(Type::Unit), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
+                Type::Callable { lifetime_binders: 0, parameters: vec![], result: Box::new(nested.clone()), effects: EffectRow::empty(), invocation: crate::Quantity::UNRESTRICTED },
+                Type::Nominal { definition, arguments: vec![GenericArgument::Type(nested)] }];
+            for value in variants {
+                assert!(!type_projection_normalization_is_identity(&value), "{value:?}");
+                assert!(TraitSolver::new(&ElaboratedInterface::default()).normalize_type(value).is_err());
+            }
+        }
+        // The type normalizer does not recurse into these carriers. Preserve
+        // that boundary, rather than silently broadening type normalization.
+        let row = EffectRow { effects: Default::default(), projections: vec![crate::EffectRowProjection {
+            subject: Box::new(projection.clone()), trait_definition: definition, trait_arguments: vec![],
+            name: "Effects".into(), item_generic_kinds: vec![], item_arguments: vec![],
+        }], tail: None };
+        let opaque = [Type::StaticData { element: Box::new(projection), tag: 1, alignment: 1 },
+            Type::Callable { lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit), effects: row.clone(), invocation: crate::Quantity::UNRESTRICTED },
+            Type::Nominal { definition, arguments: vec![GenericArgument::EffectRow(row)] }];
+        for value in opaque {
+            assert!(type_projection_normalization_is_identity(&value));
+            assert_eq!(TraitSolver::new(&ElaboratedInterface::default()).normalize_type(value.clone()).unwrap(), value);
+        }
+    }
 
     #[test]
     fn fresh_query_shares_only_immutable_state_and_restores_its_own_budget() {
