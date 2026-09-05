@@ -92,6 +92,24 @@ fn cli_emits_verifies_and_runs_verified_vm_programs() {
 }
 
 #[test]
+fn cli_source_run_trust_does_not_grant_unsafe_execution_to_serialized_files() {
+    let directory = temporary_directory();
+    let source = directory.join("unsafe.glorious");
+    let artifact = directory.join("unsafe.g0vp");
+    fs::write(&source, "unsafe fn answer() -> i64 { 42 } pub fn main() -> i64 { unsafe { answer() } }").unwrap();
+    let compiler = env!("CARGO_BIN_EXE_grc-stage0");
+    let run = Command::new(compiler).args(["run", source.to_str().unwrap()]).output().unwrap();
+    assert!(run.status.success(), "{}", String::from_utf8_lossy(&run.stderr));
+    assert_eq!(String::from_utf8(run.stdout).unwrap(), "42\n");
+    let build = Command::new(compiler).args(["emit-vm", source.to_str().unwrap(), artifact.to_str().unwrap()]).output().unwrap();
+    assert!(build.status.success(), "{}", String::from_utf8_lossy(&build.stderr));
+    let run_file = Command::new(compiler).args(["run-vm", artifact.to_str().unwrap()]).output().unwrap();
+    assert!(!run_file.status.success());
+    assert!(String::from_utf8_lossy(&run_file.stderr).contains("UnsafeExecutionRequiresUnsafeApi"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn cli_run_vm_separates_guest_arguments_from_launcher_options() {
     let directory = temporary_directory();
     let source = directory.join("guest-argv.glorious");

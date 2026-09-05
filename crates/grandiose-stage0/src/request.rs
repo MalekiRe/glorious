@@ -83,12 +83,14 @@ pub struct CompilerBuildIdentity {
 /// Language/interface generation two adds raw-pointer and unsafe contracts.
 /// Cache generation five and verifier generation seven retain explicit unsafe
 /// scopes and callable/implementation requirements through Core and MIR.
+/// Cache six, bytecode 49 and verifier eight retain raw-pointer types,
+/// function safety, nominal layout kind and general memory operations in the VM.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 2;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 2;
-pub const STAGE0_CACHE_GENERATION: u32 = 5;
-pub const STAGE0_BYTECODE_GENERATION: u32 = 48;
-pub const STAGE0_VERIFIER_GENERATION: u32 = 7;
+pub const STAGE0_CACHE_GENERATION: u32 = 6;
+pub const STAGE0_BYTECODE_GENERATION: u32 = 49;
+pub const STAGE0_VERIFIER_GENERATION: u32 = 8;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

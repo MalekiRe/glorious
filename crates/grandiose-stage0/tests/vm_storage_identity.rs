@@ -10,6 +10,8 @@ fn swapped_storage_dead_bindings() -> CandidateVmArtifact {
         schema: STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-storage-binding-swap")),
             captures: 0,

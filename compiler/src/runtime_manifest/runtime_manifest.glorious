@@ -18,6 +18,34 @@ pub enum FloatPrimitive {
     Convert { from: ScalarType, to: ScalarType, checked: Bool },
     ToBits { width: FloatWidth }, FromBits { width: FloatWidth },
 }
+pub enum MemoryPrimitive {
+    SizeOf, AlignOf, Null, Dangling, Allocate, Reallocate, Deallocate, IsNull,
+    Offset, OffsetConst, Cast, AsConst, Read, Write, Copy, CopyNonoverlapping,
+}
+fn memory_ordinal(value: MemoryPrimitive) -> usize {
+    handle value {
+        MemoryPrimitive::SizeOf => 0, MemoryPrimitive::AlignOf => 1,
+        MemoryPrimitive::Null => 2, MemoryPrimitive::Dangling => 3,
+        MemoryPrimitive::Allocate => 4, MemoryPrimitive::Reallocate => 5,
+        MemoryPrimitive::Deallocate => 6, MemoryPrimitive::IsNull => 7,
+        MemoryPrimitive::Offset => 8, MemoryPrimitive::OffsetConst => 9,
+        MemoryPrimitive::Cast => 10, MemoryPrimitive::AsConst => 11,
+        MemoryPrimitive::Read => 12, MemoryPrimitive::Write => 13,
+        MemoryPrimitive::Copy => 14, MemoryPrimitive::CopyNonoverlapping => 15,
+    }
+}
+fn memory_name(value: MemoryPrimitive) -> Str<'static> {
+    handle value {
+        MemoryPrimitive::SizeOf => "memory-size-of", MemoryPrimitive::AlignOf => "memory-align-of",
+        MemoryPrimitive::Null => "memory-null", MemoryPrimitive::Dangling => "memory-dangling",
+        MemoryPrimitive::Allocate => "memory-allocate", MemoryPrimitive::Reallocate => "memory-reallocate",
+        MemoryPrimitive::Deallocate => "memory-deallocate", MemoryPrimitive::IsNull => "memory-is-null",
+        MemoryPrimitive::Offset => "memory-offset", MemoryPrimitive::OffsetConst => "memory-offset-const",
+        MemoryPrimitive::Cast => "memory-cast", MemoryPrimitive::AsConst => "memory-as-const",
+        MemoryPrimitive::Read => "memory-read", MemoryPrimitive::Write => "memory-write",
+        MemoryPrimitive::Copy => "memory-copy", MemoryPrimitive::CopyNonoverlapping => "memory-copy-nonoverlapping",
+    }
+}
 pub enum PrimitiveRole {
     Abort,
     Float(FloatPrimitive),
@@ -125,6 +153,7 @@ pub enum PrimitiveRole {
     StaticGetShared,
     StaticAsArray,
     StaticRawAsArray,
+    Memory(MemoryPrimitive),
 }
 pub struct PrimitiveSelector { role: PrimitiveRole, module_path: String, name: String }
 pub struct HostImportSelector { module_path: String, name: String, capability: String, symbol: String }
@@ -268,6 +297,7 @@ fn role_order(value: PrimitiveRole) -> usize {
         PrimitiveRole::StaticGetShared => 103,
         PrimitiveRole::StaticAsArray => 104,
         PrimitiveRole::StaticRawAsArray => 105,
+        PrimitiveRole::Memory(_) => 106,
     }
 }
 pub fn compare(left: &PrimitiveRole, right: &PrimitiveRole) -> Ordering {
@@ -275,6 +305,7 @@ pub fn compare(left: &PrimitiveRole, right: &PrimitiveRole) -> Ordering {
     handle Ord::compare(&a, &b) {
         Ordering::Equal => handle (*left, *right) {
             (PrimitiveRole::Float(a), PrimitiveRole::Float(b)) => { let a_key = float_order(a); let b_key = float_order(b); Ord::compare(&a_key, &b_key) },
+            (PrimitiveRole::Memory(a), PrimitiveRole::Memory(b)) => { let a_key = memory_ordinal(a); let b_key = memory_ordinal(b); Ord::compare(&a_key, &b_key) },
             _ => Ordering::Equal,
         },
         result => result,
@@ -287,7 +318,11 @@ pub impl Eq for PrimitiveRole {
 pub impl Hash for PrimitiveRole {
     hash(value: &PrimitiveRole, state: &mut Hasher) -> () {
         Hasher::write_usize(&mut *state, role_order(*value));
-        handle *value { PrimitiveRole::Float(primitive) => Hasher::write_usize(state, float_order(primitive)), _ => () }
+        handle *value {
+            PrimitiveRole::Float(primitive) => Hasher::write_usize(state, float_order(primitive)),
+            PrimitiveRole::Memory(primitive) => Hasher::write_usize(state, memory_ordinal(primitive)),
+            _ => (),
+        }
     }
 }
 fn float_width(value: ScalarType) -> Option<usize> {
@@ -344,6 +379,7 @@ fn float_ordinal(value: FloatPrimitive) -> Option<usize> {
 }
 pub fn stable_tag(value: PrimitiveRole) -> Option<u8> {
     handle value {
+        PrimitiveRole::Memory(primitive) => Result::Ok(as<u8>(183 + memory_ordinal(primitive))),
         PrimitiveRole::Float(primitive) => handle float_ordinal(primitive) {
             Result::Err(_) => None, Result::Ok(ordinal) => Result::Ok(as<u8>(69 + ordinal)),
         },
@@ -459,6 +495,7 @@ pub fn validate_role(value: PrimitiveRole) -> Result<(), ManifestError> {
 }
 fn static_name(value: PrimitiveRole) -> Str<'static> {
     handle value {
+        PrimitiveRole::Memory(primitive) => memory_name(primitive),
         PrimitiveRole::Float(_) => "",
         PrimitiveRole::Abort => "abort",
         PrimitiveRole::BranchBool => "branch-bool",

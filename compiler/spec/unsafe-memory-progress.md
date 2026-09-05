@@ -18,15 +18,15 @@ alone is not proof that unsafe code is sound.
 | Gate | Required result | Current state |
 |---|---|---|
 | U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
-| U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Initial Rust substrate passes native and Miri tests; guest budget integration remains |
-| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Pointer types and lexical/callable/trait contracts implemented and tested; raw operations remain |
-| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Missing; untrusted-bytecode admission and native-export certification deferred |
+| U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Rust substrate plus Stage0 per-run total/per-block memory accounting implemented; resident cleanup remains source-owned |
+| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Types/contracts and 16 bodyless machine leaves implemented; raw-to-safe reference construction remains |
+| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Initial Stage0 schema 94 executes general raw memory for scalar/pointer/product/enum layouts; independent G1 extension remains; untrusted-bytecode admission deferred |
 | U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
 | U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Missing |
 | U6 | Execute strings/UTF-8/hashing and remaining collection algorithms as source bytecode, replacing specialized VM algorithms | Missing |
 
-U1 alone does not expose pointers to Glorious programs. U2 without U3 cannot
-authorize unsafe bytecode or claim a safe-only sandbox. U4 must cross the actual
+The initial Stage0 U3 path below exposes real raw storage to compiled source;
+it does not claim a safe-only sandbox or the complete shared ABI. U4 must cross the actual
 runtime/native boundary, not only call a Rust helper with a pointer. Stage0
 programs and independent G1 artifacts have distinct contracts; implementation
 in one does not certify the other.
@@ -196,3 +196,60 @@ evidence: `/tmp/grandiose-unsafe-contracts-FgyrYG/`. Source-lock SHA-256:
 `309f8acd7a563e904b46ea16f7a884d82aa4e09aa0b6ce72389dc46b0044694b`.
 U2 remains partial until raw operations are implemented; U3–U6 and all 11,455
 frozen public compiler contracts remain open.
+
+## U3: initial locally compiled raw-memory execution
+
+Stage0 schema 94 now carries raw-pointer types, unsafe callable types, function
+safety and execution requirements, and the record-versus-enum layout distinction.
+It adds one structurally typed memory instruction family (opcode 194) with 16
+finite machine operations. Rust and source build identities advance cache to six,
+bytecode to 49 and verifier to eight; language/interface remain two. Decoders
+reject older Stage0 schemas before reading the changed payload. Released G1
+encodings, feature bits, and independent verifier are unchanged.
+
+The runtime manifest binds bodyless declarations (`unsafe fn read<T>(p: *const T)
+-> T;`) to size/alignment, null/dangling, allocate/resize/release, pointer offset/
+cast/const conversion, typed read/write, and overlapping/nonoverlapping copy.
+All pointer operations require explicit unsafe blocks, even inside unsafe
+functions. Missing declaration bindings are compilation errors. All canonical
+standard-library machine leaves now use declarations without bogus unit bodies.
+The Rust/source primitive inventories agree on unique tags 183–198; legacy tags
+and their relative ordering are unchanged.
+
+Raw storage uses actual host pointers and retains allocation provenance, including
+when a pointer is itself stored in memory. Concrete scalar, pointer, unit, tuple,
+record and enum layouts use natural host alignment on 64-bit targets. Enums have
+a u32 discriminant followed by an aligned payload union; records retain field
+order and trailing padding. Typed stores move VM residents into native storage;
+typed loads reconstruct private register values, reading initialized fields rather
+than padding. Bulk movement preserves padding as bytes. This is not reconstruction
+at a VM/native call boundary, and not yet shared native layout for every VM value:
+references, callables, static-data handles and legacy text/bytes/arrays still lack
+the full address/call ABI and are rejected by these layout operations.
+
+Each execution owns its allocation registry and enforces total/per-block native
+byte limits (defaults 16 MiB/1 MiB). Zero-byte allocations retain alignment without
+owning bytes; source still owes all logical resident uses. A rejected resize
+preserves its registered owner and initialized prefix. Releasing an allocation
+or ending execution frees bytes, not resident drop glue or host ownership.
+
+Safe Rust execution entry points do not permit raw operations. Explicit unsafe
+per-call APIs require the embedding caller to uphold the unsafe source contracts
+for that run; an artifact field cannot grant this permission. CLI `run` uses this
+path for its trusted local source compilation, while `run-vm` continues to reject
+unsafe execution from serialized files. There is no new two-phase admission API.
+
+Nine integration tests execute bodyless bindings, generic movement of a linear
+padded record, exact field offsets, one/multiple-variant enums, zero-sized linear
+residents, overlapping/disjoint movement, resize, and pointer-resident provenance.
+The shared allocator now has 13 strict-provenance Miri tests, including field
+layout composition. Three Stage0 allocation-registry unit tests cover budgets,
+rollback, over-alignment and zero-byte transitions. Full U4 interop, source Vec,
+resident cleanup/cancellation, and U5–U6 remain open; these primitive tests do not
+certify those gates.
+
+Validation: the normal workspace/all-target suite passes with no failures,
+including all 48 source-compiler entries (69.78 seconds). The 13 allocator tests
+completed under strict-provenance Miri. The full source/interpreter Miri run was
+stopped at the user's request to prioritize implementation; it is not claimed
+as completed evidence. Further Miri runs are deferred unless needed for a bug.

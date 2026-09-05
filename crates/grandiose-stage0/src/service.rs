@@ -1097,6 +1097,7 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
                     from, to, checked,
                 })
             }))
+            .chain(crate::MemoryPrimitive::ALL.into_iter().map(PrimitiveRole::Memory))
             .map(|role| PrimitiveSelector {
                 role,
                 module_path: "crate".into(),
@@ -1962,17 +1963,19 @@ impl StageZeroCompiler {
                         .iter()
                         .any(|role| manifest.primitives.get(role) == Some(&declaration.key))
                         || manifest.primitives.iter().any(|(role, definition)| {
-                            role.is_float() && definition == &declaration.key
+                            (role.is_float() || matches!(role, PrimitiveRole::Memory(_)))
+                                && definition == &declaration.key
                         })
                 }) {
                     package_sessions
                         .get(&node.key.package)
                         .expect("every module graph has a request-local package session")
                         .checkpoint(1)?;
-                    // This exact manifest-bound runtime leaf has an opaque
-                    // source body. Do not parse or elaborate it as `Unit`:
-                    // only a bound identity may bypass ordinary source-body
-                    // semantics, and calls lower to the sealed VM opcode.
+                    // This exact manifest-bound declaration is implemented by
+                    // the runtime. Canonical source has no body. Historical
+                    // seed placeholders remain compatible, but are not parsed
+                    // as Glorious implementations. An unbound declaration
+                    // reaches the missing-body diagnostic below.
                     continue;
                 }
                 let Some(body_range) = declaration.body else {
@@ -3517,6 +3520,9 @@ fn specialize_mir_local_types(function: &mut MirFunction, arguments: &[GenericAr
     for block in &mut function.blocks {
         for instruction in &mut block.instructions {
             match instruction {
+                crate::MirInstruction::MemoryIntrinsic { types, .. } => {
+                    *types = types.iter().map(|ty| specialize_type(ty, arguments)).collect();
+                }
                 crate::MirInstruction::MakeArray { element_type, .. }
                 | crate::MirInstruction::ProjectArray { element_type, .. }
                 | crate::MirInstruction::ArrayNew { element_type, .. }
@@ -3667,6 +3673,9 @@ fn register_specialized_nominal_copy_descriptors(
         .iter()
         .map(|local| local.ty.clone())
         .chain(std::iter::once(function.result.clone()))
+        .chain(function.blocks.iter().flat_map(|block| &block.instructions).flat_map(|instruction| {
+            match instruction { MirInstruction::MemoryIntrinsic { types, .. } => types.as_slice(), _ => &[] }
+        }).cloned())
         .collect::<Vec<_>>();
     let mut building = vec![];
     for root in roots {
@@ -3772,6 +3781,8 @@ fn register_specialized_nominal_copy_type(
                 .nominal_copy_descriptors
                 .push(crate::MirNominalCopyDescriptor {
                     definition: *definition,
+                    is_enum: matches!(signatures.definitions.get(definition),
+                        Some(ElaboratedHeader::Nominal { layout: crate::signature::ElaboratedNominalLayout::Enum(_), .. })),
                     arguments: arguments.clone(),
                     variants,
                 });

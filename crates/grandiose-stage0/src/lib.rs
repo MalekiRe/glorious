@@ -19,6 +19,7 @@ pub mod header;
 pub mod identity;
 pub mod instance;
 pub mod interface;
+pub mod memory_primitive;
 pub mod mir;
 pub mod mir_storage;
 pub mod module_graph;
@@ -87,6 +88,7 @@ pub use interface::{
     Definition, DefinitionNamespace, InterfaceCache, InterfaceCacheStats, InterfaceDiagnostic,
     InterfaceSet, PackageInterface,
 };
+pub use memory_primitive::MemoryPrimitive;
 pub use mir::{
     MirAnalysisInvalidation, MirBlock, MirBlockId, MirCapture, MirCaptureEnvironment,
     MirCleanupAction, MirCleanupDropFlag, MirCleanupPlan, MirContinuationPolicy,

@@ -18,6 +18,8 @@ use std::collections::BTreeMap;
 fn authoring_tuple_program(second: VmType, instruction: VmInstruction) -> grandiose_stage0::VerifiedVmProgram {
     let definition = DefKey(Digest::of_bytes(b"authoring-tuple-results"));
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![], definition, captures: 0, parameters: 0,
         registers: vec![VmType::I64, second.clone(), VmType::Tuple(vec![VmType::I64, second])],
         instructions: vec![VmInstruction::ConstI64 { dst: 0, value: 12 }, instruction,
@@ -83,6 +85,8 @@ impl VmHost for RecordingVmHost {
 #[test]
 fn text_byte_len_is_a_capability_free_verified_vm_primitive() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"text-byte-len-vm")),
         captures: 0,
@@ -118,6 +122,8 @@ fn text_byte_len_is_a_capability_free_verified_vm_primitive() {
 #[test]
 fn verifier_rejects_text_byte_len_with_forged_operand_or_result_abi() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-text-byte-len-vm")),
         captures: 0,
@@ -148,6 +154,8 @@ fn verifier_rejects_text_byte_len_with_forged_operand_or_result_abi() {
 #[test]
 fn verifier_rejects_forged_text_family_opcode_abis() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-text-family-vm")),
         captures: 0,
@@ -189,6 +197,8 @@ fn verifier_rejects_forged_text_family_opcode_abis() {
 #[test]
 fn verifier_rejects_forged_checked_char_opcode_abi() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-char-family-vm")),
         captures: 0,
@@ -235,6 +245,8 @@ fn verifier_rejects_forged_checked_char_opcode_abi() {
 #[test]
 fn verifier_rejects_forged_bytes_family_opcode_abis() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-bytes-family-vm")),
         captures: 0,
@@ -272,6 +284,8 @@ fn verifier_rejects_forged_bytes_family_opcode_abis() {
 #[test]
 fn manifest_bound_u32_runtime_family_executes_wrapping_checked_and_conversion_abis() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"u32-runtime-family-vm")),
         captures: 0,
@@ -323,6 +337,8 @@ fn manifest_bound_u32_runtime_family_executes_wrapping_checked_and_conversion_ab
 #[test]
 fn verifier_rejects_forged_u32_runtime_opcode_abi() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"forged-u32-runtime-vm")),
         captures: 0,
@@ -361,6 +377,8 @@ fn verifier_rejects_forged_u32_runtime_opcode_abi() {
 #[test]
 fn i64_wrapping_add_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-wrapping-add-vm")),
         captures: 0,
@@ -413,6 +431,8 @@ fn i64_wrapping_add_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn i64_wrapping_sub_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-wrapping-sub-vm")),
         captures: 0,
@@ -465,6 +485,8 @@ fn i64_wrapping_sub_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn i64_wrapping_mul_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-wrapping-mul-vm")),
         captures: 0,
@@ -517,6 +539,8 @@ fn i64_wrapping_mul_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn i64_equality_to_u32_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-equality-u32-vm")),
         captures: 0,
@@ -565,6 +589,8 @@ fn i64_equality_to_u32_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn i64_less_to_u32_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-less-u32-vm")),
         captures: 0,
@@ -613,6 +639,8 @@ fn i64_less_to_u32_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn checked_i64_to_usize_rejects_negative_and_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-usize-checked")),
         captures: 0,
@@ -653,6 +681,8 @@ fn checked_i64_to_usize_rejects_negative_and_type_confusion() {
 #[test]
 fn checked_i64_to_u8_rejects_negative_out_of_range_and_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-u8-checked")),
         captures: 0,
@@ -701,6 +731,8 @@ fn checked_i64_to_u8_rejects_negative_out_of_range_and_type_confusion() {
 #[test]
 fn checked_i64_to_u16_rejects_negative_out_of_range_and_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-u16-checked")),
         captures: 0,
@@ -752,6 +784,8 @@ fn checked_i64_to_u16_rejects_negative_out_of_range_and_type_confusion() {
 #[test]
 fn checked_i64_to_i16_rejects_out_of_range_and_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-i16-checked")),
         captures: 0,
@@ -795,6 +829,8 @@ fn checked_i64_to_i16_rejects_out_of_range_and_type_confusion() {
 #[test]
 fn checked_i64_to_i32_rejects_out_of_range_and_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-i32-checked")),
         captures: 0,
@@ -838,6 +874,8 @@ fn checked_i64_to_i32_rejects_out_of_range_and_type_confusion() {
 #[test]
 fn checked_i64_to_u32_rejects_negative_out_of_range_and_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-u32-checked")),
         captures: 0,
@@ -878,6 +916,8 @@ fn checked_i64_to_u32_rejects_negative_out_of_range_and_type_confusion() {
 #[test]
 fn i64_shr_u32_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-shr-u32-vm")),
         captures: 0,
@@ -930,6 +970,8 @@ fn i64_shr_u32_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn i64_bit_xor_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-bit-xor-vm")),
         captures: 0,
@@ -978,6 +1020,8 @@ fn i64_bit_xor_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn i64_bit_and_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-bit-and-vm")),
         captures: 0,
@@ -1026,6 +1070,8 @@ fn i64_bit_and_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn i64_bit_or_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-bit-or-vm")),
         captures: 0,
@@ -1075,6 +1121,8 @@ fn i64_bit_or_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn i64_bit_not_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-bit-not-vm")),
         captures: 0,
@@ -1119,6 +1167,8 @@ fn i64_bit_not_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn i64_shift_left_rejects_a_width_count_and_rejects_count_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-shl-vm")),
         captures: 0,
@@ -1166,6 +1216,8 @@ fn i64_shift_left_rejects_a_width_count_and_rejects_count_type_confusion() {
 #[test]
 fn i64_to_u32_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-to-u32-wrapping-vm")),
         captures: 0,
@@ -1210,6 +1262,8 @@ fn i64_to_u32_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
 #[test]
 fn i64_to_usize_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-to-usize-wrapping-vm")),
         captures: 0,
@@ -1254,6 +1308,8 @@ fn i64_to_usize_wrapping_round_trips_and_verifier_rejects_input_type_confusion()
 #[test]
 fn i64_to_u8_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-to-u8-wrapping-vm")),
         captures: 0,
@@ -1298,6 +1354,8 @@ fn i64_to_u8_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
 #[test]
 fn i64_to_u16_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-to-u16-wrapping-vm")),
         captures: 0,
@@ -1342,6 +1400,8 @@ fn i64_to_u16_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
 #[test]
 fn i64_to_i16_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-to-i16-wrapping-vm")),
         captures: 0,
@@ -1388,6 +1448,8 @@ fn i64_to_i16_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
 #[test]
 fn i64_to_i32_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-to-i32-wrapping-vm")),
         captures: 0,
@@ -1434,6 +1496,8 @@ fn i64_to_i32_wrapping_round_trips_and_verifier_rejects_input_type_confusion() {
 #[test]
 fn i64_greater_to_u32_round_trips_and_verifier_rejects_type_confusion() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"i64-greater-u32-vm")),
         captures: 0,
@@ -1483,6 +1547,8 @@ fn i64_greater_to_u32_round_trips_and_verifier_rejects_type_confusion() {
 #[test]
 fn checked_u32_shifts_and_division_fail_deterministically() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"checked-u32-runtime-failure-vm")),
         captures: 0,
@@ -1626,6 +1692,8 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
     use grandiose_stage0::StructuralU32Expr;
 
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-forged-symbolic-const")),
         captures: 0,
@@ -1665,6 +1733,8 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
         Box::new(StructuralU32Expr::Literal(0)),
     );
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-forged-invalid-symbolic-const")),
         captures: 0,
@@ -1697,6 +1767,8 @@ fn vm_rejects_forged_noncanonical_structural_const_identity() {
     ));
 
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"vm-top-level-const-register")),
         captures: 0,
@@ -1823,6 +1895,8 @@ fn vm_rejects_higher_ranked_lifetime_leaks_in_nested_effect_identity_metadata() 
         tail: None,
     })];
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -1877,6 +1951,8 @@ fn vm_rejects_higher_ranked_lifetime_leaks_in_nested_effect_identity_metadata() 
 fn program_host_capability_declarations_are_canonical_exact_and_fingerprinted() {
     let entry = DefKey(Digest::of_bytes(b"host-capability-entry"));
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -1961,6 +2037,8 @@ fn program_host_capability_declarations_are_canonical_exact_and_fingerprinted() 
 fn program_host_execution_requires_and_uses_an_explicit_adapter() {
     let entry = DefKey(Digest::of_bytes(b"host-execution-entry"));
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -2007,6 +2085,8 @@ fn program_host_capabilities_exclude_unreachable_emitted_helpers() {
     let entry = DefKey(Digest::of_bytes(b"reachable-host-capability-entry"));
     let unused = DefKey(Digest::of_bytes(b"unreachable-host-capability-helper"));
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -2018,6 +2098,8 @@ fn program_host_capabilities_exclude_unreachable_emitted_helpers() {
         ],
     };
     let unused_host_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: unused,
         captures: 0,
@@ -2073,7 +2155,10 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
             (
                 entry,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        is_enum: false,
                         definition: nominal,
                         arguments: vec![],
                         variants: vec![vec![VmType::I64]],
@@ -2102,7 +2187,10 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
             (
                 callee,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        is_enum: false,
                         definition: nominal,
                         arguments: vec![],
                         variants: vec![vec![VmType::Bool]],
@@ -2155,6 +2243,8 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
             (
                 entry,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: entry,
                     captures: 0,
@@ -2181,6 +2271,8 @@ fn verifier_rejects_cross_function_nominal_layout_and_manifest_order_conflicts()
             (
                 helper,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: helper,
                     captures: 0,
@@ -2225,6 +2317,7 @@ fn verifier_rejects_reordered_nominal_descriptor_sets_before_cache_or_execution(
     let first = DefKey(Digest::of_bytes(b"reordered-nominal-descriptor-first"));
     let second = DefKey(Digest::of_bytes(b"reordered-nominal-descriptor-second"));
     let descriptor = |definition| VmNominalCopyDescriptor {
+        is_enum: false,
         definition,
         arguments: vec![],
         variants: vec![vec![]],
@@ -2236,6 +2329,8 @@ fn verifier_rejects_reordered_nominal_descriptor_sets_before_cache_or_execution(
     descriptors.sort_by_key(|descriptor| descriptor.definition);
     descriptors.reverse();
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: descriptors,
         definition: entry,
         captures: 0,
@@ -2287,6 +2382,8 @@ fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
             (
                 caller,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: caller,
                     captures: 0,
@@ -2318,6 +2415,8 @@ fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
             (
                 callee,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: callee,
                     captures: 0,
@@ -2372,6 +2471,8 @@ fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
             (
                 caller,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: caller,
                     captures: 0,
@@ -2380,6 +2481,7 @@ fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
                         VmType::I64,
                         VmType::I64,
                         VmType::Callable {
+                            safety: grandiose_stage0::Safety::Safe,
                             parameters: vec![],
                             result: Box::new(VmType::I64),
                             effects: Box::<VmEffectRow>::default(),
@@ -2418,6 +2520,8 @@ fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
             (
                 payload_callee,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: payload_callee,
                     captures: 0,
@@ -2462,6 +2566,8 @@ fn verifier_rejects_cross_function_effect_abi_confusion_before_resumption() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: Some(Digest::of_bytes(b"terminal-policy-manifest")),
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"non-unit-terminal-handler")),
             captures: 0,
@@ -2512,6 +2618,8 @@ fn verifier_rejects_unspecialized_generic_effect_abis_at_direct_and_callable_bou
     // the global ABI table treated Ask<T> and Ask<i64> as separate keys, then
     // runtime handler lookup failed to find the caller's Ask<i64> frame.
     let generic_callee = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: callee,
         captures: 0,
@@ -2529,6 +2637,8 @@ fn verifier_rejects_unspecialized_generic_effect_abis_at_direct_and_callable_bou
         ],
     };
     let direct_caller = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: caller,
         captures: 0,
@@ -2579,6 +2689,8 @@ fn verifier_rejects_unspecialized_generic_effect_abis_at_direct_and_callable_bou
     }
 
     let indirect_caller = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: caller,
         captures: 0,
@@ -2586,6 +2698,7 @@ fn verifier_rejects_unspecialized_generic_effect_abis_at_direct_and_callable_bou
         registers: vec![
             VmType::I64,
             VmType::Callable {
+                safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![VmType::I64],
                 result: Box::new(VmType::I64),
                 effects: Box::<VmEffectRow>::default(),
@@ -2658,6 +2771,8 @@ fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
             (
                 caller,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: caller,
                     captures: 0,
@@ -2694,6 +2809,8 @@ fn program_handler_resumes_a_performance_from_an_ordinary_callee_frame() {
             (
                 callee,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: callee,
                     captures: 0,
@@ -2751,6 +2868,8 @@ fn program_forwards_a_nested_callee_performance_to_an_ancestor_handler() {
             (
                 outer,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: outer,
                     captures: 0,
@@ -2788,6 +2907,8 @@ fn program_forwards_a_nested_callee_performance_to_an_ancestor_handler() {
             (
                 middle,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: middle,
                     captures: 0,
@@ -2818,6 +2939,8 @@ fn program_forwards_a_nested_callee_performance_to_an_ancestor_handler() {
             (
                 leaf,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: leaf,
                     captures: 0,
@@ -2857,6 +2980,8 @@ fn program_replay_resumption_returns_after_the_original_caller_path_completes() 
             (
                 caller,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: caller,
                     captures: 0,
@@ -2907,6 +3032,8 @@ fn program_replay_resumption_returns_after_the_original_caller_path_completes() 
             (
                 callee,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: callee,
                     captures: 0,
@@ -2943,6 +3070,8 @@ fn verifier_rejects_an_unrestored_handler_across_a_replay_return() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"replay-return-frame-proof")),
             captures: 0,
@@ -3071,6 +3200,8 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-effect-argument-round-trip")),
             captures: 0,
@@ -3098,7 +3229,8 @@ fn vm_artifacts_round_trip_every_effect_generic_argument_tag() {
     // before the candidate reaches artifact verification.
     // Schema 38 inserts the canonical nominal-copy descriptor count between
     // registers and the instruction stream (zero descriptors here).
-    let generic_argument_tag = 53 + 32 + 8 + 8 + 8 + 1 + 8 + 1 + 4 + 32 + 8;
+    // Schema 94 adds function safety and unsafe-execution bytes after its key.
+    let generic_argument_tag = 53 + 32 + 2 + 8 + 8 + 8 + 1 + 8 + 1 + 4 + 32 + 8;
     assert_eq!(encoded[generic_argument_tag], 0);
     let mut hostile = encoded.clone();
     hostile[generic_argument_tag] = u8::MAX;
@@ -3146,6 +3278,8 @@ fn vm_decoder_rejects_noncanonical_effect_row_instances() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"effect-row-order-caller")),
             captures: 0,
@@ -3193,10 +3327,10 @@ fn vm_decoder_rejects_noncanonical_effect_row_instances() {
 /// explicit and protects against silently testing a different instruction.
 fn leave_fixture_offsets(bytes: &[u8]) -> LeaveFixtureOffsets {
     // Envelope: magic (8), schema (4), fingerprint (32), no manifest (1),
-    // payload size (8). Function: definition (32), captures/parameters (8),
+    // payload size (8). Function: definition (32), safety/unsafe-execution (2), captures/parameters (8),
     // two I64 register types (10), descriptor count (8), instruction count
     // (8), ConstI64 (13).
-    let leave_opcode = 53 + 32 + 8 + 10 + 8 + 8 + 13;
+    let leave_opcode = 53 + 32 + 2 + 8 + 10 + 8 + 8 + 13;
     assert_eq!(bytes[leave_opcode], 55, "fixture no longer encodes Leave");
     let brand_owner = leave_opcode + 1;
     let target = brand_owner + 32 + 4 + 4;
@@ -3240,6 +3374,8 @@ fn encoded_leave_fixture() -> Vec<u8> {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"hostile-leave-fixture")),
             captures: 0,
@@ -3285,6 +3421,8 @@ fn encoded_leave_fixture() -> Vec<u8> {
 /// a literal in the standalone VM and a cross-function call in the program.
 fn cleanup_carrying_leave_entry(definition: DefKey, first: VmInstruction) -> VmFunction {
     VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         definition,
         nominal_copy_descriptors: vec![],
         captures: 0,
@@ -3345,6 +3483,8 @@ fn make_leave_cleanup_noncanonical(function: &mut VmFunction) {
 /// shape that proves nonlocal edges cannot skip instruction accounting.
 fn cleanup_leave_budget_loop(definition: DefKey) -> VmFunction {
     VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         definition,
         nominal_copy_descriptors: vec![],
         captures: 0,
@@ -3386,6 +3526,8 @@ fn cleanup_leave_budget_loop(definition: DefKey) -> VmFunction {
 
 fn aggregate_allocation_fixture(definition: DefKey) -> VmFunction {
     VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         definition,
         nominal_copy_descriptors: vec![],
         captures: 0,
@@ -3410,6 +3552,8 @@ fn aggregate_allocation_fixture(definition: DefKey) -> VmFunction {
 
 fn handler_payload_allocation_fixture(definition: DefKey) -> VmFunction {
     VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         definition,
         nominal_copy_descriptors: vec![],
         captures: 0,
@@ -3642,6 +3786,8 @@ fn verifier_rejects_leave_storage_witnesses_with_divergent_storage_and_binding_i
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition,
             captures: 0,
@@ -3706,6 +3852,8 @@ fn verifier_rejects_writes_that_resurrect_dead_source_storage() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"resurrected-source-storage")),
             captures: 0,
@@ -3744,11 +3892,13 @@ fn verifier_rejects_writes_that_resurrect_dead_source_storage() {
 fn verifier_rejects_labels_laundered_through_mutable_storage() {
     let owner = DefKey(Digest::of_bytes(b"label-mutable-storage-owner"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
     let closure = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -3759,6 +3909,8 @@ fn verifier_rejects_labels_laundered_through_mutable_storage() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -3833,6 +3985,8 @@ fn verifier_rejects_storage_death_while_a_borrow_remains_live() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"live-borrow-after-storage-dead")),
             captures: 0,
@@ -3892,6 +4046,8 @@ fn verifier_rejects_program_map_keys_that_disagree_with_function_identity() {
     let entry = DefKey(Digest::of_bytes(b"forged-program-map-entry"));
     let embedded = DefKey(Digest::of_bytes(b"forged-program-embedded-definition"));
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: embedded,
         captures: 0,
@@ -3932,6 +4088,8 @@ fn verifier_rejects_program_map_keys_that_disagree_with_function_identity() {
 fn program_envelope_rejects_truncation_and_function_count_amplification_before_allocation() {
     let entry = DefKey(Digest::of_bytes(b"program-decode-limit-entry"));
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -4009,6 +4167,8 @@ fn cleanup_carrying_leave_has_standalone_and_multifunction_program_parity() {
         },
     );
     let helper_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: helper,
         captures: 0,
@@ -4143,6 +4303,8 @@ fn cleanup_carrying_leave_cannot_evict_artifact_or_program_execution_limits() {
 fn program_call_depth_limit_classifies_recursive_execution() {
     let definition = DefKey(Digest::of_bytes(b"recursive-call-depth"));
     let recursive = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         definition,
         nominal_copy_descriptors: vec![],
         captures: 0,
@@ -4387,6 +4549,8 @@ fn verified_vm_round_trips_and_executes_typed_tuple_values() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"tuple-value")),
             captures: 0,
@@ -4426,6 +4590,8 @@ fn structural_pattern_tests_round_trip_through_the_independent_vm_decoder() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"pattern-test")),
             captures: 0,
@@ -4460,6 +4626,8 @@ fn wide_integer_pattern_literals_are_contextually_typed_by_the_vm_payload() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"wide-pattern-test")),
             captures: 0,
@@ -4492,6 +4660,8 @@ fn vm_scalar_pattern_literals_share_the_lexer_escape_contract() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-escaped-text-pattern")),
             captures: 0,
@@ -4519,6 +4689,8 @@ fn vm_scalar_pattern_literals_share_the_lexer_escape_contract() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-malformed-text-pattern")),
             captures: 0,
@@ -4555,7 +4727,10 @@ fn vm_verifier_rejects_nominal_pattern_fields_outside_frozen_arity() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                is_enum: false,
                 definition,
                 arguments: vec![],
                 variants: vec![vec![VmType::I64]],
@@ -4618,7 +4793,10 @@ fn vm_decoder_verifier_rejects_nominal_pattern_field_type_forgery() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                is_enum: false,
                 definition,
                 arguments: vec![],
                 variants: vec![vec![VmType::I64]],
@@ -4681,6 +4859,8 @@ fn vm_decoder_verifier_rejects_forged_array_pattern_element_metadata() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"vm-array-pattern-forgery")),
             captures: 0,
@@ -4730,6 +4910,8 @@ fn verified_vm_reports_unhandled_effects_without_synthesizing_a_handler() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"effect-test")),
             captures: 0,
@@ -4768,6 +4950,8 @@ fn suspended_handler_frames_cannot_intercept_fresh_clause_effects() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"suspended-clause-effect-entry")),
             captures: 0,
@@ -4826,6 +5010,8 @@ fn verified_vm_executes_a_deep_one_shot_handler_frame() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"handler-frame")),
             captures: 0,
@@ -4895,6 +5081,8 @@ fn handlers_match_the_exact_non_type_effect_instance() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"exact-non-type-handler-caller")),
             captures: 0,
@@ -4948,6 +5136,8 @@ fn replay_handler_policy_round_trips_and_runs_in_both_vm_engines() {
     let effect = DefKey(Digest::of_bytes(b"replay-ask"));
     let definition = DefKey(Digest::of_bytes(b"replay-handler-frame"));
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         definition,
         nominal_copy_descriptors: vec![],
         captures: 0,
@@ -5058,6 +5248,7 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
     let effect = DefKey(Digest::of_bytes(b"snapshot-ask"));
     let residual_effect = DefKey(Digest::of_bytes(b"snapshot-residual-log"));
     let continuation = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         // Captured resumptions are first-class callable values. Their
@@ -5076,6 +5267,8 @@ fn explicit_resumption_snapshot_round_trips_and_resumes_its_branded_frame() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"explicit-snapshot")),
             captures: 0,
@@ -5126,6 +5319,7 @@ fn dynamic_label_call_abandons_replay_return_frames() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-label-replay-owner"));
     let effect = DefKey(Digest::of_bytes(b"dynamic-label-replay-effect"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
@@ -5135,6 +5329,8 @@ fn dynamic_label_call_abandons_replay_return_frames() {
     // an abandonment boundary: execution must reach its payload return, not
     // resurrect the handler clause at the pending return address (the trap).
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: owner,
         captures: 0,
@@ -5208,6 +5404,7 @@ fn verifier_rejects_dynamic_label_rejoin_that_leaks_a_retained_facade() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-label-facade-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-label-facade-effect"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
@@ -5219,6 +5416,8 @@ fn verifier_rejects_dynamic_label_rejoin_that_leaks_a_retained_facade() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -5271,11 +5470,13 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
     let owner = DefKey(Digest::of_bytes(b"dynamic-label-unique-capture-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-label-unique-capture-facade"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
     let closure = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -5288,6 +5489,8 @@ fn verifier_rejects_unique_callable_capture_at_a_dynamic_label_rejoin() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -5372,11 +5575,13 @@ fn verifier_rejects_nested_label_callable_capture_before_dynamic_rejoin_can_esca
     let owner = DefKey(Digest::of_bytes(b"dynamic-label-capture-owner"));
     let facade = DefKey(Digest::of_bytes(b"dynamic-label-capture-facade"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
     let closure = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -5385,6 +5590,8 @@ fn verifier_rejects_nested_label_callable_capture_before_dynamic_rejoin_can_esca
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -5395,6 +5602,7 @@ fn verifier_rejects_nested_label_callable_capture_before_dynamic_rejoin_can_esca
                 VmType::Tuple(vec![label.clone(), VmType::I64]),
                 VmType::Array(Box::new(VmType::Tuple(vec![
                     VmType::Callable {
+                        safety: grandiose_stage0::Safety::Safe,
                         parameters: vec![VmType::I64],
                         result: Box::new(VmType::Unit),
                         effects: Box::<VmEffectRow>::default(),
@@ -5471,6 +5679,7 @@ fn verifier_rejects_label_projected_through_record_array_and_tuple_before_callab
     let owner = DefKey(Digest::of_bytes(b"projected-label-capture-owner"));
     let record = DefKey(Digest::of_bytes(b"projected-label-capture-record"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
@@ -5478,6 +5687,7 @@ fn verifier_rejects_label_projected_through_record_array_and_tuple_before_callab
     let tuple = VmType::Tuple(vec![label.clone()]);
     let array = VmType::Array(Box::new(tuple.clone()));
     let closure = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -5486,7 +5696,10 @@ fn verifier_rejects_label_projected_through_record_array_and_tuple_before_callab
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                is_enum: false,
                 definition: record,
                 arguments: vec![],
                 variants: vec![vec![array.clone()]],
@@ -5584,16 +5797,19 @@ fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can
     let facade = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-facade"));
     let effect = DefKey(Digest::of_bytes(b"dynamic-resumption-capture-effect"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
     let snapshot = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
     };
     let closure = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -5602,6 +5818,8 @@ fn verifier_rejects_nested_resumption_callable_capture_before_dynamic_rejoin_can
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -5727,11 +5945,13 @@ fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
     let tuple = VmType::Tuple(vec![shared.clone(), VmType::I64]);
     let array = VmType::Array(Box::new(tuple.clone()));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
     let callable = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -5746,6 +5966,8 @@ fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
         }],
     };
     let closure_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: closure,
         captures: 1,
@@ -5799,6 +6021,8 @@ fn nested_shared_capture_executes_after_dynamic_label_rejoin() {
         ],
     };
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -5900,11 +6124,13 @@ fn verifier_rejects_unique_reference_nested_behind_shared_array_capture_at_dynam
         referent: Box::new(tuple.clone()),
     };
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
     let closure = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -5913,6 +6139,8 @@ fn verifier_rejects_unique_reference_nested_behind_shared_array_capture_at_dynam
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -6006,11 +6234,14 @@ fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"orphan-snapshot")),
             captures: 0,
             parameters: 0,
             registers: vec![VmType::Callable {
+                safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![VmType::I64],
                 result: Box::new(VmType::I64),
                 effects: Box::<VmEffectRow>::default(),
@@ -6031,6 +6262,7 @@ fn verifier_rejects_snapshot_capture_without_a_suspended_handler_frame() {
 fn verifier_rejects_snapshot_capture_from_a_terminal_handler_frame() {
     let effect = DefKey(Digest::of_bytes(b"terminal-capture"));
     let continuation = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::Unit],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
@@ -6039,6 +6271,8 @@ fn verifier_rejects_snapshot_capture_from_a_terminal_handler_frame() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"terminal-capture-candidate")),
             captures: 0,
@@ -6077,6 +6311,7 @@ fn verifier_rejects_resumption_tokens_crossing_direct_call_frames() {
     let sink = DefKey(Digest::of_bytes(b"snapshot-direct-call-sink"));
     let effect = DefKey(Digest::of_bytes(b"snapshot-direct-call-effect"));
     let snapshot = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -6086,6 +6321,8 @@ fn verifier_rejects_resumption_tokens_crossing_direct_call_frames() {
     // through an ordinary call frame; the executor already rejects it while
     // rebasing call arguments, so verification must fail before execution.
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -6122,6 +6359,8 @@ fn verifier_rejects_resumption_tokens_crossing_direct_call_frames() {
         ],
     };
     let sink_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: sink,
         captures: 0,
@@ -6158,6 +6397,7 @@ fn verifier_rejects_resumption_tokens_masquerading_as_indirect_callees() {
     let entry = DefKey(Digest::of_bytes(b"snapshot-indirect-callee-entry"));
     let effect = DefKey(Digest::of_bytes(b"snapshot-indirect-callee-effect"));
     let snapshot = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -6166,6 +6406,8 @@ fn verifier_rejects_resumption_tokens_masquerading_as_indirect_callees() {
     // must nevertheless reject it: only `ResumeSnapshot` carries the frame
     // provenance needed to restore the captured continuation safely.
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -6228,6 +6470,7 @@ fn verifier_rejects_resumption_tokens_hidden_through_mutable_storage() {
     let sink = DefKey(Digest::of_bytes(b"snapshot-mutable-storage-sink"));
     let effect = DefKey(Digest::of_bytes(b"snapshot-mutable-storage-effect"));
     let snapshot = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -6236,6 +6479,8 @@ fn verifier_rejects_resumption_tokens_hidden_through_mutable_storage() {
     // hostile artifact could then re-read the same VM resumption through the
     // reference and present it to `CallIndirect` as an ordinary callable.
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -6305,6 +6550,8 @@ fn verifier_rejects_resumption_tokens_hidden_through_mutable_storage() {
         ],
     };
     let sink_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: sink,
         captures: 0,
@@ -6340,6 +6587,7 @@ fn verifier_rejects_resumption_tokens_hidden_through_mutable_storage() {
 fn verifier_rejects_resumption_tokens_returned_after_handler_exit() {
     let effect = DefKey(Digest::of_bytes(b"snapshot-return-after-cancel-effect"));
     let snapshot = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -6351,6 +6599,8 @@ fn verifier_rejects_resumption_tokens_returned_after_handler_exit() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"snapshot-return-after-cancel")),
             captures: 0,
@@ -6398,6 +6648,7 @@ fn verifier_rejects_resumption_tokens_returned_after_handler_exit() {
 fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
     let effect = DefKey(Digest::of_bytes(b"forged-snapshot-effect"));
     let continuation = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         // A residual effect row is legitimate for a captured continuation,
@@ -6415,6 +6666,8 @@ fn verifier_rejects_an_ordinary_callable_used_as_a_resumption_snapshot() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-snapshot")),
             captures: 0,
@@ -6471,6 +6724,8 @@ fn resumed_handler_frame_reinstalls_for_the_next_matching_operation() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"deep-handler-frame")),
             captures: 0,
@@ -6531,6 +6786,8 @@ fn nested_partial_handler_forwards_to_an_outer_frame_and_restores_it_on_resume()
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"nested-forwarding")),
             captures: 0,
@@ -6601,6 +6858,8 @@ fn verifier_rejects_a_forged_nested_arm_that_skips_the_inner_continuation() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-nested-arm-resume")),
             captures: 0,
@@ -6668,6 +6927,8 @@ fn verifier_rejects_a_forged_three_frame_resume_that_skips_the_live_suffix() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-three-frame-resume")),
             captures: 0,
@@ -6736,6 +6997,8 @@ fn verifier_rejects_a_forged_partial_handler_forward_without_an_outer_frame() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-partial-forward-root")),
             captures: 0,
@@ -6771,6 +7034,7 @@ fn verifier_rejects_a_forged_partial_handler_forward_without_an_outer_frame() {
 fn verifier_rejects_a_replay_snapshot_after_its_frame_is_cancelled() {
     let effect = DefKey(Digest::of_bytes(b"cancelled-replay-snapshot"));
     let snapshot = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -6782,6 +7046,8 @@ fn verifier_rejects_a_replay_snapshot_after_its_frame_is_cancelled() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"cancelled-replay-snapshot-candidate")),
             captures: 0,
@@ -6832,6 +7098,8 @@ fn declined_handler_pattern_forwards_the_suspended_operation_to_an_outer_frame()
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"declined-handler-pattern")),
             captures: 0,
@@ -6915,6 +7183,8 @@ fn cancelled_handler_continuation_abandons_its_snapshot_and_returns_clause_value
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"cancelled-handler")),
             captures: 0,
@@ -6959,6 +7229,7 @@ fn verifier_rejects_a_snapshot_alias_after_its_handler_is_cancelled() {
     let cancelled = DefKey(Digest::of_bytes(b"cancelled-snapshot-effect"));
     let later = DefKey(Digest::of_bytes(b"later-snapshot-effect"));
     let snapshot = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -6972,6 +7243,8 @@ fn verifier_rejects_a_snapshot_alias_after_its_handler_is_cancelled() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"cancelled-snapshot-alias")),
             captures: 0,
@@ -7047,6 +7320,8 @@ fn verifier_allows_checked_store_reinitialization_but_rejects_type_confusion() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"store-value")),
             captures: 0,
@@ -7090,6 +7365,8 @@ fn verified_vm_round_trips_arrays_and_rejects_type_confused_elements() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"array-value")),
             captures: 0,
@@ -7142,8 +7419,11 @@ fn verified_vm_round_trips_and_executes_typed_nominal_records() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             definition,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                is_enum: false,
                 definition,
                 arguments: vec![],
                 variants: vec![vec![VmType::I64, VmType::I64]],
@@ -7191,8 +7471,11 @@ fn verifier_round_trips_record_projection_and_rejects_out_of_bounds_indices() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             definition,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                is_enum: false,
                 definition,
                 arguments: vec![],
                 variants: vec![vec![VmType::I64, VmType::I64]],
@@ -7260,11 +7543,13 @@ fn verifier_rejects_callable_signature_forged_through_a_nominal_record_projectio
     let closure = DefKey(Digest::of_bytes(b"forged-callable-record-closure"));
     let record = DefKey(Digest::of_bytes(b"forged-callable-record-layout"));
     let actual = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
     };
     let forged = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -7278,6 +7563,8 @@ fn verifier_rejects_callable_signature_forged_through_a_nominal_record_projectio
             (
                 closure,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: closure,
                     captures: 0,
@@ -7292,7 +7579,10 @@ fn verifier_rejects_callable_signature_forged_through_a_nominal_record_projectio
             (
                 entry,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        is_enum: false,
                         definition: record,
                         arguments: vec![],
                         variants: vec![vec![actual.clone()]],
@@ -7369,11 +7659,13 @@ fn runtime_rechecks_callable_signature_when_an_enum_projection_is_variant_depend
     let closure = DefKey(Digest::of_bytes(b"variant-callable-closure"));
     let choice = DefKey(Digest::of_bytes(b"variant-callable-choice"));
     let actual = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
     };
     let other_variant = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -7387,6 +7679,8 @@ fn runtime_rechecks_callable_signature_when_an_enum_projection_is_variant_depend
             (
                 closure,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: closure,
                     captures: 0,
@@ -7401,7 +7695,10 @@ fn runtime_rechecks_callable_signature_when_an_enum_projection_is_variant_depend
             (
                 entry,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                        is_enum: true,
                         definition: choice,
                         arguments: vec![],
                         variants: vec![vec![actual.clone()], vec![other_variant.clone()]],
@@ -7481,6 +7778,8 @@ fn verifier_rejects_malformed_candidate_artifacts_before_execution() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: Some(Digest::of_bytes(b"trusted-runtime-manifest")),
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"bad")),
             captures: 0,
@@ -7503,6 +7802,8 @@ fn standalone_artifact_verifier_rejects_unbound_entry_parameters() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"parameterized-artifact")),
             captures: 0,
@@ -7529,6 +7830,8 @@ fn verifier_rejects_type_confused_constants_before_execution() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"bad-type")),
             captures: 0,
@@ -7558,6 +7861,8 @@ fn vm_rejects_payload_distinct_nan_constants_at_candidate_and_decode_boundaries(
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-vm-nan-payload")),
             captures: 0,
@@ -7594,6 +7899,8 @@ fn verifier_rejects_candidates_with_stale_schema_or_fingerprint() {
         schema: 1,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"schema")),
             captures: 0,
@@ -7614,6 +7921,8 @@ fn verifier_rejects_candidates_with_stale_schema_or_fingerprint() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"fingerprint")),
             captures: 0,
@@ -7684,6 +7993,8 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
     let closure = DefKey(Digest::of_bytes(b"lifted-closure"));
     let entry = DefKey(Digest::of_bytes(b"callable-entry"));
     let closure_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: closure,
         captures: 0,
@@ -7695,12 +8006,15 @@ fn verified_vm_executes_typed_indirect_calls_to_lifted_callables() {
         ],
     };
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
         parameters: 0,
         registers: vec![
             VmType::Callable {
+                safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![],
                 result: Box::new(VmType::I64),
                 effects: Box::<VmEffectRow>::default(),
@@ -7747,11 +8061,13 @@ fn verifier_retains_resumption_provenance_across_handler_clause_joins() {
     let effect = DefKey(Digest::of_bytes(b"joined-resumption-effect"));
     let owner = DefKey(Digest::of_bytes(b"joined-resumption-owner"));
     let snapshot = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
     };
     let closure = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::<VmEffectRow>::default(),
@@ -7760,6 +8076,8 @@ fn verifier_retains_resumption_provenance_across_handler_clause_joins() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -7838,11 +8156,13 @@ fn verifier_retains_resumption_provenance_across_handler_clause_joins() {
 fn verifier_retains_label_provenance_across_callable_joins() {
     let owner = DefKey(Digest::of_bytes(b"joined-label-owner"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
     };
     let closure = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
@@ -7851,6 +8171,8 @@ fn verifier_retains_label_provenance_across_callable_joins() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -7932,6 +8254,8 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         }],
     };
     let closure = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: callable,
         captures: 1,
@@ -7940,6 +8264,8 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         instructions: vec![VmInstruction::Return { value: 0 }],
     };
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -7947,6 +8273,7 @@ fn callable_environment_contracts_round_trip_and_reject_forged_layouts() {
         registers: vec![
             VmType::I64,
             VmType::Callable {
+                safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![],
                 result: Box::new(VmType::I64),
                 effects: Box::<VmEffectRow>::default(),
@@ -8194,6 +8521,7 @@ fn callable_type_decoder_limits_recursive_hostile_encodings() {
     let mut ty = VmType::I64;
     for _ in 0..98 {
         ty = VmType::Callable {
+            safety: grandiose_stage0::Safety::Safe,
             parameters: vec![],
             result: Box::new(ty),
             effects: Box::<VmEffectRow>::default(),
@@ -8203,6 +8531,8 @@ fn callable_type_decoder_limits_recursive_hostile_encodings() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"deep-callable-type")),
             captures: 0,
@@ -8226,6 +8556,7 @@ fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
     let effect_a = DefKey(Digest::of_bytes(b"callable-effect-row-a"));
     let effect_b = DefKey(Digest::of_bytes(b"callable-effect-row-b"));
     let callable = |effect| VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::new(VmEffectRow {
@@ -8246,6 +8577,8 @@ fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"callable-effect-artifact")),
             captures: 0,
@@ -8290,6 +8623,8 @@ fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
             (
                 entry,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: entry,
                     captures: 0,
@@ -8308,6 +8643,8 @@ fn callable_effect_rows_are_part_of_artifact_and_program_type_contracts() {
             (
                 target,
                 VmFunction {
+                    safety: grandiose_stage0::Safety::Safe,
+                    unsafe_execution: false,
                     nominal_copy_descriptors: vec![],
                     definition: target,
                     captures: 0,
@@ -8340,6 +8677,7 @@ fn verifier_rejects_noncanonical_callable_effect_rows() {
         (second, first)
     };
     let malformed = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![],
         result: Box::new(VmType::I64),
         effects: Box::new(VmEffectRow {
@@ -8361,6 +8699,8 @@ fn verifier_rejects_noncanonical_callable_effect_rows() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"noncanonical-callable-effect-row")),
             captures: 0,
@@ -8673,6 +9013,8 @@ fn vm_preserves_mir_leave_cleanup_and_label_identity() {
 fn text_materialization_obeys_value_limits_before_standalone_and_decoded_program_allocation() {
     let definition = DefKey(Digest::of_bytes(b"text-materialization-limits"));
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition,
         captures: 0,
@@ -8818,6 +9160,8 @@ fn verifier_rejects_a_label_brand_retargeted_to_another_typed_destination() {
     let definition = DefKey(Digest::of_bytes(b"forged-vm-label-contract"));
     let owner = DefKey(Digest::of_bytes(b"forged-vm-label-contract-owner"));
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         definition,
         nominal_copy_descriptors: vec![],
         captures: 0,
@@ -8899,6 +9243,8 @@ fn verifier_rejects_branch_targets_outside_the_instruction_stream() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"invalid-branch-target")),
             captures: 0,
@@ -8932,6 +9278,8 @@ fn verifier_rejects_ordinary_control_flow_into_handler_clauses() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"branch-into-handler-clause")),
             captures: 0,
@@ -8972,6 +9320,8 @@ fn verifier_rejects_ordinary_control_flow_into_handler_clauses() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"fallthrough-into-handler-clause")),
             captures: 0,
@@ -9004,6 +9354,7 @@ fn verifier_rejects_dynamic_label_targets_at_private_handler_clauses() {
     let owner = DefKey(Digest::of_bytes(b"label-into-handler-clause"));
     let effect = DefKey(Digest::of_bytes(b"label-into-handler-clause-effect"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
@@ -9016,6 +9367,8 @@ fn verifier_rejects_dynamic_label_targets_at_private_handler_clauses() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -9062,6 +9415,7 @@ fn verifier_rejects_dynamic_label_targets_at_private_handler_clauses() {
 fn verifier_rejects_dynamic_labels_with_one_brand_and_contradictory_targets() {
     let owner = DefKey(Digest::of_bytes(b"contradictory-dynamic-label-owner"));
     let label = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![VmType::I64],
         result: Box::new(VmType::Unit),
         effects: Box::<VmEffectRow>::default(),
@@ -9073,6 +9427,8 @@ fn verifier_rejects_dynamic_labels_with_one_brand_and_contradictory_targets() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: owner,
             captures: 0,
@@ -9182,6 +9538,8 @@ fn program_verifier_rejects_inconsistent_generic_call_bindings() {
     let generic = DefKey(Digest::of_bytes(b"generic-pair"));
     let entry = DefKey(Digest::of_bytes(b"generic-call-entry"));
     let generic_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: generic,
         captures: 0,
@@ -9193,6 +9551,8 @@ fn program_verifier_rejects_inconsistent_generic_call_bindings() {
         ],
     };
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -9233,6 +9593,8 @@ fn generic_vm_programs_round_trip_and_execute_after_call_instantiation() {
     let generic = DefKey(Digest::of_bytes(b"generic-identity"));
     let entry = DefKey(Digest::of_bytes(b"generic-identity-entry"));
     let generic_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: generic,
         captures: 0,
@@ -9244,6 +9606,8 @@ fn generic_vm_programs_round_trip_and_execute_after_call_instantiation() {
         ],
     };
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -9280,6 +9644,8 @@ fn unique_reference_mutates_its_live_register_and_round_trips() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"unique-reference-store")),
             captures: 0,
@@ -9337,6 +9703,8 @@ fn unique_reference_writeback_survives_direct_call_and_return() {
         referent: Box::new(VmType::I64),
     };
     let callee_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: callee,
         captures: 0,
@@ -9352,6 +9720,8 @@ fn unique_reference_writeback_survives_direct_call_and_return() {
         ],
     };
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -9411,11 +9781,14 @@ fn unique_reference_writeback_survives_indirect_call_and_return() {
         referent: Box::new(VmType::I64),
     };
     let callable = VmType::Callable {
+        safety: grandiose_stage0::Safety::Safe,
         parameters: vec![unique_i64.clone()],
         result: Box::new(unique_i64.clone()),
         effects: Box::<VmEffectRow>::default(),
     };
     let callee_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: callee,
         captures: 0,
@@ -9431,6 +9804,8 @@ fn unique_reference_writeback_survives_indirect_call_and_return() {
         ],
     };
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -9499,8 +9874,11 @@ fn verifier_rejects_copying_a_nominal_carrier_of_a_unique_reference() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             definition,
             nominal_copy_descriptors: vec![VmNominalCopyDescriptor {
+                is_enum: false,
                 definition,
                 arguments: vec![],
                 variants: vec![vec![unique_i64.clone()]],
@@ -9555,6 +9933,8 @@ fn verifier_rejects_a_forged_tuple_borrow_referent_before_dereference() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-tuple-borrow-referent")),
             captures: 0,
@@ -9607,6 +9987,8 @@ fn verifier_rejects_forged_reborrow_capability_and_whole_place_referent() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-shared-to-unique-reborrow")),
             captures: 0,
@@ -9653,6 +10035,8 @@ fn verifier_rejects_forged_reborrow_capability_and_whole_place_referent() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"forged-whole-borrow-referent")),
             captures: 0,
@@ -9693,6 +10077,8 @@ fn cleanup_carrying_leave_round_trips_and_unwinds_active_handler_frames() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"cleanup-carrying-leave")),
             captures: 0,
@@ -9765,6 +10151,8 @@ fn cleanup_leave_preserves_the_lexical_outer_handler_prefix() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"leave-retained-prefix")),
             captures: 0,
@@ -9845,6 +10233,7 @@ fn lowered_partial_move_leave_keeps_only_the_residual_aggregate_cleanup() {
     // Supply the same declaration-owned record layout before independently
     // verifying the raw artifact.
     artifact.function.nominal_copy_descriptors = vec![VmNominalCopyDescriptor {
+        is_enum: false,
         definition: pair,
         arguments: vec![],
         variants: vec![vec![VmType::I64, VmType::I64]],
@@ -9887,6 +10276,8 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"leave-reject-canonical")),
             captures: 0,
@@ -9935,6 +10326,8 @@ fn verifier_rejects_noncanonical_or_handler_entering_leave_edges() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"leave-reject-clause")),
             captures: 0,
@@ -9984,6 +10377,8 @@ fn verifier_rejects_overlapping_or_loaned_cleanup_slots() {
             schema: grandiose_stage0::STAGE0_VM_SCHEMA,
             runtime_manifest: None,
             function: VmFunction {
+                safety: grandiose_stage0::Safety::Safe,
+                unsafe_execution: false,
                 nominal_copy_descriptors: vec![],
                 definition: DefKey(Digest::of_bytes(b"leave-cleanup-overlap")),
                 captures: 0,
@@ -10101,6 +10496,8 @@ fn leave_from_a_handler_clause_abandons_its_suspended_continuation() {
     let effect = DefKey(Digest::of_bytes(b"leave-clause-effect"));
     let owner = DefKey(Digest::of_bytes(b"leave-clause-owner"));
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"leave-clause")),
         captures: 0,
@@ -10171,6 +10568,8 @@ fn cleanup_leave_program_artifacts_are_insertion_order_deterministic() {
     let helper = DefKey(Digest::of_bytes(b"deterministic-leave-helper"));
     let leave = cleanup_carrying_leave_entry(entry, VmInstruction::ConstI64 { dst: 0, value: 42 });
     let helper = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: helper,
         captures: 0,
@@ -10220,6 +10619,8 @@ fn cleanup_leave_program_artifacts_are_insertion_order_deterministic() {
 #[test]
 fn verifier_and_runtime_distinguish_live_uninitialized_storage_from_double_writes() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"live-uninitialized-storage")),
         captures: 0,
@@ -10278,6 +10679,8 @@ fn verifier_and_runtime_distinguish_live_uninitialized_storage_from_double_write
 #[test]
 fn verifier_allows_explicit_drop_flag_transitions_without_relaxing_value_writes() {
     let function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: DefKey(Digest::of_bytes(b"drop-flag-transitions")),
         captures: 0,
@@ -10315,6 +10718,8 @@ fn verifier_rejects_cfg_join_that_revives_dead_source_storage() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"cfg-storage-revival")),
             captures: 0,
@@ -10372,6 +10777,8 @@ fn verifier_retains_all_possible_reference_roots_across_cfg_joins() {
         schema: grandiose_stage0::STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"cfg-reference-origin-join")),
             captures: 0,
@@ -10444,6 +10851,8 @@ fn declared_nonreturn_abi_preserves_bottom_coerced_direct_and_indirect_calls() {
     let terminal = DefKey(Digest::of_bytes(b"declared-nonreturn-terminal"));
     let entry = DefKey(Digest::of_bytes(b"declared-nonreturn-entry"));
     let terminal_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: terminal,
         captures: 0,
@@ -10462,6 +10871,8 @@ fn declared_nonreturn_abi_preserves_bottom_coerced_direct_and_indirect_calls() {
         ],
     };
     let entry_function = VmFunction {
+        safety: grandiose_stage0::Safety::Safe,
+        unsafe_execution: false,
         nominal_copy_descriptors: vec![],
         definition: entry,
         captures: 0,
@@ -10469,6 +10880,7 @@ fn declared_nonreturn_abi_preserves_bottom_coerced_direct_and_indirect_calls() {
         registers: vec![
             VmType::I64,
             VmType::Callable {
+                safety: grandiose_stage0::Safety::Safe,
                 parameters: vec![],
                 result: Box::new(VmType::I64),
                 effects: Box::new(VmEffectRow::default()),

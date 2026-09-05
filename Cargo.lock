@@ -107,6 +107,7 @@ name = "grandiose-stage0"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "grandiose-runtime",
 ]
 
 [[package]]

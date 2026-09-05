@@ -14,4 +14,4 @@ path = "src/main.rs"
 
 [dependencies]
 blake3 = "1"
-
+grandiose-runtime = { path = "../grandiose-runtime" }

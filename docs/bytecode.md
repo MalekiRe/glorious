@@ -15,6 +15,10 @@ This decision allocates no opcode, feature bit, profile flag, or CLI switch.
 In particular, it does not reinterpret existing fixed-width `usize`/`isize`
 values or portable container fields as native pointer representations.
 
+The separate Stage0 authoring format now has schema 94 raw-memory execution for
+locally compiled source; see its [implementation state](../compiler/spec/unsafe-memory-progress.md#u3-initial-locally-compiled-raw-memory-execution).
+That extension is not a G1 opcode assignment or independent G1 safety certificate.
+
 Status: normative. Keywords **MUST**, **MUST NOT**, **SHOULD**, and **MAY** are to
 be interpreted as requirements. Generation 1 is abbreviated G1.
 

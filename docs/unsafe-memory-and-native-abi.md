@@ -64,8 +64,8 @@ The language foundation must support:
   initialization, validity, alignment, provenance, aliasing, and lifetime
   obligations. Returning a reference must not invent an unrelated lifetime.
 
-Syntax and wire encodings require tested compiler changes. There is no shipped
-`unsafe` syntax or raw-pointer instruction implied by this document. Unsafety
+Syntax and wire encodings require tested compiler changes; the current Stage0
+implementation is tracked separately in the implementation gates. Unsafety
 is not an ordinary user-handleable effect: handling a similarly named effect
 must not grant unsafe permission or erase a call contract. An unsafe operation
 scope must not silently authorize deferred closure bodies.

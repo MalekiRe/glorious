@@ -19,6 +19,14 @@ does not silently change the fixed generation-1 bundle rules below.
 Status: normative design for the generation-1 standard library and source-bundle
 model. The standard library is Grandiose source built over the finite,
 manifest-bound machine-type, primitive, and host-import leaves specified here.
+
+Runtime-supplied function implementations are declared without a body, ending in
+`;`, including `unsafe fn` raw-memory leaves. The exact manifest binding supplies
+the implementation and validates its signature. Without that binding, a bodyless
+function is a compile error. Do not use dummy `{ () }` bodies or aborting stubs for
+canonical intrinsics. Source `host CAP fn ...;` remains the separate explicit host
+capability import mechanism; a runtime declaration does not itself select a C ABI
+or grant host authority.
 The compiler must not recognize its control names or operator spellings.
 
 The result-based control model is adapted from Justin Pombrio's

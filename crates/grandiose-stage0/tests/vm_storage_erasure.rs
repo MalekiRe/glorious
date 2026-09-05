@@ -19,6 +19,8 @@ fn compact_exit_without_storage_witness() -> CandidateVmArtifact {
         schema: STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"storage-erasure-no-witness")),
             captures: 0,
@@ -83,6 +85,8 @@ fn witnessed_storage_exit() -> CandidateVmArtifact {
         schema: STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"storage-erasure-witnessed")),
             captures: 0,

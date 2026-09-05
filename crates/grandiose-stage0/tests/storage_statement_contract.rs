@@ -141,6 +141,8 @@ fn all_false_drop_flag_exit() -> CandidateVmArtifact {
         schema: STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             nominal_copy_descriptors: vec![],
             definition: DefKey(Digest::of_bytes(b"storage-statement-all-false-erasure")),
             captures: 0,

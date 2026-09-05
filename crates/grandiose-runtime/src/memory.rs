@@ -53,6 +53,18 @@ impl MemoryLayout {
         self.0.align()
     }
 
+    /// Append one naturally aligned field. Field order and enum policy belong
+    /// to the caller's concrete ABI, not the allocator.
+    pub fn extend(self, field: Self) -> Result<(Self, usize), MemoryError> {
+        self.0.extend(field.0).map(|(layout, offset)| (Self(layout), offset))
+            .map_err(|_| MemoryError::SizeOverflow)
+    }
+
+    /// Include trailing padding so adjacent residents retain their alignment.
+    pub fn pad_to_alignment(self) -> Self {
+        Self(self.0.pad_to_align())
+    }
+
     fn dangling(self) -> NonNull<u8> {
         // The nonzero alignment is guaranteed by Layout. This address has no
         // allocation provenance and must never be dereferenced for bytes.
@@ -283,6 +295,19 @@ mod tests {
             Err(MemoryError::SizeOverflow)
         );
         assert_eq!(padded.repeat(0).unwrap(), MemoryLayout::new(0, 8).unwrap());
+    }
+
+    #[test]
+    fn extended_layouts_preserve_field_padding_and_trailing_stride() {
+        let (layout, first) = MemoryLayout::of::<()>().extend(MemoryLayout::of::<u8>()).unwrap();
+        let (layout, second) = layout.extend(MemoryLayout::of::<u64>()).unwrap();
+        let (layout, third) = layout.extend(MemoryLayout::of::<u8>()).unwrap();
+        assert_eq!((first, second, third), (0, 8, 16));
+        assert_eq!(layout.size(), 17);
+        assert_eq!(layout.pad_to_alignment(), MemoryLayout::new(24, 8).unwrap());
+        assert_eq!(layout.repeat(2).unwrap(), MemoryLayout::new(48, 8).unwrap());
+        let huge = MemoryLayout::new(isize::MAX as usize, 1).unwrap();
+        assert_eq!(huge.extend(MemoryLayout::of::<u64>()), Err(MemoryError::SizeOverflow));
     }
 
     #[test]

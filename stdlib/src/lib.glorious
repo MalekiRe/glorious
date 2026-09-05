@@ -4,149 +4,171 @@
 // ordinary source-defined UTF-8 view; its private byte window works equally
 // for compiler-emitted static data and for a future owned `String` buffer.
 
+// General machine memory leaves. These do not own collection policy or element
+// lifetimes. All pointer operations require explicit unsafe source scopes;
+// their exact signatures/identities are bound by the runtime manifest. A trailing
+// semicolon declares an externally supplied implementation, not a stub body.
+__g1_memory_size_of<T>() -> usize;
+__g1_memory_align_of<T>() -> usize;
+unsafe fn __g1_memory_null<T>() -> *mut T;
+unsafe fn __g1_memory_dangling<T>() -> *mut T;
+unsafe fn __g1_memory_allocate(size: usize, alignment: usize) -> *mut u8;
+unsafe fn __g1_memory_reallocate(pointer: *mut u8, old_size: usize, alignment: usize, new_size: usize) -> *mut u8;
+unsafe fn __g1_memory_deallocate(pointer: *mut u8, size: usize, alignment: usize) -> ();
+unsafe fn __g1_memory_is_null<T>(pointer: *mut T) -> u32;
+unsafe fn __g1_memory_offset<T>(pointer: *mut T, count: usize) -> *mut T;
+unsafe fn __g1_memory_offset_const<T>(pointer: *const T, count: usize) -> *const T;
+unsafe fn __g1_memory_cast<T, U>(pointer: *mut T) -> *mut U;
+unsafe fn __g1_memory_as_const<T>(pointer: *mut T) -> *const T;
+unsafe fn __g1_memory_read<T>(pointer: *const T) -> T;
+unsafe fn __g1_memory_write<T>(pointer: *mut T, value: T) -> ();
+unsafe fn __g1_memory_copy<T>(source: *const T, destination: *mut T, count: usize) -> ();
+unsafe fn __g1_memory_copy_nonoverlapping<T>(source: *const T, destination: *mut T, count: usize) -> ();
+
 // Trusted array leaves. Their exact declaration identities are bound only
 // when the compiler supplies this package; copied source spellings have no VM
-// authority. Public collections below provide all bounds and ownership policy.
-__g1_array_len<T>(value: &Array<T>) -> usize { () }
-__g1_array_utf8_valid_up_to(value: &Array<u8>) -> usize { () }
-__g1_array_push_utf8_char(value: &mut Array<u8>, character: char) -> () { () }
+// authority. These compatibility leaves are bodyless external declarations;
+// their algorithms are being replaced with ordinary source implementations.
+__g1_array_len<T>(value: &Array<T>) -> usize;
+__g1_array_utf8_valid_up_to(value: &Array<u8>) -> usize;
+__g1_array_push_utf8_char(value: &mut Array<u8>, character: char) -> ();
 __g1_array_extend_from_slice<T>(value: &mut Array<T>, source: &Array<T>, start: usize, length: usize) -> ()
-    where T: Use<[0, *]> { () }
-__g1_array_insert_move<T>(value: &mut Array<T>, index: usize, item: T) -> () { () }
-__g1_array_remove_move<T>(value: &mut Array<T>, index: usize) -> T { () }
-__g1_array_append_move<T>(value: &mut Array<T>, source: Array<T>) -> () { () }
+    where T: Use<[0, *]>;
+__g1_array_insert_move<T>(value: &mut Array<T>, index: usize, item: T) -> ();
+__g1_array_remove_move<T>(value: &mut Array<T>, index: usize) -> T;
+__g1_array_append_move<T>(value: &mut Array<T>, source: Array<T>) -> ();
 __g1_array_insert_from_slice<T>(value: &mut Array<T>, index: usize, source: &Array<T>, start: usize, length: usize) -> ()
-    where T: Use<[0, *]> { () }
-__g1_array_insert_utf8_from_slice(value: &mut Array<u8>, index: usize, source: &Array<u8>, start: usize, length: usize) -> usize { () }
+    where T: Use<[0, *]>;
+__g1_array_insert_utf8_from_slice(value: &mut Array<u8>, index: usize, source: &Array<u8>, start: usize, length: usize) -> usize;
 __g1_array_truncate_discard<T>(value: &mut Array<T>, length: usize) -> ()
-    where T: Use<[0, 1]> { () }
-__g1_array_reverse_move<T>(value: &mut Array<T>) -> () { () }
-__g1_array_split_off_move<T>(value: &mut Array<T>, index: usize) -> Array<T> { () }
+    where T: Use<[0, 1]>;
+__g1_array_reverse_move<T>(value: &mut Array<T>) -> ();
+__g1_array_split_off_move<T>(value: &mut Array<T>, index: usize) -> Array<T>;
 // This consumes one unique array window and returns two disjoint unique
 // windows.  It is a sealed runtime leaf: source code can only receive these
 // references through SliceMut::split_at, whose private fields retain the
 // checked start and length metadata.
-__g1_array_split_borrow_unique<'a, T>(value: &'a mut Array<T>, start: usize, length: usize, index: usize) -> (&'a mut Array<T>, &'a mut Array<T>) { () }
-__g1_array_pop_utf8_char(value: &mut Array<u8>) -> (char, usize) { () }
-__g1_array_utf8_char_at(value: &Array<u8>, start: usize, length: usize, index: usize) -> (char, usize) { () }
-__g1_array_get_borrow_shared<'a, T>(value: &'a Array<T>, index: usize) -> &'a T { () }
-__g1_array_get_borrow_unique<'a, T>(value: &'a mut Array<T>, index: usize) -> &'a mut T { () }
-__g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T { () }
-__g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) -> () { () }
-__g1_array_empty<T>() -> Array<T> { () }
-__g1_array_push_move<T>(value: &mut Array<T>, item: T) -> () { () }
-__g1_array_pop_move<T>(value: &mut Array<T>) -> T { () }
-__g1_array_capacity<T>(value: &Array<T>) -> usize { () }
-__g1_array_reserve<T>(value: &mut Array<T>, additional: usize) -> () { () }
+__g1_array_split_borrow_unique<'a, T>(value: &'a mut Array<T>, start: usize, length: usize, index: usize) -> (&'a mut Array<T>, &'a mut Array<T>);
+__g1_array_pop_utf8_char(value: &mut Array<u8>) -> (char, usize);
+__g1_array_utf8_char_at(value: &Array<u8>, start: usize, length: usize, index: usize) -> (char, usize);
+__g1_array_get_borrow_shared<'a, T>(value: &'a Array<T>, index: usize) -> &'a T;
+__g1_array_get_borrow_unique<'a, T>(value: &'a mut Array<T>, index: usize) -> &'a mut T;
+__g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T;
+__g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) -> ();
+__g1_array_empty<T>() -> Array<T>;
+__g1_array_push_move<T>(value: &mut Array<T>, item: T) -> ();
+__g1_array_pop_move<T>(value: &mut Array<T>) -> T;
+__g1_array_capacity<T>(value: &Array<T>) -> usize;
+__g1_array_reserve<T>(value: &mut Array<T>, additional: usize) -> ();
 // Existing deterministic byte mechanisms, admitted by their exact selectors.
-__g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () }
-__g1_bytes_to_array(value: Bytes) -> Array<u8> { () }
-__g1_blake3(value: Bytes) -> Bytes { () }
-__g1_static_len(value: __StaticData<Utf8Bytes>) -> usize { () }
-__g1_static_subslice(value: __StaticData<Utf8Bytes>, start: usize, length: usize) -> __StaticData<Utf8Bytes> { () }
-__g1_static_get_shared(value: __StaticData<Utf8Bytes>, index: usize) -> &'static u8 { () }
-__g1_static_as_array(value: __StaticData<Utf8Bytes>) -> &'static Array<u8> { () }
-__g1_static_raw_as_array(value: __StaticData<u8>) -> &'static Array<u8> { () }
+__g1_bytes_from_array_move(value: Array<u8>) -> Bytes;
+__g1_bytes_to_array(value: Bytes) -> Array<u8>;
+__g1_blake3(value: Bytes) -> Bytes;
+__g1_static_len(value: __StaticData<Utf8Bytes>) -> usize;
+__g1_static_subslice(value: __StaticData<Utf8Bytes>, start: usize, length: usize) -> __StaticData<Utf8Bytes>;
+__g1_static_get_shared(value: __StaticData<Utf8Bytes>, index: usize) -> &'static u8;
+__g1_static_as_array(value: __StaticData<Utf8Bytes>) -> &'static Array<u8>;
+__g1_static_raw_as_array(value: __StaticData<u8>) -> &'static Array<u8>;
 // Scalar leaves are private manifest bindings.  The public character API
 // validates before calling the checked conversion, so invalid code points are
 // represented as `None` rather than as a VM execution failure.
-__g1_char_from_u32_checked(value: u32) -> char { () }
-__g1_char_to_u32(value: char) -> u32 { () }
-__g1_int_convert_wrapping_to_u32<T>(value: T) -> u32 { () }
-__g1_int_convert_wrapping_to_usize<T>(value: T) -> usize { () }
-__g1_int_convert_checked_to_u8<T>(value: T) -> u8 { () }
-__g1_int_convert_checked_to_u16<T>(value: T) -> u16 { () }
-__g1_int_convert_checked_to_u32<T>(value: T) -> u32 { () }
-__g1_int_convert_checked_to_u64<T>(value: T) -> u64 { () }
-__g1_int_convert_checked_to_usize<T>(value: T) -> usize { () }
-__g1_int_convert_checked_to_i8<T>(value: T) -> i8 { () }
-__g1_int_convert_checked_to_i16<T>(value: T) -> i16 { () }
-__g1_int_convert_checked_to_i32<T>(value: T) -> i32 { () }
-__g1_int_convert_checked_to_isize<T>(value: T) -> isize { () }
-__g1_int_convert_checked_to_u128<T>(value: T) -> u128 { () }
-__g1_int_convert_checked_to_i128<T>(value: T) -> i128 { () }
-__g1_int_convert_wrapping_to_i64<T>(value: T) -> i64 { () }
-__g1_int_convert_wrapping_to_u8<T>(value: T) -> u8 { () }
-__g1_int_convert_wrapping_to_u16<T>(value: T) -> u16 { () }
-__g1_int_convert_wrapping_to_i8<T>(value: T) -> i8 { () }
-__g1_int_convert_wrapping_to_i16<T>(value: T) -> i16 { () }
-__g1_int_convert_wrapping_to_i32<T>(value: T) -> i32 { () }
-__g1_int_convert_wrapping_to_u64<T>(value: T) -> u64 { () }
-__g1_int_convert_wrapping_to_isize<T>(value: T) -> isize { () }
-__g1_int_convert_wrapping_to_u128<T>(value: T) -> u128 { () }
-__g1_int_convert_wrapping_to_i128<T>(value: T) -> i128 { () }
-__g1_int_wrapping_add<T>(left: T, right: T) -> T { () }
-__g1_int_wrapping_sub<T>(left: T, right: T) -> T { () }
-__g1_int_wrapping_mul<T>(left: T, right: T) -> T { () }
-__g1_int_bit_and<T>(left: T, right: T) -> T { () }
-__g1_int_bit_or<T>(left: T, right: T) -> T { () }
-__g1_int_bit_xor<T>(left: T, right: T) -> T { () }
-__g1_int_bit_not<T>(value: T) -> T { () }
-__g1_int_shl<T>(value: T, count: u32) -> T { () }
-__g1_int_shr<T>(value: T, count: u32) -> T { () }
-__g1_f32_add(left: f32, right: f32) -> f32 { () }
-__g1_f32_sub(left: f32, right: f32) -> f32 { () }
-__g1_f32_mul(left: f32, right: f32) -> f32 { () }
-__g1_f32_div(left: f32, right: f32) -> f32 { () }
-__g1_f32_rem(left: f32, right: f32) -> f32 { () }
-__g1_f32_eq(left: f32, right: f32) -> u32 { () }
-__g1_f32_ne(left: f32, right: f32) -> u32 { () }
-__g1_f32_lt(left: f32, right: f32) -> u32 { () }
-__g1_f32_le(left: f32, right: f32) -> u32 { () }
-__g1_f32_gt(left: f32, right: f32) -> u32 { () }
-__g1_f32_ge(left: f32, right: f32) -> u32 { () }
-__g1_f32_from_bits(value: u32) -> f32 { () }
-__g1_i64_to_f32(value: i64) -> f32 { () }
-__g1_f32_to_i64_checked(value: f32) -> i64 { () }
-__g1_f64_add(left: f64, right: f64) -> f64 { () }
-__g1_f64_sub(left: f64, right: f64) -> f64 { () }
-__g1_f64_mul(left: f64, right: f64) -> f64 { () }
-__g1_f64_div(left: f64, right: f64) -> f64 { () }
-__g1_f64_rem(left: f64, right: f64) -> f64 { () }
-__g1_f64_eq(left: f64, right: f64) -> u32 { () }
-__g1_f64_ne(left: f64, right: f64) -> u32 { () }
-__g1_f64_lt(left: f64, right: f64) -> u32 { () }
-__g1_f64_le(left: f64, right: f64) -> u32 { () }
-__g1_f64_gt(left: f64, right: f64) -> u32 { () }
-__g1_f64_ge(left: f64, right: f64) -> u32 { () }
-__g1_f64_to_i64_checked(value: f64) -> i64 { () }
+__g1_char_from_u32_checked(value: u32) -> char;
+__g1_char_to_u32(value: char) -> u32;
+__g1_int_convert_wrapping_to_u32<T>(value: T) -> u32;
+__g1_int_convert_wrapping_to_usize<T>(value: T) -> usize;
+__g1_int_convert_checked_to_u8<T>(value: T) -> u8;
+__g1_int_convert_checked_to_u16<T>(value: T) -> u16;
+__g1_int_convert_checked_to_u32<T>(value: T) -> u32;
+__g1_int_convert_checked_to_u64<T>(value: T) -> u64;
+__g1_int_convert_checked_to_usize<T>(value: T) -> usize;
+__g1_int_convert_checked_to_i8<T>(value: T) -> i8;
+__g1_int_convert_checked_to_i16<T>(value: T) -> i16;
+__g1_int_convert_checked_to_i32<T>(value: T) -> i32;
+__g1_int_convert_checked_to_isize<T>(value: T) -> isize;
+__g1_int_convert_checked_to_u128<T>(value: T) -> u128;
+__g1_int_convert_checked_to_i128<T>(value: T) -> i128;
+__g1_int_convert_wrapping_to_i64<T>(value: T) -> i64;
+__g1_int_convert_wrapping_to_u8<T>(value: T) -> u8;
+__g1_int_convert_wrapping_to_u16<T>(value: T) -> u16;
+__g1_int_convert_wrapping_to_i8<T>(value: T) -> i8;
+__g1_int_convert_wrapping_to_i16<T>(value: T) -> i16;
+__g1_int_convert_wrapping_to_i32<T>(value: T) -> i32;
+__g1_int_convert_wrapping_to_u64<T>(value: T) -> u64;
+__g1_int_convert_wrapping_to_isize<T>(value: T) -> isize;
+__g1_int_convert_wrapping_to_u128<T>(value: T) -> u128;
+__g1_int_convert_wrapping_to_i128<T>(value: T) -> i128;
+__g1_int_wrapping_add<T>(left: T, right: T) -> T;
+__g1_int_wrapping_sub<T>(left: T, right: T) -> T;
+__g1_int_wrapping_mul<T>(left: T, right: T) -> T;
+__g1_int_bit_and<T>(left: T, right: T) -> T;
+__g1_int_bit_or<T>(left: T, right: T) -> T;
+__g1_int_bit_xor<T>(left: T, right: T) -> T;
+__g1_int_bit_not<T>(value: T) -> T;
+__g1_int_shl<T>(value: T, count: u32) -> T;
+__g1_int_shr<T>(value: T, count: u32) -> T;
+__g1_f32_add(left: f32, right: f32) -> f32;
+__g1_f32_sub(left: f32, right: f32) -> f32;
+__g1_f32_mul(left: f32, right: f32) -> f32;
+__g1_f32_div(left: f32, right: f32) -> f32;
+__g1_f32_rem(left: f32, right: f32) -> f32;
+__g1_f32_eq(left: f32, right: f32) -> u32;
+__g1_f32_ne(left: f32, right: f32) -> u32;
+__g1_f32_lt(left: f32, right: f32) -> u32;
+__g1_f32_le(left: f32, right: f32) -> u32;
+__g1_f32_gt(left: f32, right: f32) -> u32;
+__g1_f32_ge(left: f32, right: f32) -> u32;
+__g1_f32_from_bits(value: u32) -> f32;
+__g1_i64_to_f32(value: i64) -> f32;
+__g1_f32_to_i64_checked(value: f32) -> i64;
+__g1_f64_add(left: f64, right: f64) -> f64;
+__g1_f64_sub(left: f64, right: f64) -> f64;
+__g1_f64_mul(left: f64, right: f64) -> f64;
+__g1_f64_div(left: f64, right: f64) -> f64;
+__g1_f64_rem(left: f64, right: f64) -> f64;
+__g1_f64_eq(left: f64, right: f64) -> u32;
+__g1_f64_ne(left: f64, right: f64) -> u32;
+__g1_f64_lt(left: f64, right: f64) -> u32;
+__g1_f64_le(left: f64, right: f64) -> u32;
+__g1_f64_gt(left: f64, right: f64) -> u32;
+__g1_f64_ge(left: f64, right: f64) -> u32;
+__g1_f64_to_i64_checked(value: f64) -> i64;
 // Remaining width-specific bindings to existing numeric VM operations.
-__g1_u8_to_f32(value: u8) -> f32 { () }
-__g1_u8_to_f64(value: u8) -> f64 { () }
-__g1_u16_to_f32(value: u16) -> f32 { () }
-__g1_u16_to_f64(value: u16) -> f64 { () }
-__g1_u32_to_f32(value: u32) -> f32 { () }
-__g1_u32_to_f64(value: u32) -> f64 { () }
-__g1_u64_to_f32(value: u64) -> f32 { () }
-__g1_u64_to_f64(value: u64) -> f64 { () }
-__g1_u128_to_f32(value: u128) -> f32 { () }
-__g1_u128_to_f64(value: u128) -> f64 { () }
-__g1_usize_to_f32(value: usize) -> f32 { () }
-__g1_usize_to_f64(value: usize) -> f64 { () }
-__g1_i8_to_f32(value: i8) -> f32 { () }
-__g1_i8_to_f64(value: i8) -> f64 { () }
-__g1_i16_to_f32(value: i16) -> f32 { () }
-__g1_i16_to_f64(value: i16) -> f64 { () }
-__g1_i32_to_f32(value: i32) -> f32 { () }
-__g1_i32_to_f64(value: i32) -> f64 { () }
-__g1_i64_to_f64(value: i64) -> f64 { () }
-__g1_i128_to_f32(value: i128) -> f32 { () }
-__g1_i128_to_f64(value: i128) -> f64 { () }
-__g1_isize_to_f32(value: isize) -> f32 { () }
-__g1_isize_to_f64(value: isize) -> f64 { () }
-__g1_f32_to_f64(value: f32) -> f64 { () }
-__g1_f64_to_f32(value: f64) -> f32 { () }
-__g1_f64_to_u8_checked(value: f64) -> u8 { () }
-__g1_f64_to_u16_checked(value: f64) -> u16 { () }
-__g1_f64_to_u32_checked(value: f64) -> u32 { () }
-__g1_f64_to_u64_checked(value: f64) -> u64 { () }
-__g1_f64_to_u128_checked(value: f64) -> u128 { () }
-__g1_f64_to_usize_checked(value: f64) -> usize { () }
-__g1_f64_to_i8_checked(value: f64) -> i8 { () }
-__g1_f64_to_i16_checked(value: f64) -> i16 { () }
-__g1_f64_to_i32_checked(value: f64) -> i32 { () }
-__g1_f64_to_i128_checked(value: f64) -> i128 { () }
-__g1_f64_to_isize_checked(value: f64) -> isize { () }
+__g1_u8_to_f32(value: u8) -> f32;
+__g1_u8_to_f64(value: u8) -> f64;
+__g1_u16_to_f32(value: u16) -> f32;
+__g1_u16_to_f64(value: u16) -> f64;
+__g1_u32_to_f32(value: u32) -> f32;
+__g1_u32_to_f64(value: u32) -> f64;
+__g1_u64_to_f32(value: u64) -> f32;
+__g1_u64_to_f64(value: u64) -> f64;
+__g1_u128_to_f32(value: u128) -> f32;
+__g1_u128_to_f64(value: u128) -> f64;
+__g1_usize_to_f32(value: usize) -> f32;
+__g1_usize_to_f64(value: usize) -> f64;
+__g1_i8_to_f32(value: i8) -> f32;
+__g1_i8_to_f64(value: i8) -> f64;
+__g1_i16_to_f32(value: i16) -> f32;
+__g1_i16_to_f64(value: i16) -> f64;
+__g1_i32_to_f32(value: i32) -> f32;
+__g1_i32_to_f64(value: i32) -> f64;
+__g1_i64_to_f64(value: i64) -> f64;
+__g1_i128_to_f32(value: i128) -> f32;
+__g1_i128_to_f64(value: i128) -> f64;
+__g1_isize_to_f32(value: isize) -> f32;
+__g1_isize_to_f64(value: isize) -> f64;
+__g1_f32_to_f64(value: f32) -> f64;
+__g1_f64_to_f32(value: f64) -> f32;
+__g1_f64_to_u8_checked(value: f64) -> u8;
+__g1_f64_to_u16_checked(value: f64) -> u16;
+__g1_f64_to_u32_checked(value: f64) -> u32;
+__g1_f64_to_u64_checked(value: f64) -> u64;
+__g1_f64_to_u128_checked(value: f64) -> u128;
+__g1_f64_to_usize_checked(value: f64) -> usize;
+__g1_f64_to_i8_checked(value: f64) -> i8;
+__g1_f64_to_i16_checked(value: f64) -> i16;
+__g1_f64_to_i32_checked(value: f64) -> i32;
+__g1_f64_to_i128_checked(value: f64) -> i128;
+__g1_f64_to_isize_checked(value: f64) -> isize;
 
 
 pub enum Result<T, E> { Ok(T), Err(E) }

@@ -678,6 +678,14 @@ pub enum MirInstruction {
         primitive: FloatPrimitive,
         arguments: Vec<MirLocal>,
     },
+    /// Manifest-bound raw-memory operation, specialized with ordinary source
+    /// generics. It owns no collection algorithm or initialized-length policy.
+    MemoryIntrinsic {
+        dst: MirLocal,
+        primitive: crate::MemoryPrimitive,
+        types: Vec<Type>,
+        arguments: Vec<MirLocal>,
+    },
     /// A sealed generic-integer operation whose scalar width is fixed by the
     /// enclosing materialized instance. The primitive role remains an exact
     /// trusted-manifest identity, never a source callable name.
@@ -3268,6 +3276,7 @@ fn operation_input_mut(
             "MIR operation input index {input} is outside an input-free instruction"
         )),
         MirInstruction::FloatIntrinsic { arguments, .. }
+        | MirInstruction::MemoryIntrinsic { arguments, .. }
         | MirInstruction::IntIntrinsic { arguments, .. }
         | MirInstruction::IntGenericIntrinsic { arguments, .. }
         | MirInstruction::Perform { arguments, .. }
@@ -3530,6 +3539,7 @@ fn operation_is_effectful(instruction: &MirInstruction) -> bool {
     matches!(
         instruction,
         MirInstruction::Abort
+            | MirInstruction::MemoryIntrinsic { .. }
             | MirInstruction::Store { .. }
             | MirInstruction::DerefStore { .. }
             | MirInstruction::ArraySetMove { .. }
@@ -4266,7 +4276,8 @@ fn fold_block(
 fn invalidates_alias_visible_constants(instruction: &MirInstruction) -> bool {
     matches!(
         instruction,
-        MirInstruction::Store { .. }
+        MirInstruction::MemoryIntrinsic { .. }
+            | MirInstruction::Store { .. }
             | MirInstruction::DerefStore { .. }
             | MirInstruction::ArraySetMove { .. }
             | MirInstruction::ArrayPushMove { .. }
@@ -4438,6 +4449,7 @@ fn destination(instruction: &MirInstruction) -> Option<MirLocal> {
         | MirInstruction::ConstF64 { dst, .. }
         | MirInstruction::DeferredLiteral { dst, .. }
         | MirInstruction::FloatIntrinsic { dst, .. }
+        | MirInstruction::MemoryIntrinsic { dst, .. }
         | MirInstruction::IntIntrinsic { dst, .. }
         | MirInstruction::IntGenericIntrinsic { dst, .. }
         | MirInstruction::ConstBool { dst, .. }
@@ -4628,6 +4640,8 @@ pub struct MirLocalDecl {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MirNominalCopyDescriptor {
     pub definition: DefKey,
+    /// A one-variant enum still needs a discriminant in the native layout.
+    pub is_enum: bool,
     pub arguments: Vec<GenericArgument>,
     /// A struct has one entry. An enum has one entry per variant, in its
     /// declaration order.
@@ -7816,6 +7830,21 @@ impl MirFunction {
                 self.require_scalar_locals(&[*dst], ScalarType::I128, "i64-to-i128 result")?;
                 self.require_scalar_locals(&[*value], ScalarType::I64, "i64-to-i128 input")?;
             }
+            MirInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
+                let Some(signature) = primitive.instantiated_signature(types) else {
+                    return Err("MIR memory primitive has the wrong type arity".into());
+                };
+                if signature.safety == crate::Safety::Unsafe && !self.unsafe_execution {
+                    return Err("MIR memory primitive requires an unsafe implementation scope".into());
+                }
+                if arguments.len() != signature.parameters.len()
+                    || self.locals[dst.0 as usize].ty != signature.result
+                    || arguments.iter().zip(&signature.parameters)
+                        .any(|(argument, expected)| &self.locals[argument.0 as usize].ty != expected)
+                {
+                    return Err("MIR memory primitive ABI does not match its contract".into());
+                }
+            }
             MirInstruction::FloatIntrinsic {
                 dst,
                 primitive,
@@ -9838,6 +9867,8 @@ fn validate_instruction_semantic_types(instruction: &MirInstruction) -> Result<(
                 .try_for_each(|ty| validate_mir_type(ty, &mut lifetime_binders))?;
             validate_mir_type(result, &mut lifetime_binders)
         }
+        MirInstruction::MemoryIntrinsic { types, .. } => types.iter()
+            .try_for_each(|ty| validate_mir_type(ty, &mut lifetime_binders)),
         MirInstruction::Abort
         | MirInstruction::FloatIntrinsic { .. }
         | MirInstruction::IntIntrinsic { .. }
@@ -10675,6 +10706,7 @@ fn effect_row_retains_generic_placeholder(value: &crate::EffectRow) -> bool {
 
 fn instruction_retains_generic_placeholder(instruction: &MirInstruction) -> bool {
     match instruction {
+        MirInstruction::MemoryIntrinsic { types, .. } => types.iter().any(type_retains_generic_placeholder),
         MirInstruction::MakeArray { element_type, .. }
         | MirInstruction::ProjectArray { element_type, .. }
         | MirInstruction::ArrayNew { element_type, .. }
@@ -10798,6 +10830,7 @@ fn references(value: &MirInstruction) -> Vec<MirLocal> {
         | MirInstruction::ConstText { dst, .. }
         | MirInstruction::ConstStaticData { dst, .. } => vec![*dst],
         MirInstruction::FloatIntrinsic { dst, arguments, .. }
+        | MirInstruction::MemoryIntrinsic { dst, arguments, .. }
         | MirInstruction::IntIntrinsic { dst, arguments, .. }
         | MirInstruction::IntGenericIntrinsic { dst, arguments, .. } => std::iter::once(*dst)
             .chain(arguments.iter().copied())
@@ -31621,6 +31654,20 @@ impl Lowerer<'_> {
                                     _ => unreachable!("Array role was narrowed above"),
                                 }
                             }
+                            Some(PrimitiveRole::Memory(primitive)) => {
+                                let Some(types) = generic_arguments.iter().map(|argument| {
+                                    match argument { GenericArgument::Type(ty) => Some(ty.clone()), _ => None }
+                                }).collect::<Option<Vec<_>>>() else {
+                                    self.error("G6005", "memory primitive requires type-only arguments");
+                                    return None;
+                                };
+                                if primitive.instantiated_signature(&types).is_none() {
+                                    self.error("G6005", "memory primitive has the wrong type arity");
+                                    return None;
+                                }
+                                for ty in &types { self.register_nominal_copy_descriptors(ty); }
+                                self.instructions.push(MirInstruction::MemoryIntrinsic { dst, primitive, types, arguments });
+                            }
                             Some(PrimitiveRole::Float(primitive)) => {
                                 if !generic_arguments.is_empty() {
                                     self.error(
@@ -32338,6 +32385,8 @@ impl Lowerer<'_> {
                 self.nominal_copy_descriptors
                     .push(MirNominalCopyDescriptor {
                         definition: *definition,
+                        is_enum: matches!(signatures.definitions.get(definition),
+                            Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Enum(_), .. })),
                         arguments: arguments.clone(),
                         variants,
                     });

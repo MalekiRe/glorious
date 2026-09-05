@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 
 use crate::signature::HostImport;
+use crate::MemoryPrimitive;
 use crate::{
     ElaboratedHeader, ElaboratedInterface, PackageInterface, PackageKey, Quantity, ScalarType,
     Type,
@@ -579,6 +580,8 @@ pub enum PrimitiveRole {
     /// manifest identity prevents raw assets from being accepted by UTF-8
     /// operations such as `Str` construction.
     StaticRawAsArray,
+    /// General raw-memory mechanisms. Collection policy remains in source.
+    Memory(MemoryPrimitive),
 }
 
 impl PrimitiveRole {
@@ -595,6 +598,9 @@ impl PrimitiveRole {
     /// appended to the legacy list at tag 69; its corrected tag is 182.
     /// Every other existing tag remains unchanged.
     pub(crate) fn stable_tag(self) -> u8 {
+        if let Self::Memory(primitive) = self {
+            return 183 + primitive.ordinal();
+        }
         if let Self::Float(primitive) = self {
             return 69 + primitive.ordinal();
         }
@@ -797,6 +803,9 @@ impl PrimitiveRole {
     }
 
     pub fn selector_name(self) -> String {
+        if let Self::Memory(primitive) = self {
+            return primitive.selector_name().into();
+        }
         if let Self::Float(primitive) = self {
             return primitive.selector_name();
         }
@@ -906,12 +915,16 @@ impl PrimitiveRole {
             Self::StaticGetShared => "static-get-shared",
             Self::StaticAsArray => "static-as-array",
             Self::StaticRawAsArray => "static-raw-as-array",
-            Self::Float(_) => unreachable!("handled before the static selector table"),
+            Self::Float(_) | Self::Memory(_) => unreachable!("handled before the static selector table"),
         })
         .to_owned()
     }
 
     pub fn parse_selector_name(value: impl AsRef<str>) -> Option<Self> {
+        if let Some(primitive) = MemoryPrimitive::ALL.into_iter()
+            .find(|primitive| primitive.selector_name() == value.as_ref()) {
+            return Some(Self::Memory(primitive));
+        }
         let value = value.as_ref();
         if let Some(primitive) = FloatPrimitive::parse_selector_name(value) {
             return Some(Self::Float(primitive));
@@ -1257,6 +1270,9 @@ impl RuntimeManifestInput {
     }
 }
 fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
+    if let PrimitiveRole::Memory(primitive) = role {
+        return primitive.signature();
+    }
     if let PrimitiveRole::Float(primitive) = role {
         return expected_float_signature(primitive);
     }
@@ -2247,7 +2263,7 @@ fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
             where_associated_type_bindings: vec![],
             where_associated_effect_bindings: vec![],
         },
-        PrimitiveRole::Float(_) => unreachable!("handled before the legacy signature table"),
+        PrimitiveRole::Float(_) | PrimitiveRole::Memory(_) => unreachable!("handled before the legacy signature table"),
     }
 }
 
@@ -2570,15 +2586,16 @@ mod tests {
                 }
             }
         }
-        assert_eq!(roles.len(), 183);
-        assert_eq!(roles.iter().copied().collect::<BTreeSet<_>>().len(), 183);
+        roles.extend(MemoryPrimitive::ALL.into_iter().map(PrimitiveRole::Memory));
+        assert_eq!(roles.len(), 199);
+        assert_eq!(roles.iter().copied().collect::<BTreeSet<_>>().len(), 199);
         let mut tags = BTreeMap::new();
         for role in roles {
             assert_eq!(PrimitiveRole::parse_selector_name(role.selector_name()), Some(role));
             let previous = tags.insert(role.stable_tag(), role);
             assert!(previous.is_none(), "runtime tag {} aliases {previous:?} and {role:?}", role.stable_tag());
         }
-        assert_eq!(tags.keys().copied().collect::<Vec<_>>(), (0..=182).collect::<Vec<u8>>());
+        assert_eq!(tags.keys().copied().collect::<Vec<_>>(), (0..=198).collect::<Vec<u8>>());
         // Shared immutable witnesses for the source-owned role comparator.
         // Check exact tags here, where the native private encoding is visible;
         // the source fixture separately executes its own metadata functions.

@@ -179,6 +179,8 @@ fn stage0_artifact_preserves_a_sealed_static_data_type() {
         schema: STAGE0_VM_SCHEMA,
         runtime_manifest: None,
         function: VmFunction {
+            safety: grandiose_stage0::Safety::Safe,
+            unsafe_execution: false,
             definition: grandiose_stage0::DefKey(Digest::of_bytes(b"static-data-type-artifact")),
             nominal_copy_descriptors: vec![],
             captures: 0,

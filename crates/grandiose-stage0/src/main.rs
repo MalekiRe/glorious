@@ -6,7 +6,7 @@ use grandiose_stage0::{
     decode_and_verify_program, write_atomically, BootstrapLimits, BootstrapManifest,
     BootstrapStage, CompilationMode, CompilationRequest, CompileDiagnostic, CompilerBuildIdentity,
     Digest, HostImportSelector, LogicalPath, PackageKey, PrimitiveRole, PrimitiveSelector,
-    RuntimeManifestInput, SourceInput, StageZeroCompiler, SystemVmHost,
+    RuntimeManifestInput, SourceInput, StageZeroCompiler, SystemVmHost, VmExecutionLimits,
 };
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -227,11 +227,15 @@ fn run_cli() -> ExitCode {
                 // installs the process/filesystem host for an artifact whose
                 // manifest has already frozen the permitted imports.
                 let mut host = SystemVmHost::new(env::args().collect());
-                match outcome
+                let program = outcome
                     .artifact
-                    .expect("successful build has verified artifact")
-                    .run_display_with_host(&mut host)
-                {
+                    .expect("successful build has verified artifact");
+                // SAFETY: `run` executes the source world selected by this
+                // local user through our trusted compiler/runtime, just like
+                // running a native build. Its unsafe library/source contracts
+                // are trusted for this invocation. This is not permission for
+                // decoded or downloaded artifact bytes (see `run_program`).
+                match unsafe { program.run_display_with_unsafe(VmExecutionLimits::default(), Some(&mut host)) } {
                     Ok(value) => println!("{value}"),
                     Err(error) => {
                         eprintln!("grc-stage0: verified VM execution failed: {error:?}");
@@ -509,8 +513,9 @@ fn verify_program(path: &str) -> ExitCode {
     }
 }
 
-// Keep artifact execution behind the same decode-and-verify boundary as the
-// ordinary source `run` command.  Bootstrap tooling uses this to prove that a
+// Serialized artifacts retain structural verification and safe execution;
+// they do not inherit the source `run` command's trust in a local compilation.
+// Bootstrap tooling uses this to prove that a
 // seed-emitted stage artifact is executable, rather than merely well-formed.
 fn run_program(path: &str, guest_arguments: Vec<String>) -> ExitCode {
     let bytes = match fs::read(path) {

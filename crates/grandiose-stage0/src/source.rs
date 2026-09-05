@@ -283,12 +283,12 @@ impl Lexer<'_> {
                     // can accept projection arguments without whitespace hacks.
                     self.index += 1;
                     self.push(TokenKind::Operator, start);
-                } else if byte == b'<' && matches!(self.peek(1), Some(b'&' | b'!')) {
-                    // `&` and `!` start reference and bottom types inside a
+                } else if byte == b'<' && matches!(self.peek(1), Some(b'&' | b'!' | b'*')) {
+                    // `&`, `!` and `*` start reference, bottom and pointer types inside a
                     // generic application. Splitting only these type-led
                     // boundaries preserves the lexer’s ordinary maximal
                     // munch for comparisons such as `<=` while allowing
-                    // canonical forms like `Option<&'a T>` and `Result<!, E>`
+                    // canonical forms like `Option<&'a T>`, `Result<!, E>` and `size_of<*mut T>()`
                     // without whitespace.
                     self.index += 1;
                     self.push(TokenKind::Operator, start);

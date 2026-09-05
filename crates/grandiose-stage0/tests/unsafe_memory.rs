@@ -272,7 +272,7 @@ fn unsafe_trait_implementations_and_method_contracts_require_exact_qualifiers() 
 }
 
 #[test]
-fn mir_keeps_call_safety_separate_from_unsafe_implementation_and_rejects_old_vm() {
+fn mir_and_vm_keep_call_safety_separate_from_unsafe_implementation() {
     for (source, safety, unsafe_execution) in [
         (
             "unsafe fn main() -> i64 { 42 }",
@@ -300,7 +300,13 @@ fn mir_keeps_call_safety_separate_from_unsafe_implementation_and_rejects_old_vm(
         let function = lowered.function.unwrap();
         assert_eq!(function.safety, safety);
         assert_eq!(function.unsafe_execution, unsafe_execution);
-        assert!(grandiose_stage0::vm_backend::emit(&function).is_err());
+        let artifact = grandiose_stage0::vm_backend::emit(&function).unwrap();
+        assert_eq!(artifact.function.safety, safety);
+        assert_eq!(artifact.function.unsafe_execution, unsafe_execution);
+        let verified = grandiose_stage0::verify_vm(artifact).unwrap();
+        assert!(matches!(verified.run_i64(), Err(grandiose_stage0::VmArtifactError::UnsafeExecutionRequiresUnsafeApi)));
+        // SAFETY: these complete source fixtures only return the constant 42.
+        assert_eq!(unsafe { verified.run_i64_with_unsafe(grandiose_stage0::VmExecutionLimits::default()) }.unwrap(), 42);
     }
 }
 
@@ -363,7 +369,8 @@ fn unsafe_trait_contract_does_not_make_safe_methods_unsafe_or_vice_versa() {
         function.unsafe_execution,
         "unsafe implementation promises were silently omitted"
     );
-    assert!(grandiose_stage0::vm_backend::emit(&function).is_err());
+    let candidate = grandiose_stage0::vm_backend::emit(&function).unwrap();
+    assert!(candidate.function.unsafe_execution);
     let (unsafe_method, _) = elaborate_main(
         "trait Stable { unsafe fn read(x: i64) -> i64; } impl Stable for i64 { unsafe fn read(x: i64) -> i64 { x } } fn main() -> i64 { Stable::read(42) }",
     );
@@ -652,10 +659,9 @@ fn typed_closures_and_mir_preserve_raw_pointer_types() {
         function.result,
         pointer(PointerMutability::Mut, Type::Scalar(ScalarType::I64))
     );
-    assert!(
-        grandiose_stage0::vm_backend::emit(&function).is_err(),
-        "raw pointer was silently represented by an old-format VM value"
-    );
+    let candidate = grandiose_stage0::vm_backend::emit(&function).unwrap();
+    assert!(candidate.function.registers.iter().any(|ty| matches!(ty, grandiose_stage0::VmType::RawPointer { .. })));
+    assert_eq!(candidate.schema, grandiose_stage0::STAGE0_VM_SCHEMA);
 }
 
 #[test]

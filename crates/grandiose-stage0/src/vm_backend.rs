@@ -23,9 +23,14 @@ use crate::{
     runtime_manifest::{FloatBinaryOp, FloatCompareOp, FloatPrimitive, FloatWidth, PrimitiveRole},
     source::{TokenKind, exact_scalar_literal_kind},
     types::{
-        ConstKind, EffectTail, GenericArgument, Lifetime, ScalarType, StructuralU32Expr, Type,
+        ConstKind, EffectTail, GenericArgument, Lifetime, PointerMutability, Safety, ScalarType, StructuralU32Expr, Type,
     },
 };
+
+use crate::MemoryPrimitive;
+
+mod native_memory;
+use native_memory::{NativeMemory, execute_memory_intrinsic};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmType {
@@ -82,6 +87,7 @@ pub enum VmType {
         arguments: Vec<VmType>,
     },
     Callable {
+        safety: Safety,
         parameters: Vec<VmType>,
         result: Box<VmType>,
         /// The exact outward effect contract of this callable value.  This is
@@ -93,6 +99,10 @@ pub enum VmType {
     Reference {
         unique: bool,
         referent: Box<VmType>,
+    },
+    RawPointer {
+        mutability: PointerMutability,
+        pointee: Box<VmType>,
     },
 }
 
@@ -336,6 +346,12 @@ pub enum VmInstruction {
     FloatIntrinsic {
         dst: u32,
         primitive: FloatPrimitive,
+        arguments: Vec<u32>,
+    },
+    MemoryIntrinsic {
+        dst: u32,
+        primitive: MemoryPrimitive,
+        types: Vec<VmType>,
         arguments: Vec<u32>,
     },
     /// Manifest-sealed generic integer operation specialized to one concrete
@@ -1702,12 +1718,15 @@ impl VmStorageErasureWitness {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmNominalCopyDescriptor {
     pub definition: DefKey,
+    pub is_enum: bool,
     pub arguments: Vec<VmType>,
     pub variants: Vec<Vec<VmType>>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmFunction {
     pub definition: DefKey,
+    pub safety: Safety,
+    pub unsafe_execution: bool,
     /// Sealed declaration-owned layouts for every nominal identity whose
     /// value may be copied by this function.
     pub nominal_copy_descriptors: Vec<VmNominalCopyDescriptor>,
@@ -1742,6 +1761,15 @@ pub struct CandidateVmProgram {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmArtifactError {
+    /// Use the explicit unsafe Rust execution entry point for code containing
+    /// programmer-owned unsafe obligations. This is not bytecode admission.
+    UnsafeExecutionRequiresUnsafeApi,
+    NativeMemory {
+        message: &'static str,
+    },
+    UnsupportedNativeLayout {
+        ty: VmType,
+    },
     MalformedEncoding {
         message: &'static str,
     },
@@ -1958,6 +1986,9 @@ impl VmHost for SystemVmHost {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VmExecutionLimits {
+    /// Live raw allocation bytes, separate from logical register/element charges.
+    pub max_native_bytes: u64,
+    pub max_native_allocation_bytes: u64,
     pub max_call_depth: u32,
     pub max_handler_depth: u32,
     /// Maximum suspended handler continuations retained at once.
@@ -1984,6 +2015,8 @@ pub struct VmAuthoringProfile {
 impl Default for VmExecutionLimits {
     fn default() -> Self {
         Self {
+            max_native_bytes: 1 << 24,
+            max_native_allocation_bytes: 1 << 20,
             // The source compiler's cursor-based frontend is deliberately
             // recursive until source-defined loops/tail-call lowering land.
             // Keep a finite hostile-program boundary, but leave enough headroom
@@ -2097,8 +2130,11 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 /// into the legacy Text/Bytes representations.
 /// Schema 92 adds `DerefMove`, allowing a unique borrowed referent to be
 /// moved out and restored without treating an affine value as copied.
-/// Schema 93 adds sealed `ConstStaticData` literals.
-pub const STAGE0_VM_SCHEMA: u32 = 93;
+/// Schema 93 adds sealed `ConstStaticData` literals. Schema 94 preserves source
+/// safety contracts and nominal kind, and adds host-memory types/operations.
+/// It is for locally compiled source; untrusted-bytecode certification of the
+/// new unsafe facilities is deferred. Earlier payloads are not reinterpreted.
+pub const STAGE0_VM_SCHEMA: u32 = 94;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;
@@ -2136,6 +2172,9 @@ pub fn decode_artifact(bytes: &[u8]) -> Result<CandidateVmArtifact, VmArtifactEr
         });
     }
     let schema = decoder.u32()?;
+    if schema != STAGE0_VM_SCHEMA {
+        return Err(VmArtifactError::UnsupportedSchema { found: schema });
+    }
     let fingerprint = Digest::from_bytes(decoder.array()?);
     let runtime_manifest = decoder.optional_digest()?;
     let payload_len = decoder.u64()?;
@@ -2198,6 +2237,9 @@ pub fn decode_program(bytes: &[u8]) -> Result<CandidateVmProgram, VmArtifactErro
         });
     }
     let schema = decoder.u32()?;
+    if schema != STAGE0_VM_SCHEMA {
+        return Err(VmArtifactError::UnsupportedSchema { found: schema });
+    }
     let entry = decoder.def_key()?;
     let fingerprint = Digest::from_bytes(decoder.array()?);
     let runtime_manifest = decoder.optional_digest()?;
@@ -2266,6 +2308,19 @@ impl CandidateVmProgram {
     }
 }
 impl VerifiedVmArtifact {
+    /// Execute a locally compiled artifact containing programmer-owned unsafe
+    /// obligations. Existing structural checks and resource limits still apply.
+    ///
+    /// # Safety
+    /// For this execution, the caller must uphold the source program's unsafe
+    /// preconditions, pointer validity, aliasing, resident ownership, and cleanup.
+    /// This API does not validate hostile bytecode or provide memory containment.
+    pub unsafe fn run_i64_with_unsafe(&self, limits: VmExecutionLimits) -> Result<i64, VmArtifactError> {
+        let mut budget = ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: true,
+            limits, instructions: 0, allocated_elements: 0 };
+        expect_i64(execute(&self.artifact.function, &mut budget)?)
+    }
+
     pub fn fingerprint(&self) -> Digest {
         self.artifact.fingerprint
     }
@@ -2274,6 +2329,8 @@ impl VerifiedVmArtifact {
     }
     fn execute_with_limits(&self, limits: VmExecutionLimits) -> Result<VmValue, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: 0,
             allocated_elements: 0,
@@ -2357,6 +2414,35 @@ impl VerifiedVmArtifact {
     }
 }
 impl VerifiedVmProgram {
+    /// Execute locally compiled source with its unsafe implementation obligations.
+    /// Permission lasts for this call only; it is not attached to artifact bytes.
+    ///
+    /// # Safety
+    /// The caller must uphold all unsafe source/library invariants for this
+    /// execution: valid initialized residents, provenance, alignment, aliasing,
+    /// ownership transfer, callbacks, and cleanup on every exit. Existing bytecode
+    /// checks do not prove these obligations or contain invalid host-memory access.
+    pub unsafe fn run_i64_with_unsafe(&self, limits: VmExecutionLimits) -> Result<i64, VmArtifactError> {
+        let mut budget = ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: true,
+            limits, instructions: 0, allocated_elements: 0 };
+        expect_i64(execute_with_arguments(&self.program, self.program.entry, &[], 0, &mut budget)?)
+    }
+
+    /// Render one unrestricted locally compiled source execution with optional
+    /// explicit host capabilities. This is not a hostile-bytecode admission API.
+    ///
+    /// # Safety
+    /// The caller has the same per-execution source/unsafe obligations as
+    /// `run_i64_with_unsafe`, including the supplied host's callback contracts.
+    pub unsafe fn run_display_with_unsafe(&self, limits: VmExecutionLimits, mut host: Option<&mut dyn VmHost>)
+        -> Result<String, VmArtifactError>
+    {
+        let mut budget = ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: true,
+            limits, instructions: 0, allocated_elements: 0 };
+        let value = execute_with_arguments_with_host(&self.program, self.program.entry, &[], 0, &mut budget, &mut host)?;
+        Ok(format_vm_value(&value))
+    }
+
     pub fn fingerprint(&self) -> Digest {
         self.program.fingerprint
     }
@@ -2371,6 +2457,8 @@ impl VerifiedVmProgram {
     /// tooling; typed embedding APIs should use the `run_*` methods below.
     pub fn run_display(&self) -> Result<String, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2392,6 +2480,8 @@ impl VerifiedVmProgram {
         host: &mut dyn VmHost,
     ) -> Result<String, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2437,6 +2527,8 @@ impl VerifiedVmProgram {
         limits: VmExecutionLimits,
     ) -> Result<(VmValue, VmAuthoringProfile), VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: 0,
             allocated_elements: 0,
@@ -2460,6 +2552,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_usize(&self) -> Result<u64, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2474,6 +2568,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_u32(&self) -> Result<u32, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2488,6 +2584,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_u8(&self) -> Result<u8, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2502,6 +2600,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_u16(&self) -> Result<u16, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2516,6 +2616,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_i16(&self) -> Result<i16, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2530,6 +2632,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_i32(&self) -> Result<i32, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2544,6 +2648,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_i8(&self) -> Result<i8, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2558,6 +2664,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_u64(&self) -> Result<u64, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2572,6 +2680,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_isize(&self) -> Result<i64, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2586,6 +2696,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_u128(&self) -> Result<u128, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2600,6 +2712,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_i128(&self) -> Result<i128, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2614,6 +2728,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_tuple_i64(&self) -> Result<Vec<i64>, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2628,6 +2744,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_array_i64(&self) -> Result<Vec<i64>, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2642,6 +2760,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_record_i64(&self) -> Result<Vec<i64>, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2656,6 +2776,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_enum_i64(&self) -> Result<Vec<i64>, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2673,6 +2795,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_unit_with_limits(&self, limits: VmExecutionLimits) -> Result<(), VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: 0,
             allocated_elements: 0,
@@ -2690,6 +2814,8 @@ impl VerifiedVmProgram {
     /// This is the entry point used by the self-host compiler application.
     pub fn run_unit_with_host(&self, host: &mut dyn VmHost) -> Result<(), VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2706,6 +2832,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_i64_with_limits(&self, limits: VmExecutionLimits) -> Result<i64, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: 0,
             allocated_elements: 0,
@@ -2723,6 +2851,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_f64_with_limits(&self, limits: VmExecutionLimits) -> Result<f64, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: 0,
             allocated_elements: 0,
@@ -2737,6 +2867,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_f32(&self) -> Result<f32, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(),
             instructions: 0,
             allocated_elements: 0,
@@ -2754,6 +2886,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_bool_with_limits(&self, limits: VmExecutionLimits) -> Result<bool, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: 0,
             allocated_elements: 0,
@@ -2771,6 +2905,8 @@ impl VerifiedVmProgram {
     }
     pub fn run_char_with_limits(&self, limits: VmExecutionLimits) -> Result<char, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: 0,
             allocated_elements: 0,
@@ -2791,6 +2927,8 @@ impl VerifiedVmProgram {
         limits: VmExecutionLimits,
     ) -> Result<String, VmArtifactError> {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: 0,
             allocated_elements: 0,
@@ -2814,11 +2952,6 @@ fn emit_with_specialized_lifted_targets(
     function: &MirFunction,
     specialized_lifted_targets: &BTreeSet<DefKey>,
 ) -> Result<CandidateVmArtifact, VmArtifactError> {
-    if function.safety == crate::Safety::Unsafe || function.unsafe_execution {
-        return Err(VmArtifactError::MalformedEncoding {
-            message: "unsafe contracts require the versioned unsafe bytecode profile",
-        });
-    }
     if function
         .validate_with_specialized_lifted_targets(specialized_lifted_targets)
         .is_err()
@@ -3005,6 +3138,8 @@ fn emit_with_specialized_lifted_targets(
         canonical_descriptors.push(descriptor);
     }
     let function = VmFunction {
+        safety: function.safety,
+        unsafe_execution: function.unsafe_execution,
         nominal_copy_descriptors: canonical_descriptors,
         definition: function.definition,
         captures: function.captures,
@@ -3316,6 +3451,7 @@ fn vm_nominal_copy_descriptor(
     descriptor: &crate::mir::MirNominalCopyDescriptor,
 ) -> Result<VmNominalCopyDescriptor, VmArtifactError> {
     Ok(VmNominalCopyDescriptor {
+        is_enum: descriptor.is_enum,
         definition: descriptor.definition,
         arguments: descriptor
             .arguments
@@ -3405,7 +3541,7 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
             parameters,
             result,
             effects,
-            safety: crate::Safety::Safe,
+            safety,
             ..
         } => {
             // A callable value owns its HRTB binder. Bytecode deliberately
@@ -3419,6 +3555,7 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
                 crate::core::open_hrtb_callable_body_effect_row(effects.clone(), 0)
             };
             Ok(VmType::Callable {
+                safety: *safety,
                 parameters: parameters
                     .iter()
                     .map(vm_type)
@@ -3427,6 +3564,10 @@ fn vm_type(value: &Type) -> Result<VmType, Box<Type>> {
                 effects: Box::new(vm_effect_row(&effects)?),
             })
         }
+        Type::RawPointer { mutability, pointee } => Ok(VmType::RawPointer {
+            mutability: *mutability,
+            pointee: Box::new(vm_type(pointee)?),
+        }),
         Type::Reference {
             mutability,
             referent,
@@ -3493,6 +3634,27 @@ fn integer_scalar_bit_width(scalar: ScalarType) -> u32 {
         ScalarType::U128 | ScalarType::I128 => 128,
         _ => unreachable!("integer intrinsic scalar was validated before execution"),
     }
+}
+
+fn memory_intrinsic_signature(primitive: MemoryPrimitive, types: &[VmType])
+    -> Result<(Vec<VmType>, VmType), VmArtifactError>
+{
+    let signature = primitive.signature();
+    if signature.generics as usize != types.len() {
+        return Err(VmArtifactError::MalformedEncoding { message: "memory operation has the wrong type arity" });
+    }
+    types.iter().try_for_each(validate_vm_type)?;
+    let bindings = types.iter().enumerate().map(|(index, ty)| (index as u32, ty.clone())).collect();
+    let convert = |ty: &Type| vm_type(ty).map(|ty| instantiate_vm_type(&ty, &bindings))
+        .map_err(|ty| VmArtifactError::UnsupportedType { local: 0, ty });
+    Ok((signature.parameters.iter().map(convert).collect::<Result<_, _>>()?, convert(&signature.result)?))
+}
+
+fn require_execution_contract(function: &VmFunction, budget: &ExecutionBudget) -> Result<(), VmArtifactError> {
+    if !budget.unsafe_execution && (function.safety == Safety::Unsafe || function.unsafe_execution) {
+        return Err(VmArtifactError::UnsafeExecutionRequiresUnsafeApi);
+    }
+    Ok(())
 }
 
 fn integer_intrinsic_signature(
@@ -3703,7 +3865,9 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
         VmType::Bytes => 18,
         VmType::Generic(_) => 9,
         VmType::Array(_) => 10,
-        VmType::Callable { .. } => 6,
+        VmType::Callable { safety: Safety::Safe, .. } => 6,
+        VmType::Callable { safety: Safety::Unsafe, .. } => 30,
+        VmType::RawPointer { .. } => 31,
         VmType::Tuple(_) => 7,
         VmType::Nominal { .. } => 8,
         VmType::Reference { .. } => 11,
@@ -3718,6 +3882,7 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
             parameters,
             result,
             effects,
+            ..
         } => {
             output.extend_from_slice(&(parameters.len() as u64).to_le_bytes());
             for parameter in parameters {
@@ -3741,6 +3906,10 @@ fn encode_type(value: &VmType, output: &mut Vec<u8>) {
             for argument in arguments {
                 encode_type(argument, output);
             }
+        }
+        VmType::RawPointer { mutability, pointee } => {
+            output.push(u8::from(*mutability == PointerMutability::Mut));
+            encode_type(pointee, output);
         }
         VmType::Generic(index) => output.extend_from_slice(&index.to_le_bytes()),
         VmType::ConstU32(value) => output.extend_from_slice(&value.to_le_bytes()),
@@ -3970,7 +4139,7 @@ fn encode_optional_digest(value: Option<Digest>, output: &mut Vec<u8>) {
     }
 }
 fn artifact_fingerprint(runtime_manifest: Option<Digest>, function: &VmFunction) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-v23".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-v24".to_vec();
     encode_optional_digest(runtime_manifest, &mut bytes);
     encode_function(function, &mut bytes);
     Digest::of_bytes(&bytes)
@@ -3982,7 +4151,7 @@ fn program_fingerprint(
     functions: &BTreeMap<DefKey, VmFunction>,
     callable_environments: &BTreeMap<DefKey, VmCaptureEnvironment>,
 ) -> Digest {
-    let mut bytes = b"grandiose-stage0-vm-program-v24".to_vec();
+    let mut bytes = b"grandiose-stage0-vm-program-v25".to_vec();
     bytes.extend_from_slice(&entry.0.as_bytes());
     encode_optional_digest(runtime_manifest, &mut bytes);
     bytes.extend_from_slice(&(host_capabilities.len() as u64).to_le_bytes());
@@ -4001,6 +4170,8 @@ fn program_fingerprint(
 }
 fn encode_function(function: &VmFunction, output: &mut Vec<u8>) {
     output.extend_from_slice(&function.definition.0.as_bytes());
+    output.push(u8::from(function.safety == Safety::Unsafe));
+    output.push(u8::from(function.unsafe_execution));
     output.extend_from_slice(&function.captures.to_le_bytes());
     output.extend_from_slice(&function.parameters.to_le_bytes());
     output.extend_from_slice(&(function.registers.len() as u64).to_le_bytes());
@@ -4010,6 +4181,7 @@ fn encode_function(function: &VmFunction, output: &mut Vec<u8>) {
     output.extend_from_slice(&(function.nominal_copy_descriptors.len() as u64).to_le_bytes());
     for descriptor in &function.nominal_copy_descriptors {
         output.extend_from_slice(&descriptor.definition.0.as_bytes());
+        output.push(u8::from(descriptor.is_enum));
         output.extend_from_slice(&(descriptor.arguments.len() as u64).to_le_bytes());
         for argument in &descriptor.arguments {
             encode_type(argument, output);
@@ -4078,6 +4250,13 @@ impl<'a> Decoder<'a> {
     }
     fn byte(&mut self) -> Result<u8, VmArtifactError> {
         Ok(self.bytes(1)?[0])
+    }
+    fn boolean(&mut self) -> Result<bool, VmArtifactError> {
+        match self.byte()? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => Err(VmArtifactError::MalformedEncoding { message: "invalid boolean tag" }),
+        }
     }
     fn u32(&mut self) -> Result<u32, VmArtifactError> {
         Ok(u32::from_le_bytes(self.bytes(4)?.try_into().unwrap()))
@@ -4186,17 +4365,22 @@ impl<'a> Decoder<'a> {
                 tag: self.u128()?,
                 alignment: self.u32()?,
             }),
-            6 => {
+            tag @ (6 | 30) => {
                 let count = self.count("callable parameters", MAX_DECODE_REGISTERS)?;
                 let mut parameters = Vec::with_capacity(count);
                 for _ in 0..count {
                     parameters.push(self.vm_type_at_depth(depth + 1)?);
                 }
                 Ok(VmType::Callable {
+                    safety: if tag == 6 { Safety::Safe } else { Safety::Unsafe },
                     parameters,
                     result: Box::new(self.vm_type_at_depth(depth + 1)?),
                     effects: Box::new(self.vm_effect_row_at_depth(depth + 1)?),
                 })
+            }
+            31 => {
+                let mutability = if self.boolean()? { PointerMutability::Mut } else { PointerMutability::Const };
+                Ok(VmType::RawPointer { mutability, pointee: Box::new(self.vm_type_at_depth(depth + 1)?) })
             }
             7 => {
                 let count = self.count("tuple fields", MAX_DECODE_REGISTERS)?;
@@ -4678,6 +4862,8 @@ impl<'a> Decoder<'a> {
     }
     fn function(&mut self) -> Result<VmFunction, VmArtifactError> {
         let definition = self.def_key()?;
+        let safety = if self.boolean()? { Safety::Unsafe } else { Safety::Safe };
+        let unsafe_execution = self.boolean()?;
         let captures = self.u32()?;
         let parameters = self.u32()?;
         let register_count = self.count("registers", MAX_DECODE_REGISTERS)?;
@@ -4689,6 +4875,7 @@ impl<'a> Decoder<'a> {
         let mut nominal_copy_descriptors = Vec::with_capacity(descriptor_count);
         for _ in 0..descriptor_count {
             let definition = self.def_key()?;
+            let is_enum = self.boolean()?;
             let argument_count =
                 self.count("nominal copy descriptor arguments", MAX_DECODE_REGISTERS)?;
             let mut arguments = Vec::with_capacity(argument_count);
@@ -4708,6 +4895,7 @@ impl<'a> Decoder<'a> {
                 variants.push(fields);
             }
             nominal_copy_descriptors.push(VmNominalCopyDescriptor {
+                is_enum,
                 definition,
                 arguments,
                 variants,
@@ -4719,6 +4907,8 @@ impl<'a> Decoder<'a> {
             instructions.push(self.instruction()?);
         }
         Ok(VmFunction {
+            safety,
+            unsafe_execution,
             nominal_copy_descriptors,
             definition,
             captures,
@@ -5155,6 +5345,18 @@ impl<'a> Decoder<'a> {
                     primitive,
                     arguments,
                 })
+            }
+            194 => {
+                let dst = self.u32()?;
+                let primitive = *MemoryPrimitive::ALL.get(self.byte()? as usize)
+                    .ok_or(VmArtifactError::MalformedEncoding { message: "invalid memory operation" })?;
+                let count = self.count("memory type arguments", 2)?;
+                let mut types = Vec::with_capacity(count);
+                for _ in 0..count { types.push(self.vm_type()?); }
+                let count = self.count("memory value arguments", 4)?;
+                let mut arguments = Vec::with_capacity(count);
+                for _ in 0..count { arguments.push(self.u32()?); }
+                Ok(VmInstruction::MemoryIntrinsic { dst, primitive, types, arguments })
             }
             166 => {
                 let dst = self.u32()?;
@@ -6083,11 +6285,16 @@ pub fn verify_program(program: CandidateVmProgram) -> Result<VerifiedVmProgram, 
                     None => {}
                 }
                 let VmType::Callable {
-                    parameters, result, ..
+                    safety, parameters, result, ..
                 } = register_type(function, *dst)?
                 else {
                     return Err(VmArtifactError::NotCallable { register: *dst });
                 };
+                if safety != target.safety {
+                    return Err(VmArtifactError::MalformedEncoding {
+                        message: "callable value safety does not match its target",
+                    });
+                }
                 if target.parameters != target.captures + parameters.len() as u32 {
                     return Err(VmArtifactError::CallArity {
                         expected: target.parameters.saturating_sub(target.captures),
@@ -6424,15 +6631,17 @@ fn unify_call_type(
             _ => false,
         },
         VmType::Callable {
+            safety: expected_safety,
             parameters: expected_parameters,
             result: expected_result,
             effects: expected_effects,
         } => match found {
             VmType::Callable {
+                safety: found_safety,
                 parameters: found_parameters,
                 result: found_result,
                 effects: found_effects,
-            } if expected_parameters.len() == found_parameters.len() => {
+            } if expected_safety == found_safety && expected_parameters.len() == found_parameters.len() => {
                 expected_parameters
                     .iter()
                     .zip(found_parameters)
@@ -6440,6 +6649,11 @@ fn unify_call_type(
                     && unify_call_type(expected_result, found_result, bindings)
                     && unify_vm_effect_row(expected_effects, found_effects, bindings)
             }
+            _ => false,
+        },
+        VmType::RawPointer { mutability, pointee } => match found {
+            VmType::RawPointer { mutability: found_mutability, pointee: found_pointee }
+                if mutability == found_mutability => unify_call_type(pointee, found_pointee, bindings),
             _ => false,
         },
         _ => expected == found,
@@ -6479,10 +6693,12 @@ fn instantiate_vm_type(value: &VmType, bindings: &BTreeMap<u32, VmType>) -> VmTy
                 .collect(),
         },
         VmType::Callable {
+            safety,
             parameters,
             result,
             effects,
         } => VmType::Callable {
+            safety: *safety,
             parameters: parameters
                 .iter()
                 .map(|parameter| instantiate_vm_type(parameter, bindings))
@@ -6493,6 +6709,10 @@ fn instantiate_vm_type(value: &VmType, bindings: &BTreeMap<u32, VmType>) -> VmTy
         VmType::Reference { unique, referent } => VmType::Reference {
             unique: *unique,
             referent: Box::new(instantiate_vm_type(referent, bindings)),
+        },
+        VmType::RawPointer { mutability, pointee } => VmType::RawPointer {
+            mutability: *mutability,
+            pointee: Box::new(instantiate_vm_type(pointee, bindings)),
         },
         value => value.clone(),
     }
@@ -6756,6 +6976,13 @@ fn lower_instruction(
                 message: "generic deferred literal reached VM lowering",
             });
         }
+        MirInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => VmInstruction::MemoryIntrinsic {
+            dst: dst.0,
+            primitive: *primitive,
+            types: types.iter().map(vm_type).collect::<Result<_, _>>()
+                .map_err(|ty| VmArtifactError::UnsupportedType { local: dst.0, ty })?,
+            arguments: arguments.iter().map(|argument| argument.0).collect(),
+        },
         MirInstruction::FloatIntrinsic {
             dst,
             primitive,
@@ -8501,6 +8728,21 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 expect_type(function, *dst, VmType::F32)?;
                 write(&mut states, *dst)?
             }
+            VmInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
+                let (parameters, result) = memory_intrinsic_signature(*primitive, types)?;
+                if arguments.len() != parameters.len() {
+                    return Err(VmArtifactError::MalformedEncoding { message: "memory operation has the wrong arity" });
+                }
+                expect_type(function, *dst, result)?;
+                for (&argument, parameter) in arguments.iter().zip(parameters) {
+                    expect_type(function, argument, parameter)?;
+                    read(&states, argument)?;
+                }
+                if *primitive == MemoryPrimitive::Write {
+                    states[arguments[1] as usize] = Some(false);
+                }
+                write(&mut states, *dst)?;
+            }
             VmInstruction::FloatIntrinsic {
                 dst,
                 primitive,
@@ -9947,6 +10189,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 };
                 let frame_id = frame.id;
                 let expected = VmType::Callable {
+                    safety: Safety::Safe,
                     parameters: vec![frame.resume_type.clone()],
                     // A resumption returns to its suspended computation, so
                     // its result is frame-specific. Its effect row is the
@@ -10674,7 +10917,7 @@ fn verify_function(function: &VmFunction) -> Result<(), VmArtifactError> {
                 ..
             } => {
                 let VmType::Callable {
-                    parameters, result, ..
+                    safety: Safety::Safe, parameters, result, ..
                 } = register_type(function, *dst)?
                 else {
                     return Err(VmArtifactError::NotCallable { register: *dst });
@@ -10932,12 +11175,14 @@ fn validate_vm_type(value: &VmType) -> Result<(), VmArtifactError> {
             parameters,
             result,
             effects,
+            ..
         } => {
             parameters.iter().try_for_each(validate_vm_type)?;
             validate_vm_type(result)?;
             validate_vm_effect_row(effects)
         }
         VmType::Reference { referent, .. } => validate_vm_type(referent),
+        VmType::RawPointer { pointee, .. } => validate_vm_type(pointee),
         // Consts are metadata slots inside a nominal identity, not VM value
         // layouts. Reject direct candidate registers/parameters/results and
         // any attempt to smuggle one through a tuple, array, callable, or
@@ -11251,6 +11496,7 @@ fn validate_vm_nominal_copy_descriptors(
     for (index, descriptor) in descriptors.iter().enumerate() {
         let key = vm_nominal_copy_descriptor_key(descriptor);
         if descriptor.variants.is_empty()
+            || (!descriptor.is_enum && descriptor.variants.len() != 1)
             || descriptors[..index].iter().any(|previous| {
                 previous.definition == descriptor.definition
                     && previous.arguments == descriptor.arguments
@@ -11310,7 +11556,7 @@ fn nominal_record_layout<'a>(
     nominal: &VmType,
 ) -> Result<&'a [VmType], VmArtifactError> {
     let descriptor = nominal_layout_descriptor(function, nominal)?;
-    if descriptor.variants.len() != 1 {
+    if descriptor.is_enum || descriptor.variants.len() != 1 {
         return Err(VmArtifactError::MalformedEncoding {
             message: "record aggregate operation targets an enum descriptor",
         });
@@ -11323,8 +11569,13 @@ fn nominal_variant_layout<'a>(
     nominal: &VmType,
     variant: u32,
 ) -> Result<&'a [VmType], VmArtifactError> {
-    nominal_layout_descriptor(function, nominal)?
-        .variants
+    let descriptor = nominal_layout_descriptor(function, nominal)?;
+    if !descriptor.is_enum {
+        return Err(VmArtifactError::MalformedEncoding {
+            message: "enum aggregate operation targets a record descriptor",
+        });
+    }
+    descriptor.variants
         .get(variant as usize)
         .map(Vec::as_slice)
         .ok_or(VmArtifactError::MalformedEncoding {
@@ -11553,6 +11804,9 @@ fn read(states: &[Option<bool>], register: u32) -> Result<(), VmArtifactError> {
 }
 #[derive(Clone, Debug)]
 enum VmValue {
+    /// A genuine process pointer. Frame transfers copy the pointer, not its
+    /// pointee or provenance. Dereferencing requires an unsafe execution call.
+    RawPointer { pointer: *mut u8, signature: VmType },
     Unit,
     I64(i64),
     Usize(u64),
@@ -11720,6 +11974,7 @@ struct RuntimePerformed {
 impl VmValue {
     fn ty(&self) -> VmType {
         match self {
+            Self::RawPointer { signature, .. } => signature.clone(),
             Self::Unit => VmType::Unit,
             Self::I64(_) => VmType::I64,
             Self::Usize(_) => VmType::Usize,
@@ -13039,6 +13294,7 @@ fn transfer_to_resumed_frame(
 
 fn format_vm_value(value: &VmValue) -> String {
     match value {
+        VmValue::RawPointer { .. } => "<raw pointer>".into(),
         VmValue::Unit => "()".into(),
         VmValue::I64(value) => value.to_string(),
         VmValue::Usize(value) => value.to_string(),
@@ -14154,12 +14410,14 @@ fn value_matches_vm_type(value: &VmValue, expected: &VmType) -> bool {
             matches!(value, VmValue::Record { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } | VmValue::Enum { definition: actual, signature: VmType::Nominal { definition: signature_definition, arguments: actual_arguments }, .. } if actual == definition && signature_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_type_matches(actual, expected)))
         }
         VmType::Callable {
+            safety,
             parameters,
             result,
             effects,
         } => {
-            matches!(value, VmValue::Callable { signature: VmType::Callable { parameters: actual_parameters, result: actual_result, effects: actual_effects }, .. } if actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result) && vm_effect_row_matches(actual_effects, effects))
+            matches!(value, VmValue::Callable { signature: VmType::Callable { safety: actual_safety, parameters: actual_parameters, result: actual_result, effects: actual_effects }, .. } if actual_safety == safety && actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result) && vm_effect_row_matches(actual_effects, effects))
         }
+        VmType::RawPointer { .. } => matches!(value, VmValue::RawPointer { signature, .. } if vm_type_matches(signature, expected)),
         VmType::Reference { unique, referent } => {
             matches!(value, VmValue::Reference { unique: actual_unique, referent: actual_referent, .. } if actual_unique == unique && vm_type_matches(actual_referent, referent))
         }
@@ -14193,12 +14451,16 @@ fn vm_type_matches(actual: &VmType, expected: &VmType) -> bool {
             matches!(actual, VmType::Nominal { definition: actual_definition, arguments: actual_arguments } if actual_definition == definition && actual_arguments.len() == arguments.len() && actual_arguments.iter().zip(arguments).all(|(actual, expected)| vm_type_matches(actual, expected)))
         }
         VmType::Callable {
+            safety,
             parameters,
             result,
             effects,
         } => {
-            matches!(actual, VmType::Callable { parameters: actual_parameters, result: actual_result, effects: actual_effects } if actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result) && vm_effect_row_matches(actual_effects, effects))
+            matches!(actual, VmType::Callable { safety: actual_safety, parameters: actual_parameters, result: actual_result, effects: actual_effects } if actual_safety == safety && actual_parameters.len() == parameters.len() && actual_parameters.iter().zip(parameters).all(|(actual, expected)| vm_type_matches(actual, expected)) && vm_type_matches(actual_result, result) && vm_effect_row_matches(actual_effects, effects))
         }
+        VmType::RawPointer { mutability, pointee } => matches!(actual,
+            VmType::RawPointer { mutability: actual_mutability, pointee: actual_pointee }
+                if actual_mutability == mutability && vm_type_matches(actual_pointee, pointee)),
         VmType::Reference { unique, referent } => {
             matches!(actual, VmType::Reference { unique: actual_unique, referent: actual_referent } if actual_unique == unique && vm_type_matches(actual_referent, referent))
         }
@@ -14453,6 +14715,7 @@ fn execute(
     function: &VmFunction,
     budget: &mut ExecutionBudget,
 ) -> Result<VmValue, VmArtifactError> {
+    require_execution_contract(function, budget)?;
     if budget.limits.max_call_depth == 0 {
         return Err(VmArtifactError::CallDepthLimit {
             limit: budget.limits.max_call_depth,
@@ -14469,6 +14732,9 @@ fn execute(
         match instruction {
             VmInstruction::DeclareResult { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[dst as usize] = Some(VmValue::Unit),
+            VmInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
+                registers[dst as usize] = Some(execute_memory_intrinsic(primitive, &types, &arguments, function, &mut registers, budget)?);
+            }
             VmInstruction::ConstI64 { dst, value } => {
                 registers[dst as usize] = Some(VmValue::I64(value))
             }
@@ -16536,6 +16802,15 @@ fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
             output.extend_from_slice(&dst.to_le_bytes());
             output.extend_from_slice(&bits.to_le_bytes())
         }
+        VmInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
+            output.push(194);
+            output.extend_from_slice(&dst.to_le_bytes());
+            output.push(primitive.ordinal());
+            output.extend_from_slice(&(types.len() as u64).to_le_bytes());
+            for ty in types { encode_type(ty, output); }
+            output.extend_from_slice(&(arguments.len() as u64).to_le_bytes());
+            for argument in arguments { output.extend_from_slice(&argument.to_le_bytes()); }
+        }
         VmInstruction::FloatIntrinsic {
             dst,
             primitive,
@@ -17938,6 +18213,7 @@ fn execute_program_profiled(
         .functions
         .get(&definition)
         .ok_or(VmArtifactError::MissingFunction { definition })?;
+    require_execution_contract(function, budget)?;
     if function.parameters != arguments.len() as u32 {
         return Err(VmArtifactError::CallArity {
             expected: function.parameters,
@@ -17970,6 +18246,7 @@ fn execute_program_profiled(
             .functions
             .get(&definition)
             .ok_or(VmArtifactError::MissingFunction { definition })?;
+        require_execution_contract(function, budget)?;
         let Some(instruction) = function.instructions.get(pc) else {
             return Err(VmArtifactError::NoReturn);
         };
@@ -17977,6 +18254,9 @@ fn execute_program_profiled(
         match instruction {
             VmInstruction::DeclareResult { .. } => {}
             VmInstruction::ConstUnit { dst } => registers[*dst as usize] = Some(VmValue::Unit),
+            VmInstruction::MemoryIntrinsic { dst, primitive, types, arguments } => {
+                registers[*dst as usize] = Some(execute_memory_intrinsic(*primitive, types, arguments, function, &mut registers, budget)?);
+            }
             VmInstruction::ConstI64 { dst, value } => {
                 registers[*dst as usize] = Some(VmValue::I64(*value))
             }
@@ -20304,6 +20584,9 @@ fn execute_host_call(
     }
 }
 struct ExecutionBudget {
+    native_memory: NativeMemory,
+    /// Set only by the unsafe Rust execution entry, never decoded from bytes.
+    unsafe_execution: bool,
     limits: VmExecutionLimits,
     instructions: u64,
     allocated_elements: u64,
@@ -20358,7 +20641,7 @@ mod tests {
     use crate::{MirBlock, MirScopeId, PrimitiveRole};
 
     fn cow_budget() -> ExecutionBudget {
-        ExecutionBudget { limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0 }
+        ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: false, limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0 }
     }
 
     fn cow_owner() -> VmValue {
@@ -20592,6 +20875,8 @@ mod tests {
             fields: Arc::from([]), unique: false, referent: VmType::I64,
         };
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
         };
         let sibling = transfer_to_resumed_frame(reference.clone(), &[], &callers, 1, 2, &mut budget).unwrap();
@@ -20623,6 +20908,8 @@ mod tests {
         ];
         for (instructions, expected) in cases {
             let mut budget = ExecutionBudget {
+                native_memory: NativeMemory::default(),
+                unsafe_execution: false,
                 limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
             };
             assert_eq!(tail_return_suffix(&instructions, 0, &mut budget).unwrap(), expected);
@@ -20632,6 +20919,8 @@ mod tests {
     #[test]
     fn authoring_tail_suffix_inspection_is_budgeted() {
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits { max_instructions: 1, ..Default::default() },
             instructions: 0, allocated_elements: 0,
         };
@@ -20673,6 +20962,8 @@ mod tests {
                 signature: VmType::Unit,
             })];
             let mut budget = ExecutionBudget {
+                native_memory: NativeMemory::default(),
+                unsafe_execution: false,
                 limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
             };
             let mut profile = VmAuthoringProfile::default();
@@ -20700,6 +20991,8 @@ mod tests {
                     signature: VmType::Unit,
                 })];
                 let mut budget = ExecutionBudget {
+                    native_memory: NativeMemory::default(),
+                    unsafe_execution: false,
                     limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
                 };
                 let mut profile = VmAuthoringProfile::default();
@@ -20723,6 +21016,8 @@ mod tests {
                 fields: Arc::from([]), unique: false, referent: VmType::I64,
             })];
             let mut budget = ExecutionBudget {
+                native_memory: NativeMemory::default(),
+                unsafe_execution: false,
                 limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
             };
             let mut profile = VmAuthoringProfile::default();
@@ -20762,6 +21057,8 @@ mod tests {
                 fields: Arc::from([]), unique: true, referent: VmType::Unit,
             })];
             let mut budget = ExecutionBudget {
+                native_memory: NativeMemory::default(),
+                unsafe_execution: false,
                 limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
             };
             let mut profile = VmAuthoringProfile::default();
@@ -20774,6 +21071,8 @@ mod tests {
     fn authoring_tail_argument_inspection_obeys_work_and_allocation_limits() {
         let registers = vec![Some(VmValue::I64(42))];
         let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits: VmExecutionLimits { max_instructions: 0, ..Default::default() },
             instructions: 0, allocated_elements: 0,
         };
@@ -20870,6 +21169,8 @@ mod tests {
             schema: STAGE0_VM_SCHEMA,
             runtime_manifest: None,
             function: VmFunction {
+                safety: Safety::Safe,
+                unsafe_execution: false,
                 definition: DefKey(Digest::of_bytes(b"float-intrinsic-test")),
                 nominal_copy_descriptors: vec![],
                 captures: 0,
@@ -20904,6 +21205,8 @@ mod tests {
             execute(
                 &decoded.function,
                 &mut ExecutionBudget {
+                    native_memory: NativeMemory::default(),
+                    unsafe_execution: false,
                     limits: VmExecutionLimits::default(),
                     instructions: 0,
                     allocated_elements: 0,
@@ -21073,6 +21376,8 @@ mod tests {
             ..VmExecutionLimits::default()
         };
         let mut instructions = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: u64::MAX,
             allocated_elements: 0,
@@ -21085,6 +21390,8 @@ mod tests {
         );
 
         let mut allocations = ExecutionBudget {
+            native_memory: NativeMemory::default(),
+            unsafe_execution: false,
             limits,
             instructions: 0,
             allocated_elements: u64::MAX,
