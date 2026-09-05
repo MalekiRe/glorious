@@ -1,0 +1,76 @@
+use std::*;
+
+pub enum Failure {
+    Cancelled,
+    ResourceLimit { name: u32, ceiling: u64, requested: u64 },
+    Invariant(u32),
+}
+
+// Controls belong to a request, not a semantic memo. Work charges are never
+// refunded; reservations are released explicitly on every returning path.
+pub struct Controls {
+    private cancelled: Bool,
+    private work_limit: u64,
+    private work_spent: u64,
+    private memory_limit: u64,
+    private memory_spent: u64,
+}
+
+pub fn create(work: u64, memory: u64) -> Controls {
+    Controls { cancelled: false, work_limit: work, work_spent: 0,
+        memory_limit: memory, memory_spent: 0 }
+}
+
+pub fn cancel(controls: &mut Controls) -> () { (*controls).cancelled = Result<(), ()>::Ok(()); }
+pub fn check(controls: &Controls) -> Result<(), Failure> {
+    handle controls.cancelled {
+        true => Result::Err(Failure::Cancelled),
+        false => Result::Ok(()),
+    }
+}
+
+fn admit(spent: u64, limit: u64, amount: u64) -> Bool {
+    handle spent <= limit {
+        false => false,
+        true => amount <= wrapping_sub(limit, spent),
+    }
+}
+
+pub fn charge(controls: &mut Controls, amount: u64) -> Result<(), Failure> {
+    handle check(& *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle admit(controls.work_spent, controls.work_limit, amount) {
+            false => Result::Err(Failure::ResourceLimit { name: 0, ceiling: controls.work_limit, requested: amount }),
+            true => {
+                (*controls).work_spent = wrapping_add(controls.work_spent, amount);
+                Result::Ok(())
+            },
+        },
+    }
+}
+
+pub fn reserve(controls: &mut Controls, amount: u64) -> Result<(), Failure> {
+    handle check(& *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle admit(controls.memory_spent, controls.memory_limit, amount) {
+            false => Result::Err(Failure::ResourceLimit { name: 1, ceiling: controls.memory_limit, requested: amount }),
+            true => {
+                (*controls).memory_spent = wrapping_add(controls.memory_spent, amount);
+                Result::Ok(())
+            },
+        },
+    }
+}
+
+pub fn release(controls: &mut Controls, amount: u64) -> Result<(), Failure> {
+    handle amount <= controls.memory_spent {
+        false => Result::Err(Failure::Invariant(0)),
+        true => {
+            (*controls).memory_spent = wrapping_sub(controls.memory_spent, amount);
+            Result::Ok(())
+        },
+    }
+}
+
+pub fn work_spent(controls: &Controls) -> u64 { controls.work_spent }
+pub fn memory_spent(controls: &Controls) -> u64 { controls.memory_spent }

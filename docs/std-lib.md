@@ -393,11 +393,17 @@ Floating arithmetic and IEEE comparisons use the width-explicit public
 families `f32_add` through `f32_neg` / `f64_add` through `f64_neg` and
 `f32_equal` through `f32_greater_equal` / their `f64` counterparts. Integer to
 float conversion is named `<integer>_to_f32` or `<integer>_to_f64`; narrowing
-and widening are `f64_to_f32` and `f32_to_f64`. Every public float-to-integer
-conversion is checked and returns `Option<T>` under the name
+and widening are `f64_to_f32` and `f32_to_f64`. The original float-to-integer
+conversion family is checked and returns `Option<T>` under the name
 `checked_f32_to_<integer>` or `checked_f64_to_<integer>`. Its ordinary source
 wrapper rejects NaN, infinity, and values outside the target's half-open
 representable interval before calling the trapping frozen leaf.
+
+The additional [trait-backed `as` function](conversions.md) supports an explicit
+target (`as<f32>(1)`) or a context-inferred target (`as(1)`). It provides lossy
+integer/float conversions, including saturating float-to-integer conversion,
+and ordinary user-defined `As<T>` implementations. This adds a separate policy;
+the checked functions above keep their existing behavior.
 
 The canonical `f32_to_bits` and `f64_to_bits` views collapse every NaN to the
 frozen quiet-NaN spelling and preserve signed zero; the inverse constructors do

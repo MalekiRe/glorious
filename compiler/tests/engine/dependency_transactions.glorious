@@ -1,0 +1,202 @@
+use std::*;
+use kernel::dependency;
+use kernel::dependency::node::Node;
+use kernel::identity;
+use kernel::operation;
+pub mod kernel;
+
+fn revision(ordinal: u64) -> identity::RevisionId { identity::RevisionId { database: 7, ordinal: ordinal } }
+fn limits() -> dependency::Limits { dependency::Limits { nodes: 4, edges: 4 } }
+fn key(value: identity::Digest) -> Node { Node::Input(identity::FileKey { digest: value }) }
+fn drive(ledger: &dependency::Ledger, tx: &mut dependency::Transaction, controls: &mut operation::Controls, fuel: usize)
+    -> Result<(), dependency::Failure> {
+    handle fuel == 0 {
+        true => Result::Err(dependency::Failure::Capacity),
+        false => handle dependency::step(ledger, &mut *tx, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(progress) => handle progress {
+                dependency::Progress::Ready => Result::Ok(()),
+                dependency::Progress::Continue => drive(ledger, &mut *tx, &mut *controls, fuel - 1),
+            },
+        },
+    }
+}
+fn seal(ledger: &dependency::Ledger, tx: &mut dependency::Transaction, controls: &mut operation::Controls)
+    -> Result<(), dependency::Failure> {
+    handle dependency::seal(&mut *tx) {
+        Result::Err(error) => Result::Err(error), Result::Ok(_) => drive(ledger, tx, controls, 100),
+    }
+}
+fn prepared(ledger: &dependency::Ledger, tx: dependency::Transaction, node: Node, fingerprint: identity::Digest)
+    -> Result<dependency::Transaction, dependency::Failure> {
+    let controls = operation::create(1000, 1000);
+    handle dependency::record(&mut tx, &mut controls, node, fingerprint, Vec::new()) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle seal(ledger, &mut tx, &mut controls) {
+            Result::Err(error) => Result::Err(error), Result::Ok(_) => Result::Ok(tx),
+        },
+    }
+}
+fn prepare(ledger: &dependency::Ledger, ordinal: u64, parent: Option<identity::RevisionId>, node: Node,
+    fingerprint: identity::Digest) -> Result<dependency::Transaction, dependency::Failure> {
+    handle dependency::begin(ledger, revision(ordinal), parent, limits()) {
+        Result::Err(error) => Result::Err(error), Result::Ok(tx) => prepared(ledger, tx, node, fingerprint),
+    }
+}
+fn publish(ledger: &mut dependency::Ledger, ordinal: u64, parent: Option<identity::RevisionId>, node: Node,
+    fingerprint: identity::Digest) -> Result<(), dependency::Failure> {
+    let controls = operation::create(1000, 1000);
+    handle prepare(& *ledger, ordinal, parent, node, fingerprint) {
+        Result::Err(error) => Result::Err(error), Result::Ok(tx) => dependency::commit(ledger, &mut tx, &controls),
+    }
+}
+fn visible(ledger: &dependency::Ledger, ordinal: u64, node: Node, fingerprint: identity::Digest) -> i64 {
+    handle dependency::trace(ledger, revision(ordinal), &node) {
+        Result::Err(_) => 0,
+        Result::Ok(trace) => handle identity::equal(trace.fingerprint, fingerprint) { true => 1, false => 0 },
+    }
+}
+fn absent(ledger: &dependency::Ledger, ordinal: u64) -> i64 {
+    handle dependency::traces(ledger, revision(ordinal)) { Result::Err(_) => 1, _ => 0 }
+}
+fn closed(ledger: &dependency::Ledger, tx: &mut dependency::Transaction) -> i64 {
+    let controls = operation::create(100, 100);
+    handle dependency::step(ledger, tx, &mut controls) { Result::Err(dependency::Failure::Closed) => 1, _ => 0 }
+}
+fn failure_code(error: dependency::Failure) -> i64 {
+    handle error {
+        dependency::Failure::Foreign => 1, dependency::Failure::Closed => 2, dependency::Failure::Busy => 3,
+        dependency::Failure::Capacity => 4, dependency::Failure::ParentChanged => 5, dependency::Failure::Invariant => 6,
+        dependency::Failure::Control(_) => 7,
+    }
+}
+fn late_cancel(ledger: &mut dependency::Ledger, node: Node, old: identity::Digest, changed: identity::Digest) -> i64 {
+    handle prepare(& *ledger, 0, None, node, changed) {
+        Result::Err(_) => 0,
+        Result::Ok(tx) => {
+            let before = visible(& *ledger, 0, node, old);
+            let controls = operation::create(100, 100);
+            operation::cancel(&mut controls);
+            handle dependency::commit(&mut *ledger, &mut tx, &controls) {
+                Result::Err(dependency::Failure::Control(operation::Failure::Cancelled)) =>
+                    before + visible(& *ledger, 0, node, old) + closed(& *ledger, &mut tx),
+                _ => 0,
+            }
+        },
+    }
+}
+fn parent_replaced(ledger: &mut dependency::Ledger, node: Node, old: identity::Digest, changed: identity::Digest) -> i64 {
+    handle prepare(& *ledger, 1, Result::Ok(revision(0)), node, old) {
+        Result::Err(error) => 100 + failure_code(error),
+        Result::Ok(tx) => handle publish(&mut *ledger, 0, None, node, changed) {
+            Result::Err(error) => 200 + failure_code(error),
+            Result::Ok(_) => {
+                let controls = operation::create(100, 100);
+                handle dependency::commit(&mut *ledger, &mut tx, &controls) {
+                    Result::Err(dependency::Failure::ParentChanged) => absent(& *ledger, 1) + closed(& *ledger, &mut tx),
+                    Result::Err(error) => 300 + failure_code(error), Result::Ok(_) => 400,
+                }
+            },
+        },
+    }
+}
+fn parent_retired(ledger: &mut dependency::Ledger, node: Node, value: identity::Digest) -> i64 {
+    handle prepare(& *ledger, 1, Result::Ok(revision(0)), node, value) {
+        Result::Err(_) => 0,
+        Result::Ok(tx) => {
+            dependency::remove_revision(&mut *ledger, revision(0));
+            let controls = operation::create(100, 100);
+            handle dependency::step(& *ledger, &mut tx, &mut controls) {
+                Result::Err(dependency::Failure::ParentChanged) => absent(& *ledger, 0) + absent(& *ledger, 1) + closed(& *ledger, &mut tx),
+                _ => 0,
+            }
+        },
+    }
+}
+fn row_capacity(ledger: &mut dependency::Ledger, node: Node, value: identity::Digest) -> i64 {
+    handle prepare(& *ledger, 1, Result::Ok(revision(0)), node, value) {
+        Result::Err(_) => 0,
+        Result::Ok(tx) => {
+            let controls = operation::create(100, 100);
+            handle dependency::commit(&mut *ledger, &mut tx, &controls) {
+                Result::Err(dependency::Failure::Capacity) => absent(& *ledger, 1) + visible(& *ledger, 0, node, value) + closed(& *ledger, &mut tx),
+                _ => 0,
+            }
+        },
+    }
+}
+fn budget(ledger: &dependency::Ledger) -> i64 {
+    handle dependency::begin(ledger, revision(1), None, limits()) {
+        Result::Err(_) => 0,
+        Result::Ok(tx) => {
+            let controls = operation::create(0, 100);
+            handle dependency::step(ledger, &mut tx, &mut controls) {
+                Result::Err(dependency::Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: 0, requested: 1 })) => closed(ledger, &mut tx),
+                _ => 0,
+            }
+        },
+    }
+}
+fn record_cancel(ledger: &dependency::Ledger, node: Node, value: identity::Digest) -> i64 {
+    handle dependency::begin(ledger, revision(1), None, limits()) {
+        Result::Err(_) => 0,
+        Result::Ok(tx) => {
+            let controls = operation::create(100, 100);
+            operation::cancel(&mut controls);
+            handle dependency::record(&mut tx, &mut controls, node, value, Vec::new()) {
+                Result::Err(dependency::Failure::Control(operation::Failure::Cancelled)) => closed(ledger, &mut tx),
+                _ => 0,
+            }
+        },
+    }
+}
+fn node_capacity(ledger: &dependency::Ledger, node: Node, value: identity::Digest) -> i64 {
+    handle dependency::begin(ledger, revision(1), None, dependency::Limits { nodes: 0, edges: 0 }) {
+        Result::Err(_) => 0,
+        Result::Ok(tx) => {
+            let controls = operation::create(100, 100);
+            handle dependency::record(&mut tx, &mut controls, node, value, Vec::new()) {
+                Result::Err(dependency::Failure::Capacity) => closed(ledger, &mut tx), _ => 0,
+            }
+        },
+    }
+}
+fn missing_parent(ledger: &mut dependency::Ledger, node: Node, value: identity::Digest) -> i64 {
+    handle publish(&mut *ledger, 1, Result::Ok(revision(0)), node, value) {
+        Result::Err(_) => 0,
+        Result::Ok(_) => handle dependency::trace(& *ledger, revision(1), &node) {
+            Result::Err(_) => 0,
+            Result::Ok(trace) => handle trace.status { dependency::Status::Cold => 1, _ => 0 },
+        },
+    }
+}
+fn verify(ledger: &mut dependency::Ledger, node: Node, old: identity::Digest, changed: identity::Digest) -> i64 {
+    let rejected = budget(& *ledger) + record_cancel(& *ledger, node, old) + node_capacity(& *ledger, node, old);
+    let cancelled = late_cancel(&mut *ledger, node, old, changed);
+    let capacity = row_capacity(&mut *ledger, node, old);
+    let replaced = parent_replaced(&mut *ledger, node, old, changed);
+    let retired = parent_retired(&mut *ledger, node, changed);
+    let weak_parent = missing_parent(&mut *ledger, node, changed);
+    handle weak_parent == 1 { false => 6, true => verified(rejected, cancelled, capacity, replaced, retired) }
+}
+fn verified(rejected: i64, cancelled: i64, capacity: i64, replaced: i64, retired: i64) -> i64 {
+    handle rejected == 3 { false => 1, true => handle cancelled == 3 { false => 2, true => rest(capacity, replaced, retired) } }
+}
+fn rest(capacity: i64, replaced: i64, retired: i64) -> i64 {
+    handle capacity == 3 { false => 3, true => handle replaced == 2 { false => 4000 + replaced, true => handle retired == 3 { false => 5, true => 42 } } }
+}
+fn start(old: identity::Digest, changed: identity::Digest) -> i64 {
+    let ledger = dependency::create(7, 1);
+    let node = key(old);
+    handle publish(&mut ledger, 0, None, node, old) {
+        Result::Err(_) => 6, Result::Ok(_) => verify(&mut ledger, node, old, changed),
+    }
+}
+pub fn main() -> i64 {
+    handle identity::hash(Str::as_bytes("before")) {
+        Result::Err(_) => 7,
+        Result::Ok(old) => handle identity::hash(Str::as_bytes("after")) {
+            Result::Err(_) => 8, Result::Ok(changed) => start(old, changed),
+        },
+    }
+}

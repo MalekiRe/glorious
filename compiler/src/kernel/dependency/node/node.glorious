@@ -1,0 +1,59 @@
+use std::*;
+use super::super::identity;
+use super::super::identity::FileKey;
+use super::super::identity::DefKey;
+use super::super::identity::InstanceKey;
+use super::super::identity::ModuleKey;
+use super::super::identity::PackageKey;
+
+// The variant order and payload order match the public Rust ledger exactly.
+// A query's execution journal is a separate, first-observation-ordered product.
+pub enum Node {
+    Input(FileKey), Interface(ModuleKey), Fixity(ModuleKey), Body(DefKey),
+    Core(DefKey), Instance(InstanceKey), Mir(DefKey), Artifact(PackageKey),
+}
+pub fn kind(value: &Node) -> usize {
+    handle *value {
+        Node::Input(_) => 0, Node::Interface(_) => 1, Node::Fixity(_) => 2,
+        Node::Body(_) => 3, Node::Core(_) => 4, Node::Instance(_) => 5,
+        Node::Mir(_) => 6, Node::Artifact(_) => 7,
+    }
+}
+fn payload_order(left: &Node, right: &Node) -> Ordering {
+    // Nonmatching arms cannot be reached after compare's discriminator check.
+    handle *left {
+        Node::Input(a) => handle *right { Node::Input(b) => identity::compare_digest(a.digest, b.digest), _ => Ordering::Less },
+        Node::Interface(a) => handle *right { Node::Interface(b) => identity::compare_module(&a, &b), _ => Ordering::Less },
+        Node::Fixity(a) => handle *right { Node::Fixity(b) => identity::compare_module(&a, &b), _ => Ordering::Less },
+        Node::Body(a) => handle *right { Node::Body(b) => identity::compare_digest(a.digest, b.digest), _ => Ordering::Less },
+        Node::Core(a) => handle *right { Node::Core(b) => identity::compare_digest(a.digest, b.digest), _ => Ordering::Less },
+        Node::Instance(a) => handle *right { Node::Instance(b) => identity::compare_instance(&a, &b), _ => Ordering::Less },
+        Node::Mir(a) => handle *right { Node::Mir(b) => identity::compare_digest(a.digest, b.digest), _ => Ordering::Less },
+        Node::Artifact(a) => handle *right { Node::Artifact(b) => identity::compare_package(&a, &b), _ => Ordering::Less },
+    }
+}
+pub fn compare(left: &Node, right: &Node) -> Ordering {
+    let a = kind(left);
+    let b = kind(right);
+    handle Ord::compare(&a, &b) { Ordering::Equal => payload_order(left, right), order => order }
+}
+pub fn same(left: &Node, right: &Node) -> Bool {
+    handle compare(left, right) { Ordering::Equal => true, _ => false }
+}
+pub impl Eq for Node { eq(left: &Node, right: &Node) -> Bool { same(left, right) } }
+pub impl Ord for Node { compare(left: &Node, right: &Node) -> Ordering { compare(left, right) } }
+pub impl Hash for Node {
+    hash(value: &Node, state: &mut Hasher) -> () {
+        Hasher::write_usize(&mut *state, kind(value));
+        handle *value {
+            Node::Input(key) => Hash::hash(&key.digest, state),
+            Node::Interface(key) => identity::hash_module(&key, state),
+            Node::Fixity(key) => identity::hash_module(&key, state),
+            Node::Body(key) => Hash::hash(&key.digest, state),
+            Node::Core(key) => Hash::hash(&key.digest, state),
+            Node::Instance(key) => identity::hash_instance(&key, state),
+            Node::Mir(key) => Hash::hash(&key.digest, state),
+            Node::Artifact(key) => identity::hash_package(&key, state),
+        }
+    }
+}

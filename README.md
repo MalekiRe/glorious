@@ -10,6 +10,12 @@ The independently implemented Stage0 compiler and verified VM are the active
 Rust toolchain. The former package tool, formatter, and language server are
 retained only as explicitly disabled legacy code while they are redesigned.
 
+The fresh Glorious compiler is being implemented in [compiler/](compiler/)
+under the [GSC-2 specification](GSC-2-glorious-incremental-self-hosted-compiler-spec.md).
+Its storage, revision, and query machinery precedes the semantic port. The old
+`self-host-stage0` implementation and its build scripts have been retired;
+their historical coverage does not count toward GSC-2.
+
 ## What makes the language different?
 
 ### Values describe how many times they may be used

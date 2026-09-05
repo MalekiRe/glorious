@@ -1,0 +1,17 @@
+use std::*;
+pub mod kernel;
+
+fn read(buffer: &ByteBuf) -> i64 {
+    let bytes = ByteBuf::view(buffer);
+    handle Slice::get(bytes, 0) {
+        Result::Ok(value) => handle *value == 16 { true => 42, false => 1 },
+        Result::Err(_) => 2,
+    }
+}
+pub fn main() -> i64 {
+    let buffer = ByteBuf::new(8);
+    handle ByteBuf::put_u64(&mut buffer, 18364758544493064720) {
+        Result::Ok(_) => read(&buffer),
+        Result::Err(_) => 3,
+    }
+}

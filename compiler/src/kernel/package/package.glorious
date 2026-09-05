@@ -1,0 +1,337 @@
+use std::*;
+use super::identity::PackageKey;
+use super::identity;
+use super::storage;
+use super::storage::Handle;
+use super::operation;
+
+pub enum Status { Open, Staged, Committed, RolledBack }
+pub struct Metadata { package: PackageKey, status: Status, active_body_scratch: u64, staged_body_products: u64 }
+pub struct Stats { active_packages: u64, active_body_scratch: u64, staged_body_products: u64 }
+pub struct Limits { packages: usize, bodies: usize }
+pub enum Failure {
+    PackageNotInRequest(PackageKey), PackageAlreadyActive(PackageKey), PackageNotOpen(PackageKey),
+    ActiveBodyScratch(PackageKey), UnstagedPackages(Vec<PackageKey>), RequestRolledBack,
+    Closed, Busy, ForeignBody, StaleBody, Capacity, Invariant, Control(operation::Failure),
+}
+pub struct Body { private owner: Handle, private ordinal: u64 }
+pub enum Action {
+    Open(PackageKey), OpenBody(PackageKey), PublishBody(Body), AbandonBody(Body),
+    Stage(PackageKey), Rollback(PackageKey), RollbackAll, Prepare, Step,
+}
+pub enum Event { Done, Body(Body), Continue, Prepared }
+enum Phase { Recording, Checking { cursor: usize }, Ordering { outer: usize, inner: usize }, Prepared, Committed, RolledBack }
+struct Entry { key: PackageKey, status: Status, active: u64, staged: u64 }
+pub struct Registry {
+    private phase: Phase, private entries: Vec<Entry>, private index: HashMap<PackageKey, usize>,
+    private bodies: HashMap<u64, usize>, private next_body: u64, private limits: Limits, private stats: Stats,
+    private failed_package: Bool, private unstaged: Vec<PackageKey>,
+}
+pub impl Use<[0, 1]> for Registry {}
+// Holding this unique loan freezes package preparation across the enclosing
+// ledger commit. Publishing the permit cannot fail or allocate directory data.
+pub struct Commit<'a> { private registry: &'a mut Registry }
+pub impl<'a> Use<[0, 1]> for Commit<'a> {}
+
+pub fn configure(registry: &mut Registry, limits: Limits) -> Result<(), Failure> {
+    handle recording(& *registry) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle Vec::len(&registry.entries) == 0 {
+            false => Result::Err(Failure::Busy),
+            true => { (*registry).limits = limits; Result::Ok(()) },
+        },
+    }
+}
+pub fn prepare_commit<'a>(registry: &'a mut Registry) -> Result<Commit<'a>, Failure> {
+    handle registry.phase {
+        Phase::Prepared => Result::Ok(Commit<'a> { registry: registry }),
+        Phase::RolledBack => Result::Err(Failure::RequestRolledBack),
+        Phase::Committed => Result::Err(Failure::Closed), _ => Result::Err(Failure::Busy),
+    }
+}
+pub fn publish(permit: Commit<'_>) -> () {
+    (*permit.registry).phase = Phase::Committed;
+    (*permit.registry).stats = Stats { active_packages: 0, active_body_scratch: 0, staged_body_products: 0 };
+}
+
+pub fn create(limits: Limits) -> Registry {
+    Registry { phase: Phase::Recording, entries: Vec::new(), index: HashMap::new(),
+        bodies: HashMap::new(), next_body: 0, limits: limits, failed_package: false, unstaged: Vec::new(),
+        stats: Stats { active_packages: 0, active_body_scratch: 0, staged_body_products: 0 } }
+}
+fn recording(registry: &Registry) -> Result<(), Failure> {
+    handle registry.phase {
+        Phase::Recording => Result::Ok(()), Phase::RolledBack => Result::Err(Failure::RequestRolledBack),
+        Phase::Committed => Result::Err(Failure::Closed), _ => Result::Err(Failure::Busy),
+    }
+}
+fn locate(registry: &Registry, key: &PackageKey) -> Result<usize, Failure> {
+    handle HashMap::get(&registry.index, key) {
+        Result::Err(_) => Result::Err(Failure::PackageNotOpen(*key)), Result::Ok(index) => Result::Ok(*index),
+    }
+}
+fn open_index(registry: &Registry, key: &PackageKey) -> Result<usize, Failure> {
+    handle locate(registry, key) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(index) => handle Vec::get_unchecked(&registry.entries, index).status {
+            Status::Open => Result::Ok(index), _ => Result::Err(Failure::PackageNotOpen(*key)),
+        },
+    }
+}
+
+// The owning engine supplies the authenticated session handle and its actual
+// controls. No body token can discharge another session's scratch, including
+// after a session-table slot is reused with a new generation.
+pub fn apply(registry: &mut Registry, owner: Handle, controls: &mut operation::Controls, action: Action)
+    -> Result<Event, Failure> {
+    handle action {
+        Action::RollbackAll => { rollback_all(registry); Result::Ok(Event::Done) },
+        Action::Rollback(key) => rollback_package(registry, key),
+        Action::AbandonBody(body) => abandon(registry, owner, body),
+        other => handle operation::charge(controls, 1) {
+            Result::Err(error) => { rollback_all(registry); Result::Err(Failure::Control(error)) },
+            Result::Ok(_) => checked(registry, owner, other),
+        },
+    }
+}
+fn checked(registry: &mut Registry, owner: Handle, action: Action) -> Result<Event, Failure> {
+    handle action {
+        Action::Step => advance(registry),
+        other => handle recording(& *registry) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle other {
+                Action::Open(key) => open(registry, key),
+                Action::OpenBody(key) => open_body(registry, owner, key),
+                Action::PublishBody(body) => publish_body(registry, owner, body),
+                Action::Stage(key) => stage(registry, key),
+                Action::Prepare => {
+                    (*registry).unstaged = Vec::new();
+                    (*registry).phase = Phase::Checking { cursor: 0 };
+                    Result::Ok(Event::Continue)
+                },
+                _ => Result::Err(Failure::Invariant),
+            },
+        },
+    }
+}
+fn open(registry: &mut Registry, key: PackageKey) -> Result<Event, Failure> {
+    handle registry.failed_package {
+        true => Result::Err(Failure::RequestRolledBack), false => insert_package(registry, key),
+    }
+}
+fn insert_package(registry: &mut Registry, key: PackageKey) -> Result<Event, Failure> {
+    handle HashMap::contains_key(&registry.index, &key) {
+        true => Result::Err(Failure::PackageAlreadyActive(key)),
+        false => handle Vec::len(&registry.entries) < registry.limits.packages {
+            false => Result::Err(Failure::Capacity),
+            true => {
+                let index = Vec::len(&registry.entries);
+                Vec::push(&mut registry.entries, Entry { key: key, status: Status::Open, active: 0, staged: 0 });
+                HashMap::insert(&mut registry.index, key, index);
+                (*registry).stats.active_packages = wrapping_add(registry.stats.active_packages, 1);
+                Result::Ok(Event::Done)
+            },
+        },
+    }
+}
+fn open_body(registry: &mut Registry, owner: Handle, key: PackageKey) -> Result<Event, Failure> {
+    handle open_index(& *registry, &key) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(index) => handle registry.next_body < as<u64>(registry.limits.bodies) {
+            false => Result::Err(Failure::Capacity), true => allocate_body(registry, owner, index),
+        },
+    }
+}
+fn allocate_body(registry: &mut Registry, owner: Handle, index: usize) -> Result<Event, Failure> {
+    let ordinal = registry.next_body;
+    (*registry).next_body = wrapping_add(ordinal, 1);
+    HashMap::insert(&mut registry.bodies, ordinal, index);
+    handle Vec::get_mut(&mut registry.entries, index) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(entry) => {
+            (*entry).active = wrapping_add(entry.active, 1);
+            (*registry).stats.active_body_scratch = wrapping_add(registry.stats.active_body_scratch, 1);
+            Result::Ok(Event::Body(Body { owner: owner, ordinal: ordinal }))
+        },
+    }
+}
+fn body_index(registry: &Registry, owner: Handle, body: Body) -> Result<usize, Failure> {
+    handle storage::equal(owner, body.owner) {
+        false => Result::Err(Failure::ForeignBody),
+        true => handle HashMap::get(&registry.bodies, &body.ordinal) {
+            Result::Err(_) => Result::Err(Failure::StaleBody),
+            Result::Ok(index) => handle Vec::get_unchecked(&registry.entries, *index).status {
+                Status::Open => Result::Ok(*index), _ => Result::Err(Failure::StaleBody),
+            },
+        },
+    }
+}
+fn publish_body(registry: &mut Registry, owner: Handle, body: Body) -> Result<Event, Failure> {
+    handle body_index(& *registry, owner, body) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(index) => handle Vec::get_mut(&mut registry.entries, index) {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(entry) => {
+                (*entry).active = wrapping_sub(entry.active, 1);
+                (*entry).staged = wrapping_add(entry.staged, 1);
+                (*registry).stats.active_body_scratch = wrapping_sub(registry.stats.active_body_scratch, 1);
+                (*registry).stats.staged_body_products = wrapping_add(registry.stats.staged_body_products, 1);
+                HashMap::remove(&mut registry.bodies, &body.ordinal);
+                Result::Ok(Event::Done)
+            },
+        },
+    }
+}
+fn abandon(registry: &mut Registry, owner: Handle, body: Body) -> Result<Event, Failure> {
+    handle body_index(& *registry, owner, body) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(index) => handle Vec::get_mut(&mut registry.entries, index) {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(entry) => {
+                (*entry).active = wrapping_sub(entry.active, 1);
+                (*registry).stats.active_body_scratch = wrapping_sub(registry.stats.active_body_scratch, 1);
+                HashMap::remove(&mut registry.bodies, &body.ordinal);
+                Result::Ok(Event::Done)
+            },
+        },
+    }
+}
+fn stage(registry: &mut Registry, key: PackageKey) -> Result<Event, Failure> {
+    handle open_index(& *registry, &key) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(index) => handle Vec::get_mut(&mut registry.entries, index) {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(entry) => handle entry.active == 0 {
+                false => Result::Err(Failure::ActiveBodyScratch(key)),
+                true => { (*entry).status = Status::Staged; Result::Ok(Event::Done) },
+            },
+        },
+    }
+}
+fn rollback_package(registry: &mut Registry, key: PackageKey) -> Result<Event, Failure> {
+    handle registry.phase {
+        Phase::Committed => Result::Ok(Event::Done), Phase::RolledBack => Result::Ok(Event::Done),
+        _ => handle locate(& *registry, &key) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(index) => rollback_entry(registry, index),
+        },
+    }
+}
+fn rollback_entry(registry: &mut Registry, index: usize) -> Result<Event, Failure> {
+    handle Vec::get_mut(&mut registry.entries, index) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(entry) => handle entry.status {
+            Status::RolledBack => Result::Ok(Event::Done),
+            _ => {
+                (*registry).stats.active_packages = wrapping_sub(registry.stats.active_packages, 1);
+                (*registry).stats.active_body_scratch = wrapping_sub(registry.stats.active_body_scratch, entry.active);
+                (*registry).stats.staged_body_products = wrapping_sub(registry.stats.staged_body_products, entry.staged);
+                (*entry).status = Status::RolledBack;
+                (*entry).active = as<u64>(0);
+                (*entry).staged = as<u64>(0);
+                (*registry).failed_package = Result<(), ()>::Ok(());
+                (*registry).phase = Phase::Recording;
+                Result::Ok(Event::Done)
+            },
+        },
+    }
+}
+pub fn rollback_all(registry: &mut Registry) -> () {
+    handle registry.phase {
+        Phase::Committed => (),
+        _ => {
+            (*registry).phase = Phase::RolledBack;
+            (*registry).bodies = HashMap::new();
+            (*registry).unstaged = Vec::new();
+            (*registry).stats = Stats { active_packages: 0, active_body_scratch: 0, staged_body_products: 0 };
+        },
+    }
+}
+fn advance(registry: &mut Registry) -> Result<Event, Failure> {
+    handle registry.phase {
+        Phase::Checking { cursor: cursor } => validate_entry(registry, cursor),
+        Phase::Ordering { outer: outer, inner: inner } => order_missing(registry, outer, inner),
+        Phase::Prepared => Result::Ok(Event::Prepared),
+        Phase::RolledBack => Result::Err(Failure::RequestRolledBack),
+        Phase::Committed => Result::Err(Failure::Closed), _ => Result::Err(Failure::Busy),
+    }
+}
+fn validate_entry(registry: &mut Registry, cursor: usize) -> Result<Event, Failure> {
+    handle cursor == Vec::len(&registry.entries) {
+        true => handle Vec::len(&registry.unstaged) == 0 {
+            true => { (*registry).phase = Phase::Prepared; Result::Ok(Event::Prepared) },
+            false => { (*registry).phase = Phase::Ordering { outer: 1, inner: 1 }; Result::Ok(Event::Continue) },
+        },
+        false => {
+            let entry = *Vec::get_unchecked(&registry.entries, cursor);
+            handle entry.status {
+                Status::Staged => {
+                    (*registry).phase = Phase::Checking { cursor: cursor + 1 };
+                    Result::Ok(Event::Continue)
+                },
+                _ => {
+                    Vec::push(&mut registry.unstaged, entry.key);
+                    (*registry).phase = Phase::Checking { cursor: cursor + 1 };
+                    Result::Ok(Event::Continue)
+                },
+            }
+        },
+    }
+}
+fn order_missing(registry: &mut Registry, outer: usize, inner: usize) -> Result<Event, Failure> {
+    handle outer >= Vec::len(&registry.unstaged) {
+        true => {
+            let missing = registry.unstaged;
+            (*registry).unstaged = Vec::new();
+            (*registry).phase = Phase::Recording;
+            Result::Err(Failure::UnstagedPackages(missing))
+        },
+        false => handle inner == 0 {
+            true => {
+                (*registry).phase = Phase::Ordering { outer: outer + 1, inner: outer + 1 };
+                Result::Ok(Event::Continue)
+            },
+            false => handle identity::compare_package(Vec::get_unchecked(&registry.unstaged, inner - 1),
+                Vec::get_unchecked(&registry.unstaged, inner)) {
+                Ordering::Greater => {
+                    Vec::swap(&mut registry.unstaged, inner - 1, inner);
+                    (*registry).phase = Phase::Ordering { outer: outer, inner: inner - 1 };
+                    Result::Ok(Event::Continue)
+                },
+                _ => {
+                    (*registry).phase = Phase::Ordering { outer: outer + 1, inner: outer + 1 };
+                    Result::Ok(Event::Continue)
+                },
+            },
+        },
+    }
+}
+
+// Low-level commit primitive for the enclosing request publication kernel.
+// The Database facade deliberately does not expose a package-only commit.
+pub fn commit(registry: &mut Registry, controls: &operation::Controls) -> Result<(), Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => { rollback_all(registry); Result::Err(Failure::Control(error)) },
+        Result::Ok(_) => handle prepare_commit(registry) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(permit) => { publish(permit); Result::Ok(()) },
+        },
+    }
+}
+pub fn stats(registry: &Registry) -> Stats { registry.stats }
+pub fn metadata(registry: &Registry, key: &PackageKey) -> Result<Metadata, Failure> {
+    handle locate(registry, key) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(index) => {
+            let entry = *Vec::get_unchecked(&registry.entries, index);
+            handle registry.phase {
+                Phase::Committed => Result::Ok(Metadata { package: entry.key, status: Status::Committed,
+                    active_body_scratch: 0, staged_body_products: 0 }),
+                Phase::RolledBack => Result::Ok(Metadata { package: entry.key, status: Status::RolledBack,
+                    active_body_scratch: 0, staged_body_products: 0 }),
+                _ => Result::Ok(Metadata { package: entry.key, status: entry.status,
+                    active_body_scratch: entry.active, staged_body_products: entry.staged }),
+            }
+        },
+    }
+}

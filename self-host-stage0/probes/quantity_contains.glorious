@@ -1,5 +1,0 @@
-use quantity_library::quantity;
-
-pub fn main() -> Bool {
-    quantity::contains(quantity::affine(), quantity::once())
-}

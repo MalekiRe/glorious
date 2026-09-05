@@ -1,0 +1,155 @@
+@SUPPORT@
+use kernel::engine;
+use kernel::revision;
+type Db = registry::Registry<world::NormalizedWorld>;
+struct Root { revision: identity::RevisionId, session: registry::Session,
+    bytes: registry::Value<source::Blob>, lines: registry::Value<source::LineIndex> }
+@WITNESSES@
+fn db_limits() -> registry::Limits {
+    registry::Limits { revisions: 8, sessions: 8, attempts: 16, memos: 32, reads: 16, keys: 16,
+        source_products: 16, line_products: 16, drivers: 8, frames: 8, source_bytes: 1024, lines: 64 }
+}
+fn imported(db: &mut Db, index: usize, parent: Option<identity::RevisionId>) -> Result<identity::RevisionId, registry::Failure> {
+    let raw = fixture(index); let valid = raw.valid;
+    let builder = world::begin(raw.input, limits()); let controls = operation::create(1000000, 1000000);
+    handle run(&mut builder, &mut controls) {
+        Result::Err(_) => Result::Err(registry::Failure::Invariant), Result::Ok(value) =>
+            handle valid * same_digest(world::fingerprint(&value), fixture_digest(index)) == 1 {
+                false => Result::Err(registry::Failure::Invariant), true => world::import(db, value, parent),
+            },
+    }
+}
+fn drive<T>(db: &mut Db, query: registry::Query<T>, fuel: usize) -> Result<registry::Value<T>, registry::Failure> {
+    handle fuel == 0 { true => Result::Err(registry::Failure::Invariant), false => handle registry::poll(&mut *db, query) {
+        Result::Err(error) => Result::Err(error), Result::Ok(event) => handle event {
+            registry::Event::Ready(value) => Result::Ok(value), registry::Event::Continue => drive(db, query, fuel - 1),
+            registry::Event::Waiting => Result::Err(registry::Failure::Busy),
+        },
+    } }
+}
+fn query_bytes(db: &mut Db, session: registry::Session) -> Result<registry::Value<source::Blob>, registry::Failure> {
+    handle registry::source_bytes(&mut *db, session, fixture_file()) { Result::Err(error) => Result::Err(error), Result::Ok(query) => drive(db, query, 2000) }
+}
+fn query_lines(db: &mut Db, session: registry::Session) -> Result<registry::Value<source::LineIndex>, registry::Failure> {
+    handle registry::line_index(&mut *db, session, fixture_file()) { Result::Err(error) => Result::Err(error), Result::Ok(query) => drive(db, query, 2000) }
+}
+fn open_root(db: &mut Db, id: identity::RevisionId) -> Result<Root, registry::Failure> {
+    handle registry::open(&mut *db, id, 1000000, 1000000) { Result::Err(error) => Result::Err(error), Result::Ok(session) =>
+        handle query_bytes(&mut *db, session) { Result::Err(error) => Result::Err(error), Result::Ok(bytes) =>
+            handle query_lines(db, session) { Result::Err(error) => Result::Err(error), Result::Ok(lines) =>
+                Result::Ok(Root { revision: id, session: session, bytes: bytes, lines: lines }) } } }
+}
+fn new_root(db: &mut Db, index: usize, parent: Option<identity::RevisionId>) -> Result<Root, registry::Failure> {
+    handle imported(&mut *db, index, parent) { Result::Err(error) => Result::Err(error), Result::Ok(id) => open_root(db, id) }
+}
+fn succeeded<T>(value: Result<T, registry::Failure>) -> i64 where T: Use<[0, 1]> { handle value { Result::Ok(_) => 1, _ => 0 } }
+fn same_revision(a: identity::RevisionId, b: identity::RevisionId) -> i64 { yes(identity::same_revision(a, b)) }
+fn execution<T>(value: registry::Value<T>, kind: usize, parent: identity::RevisionId) -> i64 {
+    handle registry::execution(value) {
+        engine::Execution::Recomputed(engine::Reason::Cold) => eq(as<i64>(kind), 0),
+        engine::Execution::Memoized { revision: revision } => eq(as<i64>(kind), 1) * same_revision(revision, parent),
+        engine::Execution::ReusedFromParent { parent: actual } => eq(as<i64>(kind), 2) * same_revision(actual, parent),
+        engine::Execution::Recomputed(engine::Reason::ParentReuseRejected { parent: actual }) => eq(as<i64>(kind), 3) * same_revision(actual, parent),
+        _ => 0,
+    }
+}
+fn check_products(db: &Db, root: Root, changed: Bool) -> i64 {
+    handle registry::source_value(db, root.session, root.bytes) { Result::Err(_) => 0, Result::Ok(blob) => {
+        let actual = source::bytes(blob); let expected = fixture_contents(changed);
+        let bytes = handle Slice::lex_compare(actual, expected) { Ordering::Equal => 1, _ => 0 };
+        let valid = bytes * same_digest(source::file(blob).digest, fixture_file().digest)
+            * same_digest(source::fingerprint(blob), fixture_source_digest(changed))
+            * same_digest(registry::fingerprint(root.bytes), fixture_source_digest(changed));
+        handle registry::line_value(db, root.session, root.lines) { Result::Err(_) => 0, Result::Ok(index) =>
+            valid * expected_lines(index, changed) * same_digest(source::line_fingerprint(index), fixture_line_digest(changed))
+                * same_digest(registry::fingerprint(root.lines), fixture_line_digest(changed)) }
+    } }
+}
+fn store_counts(db: &Db, sources: usize, lines: usize, memos: usize, revisions: usize, sessions: usize) -> i64 {
+    handle registry::stats(db) { Result::Err(_) => 0, Result::Ok(stats) =>
+        eq(as<i64>(stats.sources), as<i64>(sources)) * eq(as<i64>(stats.lines), as<i64>(lines))
+            * eq(as<i64>(stats.core.products), as<i64>(sources + lines)) * eq(as<i64>(stats.core.queries.memos), as<i64>(memos))
+            * eq(as<i64>(stats.core.queries.edges), as<i64>(memos)) * eq(as<i64>(stats.core.queries.attempts), 0)
+            * eq(as<i64>(stats.drivers), 0) * eq(as<i64>(stats.core.revisions.retained), as<i64>(revisions))
+            * eq(as<i64>(stats.sessions), as<i64>(sessions)) * eq(as<i64>(stats.core.revisions.snapshot_pins), as<i64>(sessions)) }
+}
+fn close_steps(db: &mut Db, session: registry::Session, fuel: usize) -> Result<(), registry::Failure> {
+    handle fuel == 0 { true => Result::Err(registry::Failure::Invariant), false => handle registry::close_step(&mut *db, session) {
+        Result::Err(error) => Result::Err(error), Result::Ok(event) => handle event {
+            registry::CloseStep::Done => Result::Ok(()), _ => close_steps(db, session, fuel - 1),
+        },
+    } }
+}
+fn close(db: &mut Db, session: registry::Session) -> i64 {
+    handle registry::begin_close(&mut *db, session) { Result::Err(_) => 0, Result::Ok(_) => succeeded(close_steps(db, session, 1000)) }
+}
+fn gc_steps(db: &mut Db, fuel: usize) -> Result<database::Collected, registry::Failure> {
+    handle fuel == 0 { true => Result::Err(registry::Failure::Invariant), false => handle registry::collect_step(&mut *db) {
+        Result::Err(error) => Result::Err(error), Result::Ok(event) => handle event {
+            registry::CollectionStep::Done(value) => Result::Ok(value), _ => gc_steps(db, fuel - 1),
+        },
+    } }
+}
+fn sweep(db: &mut Db, revisions: usize, memos: usize, products: usize) -> i64 {
+    handle registry::collect(&mut *db) { Result::Err(_) => 0, Result::Ok(_) => handle gc_steps(db, 1000) {
+        Result::Err(_) => 0, Result::Ok(value) => eq(as<i64>(value.revisions), as<i64>(revisions))
+            * eq(as<i64>(value.memos), as<i64>(memos)) * eq(as<i64>(value.products), as<i64>(products)) * eq(as<i64>(value.edges), as<i64>(memos)),
+    } }
+}
+fn rejected_parent(value: Result<identity::RevisionId, registry::Failure>, expected: usize) -> i64 {
+    handle value { Result::Err(error) => handle error {
+        registry::Failure::Database(database::Failure::Revision(revision::RevisionError::Foreign)) => eq(as<i64>(expected), 0),
+        registry::Failure::Database(database::Failure::Revision(revision::RevisionError::Unknown)) => eq(as<i64>(expected), 1),
+        registry::Failure::Database(database::Failure::Revision(revision::RevisionError::Retired)) => eq(as<i64>(expected), 2), _ => 0,
+    }, _ => 0 }
+}
+fn admission(db: &mut Db, original: Root) -> i64 {
+    let foreign = identity::RevisionId { database: wrapping_add(original.revision.database, 1), ordinal: original.revision.ordinal };
+    let unknown = identity::RevisionId { database: original.revision.database, ordinal: 1000 };
+    let invalid = rejected_parent(imported(&mut *db, 1, Result::Ok(foreign)), 0) * rejected_parent(imported(&mut *db, 1, Result::Ok(unknown)), 1);
+    handle imported(&mut *db, 1, Result::Ok(original.revision)) { Result::Err(_) => 0, Result::Ok(id) =>
+        invalid * same_revision(id, original.revision) * store_counts(& *db, 1, 1, 2, 1, 1) }
+}
+fn cached_products(db: &mut Db, root: Root) -> i64 {
+    handle query_bytes(&mut *db, root.session) { Result::Err(_) => 0, Result::Ok(bytes) =>
+        handle query_lines(db, root.session) { Result::Err(_) => 0, Result::Ok(lines) =>
+            execution(bytes, 1, root.revision) * execution(lines, 1, root.revision) } }
+}
+fn wrong_owner(db: &Db, original: Root, changed: Root) -> i64 {
+    let bytes = handle registry::source_value(db, changed.session, original.bytes) { Result::Err(_) => 1, _ => 0 };
+    bytes * handle registry::line_value(db, changed.session, original.lines) { Result::Err(_) => 1, _ => 0 }
+}
+fn release_all(db: &mut Db, original: Root, child: Root, changed: Root) -> i64 {
+    let score = succeeded(registry::retire(&mut *db, original.revision)) * sweep(&mut *db, 0, 0, 0)
+        * store_counts(& *db, 2, 2, 6, 3, 3) * check_products(& *db, original, false)
+        * rejected_parent(imported(&mut *db, 2, Result::Ok(original.revision)), 2);
+    let score = score * close(&mut *db, original.session) * sweep(&mut *db, 1, 2, 0)
+        * store_counts(& *db, 2, 2, 4, 2, 2) * check_products(& *db, child, false) * wrong_owner(& *db, original, changed);
+    let score = score * succeeded(registry::retire(&mut *db, child.revision)) * close(&mut *db, child.session)
+        * sweep(&mut *db, 1, 2, 2) * store_counts(& *db, 1, 1, 2, 1, 1) * check_products(& *db, changed, true);
+    score * succeeded(registry::retire(&mut *db, changed.revision)) * close(&mut *db, changed.session)
+        * sweep(&mut *db, 1, 2, 2) * store_counts(& *db, 0, 0, 0, 0, 0)
+}
+fn changed_world(db: &mut Db, original: Root, child: Root, admission: i64, first: i64, reuse: i64) -> (i64, i64, i64, i64, i64) {
+    handle new_root(&mut *db, 3, Result::Ok(child.revision)) { Result::Err(_) => (admission, first, reuse, 0, 0), Result::Ok(changed) => {
+        let valid = (1 - same_revision(changed.revision, child.revision)) * execution(changed.bytes, 3, child.revision)
+            * execution(changed.lines, 3, child.revision) * check_products(& *db, changed, true)
+            * check_products(& *db, original, false) * check_products(& *db, child, false) * store_counts(& *db, 2, 2, 6, 3, 3);
+        (admission, first, reuse, valid, release_all(db, original, child, changed))
+    } }
+}
+fn child_world(db: &mut Db, original: Root, admission: i64, first: i64) -> (i64, i64, i64, i64, i64) {
+    handle new_root(&mut *db, 2, Result::Ok(original.revision)) { Result::Err(_) => (admission, first, 0, 0, 0), Result::Ok(child) => {
+        let valid = (1 - same_revision(child.revision, original.revision)) * execution(child.bytes, 2, original.revision)
+            * execution(child.lines, 2, original.revision) * check_products(& *db, child, false) * store_counts(& *db, 1, 1, 4, 2, 2);
+        changed_world(db, original, child, admission, first, valid)
+    } }
+}
+fn main() -> (i64, i64, i64, i64, i64) {
+    handle registry::create<world::NormalizedWorld>(129, db_limits()) { Result::Err(_) => (0, 0, 0, 0, 0), Result::Ok(db) =>
+        handle new_root(&mut db, 0, None) { Result::Err(_) => (0, 0, 0, 0, 0), Result::Ok(original) => {
+            let first = execution(original.bytes, 0, original.revision) * execution(original.lines, 0, original.revision)
+                * check_products(&db, original, false) * cached_products(&mut db, original);
+            let admitted = admission(&mut db, original); child_world(&mut db, original, admitted, first)
+        } } }
+}

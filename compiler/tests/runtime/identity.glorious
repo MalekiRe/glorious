@@ -1,0 +1,19 @@
+use std::*;
+use kernel::identity;
+pub mod kernel;
+
+fn compare(key: identity::FileKey) -> i64 {
+    handle identity::decode(b"@ORACLE@") {
+        Result::Err(_) => 1,
+        Result::Ok(expected) => handle identity::equal(key.digest, expected) {
+            true => 42,
+            false => 2,
+        },
+    }
+}
+pub fn main() -> i64 {
+    handle identity::file(b"app@0.1.0", b"src/main.glorious", 128) {
+        Result::Ok(key) => compare(key),
+        Result::Err(_) => 3,
+    }
+}

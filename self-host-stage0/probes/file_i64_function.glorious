@@ -1,1 +1,0 @@
-pub fn file_answer() -> i64 { 40 + 2 }

@@ -1,1 +1,0 @@
-pub fn main() -> u32 { return 20 + 22; }

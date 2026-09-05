@@ -1,0 +1,144 @@
+use std::*;
+use kernel::database;
+use kernel::database::create;
+use kernel::database::family;
+use kernel::engine;
+use kernel::identity;
+use kernel::query;
+use kernel::operation;
+pub mod kernel;
+
+pub struct World { version: u64 }
+pub struct Product { answer: i64 }
+pub type Db = database::Database<World, Product>;
+pub struct Inputs { revision: identity::RevisionId, key: database::Key<u32>, fingerprint: identity::Digest }
+
+fn twice(db: &mut Db, ticket: engine::Ticket) -> Result<engine::Event, database::Failure> {
+    handle database::step(&mut *db, ticket) {
+        Result::Ok(engine::Event::Continue) => database::step(&mut *db, ticket), other => other,
+    }
+}
+fn drive(db: &mut Db, ticket: engine::Ticket) -> Result<engine::Event, database::Failure> {
+    handle twice(&mut *db, ticket) {
+        Result::Ok(engine::Event::Continue) => twice(&mut *db, ticket), other => other,
+    }
+}
+
+fn finish(db: &mut Db, session: database::Session, ticket: engine::Ticket) -> i64 {
+    handle drive(&mut *db, ticket) {
+        Result::Ok(engine::Event::Ready(outcome)) => handle database::value(& *db, session, outcome) {
+            Result::Ok(product) => product.answer,
+            _ => 1,
+        },
+        _ => 2,
+    }
+}
+
+fn take_over(db: &mut Db, inputs: Inputs, session: database::Session, ticket: engine::Ticket) -> i64 {
+    handle drive(&mut *db, ticket) {
+        Result::Ok(engine::Event::Compute { key: _ }) => handle database::publish(&mut *db, ticket,
+            Product { answer: 42 }, inputs.fingerprint, query::Completeness::Complete) {
+            Result::Ok(_) => finish(&mut *db, session, ticket), _ => 3,
+        },
+        _ => 4,
+    }
+}
+
+fn waiter(db: &mut Db, inputs: Inputs, owner: engine::Ticket, session: database::Session) -> i64 {
+    handle database::start(&mut *db, session, inputs.key, None) {
+        Result::Err(_) => 5,
+        Result::Ok(ticket) => handle drive(&mut *db, ticket) {
+            Result::Ok(engine::Event::Waiting) => {
+                database::abort(&mut *db, owner);
+                take_over(&mut *db, inputs, session, ticket)
+            },
+            _ => 6,
+        },
+    }
+}
+
+fn new_waiter(db: &mut Db, inputs: Inputs, owner: engine::Ticket) -> i64 {
+    handle database::open(&mut *db, inputs.revision, query::RecoveryPolicy::Reject, 1, 100) {
+        Result::Ok(session) => waiter(&mut *db, inputs, owner, session), _ => 7,
+    }
+}
+
+fn cancel_waiter(db: &mut Db, inputs: Inputs, owner: engine::Ticket,
+    session: database::Session, ticket: engine::Ticket) -> i64 {
+    handle database::cancel(&mut *db, session) {
+        Result::Err(_) => 8,
+        Result::Ok(_) => handle database::step(&mut *db, ticket) {
+            Result::Err(database::Failure::Engine(engine::Failure::Control(operation::Failure::Cancelled))) =>
+                handle database::step(&mut *db, owner) {
+                    Result::Ok(engine::Event::Compute { key: _ }) => new_waiter(&mut *db, inputs, owner),
+                    _ => 9,
+                },
+            _ => 10,
+        },
+    }
+}
+
+fn unrelated(db: &mut Db, inputs: Inputs, owner: engine::Ticket, session: database::Session) -> i64 {
+    handle database::start(&mut *db, session, inputs.key, None) {
+        Result::Err(_) => 11,
+        Result::Ok(ticket) => handle drive(&mut *db, ticket) {
+            Result::Ok(engine::Event::Waiting) => cancel_waiter(&mut *db, inputs, owner, session, ticket),
+            _ => 12,
+        },
+    }
+}
+
+fn other_request(db: &mut Db, inputs: Inputs, owner: engine::Ticket) -> i64 {
+    handle database::open(&mut *db, inputs.revision, query::RecoveryPolicy::Reject, 1, 100) {
+        Result::Ok(session) => unrelated(&mut *db, inputs, owner, session), _ => 13,
+    }
+}
+
+fn same_ancestry(db: &mut Db, inputs: Inputs, owner: engine::Ticket, session: database::Session) -> i64 {
+    handle database::start(&mut *db, session, inputs.key, Result::Ok(owner)) {
+        Result::Err(_) => 14,
+        Result::Ok(child) => handle database::step(&mut *db, child) {
+            Result::Err(database::Failure::Engine(engine::Failure::Cycle { family: _ })) => other_request(&mut *db, inputs, owner),
+            _ => 15,
+        },
+    }
+}
+
+fn owner(db: &mut Db, inputs: Inputs, session: database::Session) -> i64 {
+    handle database::start(&mut *db, session, inputs.key, None) {
+        Result::Err(_) => 16,
+        Result::Ok(ticket) => handle drive(&mut *db, ticket) {
+            Result::Ok(engine::Event::Compute { key: _ }) => same_ancestry(&mut *db, inputs, ticket, session),
+            _ => 17,
+        },
+    }
+}
+
+fn keyed(db: &mut Db, inputs: Inputs) -> i64 {
+    handle database::open(&mut *db, inputs.revision, query::RecoveryPolicy::Reject, 1, 100) {
+        Result::Ok(session) => owner(&mut *db, inputs, session), _ => 18,
+    }
+}
+
+fn imported(db: &mut Db, revision: identity::RevisionId, fingerprint: identity::Digest) -> i64 {
+    handle family<u32>(&mut *db, 1, query::RecoveryPolicy::Reject, engine::ReusePolicy::Tracked, 8) {
+        Result::Err(_) => 19,
+        Result::Ok(family) => handle database::intern(&mut family, 1) {
+            Result::Ok(key) => keyed(&mut *db, Inputs { revision: revision, key: key, fingerprint: fingerprint }),
+            _ => 20,
+        },
+    }
+}
+
+fn initialized(fingerprint: identity::Digest) -> i64 {
+    let db = create<World, Product>(74, 8, 8, 16, 16, 16);
+    handle database::import(&mut db, World { version: 1 }, fingerprint, None) {
+        Result::Ok(revision) => imported(&mut db, revision, fingerprint), _ => 21,
+    }
+}
+
+pub fn main() -> i64 {
+    handle identity::hash(b"query-waiting") {
+        Result::Ok(fingerprint) => initialized(fingerprint), _ => 22,
+    }
+}

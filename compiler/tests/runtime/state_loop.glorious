@@ -1,0 +1,17 @@
+use std::*;
+pub mod kernel;
+
+pub struct State { count: i64, witness: Vec<i64> }
+
+pub fn step(state: State) -> LoopStep<State, i64> {
+    handle state.count == @STEPS@ {
+        true => break(state.count),
+        false => continue(State { count: state.count + 1, witness: state.witness }),
+    }
+}
+
+pub fn main() -> i64 {
+    let witness = Vec::new();
+    Vec::push(&mut witness, 42);
+    loop_state(State { count: 0, witness: witness }, step)
+}

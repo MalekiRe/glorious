@@ -1,0 +1,277 @@
+use std::*;
+use kernel::identity;
+use kernel::identity::Digest;
+use kernel::operation;
+use kernel::order;
+use request::sources;
+use request::bootstrap;
+pub mod kernel;
+pub mod request;
+pub mod source;
+
+struct Witness { package: Vec<u8>, path: Vec<u8>, bytes: Vec<u8>, key: Vec<u8>, digest: Vec<u8> }
+struct Expected { kind: usize, a: Slice<'static, u8>, b: Slice<'static, u8>, c: Slice<'static, u8>, values: Vec<Witness> }
+fn eq(left: i64, right: i64) -> i64 { handle left == right { true => 1, false => 0 } }
+fn same(left: Slice<u8>, right: Slice<u8>) -> i64 { handle Slice::lex_compare(left, right) { Ordering::Equal => 1, _ => 0 } }
+fn owned(bytes: Slice<u8>) -> Vec<u8> { let values = Vec<u8>::new(); Vec::extend_from_slice(&mut values, bytes); values }
+fn text(bytes: Slice<u8>) -> String { handle String::from_utf8(owned(bytes)) { Result::Ok(value) => value, Result::Err(_) => String::new() } }
+fn digest(actual: Digest, expected: Slice<u8>) -> i64 {
+    handle identity::decode(expected) { Result::Err(_) => 0, Result::Ok(value) => handle identity::equal(actual, value) { true => 1, false => 0 } }
+}
+fn path_steps(builder: &mut request::PathBuilder, controls: &mut operation::Controls) -> Result<(), request::Failure> {
+    handle request::step_path(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event { request::Event::Continue => path_steps(builder, controls), request::Event::Ready => Result::Ok(()) },
+    }
+}
+fn input(witness: Witness) -> Result<request::SourceInput, request::Failure> {
+    let controls = operation::create(10000, 10000);
+    let builder = request::begin_path(text(Vec::as_slice(&witness.path)));
+    handle path_steps(&mut builder, &mut controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle request::finish_path(&mut builder, &controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(path) => handle identity::decode(Vec::as_slice(&witness.key)) {
+                Result::Err(_) => Result::Err(request::Failure::Invariant),
+                Result::Ok(key) => handle identity::decode(Vec::as_slice(&witness.digest)) {
+                    Result::Err(_) => Result::Err(request::Failure::Invariant),
+                    Result::Ok(fingerprint) => Result::Ok(request::SourceInput { key: identity::FileKey { digest: key },
+                        package: identity::PackageKey { value: text(Vec::as_slice(&witness.package)) }, logical_path: path,
+                        bytes: witness.bytes, digest: fingerprint }),
+                },
+            },
+        },
+    }
+}
+fn push(values: &mut Vec<request::SourceInput>, witness: Witness) -> i64 {
+    handle input(witness) { Result::Err(_) => 0, Result::Ok(value) => { Vec::push(values, value); 1 } }
+}
+fn limits() -> sources::Limits { sources::Limits { source_count: 100, source_bytes: 1000, identity_bytes: 1000 } }
+fn steps(builder: &mut sources::Builder, controls: &mut operation::Controls) -> Result<(), request::Failure> {
+    handle sources::step(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event { request::Event::Continue => steps(builder, controls), request::Event::Ready => Result::Ok(()) },
+    }
+}
+fn run(builder: &mut sources::Builder, controls: &mut operation::Controls) -> Result<sources::AdmittedSources, request::Failure> {
+    handle steps(&mut *builder, &mut *controls) { Result::Err(error) => Result::Err(error), Result::Ok(_) => sources::finish(builder, & *controls) }
+}
+fn row(value: &request::AdmittedSource, witness: &Witness) -> i64 {
+    let path = request::path(value);
+    let path_text = request::path_text(path);
+    let package = request::package(value);
+    let blob = request::blob(value);
+    same(Str::as_bytes(path_text), Vec::as_slice(&witness.path)) * same(Str::as_bytes(String::as_str(&package.value)), Vec::as_slice(&witness.package))
+        * same(source::bytes(blob), Vec::as_slice(&witness.bytes)) * digest(source::file(blob).digest, Vec::as_slice(&witness.key))
+        * digest(source::fingerprint(blob), Vec::as_slice(&witness.digest)) * eq(as<i64>(source::length(blob)), as<i64>(Vec::len(&witness.bytes)))
+}
+fn rows(values: Slice<request::AdmittedSource>, expected: Slice<Witness>, cursor: usize, score: i64) -> i64 {
+    handle cursor == Slice::len(&values) { true => score, false => rows(values, expected, cursor + 1,
+        score * row(Slice::get_unchecked(values, cursor), Slice::get_unchecked(expected, cursor))) }
+}
+fn retained(values: Slice<request::AdmittedSource>, expected: &Vec<Witness>) -> i64 {
+    handle Slice::len(&values) == Vec::len(expected) { false => 0, true => rows(values, Vec::as_slice(expected), 0, 1) }
+}
+fn rejected(error: request::InputError, expected: &Expected) -> i64 {
+    handle error {
+        request::InputError::EmptySources => eq(as<i64>(expected.kind), 1),
+        request::InputError::DuplicateFileKey(key) => eq(as<i64>(expected.kind), 2) * digest(key.digest, expected.a),
+        request::InputError::SourceIdentityMismatch { supplied: supplied, expected: wanted } =>
+            eq(as<i64>(expected.kind), 3) * digest(supplied.digest, expected.a) * digest(wanted.digest, expected.b),
+        request::InputError::DigestMismatch { file: file, expected: wanted, actual: actual } =>
+            eq(as<i64>(expected.kind), 4) * digest(file.digest, expected.a) * digest(wanted, expected.b) * digest(actual, expected.c),
+        request::InputError::InvalidUtf8(file) => eq(as<i64>(expected.kind), 5) * digest(file.digest, expected.a),
+        _ => 0,
+    }
+}
+fn expect<T>(value: Result<T, request::Failure>, code: i64) -> i64 where T: Use<[0, 1]> {
+    handle value {
+        Result::Ok(_) => eq(code, 0),
+        Result::Err(error) => handle error {
+            request::Failure::Closed => eq(code, 1), request::Failure::Busy => eq(code, 2),
+            request::Failure::Control(operation::Failure::Cancelled) => eq(code, 3),
+            request::Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: _, requested: _ }) => eq(code, 4),
+            request::Failure::Capacity { name: 4, limit: _ } => eq(code, 5), _ => 0,
+        },
+    }
+}
+fn check(values: Vec<request::SourceInput>, expected: Expected) -> i64 {
+    let controls = operation::create(1000000, 1000000);
+    let builder = sources::begin(values, limits());
+    let result = run(&mut builder, &mut controls);
+    let spent = operation::work_spent(&controls);
+    let closed = expect(sources::finish(&mut builder, &controls), 1)
+        * eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent));
+    handle result {
+        Result::Err(error) => handle error { request::Failure::Rejected(error) => closed * rejected(error, &expected), _ => 0 },
+        Result::Ok(value) => {
+            let values = sources::values(&value);
+            let result = retained(values, &expected.values);
+            let extracted = sources::into_values(value);
+            closed * eq(as<i64>(expected.kind), 0) * result * retained(Vec::as_slice(&extracted), &expected.values)
+        },
+    }
+}
+@CASES@
+fn inputs() -> Vec<request::SourceInput> {
+    let values = Vec<request::SourceInput>::new(); push(&mut values, witness_a()); push(&mut values, witness_b()); values
+}
+fn advance(builder: &mut sources::Builder, controls: &mut operation::Controls, count: usize) -> () {
+    handle count == 0 { true => (), false => { sources::step(&mut *builder, &mut *controls); advance(builder, controls, count - 1) } }
+}
+fn cancelled(builder: &mut sources::Builder, controls: &mut operation::Controls, finishing: usize) -> i64 {
+    handle finishing { 0 => expect(sources::step(builder, controls), 3), _ => expect(sources::finish(builder, & *controls), 3) }
+}
+fn cancel_at(phase: usize, finishing: usize) -> i64 {
+    let builder = sources::begin(inputs(), limits());
+    let controls = operation::create(1000000, 1000000);
+    advance(&mut builder, &mut controls, phase);
+    let spent = operation::work_spent(&controls);
+    operation::cancel(&mut controls);
+    let first = cancelled(&mut builder, &mut controls, finishing);
+    let fresh = operation::create(1000000, 1000000);
+    first + expect(sources::finish(&mut builder, &fresh), 1) + eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent))
+}
+fn early_at(phase: usize) -> i64 {
+    let builder = sources::begin(inputs(), limits());
+    let controls = operation::create(1000000, 1000000);
+    advance(&mut builder, &mut controls, phase);
+    expect(sources::finish(&mut builder, &controls), 2) + expect(sources::finish(&mut builder, &controls), 1)
+}
+fn cancellation(phase: usize, score: i64) -> i64 {
+    handle phase == 28 { true => score, false => cancellation(phase + 1, score + cancel_at(phase, 0) + cancel_at(phase, 1)) }
+}
+fn early(phase: usize, score: i64) -> i64 {
+    handle phase == 27 { true => score, false => early(phase + 1, score + early_at(phase)) }
+}
+fn budget_at(budget: u64) -> i64 {
+    let builder = sources::begin(inputs(), limits());
+    let controls = operation::create(budget, 1000000);
+    let first = expect(run(&mut builder, &mut controls), 4);
+    let spent = operation::work_spent(&controls);
+    let fresh = operation::create(1000000, 1000000);
+    first + expect(sources::finish(&mut builder, &fresh), 1) + eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent))
+}
+fn failure_cases() -> i64 {
+    let controls = operation::create(1000000, 1000000);
+    let capacity = sources::begin(inputs(), sources::Limits { source_count: 1, source_bytes: 1000, identity_bytes: 1000 });
+    let score = expect(sources::step(&mut capacity, &mut controls), 5) + expect(sources::finish(&mut capacity, &controls), 1);
+    let aborted = sources::begin(inputs(), limits()); sources::abort(&mut aborted);
+    score + expect(sources::finish(&mut aborted, &controls), 1) + expect(sources::step(&mut aborted, &mut controls), 1)
+        + budget_at(0) + budget_at(10) + budget_at(30) + budget_at(45)
+}
+fn order_steps(builder: &mut order::Builder, controls: &mut operation::Controls, values: Slice<u8>) -> Result<(), order::Failure> {
+    handle order::step(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            order::Event::Continue => order_steps(builder, controls, values),
+            order::Event::Ready => Result::Ok(()),
+            order::Event::Compare { left: left, right: right } => {
+                let answer = Ord::compare(Slice::get_unchecked(values, left), Slice::get_unchecked(values, right));
+                handle order::compared(&mut *builder, &mut *controls, answer) {
+                    Result::Err(error) => Result::Err(error), Result::Ok(_) => order_steps(builder, controls, values),
+                }
+            },
+        },
+    }
+}
+fn indices(values: &Vec<usize>, expected: Slice<u8>, cursor: usize, score: i64) -> i64 {
+    handle cursor == Vec::len(values) { true => score, false => indices(values, expected, cursor + 1,
+        score * eq(as<i64>(*Vec::get_unchecked(values, cursor)), as<i64>(*Slice::get_unchecked(expected, cursor)))) }
+}
+fn order_case(values: Slice<u8>, expected: Slice<u8>, bound: u64) -> i64 {
+    let controls = operation::create(bound, 10000);
+    let builder = order::begin(Slice::len(&values), Slice::len(&values));
+    handle order_steps(&mut builder, &mut controls, values) {
+        Result::Err(_) => 0,
+        Result::Ok(_) => handle order::finish(&mut builder, &controls) {
+            Result::Err(_) => 0,
+            Result::Ok(values) => handle Vec::len(&values) == Slice::len(&expected) {
+                false => 0, true => indices(&values, expected, 0, 1),
+            },
+        },
+    }
+}
+@ORDERS@
+fn expect_order<T>(value: Result<T, order::Failure>, code: i64) -> i64 where T: Use<[0, 1]> {
+    handle value {
+        Result::Ok(_) => eq(code, 0),
+        Result::Err(error) => handle error {
+            order::Failure::Closed => eq(code, 1), order::Failure::Busy => eq(code, 2),
+            order::Failure::Control(operation::Failure::Cancelled) => eq(code, 3),
+            order::Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: _, requested: _ }) => eq(code, 4),
+            order::Failure::Capacity { actual: 3, limit: 2 } => eq(code, 5),
+            order::Failure::Capacity { actual: 18446744073709551615, limit: 1 } => eq(code, 6),
+            _ => 0,
+        },
+    }
+}
+fn repeated_comparison(builder: &mut order::Builder, controls: &mut operation::Controls) -> i64 {
+    handle order::step(builder, controls) {
+        Result::Err(_) => 0,
+        Result::Ok(event) => handle event { order::Event::Compare { left: 0, right: 1 } => 1, _ => 0 },
+    }
+}
+fn order_failures() -> i64 {
+    let controls = operation::create(1000, 1000);
+    let wrong = order::begin(2, 2);
+    let score = expect_order(order::compared(&mut wrong, &mut controls, Ordering::Equal), 2)
+        + expect_order(order::finish(&mut wrong, &controls), 1);
+    let capacity = order::begin(3, 2);
+    score = score + expect_order(order::step(&mut capacity, &mut controls), 5)
+        + expect_order(order::finish(&mut capacity, &controls), 1);
+    let huge = order::begin(18446744073709551615, 1);
+    score = score + expect_order(order::step(&mut huge, &mut controls), 6)
+        + expect_order(order::finish(&mut huge, &controls), 1);
+    let cancelled = order::begin(0, 0);
+    score = score + expect_order(order::step(&mut cancelled, &mut controls), 0);
+    operation::cancel(&mut controls);
+    score = score + expect_order(order::finish(&mut cancelled, &controls), 3);
+    let fresh = operation::create(1000, 1000);
+    score = score + expect_order(order::finish(&mut cancelled, &fresh), 1);
+    let waiting = order::begin(2, 2);
+    order::step(&mut waiting, &mut fresh); order::step(&mut waiting, &mut fresh); order::step(&mut waiting, &mut fresh);
+    score = score + repeated_comparison(&mut waiting, &mut fresh) + repeated_comparison(&mut waiting, &mut fresh)
+        + expect_order(order::compared(&mut waiting, &mut fresh, Ordering::Equal), 0)
+        + expect_order(order::compared(&mut waiting, &mut fresh, Ordering::Equal), 2)
+        + expect_order(order::finish(&mut waiting, &fresh), 1);
+    let zero = operation::create(0, 1000);
+    let exhausted = order::begin(0, 0);
+    score = score + expect_order(order::step(&mut exhausted, &mut zero), 4)
+        + expect_order(order::finish(&mut exhausted, &fresh), 1);
+    let aborted = order::begin(1, 1); order::abort(&mut aborted);
+    score = score + expect_order(order::finish(&mut aborted, &fresh), 1) + expect_order(order::step(&mut aborted, &mut fresh), 1);
+    let finished = order::begin(0, 0);
+    score + expect_order(order::step(&mut finished, &mut fresh), 0) + expect_order(order::finish(&mut finished, &fresh), 0)
+        + expect_order(order::finish(&mut finished, &fresh), 1)
+}
+fn boot_steps(builder: &mut bootstrap::Builder, controls: &mut operation::Controls) -> Result<(), request::Failure> {
+    handle bootstrap::step(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event { request::Event::Continue => boot_steps(builder, controls), request::Event::Ready => Result::Ok(()) },
+    }
+}
+fn boot(value: sources::AdmittedSources, producer: Digest, controls: &mut operation::Controls) -> i64 {
+    let stage = request::BootstrapStage { ordinal: 2, producer: producer, optimization_level: 2,
+        limits: request::BootstrapLimits { max_sources: 2, max_total_source_bytes: 3 }, expected_artifact: Result::Ok(producer) };
+    let builder = bootstrap::begin(stage, producer, sources::into_values(value), None);
+    handle boot_steps(&mut builder, &mut *controls) {
+        Result::Err(_) => 0,
+        Result::Ok(_) => handle bootstrap::finish(&mut builder, & *controls) {
+            Result::Err(_) => 0,
+            Result::Ok(value) => { let expected = Vec<Witness>::new(); Vec::push(&mut expected, witness_a()); Vec::push(&mut expected, witness_b());
+                let values = bootstrap::sources(&value); retained(values, &expected) },
+        },
+    }
+}
+fn integrated() -> i64 {
+    let controls = operation::create(1000000, 1000000);
+    let builder = sources::begin(inputs(), limits());
+    handle run(&mut builder, &mut controls) {
+        Result::Err(_) => 0,
+        Result::Ok(value) => handle identity::hash(b"producer") { Result::Err(_) => 0, Result::Ok(producer) => boot(value, producer, &mut controls) },
+    }
+}
+main() -> (i64, i64, i64, i64, i64) {
+    (oracle_cases(), cancellation(0, 0) + early(0, 0) + failure_cases(), order_cases(), integrated(), order_failures())
+}

@@ -162,8 +162,8 @@ Implement source-facing `()`, `!`, `u8`, `u16`, `u32`, `u64`, `u128`, `i8`,
 Numeric APIs include arithmetic, comparisons, min/max/clamp, bitwise and shift
 operations where applicable, wrapping conversion, and checked conversion
 returning `Option<T>`. Float operations preserve the canonical NaN and signed
-zero rules established by the VM; public float-to-integer conversion is always
-checked.
+zero rules established by the VM. Checked float-to-integer functions coexist
+with the explicit saturating policy of the [trait-backed `as` function](conversions.md).
 
 The ordinary source-level bit API is `bit_and`, `bit_or`, `bit_xor`,
 `bit_not`, `bit_shl`, and `bit_shr`. The shift helpers use a `u32` count for
@@ -233,6 +233,14 @@ collection types. `HashMap` and `HashSet` use deterministic hashing, provide
 checked lookup and ownership-preserving insert/remove variants, and make no
 iteration-order promise. Compiler-visible output must sort externally observable
 map/set results.
+
+The current source implementation uses open addressing with cached hashes,
+power-of-two growth, and tombstone cleanup. Keys and values live in a separate
+dense vector, so rehashing only rewrites index metadata. Replacement preserves
+the existing resident key and returns the old value. `HashMap::get_mut` lends
+the resident value uniquely; `HashMap::remove_entry` returns `(K,V)` without
+requiring either field to be discardable. These source algorithms do not yet
+certify the physical cost of VM aggregate snapshots or backing-array mutation.
 
 Implement in-place unstable sort, stable sort using a reusable scratch vector,
 binary search, lower/upper bounds, partition, deduplication, and lexicographic

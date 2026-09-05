@@ -1,0 +1,217 @@
+use std::*;
+
+pub struct Digest { private a: u64, private b: u64, private c: u64, private d: u64 }
+pub struct FileKey { digest: Digest }
+pub struct DefKey { digest: Digest }
+// This is the stable identity projection, not the future validated argument
+// tree. Equality/order retain the complete canonical substitution, like Rust.
+pub struct InstanceKey { callable: DefKey, canonical_substitution: Vec<u8> }
+pub struct PackageKey { value: String }
+pub struct ModuleKey { package: PackageKey, path: String }
+pub struct RevisionId { database: u64, ordinal: u64 }
+pub enum IdentityError { DigestLength, Capacity }
+
+pub fn same_revision(left: RevisionId, right: RevisionId) -> Bool {
+    handle left.database == right.database { false => false, true => left.ordinal == right.ordinal }
+}
+
+pub impl Eq for Digest {
+    eq(left: &Digest, right: &Digest) -> Bool { equal(*left, *right) }
+}
+pub impl Eq for FileKey {
+    eq(left: &FileKey, right: &FileKey) -> Bool { equal(left.digest, right.digest) }
+}
+pub impl Hash for FileKey {
+    hash(value: &FileKey, state: &mut Hasher) -> () { Hash::hash(&value.digest, state) }
+}
+pub impl Hash for Digest {
+    hash(value: &Digest, state: &mut Hasher) -> () {
+        Hasher::write_usize(&mut *state, as<usize>(value.a));
+        Hasher::write_usize(&mut *state, as<usize>(value.b));
+        Hasher::write_usize(&mut *state, as<usize>(value.c));
+        Hasher::write_usize(&mut *state, as<usize>(value.d))
+    }
+}
+pub impl Eq for RevisionId {
+    eq(left: &RevisionId, right: &RevisionId) -> Bool {
+        handle left.database == right.database {
+            true => left.ordinal == right.ordinal,
+            false => false,
+        }
+    }
+}
+pub impl Hash for RevisionId {
+    hash(value: &RevisionId, state: &mut Hasher) -> () {
+        Hasher::write_usize(&mut *state, as<usize>(value.database));
+        Hasher::write_usize(&mut *state, as<usize>(value.ordinal))
+    }
+}
+
+pub fn equal(left: Digest, right: Digest) -> Bool {
+    bit_or(bit_or(bit_xor(left.a, right.a), bit_xor(left.b, right.b)),
+        bit_or(bit_xor(left.c, right.c), bit_xor(left.d, right.d))) == 0
+}
+
+// Rust Digest orders its canonical bytes, not the little-endian words used
+// by this source representation. This distinction is observable in traces.
+fn word(value: Digest, index: usize) -> u64 {
+    handle index { 0 => value.a, 1 => value.b, 2 => value.c, _ => value.d }
+}
+fn digest_byte(value: Digest, index: usize) -> u8 {
+    as<u8>(bit_shr(word(value, index / 8), as<u32>(bit_and(index, 7) * 8)))
+}
+fn compare_digest_from(left: Digest, right: Digest, index: usize) -> Ordering {
+    handle index == 32 {
+        true => Ordering::Equal,
+        false => {
+            let a = digest_byte(left, index);
+            let b = digest_byte(right, index);
+            handle Ord::compare(&a, &b) {
+                Ordering::Equal => compare_digest_from(left, right, index + 1),
+                order => order,
+            }
+        },
+    }
+}
+pub fn compare_digest(left: Digest, right: Digest) -> Ordering { compare_digest_from(left, right, 0) }
+pub fn compare_text(left: &String, right: &String) -> Ordering {
+    Slice::lex_compare(Str::as_bytes(String::as_str(left)), Str::as_bytes(String::as_str(right)))
+}
+pub fn compare_package(left: &PackageKey, right: &PackageKey) -> Ordering {
+    compare_text(&left.value, &right.value)
+}
+pub impl Eq for PackageKey {
+    eq(left: &PackageKey, right: &PackageKey) -> Bool {
+        handle compare_package(left, right) { Ordering::Equal => true, _ => false }
+    }
+}
+pub impl Hash for PackageKey {
+    hash(value: &PackageKey, state: &mut Hasher) -> () { hash_package(value, state) }
+}
+pub fn compare_module(left: &ModuleKey, right: &ModuleKey) -> Ordering {
+    handle compare_package(&left.package, &right.package) {
+        Ordering::Equal => compare_text(&left.path, &right.path),
+        order => order,
+    }
+}
+pub fn compare_instance(left: &InstanceKey, right: &InstanceKey) -> Ordering {
+    handle compare_digest(left.callable.digest, right.callable.digest) {
+        Ordering::Equal => Slice::lex_compare(Vec::as_slice(&left.canonical_substitution), Vec::as_slice(&right.canonical_substitution)),
+        order => order,
+    }
+}
+fn hash_text_from(bytes: Slice<u8>, state: &mut Hasher, index: usize) -> () {
+    handle index < Slice::len(&bytes) {
+        false => (),
+        true => {
+            Hasher::write_usize(&mut *state, as<usize>(*Slice::get_unchecked(bytes, index)));
+            hash_text_from(bytes, &mut *state, index + 1)
+        },
+    }
+}
+pub fn hash_text(value: &String, state: &mut Hasher) -> () {
+    let bytes = Str::as_bytes(String::as_str(value));
+    Hasher::write_usize(&mut *state, Slice::len(&bytes));
+    hash_text_from(bytes, &mut *state, 0)
+}
+pub fn hash_package(value: &PackageKey, state: &mut Hasher) -> () { hash_text(&value.value, state) }
+pub fn hash_module(value: &ModuleKey, state: &mut Hasher) -> () {
+    hash_package(&value.package, &mut *state);
+    hash_text(&value.path, &mut *state)
+}
+pub fn hash_instance(value: &InstanceKey, state: &mut Hasher) -> () {
+    Hash::hash(&value.callable.digest, &mut *state);
+    Hasher::write_usize(&mut *state, Vec::len(&value.canonical_substitution));
+    hash_text_from(Vec::as_slice(&value.canonical_substitution), state, 0)
+}
+
+pub fn decode(bytes: Slice<u8>) -> Result<Digest, IdentityError> {
+    handle Slice::len(&bytes) == 32 {
+        false => Result::Err(IdentityError::DigestLength),
+        true => {
+            let cursor = ByteCursor::new();
+            handle ByteCursor::u64(&mut cursor, bytes) {
+                Result::Err(_) => Result::Err(IdentityError::DigestLength),
+                Result::Ok(a) => handle ByteCursor::u64(&mut cursor, bytes) {
+                    Result::Err(_) => Result::Err(IdentityError::DigestLength),
+                    Result::Ok(b) => handle ByteCursor::u64(&mut cursor, bytes) {
+                        Result::Err(_) => Result::Err(IdentityError::DigestLength),
+                        Result::Ok(c) => handle ByteCursor::u64(&mut cursor, bytes) {
+                            Result::Err(_) => Result::Err(IdentityError::DigestLength),
+                            Result::Ok(d) => Result::Ok(Digest { a: a, b: b, c: c, d: d }),
+                        },
+                    },
+                },
+            }
+        },
+    }
+}
+
+pub fn hash(bytes: Slice<u8>) -> Result<Digest, IdentityError> {
+    let digest = blake3(bytes);
+    decode(Vec::as_slice(&digest))
+}
+
+// A part is length-prefixed exactly as Rust Digest::of_parts. The caller's
+// buffer is attempt-owned and is discarded if any append fails.
+pub fn part(buffer: &mut ByteBuf, bytes: Slice<u8>) -> Result<(), IdentityError> {
+    let length = Slice::len(&bytes);
+    handle ByteBuf::put_u64(&mut *buffer, as<u64>(length)) {
+        Result::Err(_) => Result::Err(IdentityError::Capacity),
+        Result::Ok(_) => handle ByteBuf::append(&mut *buffer, bytes) {
+            Result::Err(_) => Result::Err(IdentityError::Capacity),
+            Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+
+fn digest_words(buffer: &mut ByteBuf, value: Digest, index: usize) -> Result<(), IdentityError> {
+    handle index == 4 {
+        true => Result::Ok(()),
+        false => handle ByteBuf::put_u64(&mut *buffer, word(value, index)) {
+            Result::Err(_) => Result::Err(IdentityError::Capacity),
+            Result::Ok(_) => digest_words(buffer, value, index + 1),
+        },
+    }
+}
+pub fn write_digest(buffer: &mut ByteBuf, value: Digest) -> Result<(), IdentityError> {
+    // Append checks the complete extent before mutating the destination.
+    let encoded = ByteBuf::new(32);
+    handle digest_words(&mut encoded, value, 0) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle ByteBuf::append(buffer, ByteBuf::view(&encoded)) {
+            Result::Err(_) => Result::Err(IdentityError::Capacity), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+fn digest_part(buffer: &mut ByteBuf, value: Digest) -> Result<(), IdentityError> {
+    handle ByteBuf::put_u64(&mut *buffer, 32) {
+        Result::Err(_) => Result::Err(IdentityError::Capacity), Result::Ok(_) => digest_words(buffer, value, 0),
+    }
+}
+pub fn instance_fingerprint(value: &InstanceKey, limit: usize) -> Result<Digest, IdentityError> {
+    let buffer = ByteBuf::new(limit);
+    handle part(&mut buffer, b"grandiose-stage0-instance-key-v1") {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle digest_part(&mut buffer, value.callable.digest) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle part(&mut buffer, Vec::as_slice(&value.canonical_substitution)) {
+                Result::Err(error) => Result::Err(error), Result::Ok(_) => hash(ByteBuf::view(&buffer)),
+            },
+        },
+    }
+}
+
+pub fn file(package: Slice<u8>, logical_path: Slice<u8>, limit: usize) -> Result<FileKey, IdentityError> {
+    let buffer = ByteBuf::new(limit);
+    handle part(&mut buffer, package) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle part(&mut buffer, logical_path) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle hash(ByteBuf::view(&buffer)) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(digest) => Result::Ok(FileKey { digest: digest }),
+            },
+        },
+    }
+}

@@ -1,0 +1,169 @@
+use std::*;
+use kernel::diagnostic;
+use kernel::diagnostic::Failure;
+use kernel::diagnostic::Event;
+use kernel::identity;
+use kernel::operation;
+pub mod kernel;
+
+fn builder(records: usize, provenance: usize) -> diagnostic::Builder {
+    diagnostic::begin(diagnostic::Limits { diagnostics: records, provenance: provenance },
+        diagnostic::Policy { validate_spans: true, error_limit: None, input_fingerprint: None })
+}
+fn value(primary: Option<diagnostic::Span>) -> diagnostic::CompileDiagnostic {
+    diagnostic::CompileDiagnostic { code: Str::to_string("G1000"), class: diagnostic::Class::Source,
+        severity: diagnostic::Severity::Error, message: Str::to_string("failure"), primary: primary,
+        input_fingerprint: None, related: Vec::new(), facts: Vec::new(), explanation: Vec::new() }
+}
+fn closed(builder: &mut diagnostic::Builder) -> i64 {
+    let controls = operation::create(100, 100);
+    handle diagnostic::finish(builder, &controls) { Result::Err(Failure::Closed) => 1, _ => 0 }
+}
+fn spent(controls: &operation::Controls, expected: u64) -> i64 {
+    handle operation::work_spent(controls) == expected { true => 1, false => 0 }
+}
+fn capacity() -> i64 {
+    let state = builder(0, 0);
+    let controls = operation::create(100, 100);
+    handle diagnostic::record(&mut state, &mut controls, value(None)) {
+        Result::Err(Failure::Capacity) => 1 + closed(&mut state) + spent(&controls, 1), _ => 0,
+    }
+}
+fn provenance() -> i64 {
+    let state = builder(1, 0);
+    let controls = operation::create(100, 100);
+    let item = value(None);
+    Vec::push(&mut item.facts, diagnostic::Fact { name: Str::to_string("key"), value: Str::to_string("value") });
+    handle diagnostic::record(&mut state, &mut controls, item) {
+        Result::Err(Failure::Capacity) => 1 + closed(&mut state) + spent(&controls, 1), _ => 0,
+    }
+}
+fn early_finish() -> i64 {
+    let state = builder(1, 1);
+    let controls = operation::create(100, 100);
+    diagnostic::record(&mut state, &mut controls, value(None));
+    handle diagnostic::finish(&mut state, &controls) { Result::Err(Failure::Busy) => 1 + closed(&mut state), _ => 0 }
+}
+fn cancelled_record() -> i64 {
+    let state = builder(1, 1);
+    let controls = operation::create(100, 100);
+    operation::cancel(&mut controls);
+    handle diagnostic::record(&mut state, &mut controls, value(None)) {
+        Result::Err(Failure::Control(operation::Failure::Cancelled)) => 1 + closed(&mut state) + spent(&controls, 0), _ => 0,
+    }
+}
+fn cancelled_step() -> i64 {
+    let state = builder(1, 1);
+    let controls = operation::create(100, 100);
+    diagnostic::record(&mut state, &mut controls, value(None));
+    diagnostic::seal(&mut state);
+    operation::cancel(&mut controls);
+    handle diagnostic::step(&mut state, &mut controls) {
+        Result::Err(Failure::Control(operation::Failure::Cancelled)) => 1 + closed(&mut state) + spent(&controls, 1), _ => 0,
+    }
+}
+fn exhausted() -> i64 {
+    let state = builder(1, 1);
+    let controls = operation::create(0, 100);
+    diagnostic::seal(&mut state);
+    handle diagnostic::step(&mut state, &mut controls) {
+        Result::Err(Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: 0, requested: 1 })) =>
+            1 + closed(&mut state) + spent(&controls, 0),
+        _ => 0,
+    }
+}
+fn drive(state: &mut diagnostic::Builder, controls: &mut operation::Controls, fuel: usize) -> Result<(), Failure> {
+    handle fuel == 0 {
+        true => Result::Err(Failure::Invariant),
+        false => handle diagnostic::step(&mut *state, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                Event::Ready => Result::Ok(()), Event::Continue => drive(state, controls, fuel - 1),
+                Event::Validate(_) => Result::Err(Failure::Invariant),
+            },
+        },
+    }
+}
+fn late_cancel() -> i64 {
+    let state = builder(1, 1);
+    let controls = operation::create(100, 100);
+    diagnostic::record(&mut state, &mut controls, value(None));
+    diagnostic::seal(&mut state);
+    handle drive(&mut state, &mut controls, 100) {
+        Result::Err(_) => 0,
+        Result::Ok(_) => {
+            let before = operation::work_spent(&controls);
+            operation::cancel(&mut controls);
+            handle diagnostic::finish(&mut state, &controls) {
+                Result::Err(Failure::Control(operation::Failure::Cancelled)) => 1 + closed(&mut state) + spent(&controls, before), _ => 0,
+            }
+        },
+    }
+}
+fn awaiting(file: identity::Digest) -> i64 {
+    let state = builder(1, 1);
+    let controls = operation::create(100, 100);
+    let span = diagnostic::Span { file: identity::FileKey { digest: file }, start: 0, end: 1 };
+    diagnostic::record(&mut state, &mut controls, value(Result::Ok(span)));
+    diagnostic::seal(&mut state);
+    handle diagnostic::step(&mut state, &mut controls) {
+        Result::Ok(Event::Validate(_)) => {
+            operation::cancel(&mut controls);
+            handle diagnostic::answer(&mut state, &mut controls, Result::Ok(10)) {
+                Result::Err(Failure::Control(operation::Failure::Cancelled)) => 1 + closed(&mut state) + spent(&controls, 2), _ => 0,
+            }
+        },
+        _ => 0,
+    }
+}
+fn wrong_phase() -> i64 {
+    let state = builder(1, 1);
+    let controls = operation::create(100, 100);
+    handle diagnostic::answer(&mut state, &mut controls, None) { Result::Err(Failure::Busy) => 1 + closed(&mut state), _ => 0 }
+}
+fn replacement(file: identity::Digest) -> i64 {
+    let state = builder(1, 1);
+    let controls = operation::create(100, 100);
+    let span = diagnostic::Span { file: identity::FileKey { digest: file }, start: 5, end: 2 };
+    diagnostic::record(&mut state, &mut controls, value(Result::Ok(span)));
+    diagnostic::seal(&mut state);
+    handle diagnostic::step(&mut state, &mut controls) {
+        Result::Ok(Event::Validate(_)) => {
+            diagnostic::answer(&mut state, &mut controls, Result::Ok(10));
+            handle drive(&mut state, &mut controls, 100) {
+                Result::Err(_) => 0,
+                Result::Ok(_) => handle diagnostic::finish(&mut state, &controls) {
+                    Result::Err(_) => 0, Result::Ok(batch) => replaced(&batch) + closed(&mut state),
+                },
+            }
+        },
+        _ => 0,
+    }
+}
+fn replaced(batch: &diagnostic::Batch) -> i64 {
+    let values = diagnostic::values(batch);
+    handle Slice::len(&values) == 1 {
+        false => 0,
+        true => {
+            let value = Slice::get_unchecked(values, 0);
+            handle value.class {
+                diagnostic::Class::Invariant => handle value.primary { Result::Err(_) => 2, _ => 0 }, _ => 0,
+            }
+        },
+    }
+}
+fn digest_capacity(file: identity::Digest) -> i64 {
+    let buffer = ByteBuf::new(32);
+    ByteBuf::push(&mut buffer, 7);
+    handle identity::write_digest(&mut buffer, file) {
+        Result::Err(identity::IdentityError::Capacity) => handle ByteBuf::len(&buffer) == 1 { true => 2, false => 0 }, _ => 0,
+    }
+}
+fn first() -> i64 { capacity() + provenance() + early_finish() + cancelled_record() }
+fn second() -> i64 { cancelled_step() + exhausted() + late_cancel() + wrong_phase() }
+pub fn main() -> i64 {
+    handle identity::hash(b"diagnostic-control") {
+        Result::Err(_) => -1,
+        Result::Ok(file) => first() + second() + awaiting(file) + replacement(file) + digest_capacity(file),
+    }
+}

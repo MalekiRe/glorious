@@ -1,0 +1,128 @@
+use std::*;
+use kernel::identity;
+use kernel::operation;
+pub mod kernel;
+pub mod source;
+
+fn owned(value: Slice<u8>) -> Vec<u8> {
+    let bytes = Vec<u8>::new();
+    Vec::extend_from_slice(&mut bytes, value);
+    bytes
+}
+fn inputs() -> Vec<Vec<u8>> {
+    let inputs = Vec<Vec<u8>>::new();
+    @CASES@
+    inputs
+}
+fn word(buffer: &mut ByteBuf, value: u32) -> () { ByteBuf::put_u64(buffer, as<u64>(value)); () }
+fn lines(builder: &mut source::LineBuilder, blob: &source::Blob, controls: &mut operation::Controls, fuel: usize) -> Result<(), source::Failure> {
+    handle fuel == 0 {
+        true => Result::Err(source::Failure::Busy),
+        false => handle source::step_lines(&mut *builder, blob, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                source::Event::Ready => Result::Ok(()), source::Event::Continue => lines(builder, blob, controls, fuel - 1),
+            },
+        },
+    }
+}
+fn index(blob: &source::Blob, controls: &mut operation::Controls) -> Result<source::LineIndex, source::Failure> {
+    handle source::begin_lines(blob, 4096, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(builder) => handle lines(&mut builder, blob, &mut *controls, 4096) {
+            Result::Err(error) => Result::Err(error), Result::Ok(_) => source::finish_lines(&mut builder, & *controls),
+        },
+    }
+}
+fn position_steps(builder: &mut source::PositionBuilder, index: &source::LineIndex, blob: &source::Blob,
+    controls: &mut operation::Controls, fuel: usize) -> Result<(), source::Failure> {
+    handle fuel == 0 {
+        true => Result::Err(source::Failure::Busy),
+        false => handle source::step_position(&mut *builder, index, blob, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                source::Event::Ready => Result::Ok(()),
+                source::Event::Continue => position_steps(builder, index, blob, controls, fuel - 1),
+            },
+        },
+    }
+}
+fn position(buffer: &mut ByteBuf, index: &source::LineIndex, blob: &source::Blob, controls: &mut operation::Controls, offset: u32)
+    -> Result<(), source::Failure> {
+    handle source::begin_position(index, blob, offset, &mut *controls) {
+        Result::Err(source::Failure::Offset) => { word(buffer, 0); Result::Ok(()) },
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(builder) => handle position_steps(&mut builder, index, blob, &mut *controls, 4096) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle source::finish_position(&mut builder, & *controls) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(value) => {
+                    word(&mut *buffer, 1); word(&mut *buffer, value.line); word(buffer, value.utf16_column);
+                    Result::Ok(())
+                },
+            },
+        },
+    }
+}
+fn positions(buffer: &mut ByteBuf, index: &source::LineIndex, blob: &source::Blob, controls: &mut operation::Controls, offset: u32)
+    -> Result<(), source::Failure> {
+    handle offset > source::length(blob) + 1 {
+        true => position(buffer, index, blob, controls, 4294967295),
+        false => handle position(&mut *buffer, index, blob, &mut *controls, offset) {
+            Result::Err(error) => Result::Err(error), Result::Ok(_) => positions(buffer, index, blob, controls, offset + 1),
+        },
+    }
+}
+fn starts(buffer: &mut ByteBuf, values: Slice<u32>, cursor: usize) -> () {
+    handle cursor == Slice::len(&values) {
+        true => (),
+        false => { word(&mut *buffer, *Slice::get_unchecked(values, cursor)); starts(buffer, values, cursor + 1); },
+    }
+}
+fn dump(buffer: &mut ByteBuf, blob: &source::Blob, controls: &mut operation::Controls) -> Result<(), source::Failure> {
+    handle index(blob, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(index) => {
+            word(&mut *buffer, source::length(blob));
+            ByteBuf::append(&mut *buffer, source::bytes(blob));
+            identity::write_digest(&mut *buffer, source::file(blob).digest);
+            identity::write_digest(&mut *buffer, source::fingerprint(blob));
+            identity::write_digest(&mut *buffer, source::line_fingerprint(&index));
+            word(&mut *buffer, source::line_count(&index));
+            starts(&mut *buffer, source::line_starts(&index), 0);
+            positions(buffer, &index, blob, controls, 0)
+        },
+    }
+}
+fn cases(buffer: &mut ByteBuf, inputs: &Vec<Vec<u8>>, file: identity::FileKey, controls: &mut operation::Controls, cursor: usize)
+    -> Result<(), source::Failure> {
+    handle Vec::get(inputs, cursor) {
+        Result::Err(_) => Result::Ok(()),
+        Result::Ok(bytes) => handle source::create(file, *bytes, 4096, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(blob) => handle dump(&mut *buffer, &blob, &mut *controls) {
+                Result::Err(error) => Result::Err(error), Result::Ok(_) => cases(buffer, inputs, file, controls, cursor + 1),
+            },
+        },
+    }
+}
+fn run(file: identity::FileKey, expected: identity::Digest) -> i64 {
+    let inputs = inputs();
+    let buffer = ByteBuf::new(65536);
+    let controls = operation::create(200000, 1000000);
+    handle cases(&mut buffer, &inputs, file, &mut controls, 0) {
+        Result::Err(_) => -1,
+        Result::Ok(_) => handle identity::hash(ByteBuf::view(&buffer)) {
+            Result::Err(_) => -2,
+            Result::Ok(actual) => handle identity::equal(actual, expected) { true => 42, false => -3 },
+        },
+    }
+}
+pub fn main() -> i64 {
+    handle identity::hash(b"line-fixture") {
+        Result::Err(_) => -4,
+        Result::Ok(file) => handle identity::decode(b"@ORACLE@") {
+            Result::Err(_) => -5, Result::Ok(expected) => run(identity::FileKey { digest: file }, expected),
+        },
+    }
+}

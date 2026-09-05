@@ -1,0 +1,256 @@
+use std::*;
+use kernel::identity;
+use kernel::operation;
+pub mod kernel;
+pub mod source;
+
+fn owned(value: Slice<u8>) -> Vec<u8> { let bytes = Vec<u8>::new(); Vec::extend_from_slice(&mut bytes, value); bytes }
+fn equal(a: usize, b: usize) -> i64 { handle a == b { true => 1, false => 0 } }
+fn kind(error: source::Failure) -> usize {
+    handle error {
+        source::Failure::Closed => 1, source::Failure::Busy => 2, source::Failure::Capacity => 3,
+        source::Failure::SourceMismatch => 4, source::Failure::Offset => 5,
+        source::Failure::Control(operation::Failure::Cancelled) => 6,
+        source::Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: 1, requested: 1 }) => 7,
+        _ => 99,
+    }
+}
+fn expect<T>(value: Result<T, source::Failure>, expected: usize) -> i64 where T: Use<[0, 1]> {
+    handle value { Result::Ok(_) => equal(0, expected), Result::Err(error) => equal(kind(error), expected) }
+}
+fn invalid(file: identity::FileKey, bytes: Slice<u8>, expected: usize) -> i64 {
+    let controls = operation::create(1000, 1000);
+    handle source::create(file, owned(bytes), 1000, &mut controls) {
+        Result::Err(source::Failure::InvalidUtf8 { valid_up_to }) => equal(valid_up_to, expected), _ => 0,
+    }
+}
+fn invalid_cases(file: identity::FileKey) -> i64 {
+    let score = as<i64>(0);
+    @INVALID@
+    score
+}
+fn constructors(file: identity::FileKey, blob: &source::Blob) -> i64 {
+    let controls = operation::create(1000, 1000);
+    let score = expect(source::create(file, owned(b"abc"), 2, &mut controls), 3);
+    let score = score + expect(source::begin_lines(blob, 0, &mut controls), 3);
+    operation::cancel(&mut controls);
+    score + expect(source::create(file, owned(b"abc"), 100, &mut controls), 6)
+        + expect(source::begin_lines(blob, 100, &mut controls), 6)
+}
+fn line_steps(builder: &mut source::LineBuilder, blob: &source::Blob, controls: &mut operation::Controls) -> Result<(), source::Failure> {
+    handle source::step_lines(&mut *builder, blob, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            source::Event::Ready => Result::Ok(()), source::Event::Continue => line_steps(builder, blob, controls),
+        },
+    }
+}
+fn index(blob: &source::Blob) -> Result<source::LineIndex, source::Failure> {
+    let controls = operation::create(1000, 1000);
+    handle source::begin_lines(blob, 100, &mut controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(builder) => handle line_steps(&mut builder, blob, &mut controls) {
+            Result::Err(error) => Result::Err(error), Result::Ok(_) => source::finish_lines(&mut builder, &controls),
+        },
+    }
+}
+fn line_failure(blob: &source::Blob, other: &source::Blob, mode: u32) -> i64 {
+    let controls = operation::create(1000, 1000);
+    handle source::begin_lines(blob, 1, &mut controls) {
+        Result::Err(_) => -10,
+        Result::Ok(builder) => {
+            let score = fail_line(&mut builder, blob, other, &mut controls, mode);
+            let fresh = operation::create(1000, 1000);
+            score + expect(source::step_lines(&mut builder, blob, &mut fresh), 1)
+                + expect(source::finish_lines(&mut builder, &fresh), 1)
+        },
+    }
+}
+fn fail_line(builder: &mut source::LineBuilder, blob: &source::Blob, other: &source::Blob,
+    controls: &mut operation::Controls, mode: u32) -> i64 {
+    handle mode {
+        0 => expect(line_steps(builder, blob, controls), 3),
+        1 => expect(source::step_lines(builder, other, controls), 4),
+        2 => expect(source::finish_lines(builder, & *controls), 2),
+        3 => {
+            let score = expect(source::step_lines(&mut *builder, blob, &mut *controls), 0);
+            operation::cancel(&mut *controls);
+            score + expect(source::step_lines(builder, blob, controls), 6)
+        },
+        _ => { source::abort_lines(&mut *builder); expect(source::finish_lines(builder, & *controls), 1) },
+    }
+}
+fn line_budget(blob: &source::Blob) -> i64 {
+    let controls = operation::create(1, 1000);
+    handle source::begin_lines(blob, 100, &mut controls) {
+        Result::Err(_) => -11,
+        Result::Ok(builder) => {
+            let score = expect(source::step_lines(&mut builder, blob, &mut controls), 7);
+            let fresh = operation::create(1000, 1000);
+            score + expect(source::finish_lines(&mut builder, &fresh), 1)
+                + equal(as<usize>(operation::work_spent(&controls)), 1)
+        },
+    }
+}
+fn line_late_cancel(blob: &source::Blob) -> i64 {
+    let controls = operation::create(1000, 1000);
+    handle source::begin_lines(blob, 100, &mut controls) {
+        Result::Err(_) => -12,
+        Result::Ok(builder) => {
+            let score = expect(line_steps(&mut builder, blob, &mut controls), 0);
+            operation::cancel(&mut controls);
+            let score = score + expect(source::finish_lines(&mut builder, &controls), 6);
+            let fresh = operation::create(1000, 1000);
+            score + expect(source::finish_lines(&mut builder, &fresh), 1)
+        },
+    }
+}
+fn position_steps(builder: &mut source::PositionBuilder, index: &source::LineIndex, blob: &source::Blob,
+    controls: &mut operation::Controls) -> Result<(), source::Failure> {
+    handle source::step_position(&mut *builder, index, blob, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            source::Event::Ready => Result::Ok(()), source::Event::Continue => position_steps(builder, index, blob, controls),
+        },
+    }
+}
+fn fail_position(builder: &mut source::PositionBuilder, index: &source::LineIndex, alternate: &source::LineIndex,
+    blob: &source::Blob, other: &source::Blob, controls: &mut operation::Controls, mode: u32) -> i64 {
+    handle mode {
+        0 => expect(source::step_position(builder, index, other, controls), 4),
+        1 => expect(source::step_position(builder, alternate, blob, controls), 4),
+        2 => expect(source::finish_position(builder, & *controls), 2),
+        3 => {
+            let score = expect(source::step_position(&mut *builder, index, blob, &mut *controls), 0);
+            operation::cancel(&mut *controls);
+            score + expect(source::step_position(builder, index, blob, controls), 6)
+        },
+        4 => {
+            let score = expect(position_steps(&mut *builder, index, blob, &mut *controls), 0);
+            operation::cancel(&mut *controls);
+            score + expect(source::finish_position(builder, & *controls), 6)
+        },
+        _ => { source::abort_position(&mut *builder); expect(source::finish_position(builder, & *controls), 1) },
+    }
+}
+fn position_failure(index: &source::LineIndex, alternate: &source::LineIndex, blob: &source::Blob, other: &source::Blob, mode: u32) -> i64 {
+    let controls = operation::create(1000, 1000);
+    handle source::begin_position(index, blob, source::length(blob), &mut controls) {
+        Result::Err(_) => -13,
+        Result::Ok(builder) => {
+            let score = fail_position(&mut builder, index, alternate, blob, other, &mut controls, mode);
+            let fresh = operation::create(1000, 1000);
+            score + expect(source::step_position(&mut builder, index, blob, &mut fresh), 1)
+                + expect(source::finish_position(&mut builder, &fresh), 1)
+        },
+    }
+}
+fn position_budget(index: &source::LineIndex, blob: &source::Blob) -> i64 {
+    let controls = operation::create(1, 1000);
+    handle source::begin_position(index, blob, 0, &mut controls) {
+        Result::Err(_) => -14,
+        Result::Ok(builder) => {
+            let score = expect(source::step_position(&mut builder, index, blob, &mut controls), 7);
+            let fresh = operation::create(1000, 1000);
+            score + expect(source::finish_position(&mut builder, &fresh), 1)
+                + equal(as<usize>(operation::work_spent(&controls)), 1)
+        },
+    }
+}
+fn position_modes(index: &source::LineIndex, alternate: &source::LineIndex, blob: &source::Blob, other: &source::Blob, mode: u32, score: i64) -> i64 {
+    handle mode == 6 {
+        true => score,
+        false => {
+            let score = score + position_failure(index, alternate, blob, other, mode);
+            position_modes(index, alternate, blob, other, mode + 1, score)
+        },
+    }
+}
+fn line_modes(blob: &source::Blob, other: &source::Blob, mode: u32, score: i64) -> i64 {
+    handle mode == 5 {
+        true => score,
+        false => { let score = score + line_failure(blob, other, mode); line_modes(blob, other, mode + 1, score) },
+    }
+}
+fn position_once(index: &source::LineIndex, blob: &source::Blob, controls: &mut operation::Controls) -> i64 {
+    handle source::begin_position(index, blob, source::length(blob), &mut *controls) {
+        Result::Err(_) => -20,
+        Result::Ok(builder) => {
+            let score = expect(position_steps(&mut builder, index, blob, &mut *controls), 0);
+            handle source::finish_position(&mut builder, & *controls) {
+                Result::Err(_) => -21,
+                Result::Ok(value) => score + equal(as<usize>(value.line), 1) + equal(as<usize>(value.utf16_column), 2)
+                    + expect(source::finish_position(&mut builder, & *controls), 1)
+                    + expect(source::step_position(&mut builder, index, blob, controls), 1),
+            }
+        },
+    }
+}
+fn finish_once(blob: &source::Blob) -> i64 {
+    let controls = operation::create(1000, 1000);
+    handle source::begin_lines(blob, 100, &mut controls) {
+        Result::Err(_) => -22,
+        Result::Ok(builder) => {
+            let score = expect(line_steps(&mut builder, blob, &mut controls), 0);
+            handle source::finish_lines(&mut builder, &controls) {
+                Result::Err(_) => -23,
+                Result::Ok(index) => score + equal(as<usize>(source::line_count(&index)), 2)
+                    + expect(source::finish_lines(&mut builder, &controls), 1)
+                    + expect(source::step_lines(&mut builder, blob, &mut controls), 1)
+                    + position_once(&index, blob, &mut controls),
+            }
+        },
+    }
+}
+fn other_file(blob: &source::Blob, index: &source::LineIndex, file: identity::FileKey) -> i64 {
+    let controls = operation::create(1000, 1000);
+    handle source::create(file, owned(source::bytes(blob)), 100, &mut controls) {
+        Result::Err(_) => -24,
+        Result::Ok(other) => {
+            let score = line_failure(blob, &other, 1) + expect(source::begin_position(index, &other, 0, &mut controls), 4);
+            handle identity::equal(source::fingerprint(blob), source::fingerprint(&other)) {
+                false => -25, true => score + 1,
+            }
+        },
+    }
+}
+fn foreign_file(blob: &source::Blob, index: &source::LineIndex) -> i64 {
+    handle identity::hash(b"other-file") {
+        Result::Err(_) => -26, Result::Ok(digest) => other_file(blob, index, identity::FileKey { digest: digest }),
+    }
+}
+fn inspect(blob: &source::Blob, other: &source::Blob, index: &source::LineIndex, alternate: &source::LineIndex) -> i64 {
+    let controls = operation::create(1000, 1000);
+    let score = expect(source::begin_position(index, other, 0, &mut controls), 4)
+        + expect(source::begin_position(index, blob, 3, &mut controls), 5);
+    score + line_modes(blob, other, 0, 0) + line_budget(blob) + line_late_cancel(blob)
+        + position_modes(index, alternate, blob, other, 0, 0) + position_budget(index, blob)
+        + finish_once(blob) + foreign_file(blob, index)
+}
+fn with_other(blob: &source::Blob, other: &source::Blob) -> i64 {
+    handle index(blob) {
+        Result::Err(_) => -15,
+        Result::Ok(lines) => handle index(other) {
+            Result::Err(_) => -16, Result::Ok(alternate) => inspect(blob, other, &lines, &alternate),
+        },
+    }
+}
+fn run(file: identity::FileKey, blob: &source::Blob) -> i64 {
+    let controls = operation::create(1000, 1000);
+    handle source::create(file, owned(b"b\n\xf0\x9f\x98\x80"), 100, &mut controls) {
+        Result::Err(_) => -17,
+        Result::Ok(other) => invalid_cases(file) + constructors(file, blob) + with_other(blob, &other),
+    }
+}
+pub fn main() -> i64 {
+    let controls = operation::create(1000, 1000);
+    handle identity::hash(b"line-fixture") {
+        Result::Err(_) => -18,
+        Result::Ok(digest) => {
+            let file = identity::FileKey { digest: digest };
+            handle source::create(file, owned(b"a\n\xf0\x9f\x98\x80"), 100, &mut controls) {
+                Result::Err(_) => -19, Result::Ok(blob) => run(file, &blob),
+            }
+        },
+    }
+}

@@ -1,0 +1,40 @@
+use std::*;
+pub mod kernel;
+
+fn check_truncated(cursor: &mut ByteCursor, bytes: Slice<u8>) -> i64 {
+    handle ByteCursor::u64(&mut *cursor, bytes) {
+        Result::Ok(_) => 1,
+        Result::Err(ByteError::Truncated) => handle ByteCursor::position(& *cursor) == 8 {
+            true => 42,
+            false => 2,
+        },
+        Result::Err(_) => 3,
+    }
+}
+
+fn decode(bytes: Slice<u8>) -> i64 {
+    let cursor = ByteCursor::new();
+    handle ByteCursor::u64(&mut cursor, bytes) {
+        Result::Err(_) => 4,
+        Result::Ok(word) => handle word == 18364758544493064720 {
+            false => 5,
+            true => check_truncated(&mut cursor, bytes),
+        },
+    }
+}
+
+fn filled(buffer: &mut ByteBuf) -> i64 {
+    handle ByteBuf::put_u64(&mut *buffer, 1) {
+        Result::Ok(_) => 6,
+        Result::Err(ByteError::Limit) => decode(ByteBuf::view(& *buffer)),
+        Result::Err(_) => 7,
+    }
+}
+
+pub fn main() -> i64 {
+    let buffer = ByteBuf::new(8);
+    handle ByteBuf::put_u64(&mut buffer, 18364758544493064720) {
+        Result::Ok(_) => filled(&mut buffer),
+        Result::Err(_) => 8,
+    }
+}

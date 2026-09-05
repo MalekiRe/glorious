@@ -1,5 +1,9 @@
 # Compiler Size and Speed Review
 
+The replacement compiler's architecture and budgets are now specified by
+[GSC-2](../GSC-2-glorious-incremental-self-hosted-compiler-spec.md). This review
+is historical where it conflicts with that specification.
+
 Status: accepted design constraints for the greenfield compiler. This review
 narrows implementation architecture without changing Draft 0.1 semantics.
 

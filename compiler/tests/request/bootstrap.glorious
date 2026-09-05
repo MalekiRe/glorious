@@ -1,0 +1,281 @@
+use std::*;
+use kernel::identity;
+use kernel::identity::Digest;
+use kernel::operation;
+use request::bootstrap;
+pub mod kernel;
+pub mod request;
+pub mod source;
+
+struct Case {
+    ordinal: u32, level: u8, max_sources: u32, max_bytes: u64,
+    producer: usize, expected: usize, option: Str<'static>, has_option: usize,
+}
+fn owned(bytes: Slice<u8>) -> Vec<u8> { let result = Vec<u8>::new(); Vec::extend_from_slice(&mut result, bytes); result }
+fn eq(left: i64, right: i64) -> i64 { handle left == right { true => 1, false => 0 } }
+fn same(left: Slice<u8>, right: Slice<u8>) -> i64 { handle Slice::lex_compare(left, right) { Ordering::Equal => 1, _ => 0 } }
+fn digest(left: Digest, right: Digest) -> i64 { handle identity::equal(left, right) { true => 1, false => 0 } }
+fn path_steps(builder: &mut request::PathBuilder, controls: &mut operation::Controls) -> Result<(), request::Failure> {
+    handle request::step_path(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            request::Event::Ready => Result::Ok(()), request::Event::Continue => path_steps(builder, controls),
+        },
+    }
+}
+fn source_steps(builder: &mut request::SourceBuilder, controls: &mut operation::Controls) -> Result<(), request::Failure> {
+    handle request::step_source(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            request::Event::Ready => Result::Ok(()), request::Event::Continue => source_steps(builder, controls),
+        },
+    }
+}
+fn admit(path: request::LogicalPath, key: identity::FileKey, fingerprint: Digest, bytes: Slice<u8>) -> Result<request::AdmittedSource, request::Failure> {
+    let controls = operation::create(10000, 10000);
+    let builder = request::begin_source(request::SourceInput { key: key, package: identity::PackageKey { value: Str::to_string("app") },
+        logical_path: path, bytes: owned(bytes), digest: fingerprint }, 1000, 1000);
+    handle source_steps(&mut builder, &mut controls) {
+        Result::Err(error) => Result::Err(error), Result::Ok(_) => request::finish_source(&mut builder, &controls),
+    }
+}
+fn input(path: Str, bytes: Slice<u8>) -> Result<request::AdmittedSource, request::Failure> {
+    let controls = operation::create(10000, 10000);
+    let builder = request::begin_path(Str::to_string(path));
+    handle path_steps(&mut builder, &mut controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle request::finish_path(&mut builder, &controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(logical) => handle identity::file(b"app", Str::as_bytes(path), 1000) {
+                Result::Err(_) => Result::Err(request::Failure::Invariant),
+                Result::Ok(key) => handle identity::hash(bytes) {
+                    Result::Err(_) => Result::Err(request::Failure::Invariant),
+                    Result::Ok(fingerprint) => admit(logical, key, fingerprint, bytes),
+                },
+            },
+        },
+    }
+}
+fn inputs() -> Result<Vec<request::AdmittedSource>, request::Failure> {
+    handle input("src/a.glorious", b"a\n") {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(a) => handle input("src/b.glorious", b"\xc3\xa9") {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(b) => { let result = Vec<request::AdmittedSource>::new(); Vec::push(&mut result, a); Vec::push(&mut result, b); Result::Ok(result) },
+        },
+    }
+}
+fn producer(c: Case, good: Digest, bad: Digest) -> Digest { handle c.producer { 0 => good, _ => bad } }
+fn expected(c: Case, good: Digest, bad: Digest) -> Option<Digest> {
+    handle c.expected { 0 => None, 1 => Result::Ok(good), _ => Result::Ok(bad) }
+}
+fn stage(c: Case, good: Digest, bad: Digest) -> request::BootstrapStage {
+    request::BootstrapStage { ordinal: c.ordinal, producer: producer(c, good, bad), optimization_level: c.level,
+        limits: request::BootstrapLimits { max_sources: c.max_sources, max_total_source_bytes: c.max_bytes },
+        expected_artifact: expected(c, good, bad) }
+}
+fn optimization(c: Case) -> Option<String> {
+    handle c.has_option { 0 => None, _ => Result::Ok(Str::to_string(c.option)) }
+}
+fn builder(c: Case, good: Digest, bad: Digest) -> Result<bootstrap::Builder, request::Failure> {
+    handle inputs() {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(inputs) => Result::Ok(bootstrap::begin(stage(c, good, bad), good, inputs, optimization(c))),
+    }
+}
+fn steps(builder: &mut bootstrap::Builder, controls: &mut operation::Controls) -> Result<(), request::Failure> {
+    handle bootstrap::step(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            request::Event::Ready => Result::Ok(()), request::Event::Continue => steps(builder, controls),
+        },
+    }
+}
+fn run(builder: &mut bootstrap::Builder, controls: &mut operation::Controls) -> Result<bootstrap::AdmittedStage, request::Failure> {
+    handle steps(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error), Result::Ok(_) => bootstrap::finish(builder, & *controls),
+    }
+}
+fn same_expected(left: Option<Digest>, right: Option<Digest>) -> i64 {
+    handle left {
+        Result::Err(_) => handle right { Result::Err(_) => 1, _ => 0 },
+        Result::Ok(a) => handle right { Result::Ok(b) => digest(a, b), _ => 0 },
+    }
+}
+fn same_stage(value: &request::BootstrapStage, c: Case, good: Digest, bad: Digest) -> i64 {
+    eq(as<i64>(value.ordinal), as<i64>(c.ordinal)) * digest(value.producer, producer(c, good, bad))
+        * eq(as<i64>(value.optimization_level), as<i64>(c.level))
+        * eq(as<i64>(value.limits.max_sources), as<i64>(c.max_sources))
+        * eq(as<i64>(value.limits.max_total_source_bytes), as<i64>(c.max_bytes))
+        * same_expected(value.expected_artifact, expected(c, good, bad))
+}
+fn retained_input(value: &request::AdmittedSource, path: Str, bytes: Slice<u8>) -> i64 {
+    let logical = request::path(value);
+    let path_view = request::path_text(logical);
+    let blob = request::blob(value);
+    let package = request::package(value);
+    handle identity::file(b"app", Str::as_bytes(path), 1000) {
+        Result::Err(_) => 0,
+        Result::Ok(key) => handle identity::hash(bytes) {
+            Result::Err(_) => 0,
+            Result::Ok(fingerprint) => same(Str::as_bytes(path_view), Str::as_bytes(path))
+                * same(Str::as_bytes(String::as_str(&package.value)), b"app")
+                * same(source::bytes(blob), bytes) * digest(source::file(blob).digest, key.digest)
+                * digest(source::fingerprint(blob), fingerprint) * eq(as<i64>(source::length(blob)), as<i64>(Slice::len(&bytes))),
+        },
+    }
+}
+fn retained_inputs(values: Slice<request::AdmittedSource>) -> i64 {
+    handle Slice::len(&values) == 2 {
+        false => 0,
+        true => retained_input(Slice::get_unchecked(values, 0), "src/a.glorious", b"a\n")
+            * retained_input(Slice::get_unchecked(values, 1), "src/b.glorious", b"\xc3\xa9"),
+    }
+}
+fn retained(value: bootstrap::AdmittedStage, c: Case, good: Digest, bad: Digest) -> i64 {
+    let before = same_stage(bootstrap::stage(&value), c, good, bad) * retained_inputs(bootstrap::sources(&value));
+    handle bootstrap::into_parts(value) {
+        (stage, inputs) => before * same_stage(&stage, c, good, bad) * retained_inputs(Vec::as_slice(&inputs)),
+    }
+}
+fn run_case(c: Case, good: Digest, bad: Digest, kind: i64, reason: Slice<u8>, actual: u64, limit: u64) -> i64 {
+    handle builder(c, good, bad) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(10000, 10000);
+            let result = run(&mut builder, &mut controls);
+            let spent = operation::work_spent(&controls);
+            let closed = expect(bootstrap::finish(&mut builder, &controls), 1)
+                * eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent));
+            handle result {
+                Result::Ok(value) => closed * eq(kind, 0) * retained(value, c, good, bad),
+                Result::Err(error) => handle error {
+                    request::Failure::Rejected(request::InputError::InvalidBootstrapStage { reason: observed }) => closed * eq(kind, 1) * same(Str::as_bytes(String::as_str(&observed)), reason),
+                    request::Failure::Rejected(request::InputError::BootstrapSourceLimit { actual: observed, limit: ceiling }) =>
+                        closed * eq(kind, 2) * eq(as<i64>(observed), as<i64>(actual)) * eq(as<i64>(ceiling), as<i64>(limit)),
+                    _ => 0,
+                },
+            }
+        },
+    }
+}
+@CASES@
+fn default_case() -> Case { Case { ordinal: 2, level: 2, max_sources: 2, max_bytes: 4, producer: 0, expected: 1, option: "2", has_option: 1 } }
+fn advance(builder: &mut bootstrap::Builder, controls: &mut operation::Controls, count: usize) -> () {
+    handle count == 0 { true => (), false => {
+        bootstrap::step(&mut *builder, &mut *controls); advance(builder, controls, count - 1)
+    } }
+}
+fn expect<T>(value: Result<T, request::Failure>, code: i64) -> i64 where T: Use<[0, 1]> {
+    handle value {
+        Result::Ok(_) => eq(code, 0),
+        Result::Err(error) => handle error {
+            request::Failure::Closed => eq(code, 1), request::Failure::Busy => eq(code, 2),
+            request::Failure::Control(operation::Failure::Cancelled) => eq(code, 3),
+            request::Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: _, requested: _ }) => eq(code, 4),
+            _ => 0,
+        },
+    }
+}
+fn cancel_case(good: Digest, bad: Digest, phase: usize, finishing: usize) -> i64 {
+    handle builder(default_case(), good, bad) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(1000, 1000);
+            advance(&mut builder, &mut controls, phase);
+            let spent = operation::work_spent(&controls);
+            operation::cancel(&mut controls);
+            let first = cancelled(&mut builder, &mut controls, finishing);
+            let fresh = operation::create(1000, 1000);
+            first + expect(bootstrap::finish(&mut builder, &fresh), 1)
+                + eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent))
+        },
+    }
+}
+fn cancelled(builder: &mut bootstrap::Builder, controls: &mut operation::Controls, finishing: usize) -> i64 {
+    handle finishing {
+        0 => expect(bootstrap::step(builder, controls), 3),
+        _ => expect(bootstrap::finish(builder, & *controls), 3),
+    }
+}
+fn early_case(good: Digest, bad: Digest, phase: usize) -> i64 {
+    handle builder(default_case(), good, bad) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(1000, 1000);
+            advance(&mut builder, &mut controls, phase);
+            expect(bootstrap::finish(&mut builder, &controls), 2) + expect(bootstrap::finish(&mut builder, &controls), 1)
+        },
+    }
+}
+fn lifecycle_at(good: Digest, bad: Digest, phase: usize, score: i64) -> i64 {
+    handle phase == 7 {
+        true => score,
+        false => lifecycle_at(good, bad, phase + 1, score + cancel_case(good, bad, phase, 0) + cancel_case(good, bad, phase, 1)),
+    }
+}
+fn early_at(good: Digest, bad: Digest, phase: usize, score: i64) -> i64 {
+    handle phase == 6 { true => score, false => early_at(good, bad, phase + 1, score + early_case(good, bad, phase)) }
+}
+fn budget_case(good: Digest, bad: Digest, phase: usize) -> i64 {
+    handle builder(default_case(), good, bad) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(as<u64>(phase), 1000);
+            advance(&mut builder, &mut controls, phase);
+            let budget = expect(bootstrap::step(&mut builder, &mut controls), 4);
+            let fresh = operation::create(1000, 1000);
+            budget + expect(bootstrap::finish(&mut builder, &fresh), 1)
+                + eq(as<i64>(operation::work_spent(&controls)), as<i64>(phase))
+        },
+    }
+}
+fn budget_at(good: Digest, bad: Digest, phase: usize, score: i64) -> i64 {
+    handle phase == 7 { true => score, false => budget_at(good, bad, phase + 1, score + budget_case(good, bad, phase)) }
+}
+fn abort_case(good: Digest, bad: Digest) -> i64 {
+    handle builder(default_case(), good, bad) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => { bootstrap::abort(&mut builder); let controls = operation::create(1000, 1000);
+            expect(bootstrap::finish(&mut builder, &controls), 1) + expect(bootstrap::step(&mut builder, &mut controls), 1) },
+    }
+}
+fn finished_case(good: Digest, bad: Digest) -> i64 {
+    handle builder(default_case(), good, bad) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(1000, 1000);
+            let first = expect(run(&mut builder, &mut controls), 0);
+            first + eq(as<i64>(operation::work_spent(&controls)), 6) + expect(bootstrap::finish(&mut builder, &controls), 1)
+        },
+    }
+}
+fn build_identity(good: Digest, bad: Digest) -> i64 {
+    let value = request::stage0_identity(good);
+    let check = request::CompilationMode::Check;
+    let build = request::CompilationMode::Build;
+    let test = request::CompilationMode::Test;
+    let inspect = request::CompilationMode::Inspect;
+    let ide = request::CompilationMode::Ide;
+    let boot = request::CompilationMode::Bootstrap(stage(default_case(), good, bad));
+    digest(value.compiler, good) + eq(as<i64>(value.language_generation), @LANGUAGE@)
+        + eq(as<i64>(value.query_generation), @QUERY@) + eq(as<i64>(value.interface_generation), @INTERFACE@)
+        + eq(as<i64>(value.cache_generation), @CACHE@) + eq(as<i64>(value.bytecode_generation), @BYTECODE@)
+        + eq(as<i64>(value.verifier_generation), @VERIFIER@)
+        + eq(as<i64>(request::mode_tag(&check)), 0)
+        + eq(as<i64>(request::mode_tag(&build)), 1)
+        + eq(as<i64>(request::mode_tag(&test)), 2)
+        + eq(as<i64>(request::mode_tag(&inspect)), 3)
+        + eq(as<i64>(request::mode_tag(&ide)), 4)
+        + eq(as<i64>(request::mode_tag(&boot)), 5)
+}
+main() -> (i64, i64, i64) {
+    handle identity::hash(b"bootstrap-admission-producer") {
+        Result::Err(_) => (0, 0, 0),
+        Result::Ok(good) => handle identity::hash(b"wrong-bootstrap-producer") {
+            Result::Err(_) => (0, 0, 0),
+            Result::Ok(bad) => (oracle_cases(good, bad), lifecycle_at(good, bad, 0, 0) + early_at(good, bad, 0, 0)
+                + budget_at(good, bad, 0, 0) + abort_case(good, bad) + finished_case(good, bad), build_identity(good, bad)),
+        },
+    }
+}

@@ -1,0 +1,39 @@
+use std::*;
+use kernel::operation;
+pub mod kernel;
+
+fn after_cancel(controls: &mut operation::Controls) -> i64 {
+    operation::cancel(&mut *controls);
+    handle operation::charge(&mut *controls, 0) {
+        Result::Err(operation::Failure::Cancelled) => handle operation::release(&mut *controls, 7) {
+            Result::Err(_) => 1,
+            Result::Ok(_) => handle operation::memory_spent(& *controls) == 0 {
+                true => 42,
+                false => 2,
+            },
+        },
+        _ => 3,
+    }
+}
+fn reserved(controls: &mut operation::Controls) -> i64 {
+    handle operation::reserve(&mut *controls, 1) {
+        Result::Err(operation::Failure::ResourceLimit { name: _, ceiling: _, requested: _ }) => after_cancel(&mut *controls),
+        _ => 4,
+    }
+}
+fn charged(controls: &mut operation::Controls) -> i64 {
+    handle operation::charge(&mut *controls, 1) {
+        Result::Err(operation::Failure::ResourceLimit { name: _, ceiling: _, requested: _ }) => handle operation::reserve(&mut *controls, 7) {
+            Result::Ok(_) => reserved(&mut *controls),
+            Result::Err(_) => 5,
+        },
+        _ => 6,
+    }
+}
+pub fn main() -> i64 {
+    let controls = operation::create(18446744073709551615, 7);
+    handle operation::charge(&mut controls, 18446744073709551615) {
+        Result::Ok(_) => charged(&mut controls),
+        Result::Err(_) => 7,
+    }
+}

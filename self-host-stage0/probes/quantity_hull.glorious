@@ -1,8 +1,0 @@
-use quantity_library::quantity;
-
-pub fn main() -> Bool {
-    quantity::contains(
-        quantity::branch_hull(quantity::exact(1), quantity::exact(3)),
-        quantity::exact(3),
-    )
-}

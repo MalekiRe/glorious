@@ -1,0 +1,321 @@
+@SUPPORT@
+use request::namespace;
+use request::names;
+use kernel::text_order;
+
+struct AliasWitness { package: Vec<u8>, alias: Vec<u8> }
+struct NamespaceExpected { kind: usize, a: Vec<u8>, b: Vec<u8>, c: Vec<u8>,
+    root: Vec<u8>, sources: Vec<Witness>, aliases: Vec<AliasWitness>, capabilities: Vec<String> }
+fn ns_limits() -> namespace::Limits { namespace::Limits { packages: 100, alias_bytes: 1000, capabilities: 100, capability_bytes: 1000 } }
+fn ns_make(root: String, inputs: Vec<request::SourceInput>, caps: Vec<String>, limits: namespace::Limits,
+    controls: &mut operation::Controls) -> Result<namespace::Builder, request::Failure> {
+    let builder = sources::begin(inputs, sources::Limits { source_count: 100, source_bytes: 1000, identity_bytes: 1000 });
+    handle run(&mut builder, controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(sources) => Result::Ok(namespace::begin(identity::PackageKey { value: root }, sources, caps, limits)),
+    }
+}
+fn ns_steps(builder: &mut namespace::Builder, controls: &mut operation::Controls, count: usize) -> Result<usize, request::Failure> {
+    handle namespace::step(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            request::Event::Continue => ns_steps(builder, controls, count + 1),
+            request::Event::Ready => Result::Ok(count + 1),
+        },
+    }
+}
+fn ns_run(builder: &mut namespace::Builder, controls: &mut operation::Controls) -> Result<namespace::Admitted, request::Failure> {
+    handle ns_steps(&mut *builder, &mut *controls, 0) { Result::Err(error) => Result::Err(error), Result::Ok(_) => namespace::finish(builder, & *controls) }
+}
+fn alias_row(value: &names::PackageAlias, expected: &AliasWitness) -> i64 {
+    let package = names::package(value);
+    let alias = names::alias_text(value);
+    same(Str::as_bytes(String::as_str(&package.value)), Vec::as_slice(&expected.package)) * same(Str::as_bytes(alias), Vec::as_slice(&expected.alias))
+}
+fn alias_rows(values: Slice<names::PackageAlias>, expected: &Vec<AliasWitness>, cursor: usize, score: i64) -> i64 {
+    handle cursor == Slice::len(&values) { true => score, false => alias_rows(values, expected, cursor + 1,
+        score * alias_row(Slice::get_unchecked(values, cursor), Vec::get_unchecked(expected, cursor))) }
+}
+fn cap_rows(values: Slice<names::Capability>, expected: &Vec<String>, cursor: usize, score: i64) -> i64 {
+    handle cursor == Slice::len(&values) {
+        true => score,
+        false => {
+            let item = Slice::get_unchecked(values, cursor);
+            let actual = names::capability_text(item);
+            let wanted = String::as_str(Vec::get_unchecked(expected, cursor));
+            cap_rows(values, expected, cursor + 1, score * same(Str::as_bytes(actual), Str::as_bytes(wanted)))
+        },
+    }
+}
+fn alias_queries(value: &namespace::Admitted, expected: &Vec<AliasWitness>, cursor: usize, score: i64) -> i64 {
+    handle cursor == Vec::len(expected) {
+        true => score,
+        false => {
+            let row = Vec::get_unchecked(expected, cursor);
+            let key = text(Vec::as_slice(&row.alias));
+            handle namespace::alias_package(value, &key) {
+                Result::Err(_) => 0,
+                Result::Ok(package) => alias_queries(value, expected, cursor + 1,
+                    score * same(Str::as_bytes(String::as_str(&package.value)), Vec::as_slice(&row.package))),
+            }
+        },
+    }
+}
+fn ns_retained(value: namespace::Admitted, expected: &NamespaceExpected) -> i64 {
+    let root = namespace::root(&value);
+    let admitted = namespace::sources(&value);
+    let inputs = sources::values(admitted);
+    let aliases = namespace::aliases(&value);
+    let caps = namespace::capabilities(&value);
+    handle Slice::len(&aliases) == Vec::len(&expected.aliases) {
+        false => 0,
+        true => handle Slice::len(&caps) == Vec::len(&expected.capabilities) {
+            false => 0,
+            true => {
+                let fields = same(Str::as_bytes(String::as_str(&root.value)), Vec::as_slice(&expected.root))
+                    * retained(inputs, &expected.sources) * alias_rows(aliases, &expected.aliases, 0, 1)
+                    * cap_rows(caps, &expected.capabilities, 0, 1) * alias_queries(&value, &expected.aliases, 0, 1);
+                let missing = Str::to_string("definitely_absent_alias");
+                let absent = ns_absent(&value, &missing);
+                handle namespace::into_parts(value) {
+                    (root, sources, aliases, caps) => fields * absent
+                        * same(Str::as_bytes(String::as_str(&root.value)), Vec::as_slice(&expected.root))
+                        * retained(sources::values(&sources), &expected.sources)
+                        * alias_rows(Vec::as_slice(&aliases), &expected.aliases, 0, 1)
+                        * cap_rows(Vec::as_slice(&caps), &expected.capabilities, 0, 1),
+                }
+            },
+        },
+    }
+}
+fn ns_absent(value: &namespace::Admitted, key: &String) -> i64 {
+    handle namespace::alias_package(value, key) { Result::Err(_) => 1, Result::Ok(_) => 0 }
+}
+fn ns_rejected(error: request::InputError, expected: &NamespaceExpected) -> i64 {
+    handle error {
+        request::InputError::InvalidPackageModuleAlias(package) => eq(as<i64>(expected.kind), 1)
+            * same(Str::as_bytes(String::as_str(&package.value)), Vec::as_slice(&expected.a)),
+        request::InputError::DuplicatePackageModuleAlias { alias: alias, first: first, second: second } =>
+            eq(as<i64>(expected.kind), 2) * same(Str::as_bytes(String::as_str(&alias)), Vec::as_slice(&expected.a))
+                * same(Str::as_bytes(String::as_str(&first.value)), Vec::as_slice(&expected.b))
+                * same(Str::as_bytes(String::as_str(&second.value)), Vec::as_slice(&expected.c)),
+        request::InputError::InvalidCapability(value) => eq(as<i64>(expected.kind), 3) * same(Str::as_bytes(String::as_str(&value)), Vec::as_slice(&expected.a)),
+        request::InputError::DuplicateCapability(value) => eq(as<i64>(expected.kind), 4) * same(Str::as_bytes(String::as_str(&value)), Vec::as_slice(&expected.a)),
+        _ => 0,
+    }
+}
+fn ns_case(root: String, inputs: Vec<request::SourceInput>, caps: Vec<String>, expected: NamespaceExpected) -> i64 {
+    let controls = operation::create(1000000, 1000000);
+    handle ns_make(root, inputs, caps, ns_limits(), &mut controls) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let result = ns_run(&mut builder, &mut controls);
+            let spent = operation::work_spent(&controls);
+            let closed = expect(namespace::finish(&mut builder, &controls), 1)
+                * eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent));
+            handle result {
+                Result::Ok(value) => closed * eq(as<i64>(expected.kind), 0) * ns_retained(value, &expected),
+                Result::Err(error) => handle error { request::Failure::Rejected(error) => closed * ns_rejected(error, &expected), _ => 0 },
+            }
+        },
+    }
+}
+@CASES@
+fn ns_builder(limits: namespace::Limits) -> Result<namespace::Builder, request::Failure> {
+    let values = Vec<request::SourceInput>::new(); push(&mut values, witness_default());
+    let caps = Vec<String>::new(); Vec::push(&mut caps, Str::to_string("b")); Vec::push(&mut caps, Str::to_string("a"));
+    let controls = operation::create(1000000, 1000000);
+    ns_make(Str::to_string("p"), values, caps, limits, &mut controls)
+}
+fn ns_advance(builder: &mut namespace::Builder, controls: &mut operation::Controls, count: usize) -> () {
+    handle count == 0 { true => (), false => { namespace::step(&mut *builder, &mut *controls); ns_advance(builder, controls, count - 1) } }
+}
+fn ns_cancelled(builder: &mut namespace::Builder, controls: &mut operation::Controls, finishing: usize) -> i64 {
+    handle finishing { 0 => expect(namespace::step(builder, controls), 3), _ => expect(namespace::finish(builder, & *controls), 3) }
+}
+fn ns_cancel_at(phase: usize, finishing: usize) -> i64 {
+    handle ns_builder(ns_limits()) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(1000000, 1000000); ns_advance(&mut builder, &mut controls, phase);
+            let spent = operation::work_spent(&controls); operation::cancel(&mut controls);
+            let first = ns_cancelled(&mut builder, &mut controls, finishing);
+            let fresh = operation::create(1000000, 1000000);
+            first + expect(namespace::finish(&mut builder, &fresh), 1) + eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent))
+        },
+    }
+}
+fn ns_early_at(phase: usize) -> i64 {
+    handle ns_builder(ns_limits()) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => { let controls = operation::create(1000000, 1000000); ns_advance(&mut builder, &mut controls, phase);
+            expect(namespace::finish(&mut builder, &controls), 2) + expect(namespace::finish(&mut builder, &controls), 1) },
+    }
+}
+fn checkpoint(index: usize, ready: usize) -> usize {
+    handle index { 0 => 0, 1 => 1, 2 => 2, 3 => 3, 4 => 5, 5 => 8, 6 => 13, 7 => 21,
+        8 => 34, 9 => ready / 2, 10 => ready - ready / 4, 11 => ready - 1, _ => ready }
+}
+fn ns_cancel_points(ready: usize, index: usize, score: i64) -> i64 {
+    handle index == 13 {
+        true => score,
+        false => { let point = min(checkpoint(index, ready), ready);
+            ns_cancel_points(ready, index + 1, score + ns_cancel_at(point, 0) + ns_cancel_at(point, 1)) },
+    }
+}
+fn ns_early_points(ready: usize, index: usize, score: i64) -> i64 {
+    handle index == 12 {
+        true => score,
+        false => ns_early_points(ready, index + 1, score + ns_early_at(min(checkpoint(index, ready), ready - 1))),
+    }
+}
+fn ns_budget(budget: u64) -> i64 {
+    handle ns_builder(ns_limits()) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(budget, 1000000);
+            let result = expect(ns_run(&mut builder, &mut controls), 4); let spent = operation::work_spent(&controls);
+            let fresh = operation::create(1000000, 1000000);
+            result + expect(namespace::finish(&mut builder, &fresh), 1) + eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent))
+        },
+    }
+}
+fn ns_lifecycle() -> i64 {
+    handle ns_builder(ns_limits()) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(1000000, 1000000);
+            handle ns_steps(&mut builder, &mut controls, 0) {
+                Result::Err(_) => 0,
+                Result::Ok(ready) => expect(namespace::finish(&mut builder, &controls), 0) + expect(namespace::finish(&mut builder, &controls), 1)
+                    + ns_cancel_points(ready, 0, 0) + ns_early_points(ready, 0, 0)
+                    + ns_budget(0) + ns_budget(20) + ns_budget(50) + ns_budget(100),
+            }
+        },
+    }
+}
+fn ns_capacity(limits: namespace::Limits, name: u32) -> i64 {
+    handle ns_builder(limits) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(1000000, 1000000);
+            let result = ns_run(&mut builder, &mut controls);
+            let closed = expect(namespace::finish(&mut builder, &controls), 1);
+            handle result {
+                Result::Err(error) => handle error { request::Failure::Capacity { name: actual, limit: _ } => closed * eq(as<i64>(actual), as<i64>(name)), _ => 0 },
+                _ => 0,
+            }
+        },
+    }
+}
+fn ns_capacities() -> i64 {
+    ns_capacity(namespace::Limits { packages: 0, alias_bytes: 1000, capabilities: 100, capability_bytes: 1000 }, 6)
+        + ns_capacity(namespace::Limits { packages: 100, alias_bytes: 0, capabilities: 100, capability_bytes: 1000 }, 2)
+        + ns_capacity(namespace::Limits { packages: 100, alias_bytes: 1000, capabilities: 1, capability_bytes: 1000 }, 5)
+        + ns_capacity(namespace::Limits { packages: 100, alias_bytes: 1000, capabilities: 100, capability_bytes: 0 }, 3)
+        + ns_exact_capacity() + ns_aborted()
+}
+fn ns_exact_capacity() -> i64 {
+    // The root already occurs in the source set: it must not consume another
+    // distinct-package slot. Both single-byte capabilities fit exactly.
+    handle ns_builder(namespace::Limits { packages: 1, alias_bytes: 1, capabilities: 2, capability_bytes: 1 }) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(1000000, 1000000);
+            let result = ns_run(&mut builder, &mut controls);
+            let closed = expect(namespace::finish(&mut builder, &controls), 1);
+            handle result {
+                Result::Err(_) => 0,
+                Result::Ok(value) => {
+                    let aliases = namespace::aliases(&value); let caps = namespace::capabilities(&value);
+                    closed + eq(as<i64>(Slice::len(&aliases)), 1) * eq(as<i64>(Slice::len(&caps)), 2)
+                },
+            }
+        },
+    }
+}
+fn ns_aborted() -> i64 {
+    handle ns_builder(ns_limits()) {
+        Result::Err(_) => 0,
+        Result::Ok(builder) => {
+            let controls = operation::create(1000000, 1000000);
+            ns_advance(&mut builder, &mut controls, 13); namespace::abort(&mut builder);
+            expect(namespace::finish(&mut builder, &controls), 1) + expect(namespace::step(&mut builder, &mut controls), 1)
+        },
+    }
+}
+fn text_steps(builder: &mut text_order::Builder, controls: &mut operation::Controls) -> Result<(), text_order::Failure> {
+    handle text_order::step(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            text_order::Event::Continue => text_steps(builder, controls), text_order::Event::Ready => Result::Ok(()),
+        },
+    }
+}
+fn text_expect<T>(result: Result<T, text_order::Failure>, code: i64) -> i64 where T: Use<[0, 1]> {
+    handle result {
+        Result::Ok(_) => eq(code, 0),
+        Result::Err(error) => handle error {
+            text_order::Failure::Closed => eq(code, 1), text_order::Failure::Busy => eq(code, 2),
+            text_order::Failure::Control(operation::Failure::Cancelled) => eq(code, 3),
+            text_order::Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: _, requested: _ }) => eq(code, 4),
+            text_order::Failure::Capacity { actual: 2, limit: 1 } => eq(code, 5), _ => 0,
+        },
+    }
+}
+fn text_hole(value: &mut text_order::Sorted, index: usize) -> i64 {
+    handle text_order::take(value, index) { Result::Ok(_) => 0, Result::Err(_) => 1 }
+}
+fn text_equal(left: &String, right: &String) -> i64 { handle Eq::eq(left, right) { true => 1, false => 0 } }
+fn text_rows(value: &mut text_order::Sorted, expected: &Vec<String>, index: usize, score: i64) -> i64 {
+    handle index == Vec::len(expected) {
+        true => score * text_hole(&mut *value, index) * text_hole(value, as<usize>(as<u64>(-1))),
+        false => handle text_order::take(&mut *value, index) {
+            Result::Err(_) => 0,
+            Result::Ok(actual) => {
+                let wanted = Vec::get_unchecked(expected, index);
+                let same = text_equal(&actual, wanted);
+                let hole = text_hole(&mut *value, index);
+                let extent = eq(as<i64>(text_order::extent(& *value)), as<i64>(Vec::len(expected)));
+                text_rows(value, expected, index + 1, score * same * hole * extent)
+            },
+        },
+    }
+}
+fn text_case(inputs: Vec<String>, expected: Vec<String>) -> i64 {
+    let controls = operation::create(1000000, 1000000);
+    let builder = text_order::begin(inputs, Vec::len(&expected));
+    handle text_steps(&mut builder, &mut controls) {
+        Result::Err(_) => 0,
+        Result::Ok(_) => handle text_order::finish(&mut builder, &controls) {
+            Result::Err(_) => 0,
+            Result::Ok(sorted) => {
+                let extent = eq(as<i64>(text_order::extent(&sorted)), as<i64>(Vec::len(&expected)));
+                extent * text_rows(&mut sorted, &expected, 0, 1) * text_expect(text_order::finish(&mut builder, &controls), 1)
+            },
+        },
+    }
+}
+@TEXT_CASES@
+fn text_pair(limit: usize) -> text_order::Builder {
+    let values = Vec<String>::new(); Vec::push(&mut values, Str::to_string("ab")); Vec::push(&mut values, Str::to_string("a"));
+    text_order::begin(values, limit)
+}
+fn text_lifecycle() -> i64 {
+    let controls = operation::create(1000000, 1000000);
+    let early = text_pair(2);
+    let score = text_expect(text_order::finish(&mut early, &controls), 2) + text_expect(text_order::finish(&mut early, &controls), 1);
+    let cancelled = text_pair(2); text_steps(&mut cancelled, &mut controls);
+    let spent = operation::work_spent(&controls); operation::cancel(&mut controls);
+    score = score + text_expect(text_order::finish(&mut cancelled, &controls), 3)
+        + eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent));
+    let fresh = operation::create(1000000, 1000000);
+    score = score + text_expect(text_order::finish(&mut cancelled, &fresh), 1);
+    let capacity = text_pair(1);
+    score = score + text_expect(text_order::step(&mut capacity, &mut fresh), 5) + text_expect(text_order::finish(&mut capacity, &fresh), 1);
+    let aborted = text_pair(2); text_order::step(&mut aborted, &mut fresh); text_order::abort(&mut aborted);
+    score = score + text_expect(text_order::step(&mut aborted, &mut fresh), 1) + text_expect(text_order::finish(&mut aborted, &fresh), 1);
+    let exhausted = text_pair(2); let empty = operation::create(0, 1000000);
+    score + text_expect(text_order::step(&mut exhausted, &mut empty), 4) + text_expect(text_order::finish(&mut exhausted, &fresh), 1)
+}
+main() -> (i64, i64, i64, i64, i64) { (ns_oracles(), ns_lifecycle(), ns_capacities(), text_oracles(), text_lifecycle()) }

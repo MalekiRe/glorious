@@ -1,0 +1,130 @@
+use std::*;
+use kernel::identity;
+use kernel::revision;
+use kernel::revision::create;
+pub mod kernel;
+
+pub struct World { value: i64 }
+
+fn read(history: &revision::History<World>, snapshot: revision::Snapshot) -> i64 {
+    handle revision::world(history, snapshot) {
+        Result::Ok(world) => world.value,
+        Result::Err(_) => -1,
+    }
+}
+
+fn collected(history: &mut revision::History<World>, old: revision::Snapshot, child: revision::Snapshot) -> i64 {
+    handle revision::collect_step(&mut *history, 0) {
+        Result::Ok(revision::CollectionStep::Next { cursor: _, collected: Result::Ok(_) }) => {
+            let stats = revision::stats(& *history);
+            let child_value = read(& *history, child);
+            handle stats.retained == 1 {
+                false => 1,
+                true => handle stats.snapshot_pins == 1 {
+                    false => 2,
+                    true => handle child_value == 77 {
+                        false => 3,
+                        true => handle revision::close(&mut *history, old) {
+                            Result::Err(revision::RevisionError::StalePin) => 42,
+                            _ => 4,
+                        },
+                    },
+                },
+            }
+        },
+        _ => 5,
+    }
+}
+
+fn pinned(history: &mut revision::History<World>, old: revision::Snapshot, child: revision::Snapshot) -> i64 {
+    let value = read(& *history, old);
+    handle value == 42 {
+        false => 6,
+        true => handle revision::collect_step(&mut *history, 0) {
+            Result::Ok(revision::CollectionStep::Next { cursor: _, collected: Result::Err(_) }) =>
+                handle revision::close(&mut *history, old) {
+                    Result::Ok(_) => collected(&mut *history, old, child),
+                    _ => 7,
+                },
+            _ => 8,
+        },
+    }
+}
+
+fn retired(history: &mut revision::History<World>, parent: identity::RevisionId,
+    old: revision::Snapshot, child: revision::Snapshot, fingerprint: identity::Digest) -> i64 {
+    handle revision::retire(&mut *history, parent) {
+        Result::Err(_) => 21,
+        Result::Ok(_) => handle revision::stats(& *history).retired == 1 {
+            false => 22,
+            true => admission_after_retirement(&mut *history, parent, old, child, fingerprint),
+        },
+    }
+}
+
+fn admission_after_retirement(history: &mut revision::History<World>, parent: identity::RevisionId,
+    old: revision::Snapshot, child: revision::Snapshot, fingerprint: identity::Digest) -> i64 {
+    handle revision::open(&mut *history, parent) {
+        Result::Err(revision::RevisionError::Retired) =>
+            handle revision::import(&mut *history, World { value: 77 }, fingerprint, Result::Ok(parent)) {
+                Result::Err(revision::RevisionError::Retired) => pinned(&mut *history, old, child),
+                _ => 9,
+            },
+        _ => 10,
+    }
+}
+
+fn child_open(history: &mut revision::History<World>, parent: identity::RevisionId,
+    old: revision::Snapshot, child: revision::Snapshot, fingerprint: identity::Digest) -> i64 {
+    let stats = revision::stats(& *history);
+    handle stats.snapshot_pins == 2 {
+        false => 11,
+        true => handle revision::retire(&mut *history, parent) {
+            Result::Ok(_) => retired(&mut *history, parent, old, child, fingerprint),
+            _ => 12,
+        },
+    }
+}
+
+fn with_child(history: &mut revision::History<World>, parent: identity::RevisionId,
+    old: revision::Snapshot, fingerprint: identity::Digest) -> i64 {
+    handle revision::import(&mut *history, World { value: 77 }, fingerprint, Result::Ok(parent)) {
+        Result::Err(_) => 13,
+        Result::Ok(child) => handle revision::open(&mut *history, child) {
+            Result::Err(_) => 14,
+            Result::Ok(snapshot) => child_open(&mut *history, parent, old, snapshot, fingerprint),
+        },
+    }
+}
+
+fn duplicate(history: &mut revision::History<World>, id: identity::RevisionId,
+    fingerprint: identity::Digest, child_fingerprint: identity::Digest) -> i64 {
+    handle revision::import(&mut *history, World { value: 42 }, fingerprint, None) {
+        Result::Err(_) => 15,
+        Result::Ok(same) => handle same.ordinal == id.ordinal {
+            false => 16,
+            true => handle revision::open(&mut *history, id) {
+                Result::Err(_) => 17,
+                Result::Ok(old) => with_child(&mut *history, id, old, child_fingerprint),
+            },
+        },
+    }
+}
+
+fn start(first: identity::Digest, second: identity::Digest) -> i64 {
+    let history = create<World>(7, 8, 8);
+    handle revision::import(&mut history, World { value: 42 }, first, None) {
+        Result::Ok(id) => duplicate(&mut history, id, first, second),
+        Result::Err(_) => 18,
+    }
+}
+
+pub fn main() -> i64 {
+    handle identity::hash(b"first-world") {
+        Result::Err(_) => 19,
+        Result::Ok(first) => handle identity::hash(b"second-world") {
+            Result::Err(_) => 20,
+            Result::Ok(second) => start(first, second),
+        },
+    }
+}

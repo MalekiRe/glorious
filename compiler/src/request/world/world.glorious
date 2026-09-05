@@ -1,0 +1,328 @@
+use std::*;
+use super::CompilationRequest;
+use super::CompilerBuildIdentity;
+use super::CompilationMode;
+use super::AdmittedSource;
+use super::Failure;
+use super::InputError;
+use super::Event;
+use super::sources;
+use super::namespace;
+use super::names;
+use super::options;
+use super::bootstrap;
+use super::super::runtime_manifest;
+use super::super::runtime_manifest::input;
+use super::super::kernel::identity;
+use super::super::kernel::identity::Digest;
+use super::super::kernel::identity::FileKey;
+use super::super::kernel::identity::PackageKey;
+use super::super::kernel::identity::RevisionId;
+use super::super::kernel::operation;
+use super::super::kernel::database;
+use super::super::registry;
+use super::super::source;
+pub mod fingerprint;
+
+pub struct Limits { sources: sources::Limits, namespace: namespace::Limits, options: options::Limits, runtime_manifest: input::Limits, fingerprint_bytes: usize }
+pub struct Builder { private work: Option<Work>, private limits: Limits }
+pub impl Use<[0, 1]> for Builder {}
+pub struct NormalizedWorld { private data: Data, private fingerprint: Digest, private source_index: HashMap<FileKey, usize> }
+// This is the encoder's owned input, not a normalized-world constructor.
+// Only this module can seal Data after every admission and the final check.
+pub struct Data {
+    build: CompilerBuildIdentity, mode: CompilationMode, root_package: PackageKey,
+    sources: Vec<AdmittedSource>, target: String, semantic_options: options::Admitted, codegen_options: options::Admitted,
+    capabilities: Vec<names::Capability>, runtime_manifest: Option<input::Admitted>,
+    aliases: Vec<names::PackageAlias>, alias_index: HashMap<String, usize>,
+}
+struct Work {
+    raw: CompilationRequest, sources: Option<sources::Builder>, namespace: Option<namespace::Builder>, options: Option<options::Builder>,
+    runtime: Option<input::Builder>, bootstrap: Option<bootstrap::Builder>, encoder: Option<fingerprint::Builder>,
+    admitted_namespace: Option<namespace::Admitted>, semantic: Option<options::Admitted>, codegen: Option<options::Admitted>,
+    admitted_runtime: Option<input::Admitted>, data: Option<Data>, fingerprint: Option<Digest>, source_index: HashMap<FileKey, usize>, cursor: usize, phase: Phase,
+}
+enum Phase { Sources, Namespace, Semantic, Codegen, RuntimeStart, Runtime, Assemble, Bootstrap, EncodeStart, Encode, Index, Ready }
+
+pub fn begin(request: CompilationRequest, limits: Limits) -> Builder {
+    let raw = request; let inputs = replace(&mut raw.sources, Vec<super::SourceInput>::new());
+    Builder { work: Result::Ok(Work { raw: raw, sources: Result::Ok(sources::begin(inputs, limits.sources)), namespace: None, options: None,
+        runtime: None, bootstrap: None, encoder: None, admitted_namespace: None, semantic: None, codegen: None, admitted_runtime: None,
+        data: None, fingerprint: None, source_index: HashMap<FileKey, usize>::new(), cursor: 0, phase: Phase::Sources }), limits: limits }
+}
+pub fn abort(builder: &mut Builder) -> () { (*builder).work = None; }
+pub fn fingerprint(value: &NormalizedWorld) -> Digest { value.fingerprint }
+pub fn build<'a>(value: &'a NormalizedWorld) -> &'a CompilerBuildIdentity { &value.data.build }
+pub fn mode<'a>(value: &'a NormalizedWorld) -> &'a CompilationMode { &value.data.mode }
+pub fn root<'a>(value: &'a NormalizedWorld) -> &'a PackageKey { &value.data.root_package }
+pub fn target<'a>(value: &'a NormalizedWorld) -> Str<'a> { String::as_str(&value.data.target) }
+pub fn sources<'a>(value: &'a NormalizedWorld) -> Slice<'a, AdmittedSource> { Vec::as_slice(&value.data.sources) }
+pub fn semantic_options<'a>(value: &'a NormalizedWorld) -> &'a options::Admitted { &value.data.semantic_options }
+pub fn codegen_options<'a>(value: &'a NormalizedWorld) -> &'a options::Admitted { &value.data.codegen_options }
+pub fn capabilities<'a>(value: &'a NormalizedWorld) -> Slice<'a, names::Capability> { Vec::as_slice(&value.data.capabilities) }
+pub fn aliases<'a>(value: &'a NormalizedWorld) -> Slice<'a, names::PackageAlias> { Vec::as_slice(&value.data.aliases) }
+pub fn runtime_manifest<'a>(value: &'a NormalizedWorld) -> Option<&'a runtime_manifest::RuntimeManifestInput> {
+    handle Result::as_ref(&value.data.runtime_manifest) { Result::Err(_) => None, Result::Ok(admitted) => Result::Ok(input::value(admitted)) }
+}
+pub fn source_input<'a>(value: &'a NormalizedWorld, key: FileKey) -> Option<&'a AdmittedSource> {
+    handle HashMap::get(&value.source_index, &key) { Result::Err(_) => None, Result::Ok(index) => Vec::get(&value.data.sources, *index) }
+}
+pub fn alias_package<'a>(value: &'a NormalizedWorld, alias: &String) -> Option<&'a PackageKey> {
+    handle HashMap::get(&value.data.alias_index, alias) {
+        Result::Err(_) => None,
+        Result::Ok(index) => { let entry = Vec::get_unchecked(&value.data.aliases, *index); Result::Ok(names::package(entry)) },
+    }
+}
+fn contains(value: &NormalizedWorld, package: &PackageKey, low: usize, high: usize) -> Bool {
+    handle low == high {
+        true => false,
+        false => { let middle = low + (high - low) / 2; let entry = Vec::get_unchecked(&value.data.aliases, middle); let candidate = names::package(entry);
+            handle identity::compare_package(candidate, package) {
+                Ordering::Equal => true, Ordering::Less => contains(value, package, middle + 1, high), Ordering::Greater => contains(value, package, low, middle),
+            }
+        },
+    }
+}
+pub impl database::PackageWorld for NormalizedWorld {
+    contains_package(world: &NormalizedWorld, package: &PackageKey) -> Bool { contains(world, package, 0, Vec::len(&world.data.aliases)) }
+}
+pub impl registry::World for NormalizedWorld {
+    source<'a>(world: &'a NormalizedWorld, file: FileKey) -> Option<&'a source::Blob> {
+        handle source_input(world, file) { Result::Err(_) => None, Result::Ok(value) => Result::Ok(super::blob(value)) }
+    }
+}
+pub impl database::DiagnosticWorld for NormalizedWorld {
+    source_length(world: &NormalizedWorld, file: &FileKey) -> Option<u32> {
+        handle source_input(world, *file) {
+            Result::Err(_) => None,
+            Result::Ok(value) => { let blob = super::blob(value); Result::Ok(source::length(blob)) },
+        }
+    }
+}
+// This facade obtains identity exclusively from the sealed normalized value.
+pub fn import(registry: &mut registry::Registry<NormalizedWorld>, world: NormalizedWorld, parent: Option<RevisionId>) -> Result<RevisionId, registry::Failure> {
+    let digest = fingerprint(&world); registry::import(registry, world, digest, parent)
+}
+fn next(work: &mut Work, phase: Phase) -> Result<Event, Failure> { (*work).phase = phase; Result::Ok(Event::Continue) }
+fn source_step(work: &mut Work, limits: Limits, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle Result::as_mut(&mut work.sources) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(builder) => handle sources::step(&mut *builder, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                Event::Continue => Result::Ok(Event::Continue),
+                Event::Ready => handle sources::finish(builder, & *controls) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(admitted) => {
+                        (*work).sources = None;
+                        let root = replace(&mut work.raw.root_package, PackageKey { value: String::new() });
+                        let caps = replace(&mut work.raw.capability_manifest, Vec<String>::new());
+                        (*work).namespace = Result::Ok(namespace::begin(root, admitted, caps, limits.namespace)); next(work, Phase::Namespace)
+                    },
+                },
+            },
+        },
+    }
+}
+fn namespace_step(work: &mut Work, limits: Limits, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle Result::as_mut(&mut work.namespace) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(builder) => handle namespace::step(&mut *builder, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                Event::Continue => Result::Ok(Event::Continue),
+                Event::Ready => handle namespace::finish(builder, & *controls) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(admitted) => {
+                        (*work).namespace = None; (*work).admitted_namespace = Result::Ok(admitted);
+                        let values = replace(&mut work.raw.semantic_options, HashMap<String, String>::new());
+                        (*work).options = Result::Ok(options::begin(values, limits.options)); next(work, Phase::Semantic)
+                    },
+                },
+            },
+        },
+    }
+}
+fn option_done(work: &mut Work, admitted: options::Admitted, limits: Limits, semantic: Bool) -> Result<Event, Failure> {
+    (*work).options = None;
+    handle semantic {
+        true => { (*work).semantic = Result::Ok(admitted); let values = replace(&mut work.raw.codegen_options, HashMap<String, String>::new());
+            (*work).options = Result::Ok(options::begin(values, limits.options)); next(work, Phase::Codegen) },
+        false => { (*work).codegen = Result::Ok(admitted); next(work, Phase::RuntimeStart) },
+    }
+}
+fn option_step(work: &mut Work, limits: Limits, controls: &mut operation::Controls, semantic: Bool) -> Result<Event, Failure> {
+    handle Result::as_mut(&mut work.options) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(builder) => handle options::step(&mut *builder, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                Event::Continue => Result::Ok(Event::Continue),
+                Event::Ready => handle options::finish(builder, & *controls) {
+                    Result::Err(error) => Result::Err(error), Result::Ok(admitted) => option_done(work, admitted, limits, semantic),
+                },
+            },
+        },
+    }
+}
+fn runtime_error(error: input::Failure) -> Failure {
+    handle error {
+        input::Failure::Rejected(_) => Failure::Rejected(InputError::InvalidRuntimeManifest), input::Failure::Control(error) => Failure::Control(error),
+        // Full-request capacity names 10..17 are manifest-local names 0..7.
+        input::Failure::Capacity { name: name, limit: limit } => Failure::Capacity { name: wrapping_add<u32>(10, name), limit: limit }, _ => Failure::Invariant,
+    }
+}
+fn runtime_start(work: &mut Work, limits: Limits) -> Result<Event, Failure> {
+    handle Option::take(&mut work.raw.runtime_manifest) {
+        Result::Err(_) => next(work, Phase::Assemble),
+        Result::Ok(value) => { (*work).runtime = Result::Ok(input::begin(value, limits.runtime_manifest)); next(work, Phase::Runtime) },
+    }
+}
+fn runtime_step(work: &mut Work, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle Result::as_mut(&mut work.runtime) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(builder) => handle input::step(&mut *builder, &mut *controls) {
+            Result::Err(error) => Result::Err(runtime_error(error)),
+            Result::Ok(event) => handle event {
+                input::Event::Continue => Result::Ok(Event::Continue),
+                input::Event::Ready => handle input::finish(builder, & *controls) {
+                    Result::Err(error) => Result::Err(runtime_error(error)),
+                    Result::Ok(admitted) => { (*work).runtime = None; (*work).admitted_runtime = Result::Ok(admitted); next(work, Phase::Assemble) },
+                },
+            },
+        },
+    }
+}
+fn assemble(work: &mut Work) -> Result<Event, Failure> {
+    handle Option::take(&mut work.admitted_namespace) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(namespace) => handle Option::take(&mut work.semantic) {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(semantic) => handle Option::take(&mut work.codegen) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(codegen) => handle namespace::into_indexed_parts(namespace) {
+                    (root, sources, aliases, capabilities, index) => {
+                        (*work).data = Result::Ok(Data { build: work.raw.build, mode: work.raw.mode, root_package: root, sources: sources::into_values(sources),
+                            target: replace(&mut work.raw.target, String::new()), semantic_options: semantic, codegen_options: codegen,
+                            capabilities: capabilities, runtime_manifest: Option::take(&mut work.admitted_runtime), aliases: aliases, alias_index: index });
+                        next(work, Phase::Bootstrap)
+                    },
+                },
+            },
+        },
+    }
+}
+fn optimization(data: &Data, controls: &mut operation::Controls) -> Result<Option<String>, Failure> {
+    let key = Str::to_string("optimization-level");
+    handle options::get(&data.codegen_options, &key) {
+        Result::Err(_) => Result::Ok(None),
+        Result::Ok(value) => handle operation::charge(controls, as<u64>(String::len(value))) {
+            Result::Err(error) => Result::Err(Failure::Control(error)),
+            Result::Ok(_) => { let text = String::as_str(value); Result::Ok(Result::Ok(Str::to_string(text))) },
+        },
+    }
+}
+fn bootstrap_start(work: &mut Work, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle Result::as_mut(&mut work.data) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(data) => handle data.mode {
+            CompilationMode::Bootstrap(stage) => handle optimization(& *data, controls) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(option) => { let inputs = replace(&mut data.sources, Vec<AdmittedSource>::new());
+                    (*work).bootstrap = Result::Ok(bootstrap::begin(stage, data.build.compiler, inputs, option)); Result::Ok(Event::Continue) },
+            },
+            _ => next(work, Phase::EncodeStart),
+        },
+    }
+}
+fn bootstrap_done(work: &mut Work, admitted: bootstrap::AdmittedStage) -> Result<Event, Failure> {
+    (*work).bootstrap = None;
+    handle Result::as_mut(&mut work.data) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(data) => handle bootstrap::into_parts(admitted) {
+            (stage, sources) => { (*data).mode = CompilationMode::Bootstrap(stage); (*data).sources = sources; next(work, Phase::EncodeStart) },
+        },
+    }
+}
+fn bootstrap_step(work: &mut Work, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle Result::as_mut(&mut work.bootstrap) {
+        Result::Err(_) => bootstrap_start(work, controls),
+        Result::Ok(builder) => handle bootstrap::step(&mut *builder, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                Event::Continue => Result::Ok(Event::Continue),
+                Event::Ready => handle bootstrap::finish(builder, & *controls) {
+                    Result::Err(error) => Result::Err(error), Result::Ok(admitted) => bootstrap_done(work, admitted),
+                },
+            },
+        },
+    }
+}
+fn encode_start(work: &mut Work, limits: Limits) -> Result<Event, Failure> {
+    handle Option::take(&mut work.data) { Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(data) => { (*work).encoder = Result::Ok(fingerprint::begin(data, limits.fingerprint_bytes)); next(work, Phase::Encode) } }
+}
+fn encode_step(work: &mut Work, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle Result::as_mut(&mut work.encoder) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(builder) => handle fingerprint::step(&mut *builder, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                Event::Continue => Result::Ok(Event::Continue),
+                Event::Ready => handle fingerprint::finish(builder, & *controls) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(result) => handle result { (data, digest) => {
+                        (*work).encoder = None; (*work).data = Result::Ok(data); (*work).fingerprint = Result::Ok(digest); next(work, Phase::Index)
+                    } },
+                },
+            },
+        },
+    }
+}
+fn index_step(work: &mut Work) -> Result<Event, Failure> {
+    handle Result::as_ref(&work.data) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(data) => handle work.cursor == Vec::len(&data.sources) {
+            true => { (*work).phase = Phase::Ready; Result::Ok(Event::Ready) },
+            false => { let value = Vec::get_unchecked(&data.sources, work.cursor); let blob = super::blob(value);
+                handle HashMap::insert(&mut work.source_index, source::file(blob), work.cursor) {
+                    Result::Ok(_) => Result::Err(Failure::Invariant),
+                    Result::Err(_) => { (*work).cursor = work.cursor + 1; Result::Ok(Event::Continue) },
+                }
+            },
+        },
+    }
+}
+fn transition(work: &mut Work, limits: Limits, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle work.phase {
+        Phase::Sources => source_step(work, limits, controls), Phase::Namespace => namespace_step(work, limits, controls),
+        Phase::Semantic => option_step(work, limits, controls, true), Phase::Codegen => option_step(work, limits, controls, false),
+        Phase::RuntimeStart => runtime_start(work, limits), Phase::Runtime => runtime_step(work, controls), Phase::Assemble => assemble(work),
+        Phase::Bootstrap => bootstrap_step(work, controls), Phase::EncodeStart => encode_start(work, limits), Phase::Encode => encode_step(work, controls),
+        Phase::Index => index_step(work), Phase::Ready => Result::Ok(Event::Ready),
+    }
+}
+fn checked(builder: &mut Builder, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle operation::charge(&mut *controls, 1) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
+        Result::Ok(_) => handle Result::as_mut(&mut builder.work) { Result::Err(_) => Result::Err(Failure::Closed), Result::Ok(work) => transition(work, builder.limits, controls) },
+    }
+}
+pub fn step(builder: &mut Builder, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    let result = checked(&mut *builder, controls);
+    handle result { Result::Ok(event) => Result::Ok(event), Result::Err(error) => { abort(builder); Result::Err(error) } }
+}
+pub fn finish(builder: &mut Builder, controls: &operation::Controls) -> Result<NormalizedWorld, Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => { abort(builder); Result::Err(Failure::Control(error)) },
+        Result::Ok(_) => handle Option::take(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle work.phase {
+                Phase::Ready => handle work.data { Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(data) => handle work.fingerprint {
+                    Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(digest) => Result::Ok(NormalizedWorld { data: data, fingerprint: digest, source_index: work.source_index }),
+                } },
+                _ => Result::Err(Failure::Busy),
+            },
+        },
+    }
+}

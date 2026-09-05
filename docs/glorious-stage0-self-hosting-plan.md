@@ -1,5 +1,8 @@
 # Grandiose Stage0 → Feature-Complete Self-Hosted Compiler Translation Plan
 
+Historical plan, superseded by [GSC-2](../GSC-2-glorious-incremental-self-hosted-compiler-spec.md).
+The old implementation and all progress/coverage claims below are retired.
+
 **Repository:** [`MalekiRe/glorious`](https://github.com/MalekiRe/glorious)
 **Current required Stage0 baseline:** [`cfeab4b58d60754a70c819fdda25a1f1024907af`](https://github.com/MalekiRe/glorious/commit/cfeab4b58d60754a70c819fdda25a1f1024907af)
 **Historical analysis baseline:** [`02ced7ed1894acfd54b0766e2d718b699fc31a8c`](https://github.com/MalekiRe/glorious/commit/02ced7ed1894acfd54b0766e2d718b699fc31a8c)

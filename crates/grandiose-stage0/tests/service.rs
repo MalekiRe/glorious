@@ -12672,6 +12672,93 @@ fn service_replays_a_cross_call_continuation_with_resume_return() {
 }
 
 #[test]
+fn service_preserves_shared_call_arguments_when_an_ancestor_handles_their_payload() {
+    let source = r#"
+        effect Ask { [1,1] ask(value: &i64) -> i64; }
+        pub fn leaf(value: &i64) -> i64 / Ask { Ask::ask(value) }
+        pub fn relay(value: &i64) -> i64 / Ask { leaf(value) }
+        pub fn main() -> i64 {
+            let value = 40;
+            handle relay(&value) { Ask::ask(payload) with k => k(*payload + 2) }
+        }
+    "#;
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rebases_borrowed_operation_results_into_the_suspended_call_chain() {
+    let source = r#"
+        effect Ask { [1,1] ask(value: &i64) -> &i64; }
+        pub fn leaf(value: &i64) -> i64 / Ask { let returned = Ask::ask(value); *returned + 2 }
+        pub fn relay(value: &i64) -> i64 / Ask { leaf(value) }
+        pub fn main() -> i64 {
+            let value = 40;
+            handle relay(&value) { Ask::ask(payload) with k => k(payload) }
+        }
+    "#;
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rebases_forwarded_borrowed_payloads_from_the_original_performer() {
+    let source = r#"
+        effect Ask { [1,1] ask(value: &i64, selector: i64) -> i64; }
+        pub fn leaf(value: &i64) -> i64 / Ask { Ask::ask(value, 1) }
+        pub fn partial(value: &i64) -> i64 / Ask {
+            handle leaf(value) { Ask::ask(payload, 0) with k => k(*payload) }
+        }
+        pub fn main() -> i64 {
+            let value = 40;
+            handle partial(&value) { Ask::ask(payload, _) with k => k(*payload + 2) }
+        }
+    "#;
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rebases_borrowed_operation_results_for_each_replay() {
+    let source = r#"
+        effect Ask { [2,2] ask(value: &i64) -> &i64; }
+        pub fn leaf(value: &i64) -> i64 / Ask { let returned = Ask::ask(value); *returned }
+        pub fn relay(value: &i64) -> i64 / Ask { leaf(value) }
+        pub fn main() -> i64 {
+            let value = 21;
+            handle relay(&value) { Ask::ask(payload) with k => k(payload) + k(payload) }
+        }
+    "#;
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 42);
+}
+
+#[test]
+fn service_rebases_borrowed_operation_results_through_a_resumption_closure() {
+    let source = r#"
+        effect Ask { [1,1] ask(value: &i64) -> &i64; }
+        pub fn leaf(value: &i64) -> i64 / Ask { let returned = Ask::ask(value); *returned + 2 }
+        pub fn relay(value: &i64) -> i64 / Ask { leaf(value) }
+        pub fn main() -> i64 {
+            let value = 40;
+            handle relay(&value) {
+                Ask::ask(payload) with k => {
+                    let resume = (value: &i64) -> i64 { k(value) };
+                    resume(payload)
+                }
+            }
+        }
+    "#;
+    let artifact = StageZeroCompiler::new().compile(request(source)).unwrap().artifact.unwrap();
+    let program = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 42);
+}
+
+#[test]
 fn service_preserves_a_three_shot_replay_budget_through_the_vm() {
     let source = "effect Ask { [3,3] ask() -> i64; } pub fn helper() -> i64 / Ask { Ask::ask() } pub fn main() -> i64 { handle { let value = helper(); value + 1 } { Ask::ask(k) => k(20) + k(21) + k(22) } }";
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
@@ -17538,6 +17625,42 @@ fn service_rejects_private_generic_reexports_despite_public_operator_authority()
         "missing private generic re-export authority diagnostic: {first:#?}"
     );
     assert_eq!(first, second, "private re-export diagnostics must be canonical");
+}
+
+#[test]
+fn service_does_not_require_trait_instances_from_undemanded_bodies() {
+    for unused in [
+        "pub fn unused() -> i64 { Leaf::leaf(41) }",
+        "fn invoke(value: i64) -> i64 { Leaf::leaf(value) } pub fn unused() -> i64 { let callback = invoke; callback(41) }",
+        "pub fn unused() -> () -> i64 { () -> i64 { Leaf::leaf(41) } }",
+    ] {
+        let source = format!(
+            "trait Leaf {{ fn leaf(value: i64) -> i64; }} impl Leaf for i64 {{ fn leaf(value: i64) -> i64 {{ value + 1 }} }} {unused} pub fn main() -> i64 {{ 42 }}"
+        );
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        assert_eq!(outcome.instance_graph.as_ref().unwrap().ordered().len(), 1);
+        let bytes = outcome.artifact.unwrap().canonical_bytes();
+        assert_eq!(decode_and_verify_program(&bytes).unwrap().run_i64().unwrap(), 42);
+    }
+}
+
+#[test]
+fn service_materializes_trait_instances_when_their_callers_become_demanded() {
+    for (helper, entry) in [
+        ("pub fn helper() -> i64 { Leaf::leaf(41) }", "helper()"),
+        ("fn invoke(value: i64) -> i64 { Leaf::leaf(value) } pub fn helper() -> i64 { let callback = invoke; callback(41) }", "helper()"),
+        ("pub fn helper() -> () -> i64 { () -> i64 { Leaf::leaf(41) } }", "let callback = helper(); callback()"),
+    ] {
+        let source = format!(
+            "trait Leaf {{ fn leaf(value: i64) -> i64; }} impl Leaf for i64 {{ fn leaf(value: i64) -> i64 {{ value + 1 }} }} {helper} pub fn main() -> i64 {{ {entry} }}"
+        );
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        assert!(outcome.instance_graph.as_ref().unwrap().ordered().len() > 1);
+        let bytes = outcome.artifact.unwrap().canonical_bytes();
+        assert_eq!(decode_and_verify_program(&bytes).unwrap().run_i64().unwrap(), 42);
+    }
 }
 
 #[test]

@@ -68,6 +68,15 @@ fn core_for(package_name: &str, source: &str) -> TypedBody {
 }
 
 #[test]
+fn contextual_call_to_a_shadowing_non_callable_reports_an_error_instead_of_panicking() {
+    let core = core_for(
+        "shadowed-call@0.1.0",
+        "pub fn target() -> i64 { 42 } pub fn main() -> i64 { let target = 7; target() }",
+    );
+    assert!(core.diagnostics.iter().any(|diagnostic| diagnostic.code == "G4105"));
+}
+
+#[test]
 fn typed_core_elaborates_scoped_locals_and_flat_numeric_operator_chains() {
     let package = PackageKey("core@0.1.0".into());
     let source = "pub fn main() -> i64 { let value = 1; value + 2 }";
@@ -442,6 +451,33 @@ fn typed_core_retains_explicit_trait_method_generic_arguments() {
                 && method_arguments.is_empty()
         )
     }));
+}
+
+#[test]
+fn direct_callable_type_prefix_infers_trailing_types_from_arguments_and_context() {
+    for source in [
+        "fn pair<T, S>(a: S, b: T) -> (S, T) { (a, b) } pub fn main() -> (i64, u32) { pair<u32>(7, 9) }",
+        "fn choose<T, S>(value: T, other: S) -> S { other } pub fn main() -> u32 { choose<i64>(7, 9) }",
+        "pub fn choose<T, S>(value: T, other: S) -> S { other } pub fn main() -> u32 { crate::choose<i64>(7, 9) }",
+    ] {
+        let core = core_for("partial-generics@0.1.0", source);
+        assert!(core.diagnostics.is_empty(), "{source}: {:#?}", core.diagnostics);
+        assert!(core.expressions.iter().any(|expression| matches!(&expression.kind,
+            CoreKind::Function { arguments, .. } if arguments.len() == 2
+                && arguments.iter().all(|a| matches!(a, GenericArgument::Type(Type::Scalar(_)))))));
+    }
+}
+
+#[test]
+fn direct_callable_type_prefix_preserves_kind_arity_and_fixed_argument_checks() {
+    for source in [
+        "fn identity<T>(x: T) -> T { x } pub fn main() -> i64 { identity<i64, i64>(1) }",
+        "fn identity<T, q: Quantity>(x: T) -> T { x } pub fn main() -> i64 { identity<i64>(1) }",
+        "fn identity<T, S>(x: T, y: S) -> T { x } pub fn main() -> i64 { identity<u32>(1, 2) }",
+    ] {
+        let core = core_for("partial-generics-reject@0.1.0", source);
+        assert!(!core.diagnostics.is_empty(), "must reject {source}");
+    }
 }
 
 #[test]
@@ -5800,6 +5836,27 @@ fn mixed_static_and_caller_reference_results_preserve_only_caller_paths() {
             .any(|diagnostic| diagnostic.code == "G5023"),
         "mixed effect result lost its caller reference path"
     );
+}
+
+#[test]
+fn placeflow_seeds_hidden_reference_leaves_from_the_parameter_interface() {
+    let source = "pub struct Window<'a> { private storage: &'a i64 } pub struct Wrapped<'a> { private padding: i64, private window: Window<'a> } pub fn project<'a>(value: Wrapped<'a>) -> &'a i64 { value.window.storage } pub fn main<'a>(value: Wrapped<'a>) -> i64 { let result = project(value); *result }";
+    let (core, signatures) = core_and_signatures_for("parameter-layout-provenance@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{:#?}", flow.diagnostics);
+    assert!(flow.events.iter().any(|event| matches!(&event.kind, FlowEventKind::Reborrow(root) if root == "value")));
+    // A caller-path assertion alone is not proof that an opaque parameter
+    // actually contains a reference. The no-interface entry remains closed.
+    assert!(PlaceFlow::analyze(&core).diagnostics.iter().any(|error| error.code == "G5023"));
+    let lifted = PlaceFlow::analyze_lifted_with_interface(&core, core.root, &core.parameters, &signatures);
+    assert!(lifted.diagnostics.is_empty(), "{:#?}", lifted.diagnostics);
+
+    let source = "pub struct Window<'a> { private storage: &'a mut i64 } pub fn project<'a>(value: Window<'a>) -> &'a mut i64 { value.storage } pub fn main<'a>(value: Window<'a>) -> i64 { let result = project(value); *value.storage = 3; *result }";
+    let (core, signatures) = core_and_signatures_for("parameter-layout-unique-conflict@0.1.0", source);
+    assert!(core.diagnostics.is_empty(), "{:#?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.iter().any(|error| matches!(error.code, "G5001" | "G5004")), "{:#?}", flow.diagnostics);
 }
 
 #[test]

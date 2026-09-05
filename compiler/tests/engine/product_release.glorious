@@ -1,0 +1,196 @@
+use std::*;
+use kernel::database;
+use kernel::engine;
+use kernel::identity;
+use kernel::query;
+pub mod kernel;
+
+pub struct World { version: u32 }
+pub struct Product { answer: i64, bytes: Vec<u8> }
+pub impl Use<[0, 1]> for Product {}
+pub type Db = database::Database<World, Product>;
+pub struct Fixture { db: Db, family: database::Family<u32>, key: database::Key<u32>, revision: identity::RevisionId }
+pub impl Use<[0, 1]> for Fixture {}
+fn count(left: usize, right: usize) -> i64 { handle left == right { true => 1, false => 0 } }
+fn number(left: i64, right: i64) -> i64 { handle left == right { true => 1, false => 0 } }
+fn ok<T>(result: Result<T, database::Failure>) -> i64 where T: Use<[0, 1]> { handle result { Result::Ok(_) => 1, _ => 0 } }
+fn closed<T>(result: Result<T, database::Failure>) -> i64 where T: Use<[0, 1]> {
+    handle result { Result::Err(database::Failure::Engine(engine::Failure::Closed)) => 1, _ => 0 }
+}
+fn blocked<T>(result: Result<T, database::Failure>) -> i64 where T: Use<[0, 1]> {
+    handle result { Result::Err(database::Failure::Collecting) => 1, _ => 0 }
+}
+fn drive(db: &mut Db, ticket: engine::Ticket, fuel: usize) -> Result<engine::Event, database::Failure> {
+    handle fuel == 0 {
+        true => Result::Err(database::Failure::Invariant),
+        false => handle database::step(&mut *db, ticket) {
+            Result::Ok(engine::Event::Continue) => drive(db, ticket, fuel - 1), other => other,
+        },
+    }
+}
+fn gc(db: &mut Db, fuel: usize) -> Result<database::ProductCollectionStep<Product>, database::Failure> {
+    handle fuel == 0 {
+        true => Result::Err(database::Failure::Invariant),
+        false => handle database::collect_step_with_products(&mut *db) {
+            Result::Ok(database::ProductCollectionStep::Continue) => gc(db, fuel - 1), other => other,
+        },
+    }
+}
+fn product(answer: i64) -> Product {
+    let bytes = Vec<u8>::new();
+    Vec::push(&mut bytes, as<u8>(97));
+    Vec::push(&mut bytes, as<u8>(98));
+    Vec::push(&mut bytes, as<u8>(99));
+    Product { answer: answer, bytes: bytes }
+}
+fn seed(db: &mut Db, session: database::Session, key: database::Key<u32>, fingerprint: identity::Digest, answer: i64)
+    -> Result<(), database::Failure> {
+    handle database::start(&mut *db, session, key, None) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(ticket) => handle drive(&mut *db, ticket, 30) {
+            Result::Ok(engine::Event::Compute { key: _ }) => handle database::publish(&mut *db, ticket, product(answer), fingerprint, query::Completeness::Complete) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(_) => handle drive(&mut *db, ticket, 30) {
+                    Result::Ok(engine::Event::Ready(_)) => database::close(db, session), _ => Result::Err(database::Failure::Invariant),
+                },
+            },
+            _ => Result::Err(database::Failure::Invariant),
+        },
+    }
+}
+fn initialize(id: u64, fingerprint: identity::Digest, answer: i64) -> Result<Fixture, database::Failure> {
+    let db = database::create<World, Product>(id, 4, 4, 4, 4, 8);
+    handle database::family<u32>(&mut db, 1, query::RecoveryPolicy::Reject, engine::ReusePolicy::Tracked, 4) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(family) => handle database::intern(&mut family, 1) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(key) => handle database::import(&mut db, World { version: 0 }, fingerprint, None) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(revision) => initialize_session(db, family, key, revision, fingerprint, answer),
+            },
+        },
+    }
+}
+fn initialize_session(db: Db, family: database::Family<u32>, key: database::Key<u32>, revision: identity::RevisionId,
+    fingerprint: identity::Digest, answer: i64) -> Result<Fixture, database::Failure> {
+    handle database::open(&mut db, revision, query::RecoveryPolicy::Reject, 100, 100) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(session) => handle seed(&mut db, session, key, fingerprint, answer) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => Result::Ok(Fixture { db: db, family: family, key: key, revision: revision }),
+        },
+    }
+}
+fn reused(db: &mut Db, session: database::Session, key: database::Key<u32>) -> i64 {
+    handle database::start(&mut *db, session, key, None) {
+        Result::Err(_) => 0,
+        Result::Ok(ticket) => handle drive(&mut *db, ticket, 30) {
+            Result::Ok(engine::Event::Ready(outcome)) => handle outcome.execution {
+                engine::Execution::ReusedFromParent { parent: _ } => 1 + shared_value(& *db, session, outcome), _ => 0,
+            },
+            _ => 0,
+        },
+    }
+}
+fn shared_value(db: &Db, session: database::Session, outcome: engine::Outcome) -> i64 {
+    handle database::value(db, session, outcome) {
+        Result::Err(_) => 0,
+        Result::Ok(value) => number(value.answer, 42) + products(db, 1),
+    }
+}
+fn products(db: &Db, expected: usize) -> i64 {
+    handle database::stats(db) { Result::Ok(stats) => count(stats.products, expected), _ => 0 }
+}
+fn report(result: Result<database::ProductCollectionStep<Product>, database::Failure>, released: usize) -> i64 {
+    handle result {
+        Result::Ok(database::ProductCollectionStep::Done(stats)) =>
+            count(stats.revisions, 1) + count(stats.memos, 1) + count(stats.products, released),
+        _ => 0,
+    }
+}
+fn retire(db: &mut Db, revision: identity::RevisionId) -> () {
+    database::retire(&mut *db, revision); database::collect(db); ()
+}
+fn child(fixture: &mut Fixture, fingerprint: identity::Digest) -> Result<(identity::RevisionId, i64), database::Failure> {
+    handle database::import(&mut fixture.db, World { version: 1 }, fingerprint, Result::Ok(fixture.revision)) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(revision) => handle database::open(&mut fixture.db, revision, query::RecoveryPolicy::Reject, 100, 100) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(session) => {
+                let shared = reused(&mut fixture.db, session, fixture.key);
+                database::close(&mut fixture.db, session);
+                retire(&mut fixture.db, fixture.revision);
+                let kept = report(gc(&mut fixture.db, 30), 0);
+                Result::Ok((revision, shared + kept))
+            },
+        },
+    }
+}
+fn release(db: &mut Db, revision: identity::RevisionId) -> Result<database::Released<Product>, database::Failure> {
+    retire(&mut *db, revision);
+    handle gc(db, 30) {
+        Result::Ok(database::ProductCollectionStep::Release(released)) => Result::Ok(released),
+        _ => Result::Err(database::Failure::Invariant),
+    }
+}
+fn value(released: &database::Released<Product>, expected: i64) -> i64 {
+    handle database::released_value(released) {
+        Result::Err(_) => 0,
+        Result::Ok(value) => number(value.answer, expected) + count(Vec::len(&value.bytes), 3)
+            + number(as<i64>(*Vec::get_unchecked(&value.bytes, 0)), 97),
+    }
+}
+fn foreign(result: Result<(), database::Failure>) -> i64 {
+    handle result { Result::Err(database::Failure::Engine(engine::Failure::Foreign)) => 1, _ => 0 }
+}
+fn pending(first: &mut Db, second: &mut Db, a: &mut database::Released<Product>, b: &database::Released<Product>) -> i64 {
+    let wrong = foreign(database::finish_release(&mut *second, &mut *a));
+    let inspect = blocked(database::stats(& *first));
+    let advance = blocked(database::collect_step_with_products(&mut *first));
+    let plain = blocked(database::collect_step(&mut *second));
+    wrong + inspect + advance + plain + value(& *a, 42) + value(b, 99)
+}
+fn finish(db: &mut Db, released: &mut database::Released<Product>) -> i64 {
+    let once = ok(database::finish_release(&mut *db, &mut *released));
+    let hidden = released_closed(& *released);
+    let twice = closed(database::finish_release(db, released));
+    once + hidden + twice
+}
+fn released_closed(released: &database::Released<Product>) -> i64 {
+    handle database::released_value(released) {
+        Result::Err(database::Failure::Engine(engine::Failure::Closed)) => 1, _ => 0,
+    }
+}
+fn releases(first: &mut Db, second: &mut Db, a: database::Released<Product>, b: database::Released<Product>) -> i64 {
+    let guarded = pending(&mut *first, &mut *second, &mut a, &b);
+    let acknowledged = finish(&mut *first, &mut a) + finish(&mut *second, &mut b);
+    let retired = report(gc(&mut *first, 30), 1) + report(gc(&mut *second, 30), 1);
+    guarded + acknowledged + retired + products(& *first, 0) + products(& *second, 0)
+}
+fn pair(first: &mut Fixture, second: &mut Fixture, fingerprint: identity::Digest) -> i64 {
+    handle child(&mut *first, fingerprint) {
+        Result::Err(_) => 0,
+        Result::Ok((revision, shared)) => handle release(&mut first.db, revision) {
+            Result::Err(_) => 0,
+            Result::Ok(a) => handle release(&mut second.db, second.revision) {
+                Result::Err(_) => 0, Result::Ok(b) => shared + releases(&mut first.db, &mut second.db, a, b),
+            },
+        },
+    }
+}
+fn initialized(old: identity::Digest, new: identity::Digest) -> i64 {
+    handle initialize(73, old, 42) {
+        Result::Err(_) => 0,
+        Result::Ok(first) => handle initialize(74, old, 99) {
+            Result::Err(_) => 0, Result::Ok(second) => pair(&mut first, &mut second, new),
+        },
+    }
+}
+pub fn main() -> i64 {
+    handle identity::hash(b"release-world") {
+        Result::Err(_) => 0,
+        Result::Ok(old) => handle identity::hash(b"release-child") {
+            Result::Err(_) => 0, Result::Ok(new) => initialized(old, new),
+        },
+    }
+}

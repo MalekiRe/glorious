@@ -601,6 +601,33 @@ type HandlerExit = (
 
 impl Analyzer<'_> {
     fn record_parameter_reference_origins(&mut self, abi: &[(String, Type)]) {
+        // A wrapper may forward a hidden reference field without projecting
+        // that field in this body at all (Slice::get_unchecked is one such
+        // wrapper). Seed the ABI's structurally proven leaves, using the same
+        // frozen layout traversal that establishes call reference contracts.
+        // Do not infer a loan merely because a call claims an argument path.
+        // Opaque/ambiguous layouts remain closed, including the no-interface
+        // analysis entry points; their explicit reference projections below
+        // continue to work as before.
+        let empty = ElaboratedInterface::default();
+        let signatures = self.signatures.unwrap_or(&empty);
+        for (name, ty) in abi {
+            let mut leaves = vec![];
+            if crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves).is_err() {
+                continue;
+            }
+            for (fields, ty) in leaves {
+                let Type::Reference { mutability, .. } = ty else {
+                    unreachable!("reference layout traversal only yields references");
+                };
+                let key = projection_key(name, &fields);
+                self.reference_origins.entry(key).or_insert_with(|| ProjectionLoan {
+                    place: Projection { root: name.clone(), fields },
+                    unique: matches!(mutability, crate::types::Mutability::Unique),
+                    owner: None,
+                });
+            }
+        }
         let parameters = abi
             .iter()
             .map(|(name, _)| name.as_str())

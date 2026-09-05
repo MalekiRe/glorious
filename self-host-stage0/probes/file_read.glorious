@@ -1,5 +1,0 @@
-use file_read_library::source;
-
-pub fn main() -> i64 {
-    handle source::is_empty(source::input_from_file("file-read-probe", "/dev/null")) { true => 7, false => 0, _ => 0 }
-}

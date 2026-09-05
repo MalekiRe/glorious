@@ -1,9 +1,0 @@
-use compiler_support::branch_bool;
-
-pub fn choose(condition: Bool) -> i64 {
-    branch_bool(condition, () -> i64 { 41 }, () -> i64 { 42 })
-}
-
-pub fn main() -> i64 {
-    choose(false)
-}

@@ -1968,6 +1968,19 @@ pub struct VmExecutionLimits {
     /// Total materialized runtime value elements for one execution.
     pub max_allocation_elements: u64,
 }
+
+/// Authoring-runtime measurements, not compiler semantic counters. Allocation
+/// charges are logical VM-budget counts, not a Rust allocator census.
+/// The opt-in authoring runner can recycle caller-preserving self-tail calls;
+/// ordinary execution retains its existing call-depth behavior.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct VmAuthoringProfile {
+    pub work_ticks: u64,
+    pub charged_allocation_elements: u64,
+    pub peak_call_depth: u32,
+    pub recycled_tail_calls: u64,
+    pub inspected_tail_argument_elements: u64,
+}
 impl Default for VmExecutionLimits {
     fn default() -> Self {
         Self {
@@ -2395,6 +2408,52 @@ impl VerifiedVmProgram {
     }
     pub fn runtime_manifest(&self) -> Option<Digest> {
         self.program.runtime_manifest
+    }
+
+    /// Execute a source-substrate probe with measured, opt-in frame recycling.
+    /// This is an authoring capability, not a change to the frozen execution
+    /// APIs or an assertion that the G1 runtime supports this profile.
+    pub fn run_i64_for_authoring(
+        &self,
+        limits: VmExecutionLimits,
+    ) -> Result<(i64, VmAuthoringProfile), VmArtifactError> {
+        let (result, profile) = self.run_value_for_authoring(limits)?;
+        Ok((expect_i64(result)?, profile))
+    }
+
+    /// Execute a batch while retaining every result for independent comparison.
+    /// The batch shares the existing execution budget; it does not receive a
+    /// larger limit or a fresh budget for each tuple element.
+    pub fn run_tuple_i64_for_authoring(
+        &self,
+        limits: VmExecutionLimits,
+    ) -> Result<(Vec<i64>, VmAuthoringProfile), VmArtifactError> {
+        let (result, profile) = self.run_value_for_authoring(limits)?;
+        Ok((expect_tuple_i64(result)?, profile))
+    }
+
+    fn run_value_for_authoring(
+        &self,
+        limits: VmExecutionLimits,
+    ) -> Result<(VmValue, VmAuthoringProfile), VmArtifactError> {
+        let mut budget = ExecutionBudget {
+            limits,
+            instructions: 0,
+            allocated_elements: 0,
+        };
+        let mut profile = VmAuthoringProfile::default();
+        let result = execute_program_profiled(
+            &self.program,
+            self.program.entry,
+            &[],
+            0,
+            &mut budget,
+            &mut None,
+            Some(&mut profile),
+        )?;
+        profile.work_ticks = budget.instructions;
+        profile.charged_allocation_elements = budget.allocated_elements;
+        Ok((result, profile))
     }
     pub fn run_i64(&self) -> Result<i64, VmArtifactError> {
         self.run_i64_with_limits(VmExecutionLimits::default())
@@ -11804,6 +11863,25 @@ fn store_reference(
     }
 }
 
+// Empty dynamic arrays have no resident from which `VmValue::ty` can infer
+// their element type. A Borrow instruction already has an independently
+// verified destination layout; retain that layout for empty projected arrays
+// instead of manufacturing Array(Unit). Nonempty residents still determine
+// their actual type, so an incompatible value is not relabeled as acceptable.
+fn borrowed_value_type(value: &VmValue, declared: &VmType) -> VmType {
+    match (value, declared) {
+        (VmValue::Array { values, .. }, VmType::Array(element)) => VmType::Array(Box::new(
+            values.first().map(|value| borrowed_value_type(value, element))
+                .unwrap_or_else(|| element.as_ref().clone()),
+        )),
+        (VmValue::Tuple(values), VmType::Tuple(elements)) if values.len() == elements.len() => {
+            VmType::Tuple(values.iter().zip(elements)
+                .map(|(value, element)| borrowed_value_type(value, element)).collect())
+        }
+        _ => value.ty(),
+    }
+}
+
 fn borrow_value(
     registers: &[Option<VmValue>],
     callers: &[RuntimeProgramCaller],
@@ -11812,6 +11890,7 @@ fn borrow_value(
     fields: &[u32],
     unique: bool,
     reborrow: bool,
+    declared_referent: &VmType,
 ) -> Result<VmValue, VmArtifactError> {
     if reborrow {
         let VmValue::Reference {
@@ -11831,7 +11910,10 @@ fn borrow_value(
         let referent = if fields.is_empty() {
             parent_referent.clone()
         } else {
-            project_reference(reference_target(registers, callers, target)?, &path)?.ty()
+            borrowed_value_type(
+                &project_reference(reference_target(registers, callers, target)?, &path)?,
+                declared_referent,
+            )
         };
         return Ok(VmValue::Reference {
             target: target.clone(),
@@ -11848,7 +11930,7 @@ fn borrow_value(
         target: ReferenceTarget::Register(source),
         fields: fields.to_vec().into(),
         unique,
-        referent: project_reference(value, fields)?.ty(),
+        referent: borrowed_value_type(&project_reference(value, fields)?, declared_referent),
     })
 }
 
@@ -12611,6 +12693,7 @@ fn execute_array_primitive(
 fn freeze_frame_value(
     value: &VmValue,
     registers: &[Option<VmValue>],
+    callers: &[RuntimeProgramCaller],
 ) -> Result<VmValue, VmArtifactError> {
     match value {
         VmValue::Reference { unique: true, .. } => {
@@ -12621,26 +12704,40 @@ fn freeze_frame_value(
             fields,
             unique: false,
             referent,
-        } => Ok(VmValue::Reference {
-            target: ReferenceTarget::Captured(Arc::new(freeze_frame_value(
-                &project_reference(reference_target(registers, &[], target)?, fields)?,
-                registers,
-            )?)),
-            fields: Arc::from([]),
-            unique: false,
-            referent: referent.clone(),
-        }),
+        } => {
+            // Nested references are expressed in their owner's frame. A
+            // borrowed aggregate can contain loans to any retained caller;
+            // freezing it must resolve those loans in that caller's context.
+            let (owner_registers, owner_callers) = match target {
+                ReferenceTarget::Caller { caller_depth, register } => {
+                    let index = callers.len().checked_sub(*caller_depth as usize + 1)
+                        .ok_or(VmArtifactError::InvalidRegister { register: *register })?;
+                    (callers[index].registers.as_slice(), &callers[..index])
+                }
+                ReferenceTarget::Register(_) => (registers, callers),
+                ReferenceTarget::Captured(_) => (&[][..], &[][..]),
+            };
+            let projected = project_reference(reference_target(registers, callers, target)?, fields)?;
+            Ok(VmValue::Reference {
+                target: ReferenceTarget::Captured(Arc::new(freeze_frame_value(
+                    &projected, owner_registers, owner_callers,
+                )?)),
+                fields: Arc::from([]),
+                unique: false,
+                referent: referent.clone(),
+            })
+        }
         VmValue::Tuple(values) => Ok(VmValue::Tuple(
             values
                 .iter()
-                .map(|value| freeze_frame_value(value, registers))
+                .map(|value| freeze_frame_value(value, registers, callers))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
         )),
         VmValue::Array { values, capacity } => Ok(VmValue::Array {
             values: values
                 .iter()
-                .map(|value| freeze_frame_value(value, registers))
+                .map(|value| freeze_frame_value(value, registers, callers))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
             capacity: *capacity,
@@ -12653,7 +12750,7 @@ fn freeze_frame_value(
             definition: *definition,
             fields: fields
                 .iter()
-                .map(|value| freeze_frame_value(value, registers))
+                .map(|value| freeze_frame_value(value, registers, callers))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
             signature: signature.clone(),
@@ -12668,7 +12765,7 @@ fn freeze_frame_value(
             variant: *variant,
             fields: fields
                 .iter()
-                .map(|value| freeze_frame_value(value, registers))
+                .map(|value| freeze_frame_value(value, registers, callers))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
             signature: signature.clone(),
@@ -12775,24 +12872,26 @@ fn rebase_caller_references(value: VmValue, caller_depth: u32) -> Result<VmValue
     }
 }
 
-/// Move a value across an ordinary call boundary. Shared references rooted in
-/// the current frame retain the existing immutable snapshot behavior, while
-/// references already rooted in a caller frame must be rebased live: they are
-/// reborrows of a caller-owned loan, not new snapshots. Unique references are
-/// always live caller-frame targets so stores in either frame address the same
-/// owner. A unique reference into a callee-local register is not permitted to
-/// escape on return, preserving the source lifetime boundary.
+/// Move a value across an ordinary call boundary. Both shared and unique
+/// incoming loans keep their surviving caller owner, with rebased coordinates.
+/// Already-frozen captures are frame-neutral and keep their immutable backing.
+/// Only a shared reference returned from a callee-local register needs a new
+/// snapshot before that frame disappears. Unique local returns remain rejected.
+/// Independently retained callable captures still use `freeze_frame_value`.
 fn transfer_call_frame_value(
     value: &VmValue,
     registers: &[Option<VmValue>],
+    callers: &[RuntimeProgramCaller],
     transfer: UniqueReferenceTransfer,
 ) -> Result<VmValue, VmArtifactError> {
     match value {
         VmValue::Reference {
             unique: false,
-            target: ReferenceTarget::Register(_) | ReferenceTarget::Captured(_),
+            target: ReferenceTarget::Register(_),
             ..
-        } => freeze_frame_value(value, registers),
+        } if matches!(transfer, UniqueReferenceTransfer::ToCaller) => {
+            freeze_frame_value(value, registers, callers)
+        }
         VmValue::Reference {
             unique,
             target,
@@ -12856,14 +12955,14 @@ fn transfer_call_frame_value(
         VmValue::Tuple(values) => Ok(VmValue::Tuple(
             values
                 .iter()
-                .map(|value| transfer_call_frame_value(value, registers, transfer))
+                .map(|value| transfer_call_frame_value(value, registers, callers, transfer))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
         )),
         VmValue::Array { values, capacity } => Ok(VmValue::Array {
             values: values
                 .iter()
-                .map(|value| transfer_call_frame_value(value, registers, transfer))
+                .map(|value| transfer_call_frame_value(value, registers, callers, transfer))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
             capacity: *capacity,
@@ -12876,7 +12975,7 @@ fn transfer_call_frame_value(
             definition: *definition,
             fields: fields
                 .iter()
-                .map(|value| transfer_call_frame_value(value, registers, transfer))
+                .map(|value| transfer_call_frame_value(value, registers, callers, transfer))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
             signature: signature.clone(),
@@ -12891,13 +12990,62 @@ fn transfer_call_frame_value(
             variant: *variant,
             fields: fields
                 .iter()
-                .map(|value| transfer_call_frame_value(value, registers, transfer))
+                .map(|value| transfer_call_frame_value(value, registers, callers, transfer))
                 .collect::<Result<Vec<_>, _>>()?
                 .into(),
             signature: signature.clone(),
         }),
         value => Ok(value.clone()),
     }
+}
+
+// Effect clauses run in their installing frame, not necessarily the frame
+// that performed the operation. Keep the suspended payload in its original
+// coordinates; translate only the values exposed to the selected clause.
+fn transfer_to_ancestor_frame(
+    mut value: VmValue,
+    registers: &[Option<VmValue>],
+    callers: &[RuntimeProgramCaller],
+    owner_depth: usize,
+    budget: &mut ExecutionBudget,
+) -> Result<VmValue, VmArtifactError> {
+    if owner_depth > callers.len() {
+        return Err(VmArtifactError::HandlerStateMismatch);
+    }
+    for depth in (owner_depth + 1..=callers.len()).rev() {
+        budget.tick()?;
+        let owner_registers = if depth == callers.len() {
+            registers
+        } else {
+            callers[depth].registers.as_slice()
+        };
+        value = transfer_call_frame_value(
+            &value, owner_registers, &callers[..depth], UniqueReferenceTransfer::ToCaller,
+        )?;
+    }
+    Ok(value)
+}
+
+// A resumption may be invoked through helpers in the clause. Translate back
+// through the installing frame, then into the original suspended call chain;
+// source and destination can be siblings, not just adjacent frames.
+fn transfer_to_resumed_frame(
+    value: VmValue,
+    registers: &[Option<VmValue>],
+    callers: &[RuntimeProgramCaller],
+    handler_depth: usize,
+    destination_depth: usize,
+    budget: &mut ExecutionBudget,
+) -> Result<VmValue, VmArtifactError> {
+    if destination_depth < handler_depth {
+        return Err(VmArtifactError::HandlerStateMismatch);
+    }
+    let mut value = transfer_to_ancestor_frame(value, registers, callers, handler_depth, budget)?;
+    for _ in handler_depth..destination_depth {
+        budget.tick()?;
+        value = transfer_call_frame_value(&value, &[], &[], UniqueReferenceTransfer::IntoCallee)?;
+    }
+    Ok(value)
 }
 
 fn format_vm_value(value: &VmValue) -> String {
@@ -13282,10 +13430,9 @@ fn execute_float_intrinsic(
         FloatPrimitive::Convert { from, to, checked } => {
             let value = float_argument(arguments, 0, registers)?;
             if matches!(to, ScalarType::F32 | ScalarType::F64) {
-                let source = scalar_to_f64(value, from)?;
                 return Ok(match to {
-                    ScalarType::F32 => VmValue::F32(canonical_vm_f32(source as f32)),
-                    ScalarType::F64 => VmValue::F64(canonical_vm_f64(source)),
+                    ScalarType::F32 => VmValue::F32(canonical_vm_f32(scalar_to_f32(value, from)?)),
+                    ScalarType::F64 => VmValue::F64(canonical_vm_f64(scalar_to_f64(value, from)?)),
                     _ => unreachable!(),
                 });
             }
@@ -13688,6 +13835,32 @@ fn compare_f32_values(left: f32, right: f32, operation: FloatCompareOp) -> bool 
         FloatCompareOp::Gt => left > right,
         FloatCompareOp::Ge => left >= right,
     }
+}
+
+// Convert directly at the requested precision. Routing wide integers through
+// f64 before f32 can double-round at a halfway point.
+fn scalar_to_f32(value: &VmValue, scalar: ScalarType) -> Result<f32, VmArtifactError> {
+    Ok(match scalar {
+        ScalarType::F32 => expect_f32(value)?,
+        ScalarType::F64 => expect_f64(value)? as f32,
+        ScalarType::U8 => expect_u8(value)? as f32,
+        ScalarType::U16 => expect_u16(value)? as f32,
+        ScalarType::U32 => expect_u32(value)? as f32,
+        ScalarType::U64 => expect_u64(value)? as f32,
+        ScalarType::U128 => expect_u128(value)? as f32,
+        ScalarType::Usize => expect_usize(value)? as f32,
+        ScalarType::I8 => expect_i8(value)? as f32,
+        ScalarType::I16 => expect_i16(value)? as f32,
+        ScalarType::I32 => expect_i32(value)? as f32,
+        ScalarType::I64 => expect_i64(value)? as f32,
+        ScalarType::I128 => expect_i128(value)? as f32,
+        ScalarType::Isize => expect_isize(value)? as f32,
+        _ => {
+            return Err(VmArtifactError::MalformedEncoding {
+                message: "non-numeric floating conversion",
+            });
+        }
+    })
 }
 
 fn scalar_to_f64(value: &VmValue, scalar: ScalarType) -> Result<f64, VmArtifactError> {
@@ -15143,7 +15316,7 @@ fn execute(
                             .ok_or(VmArtifactError::ReadBeforeWrite {
                                 register: *argument,
                             })
-                            .and_then(|value| freeze_frame_value(&value, &registers))
+                            .and_then(|value| freeze_frame_value(&value, &registers, &[]))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let Some(index) = handlers.iter().rposition(|frame| {
@@ -15516,6 +15689,9 @@ fn execute(
                 unique,
                 reborrow,
             } => {
+                let VmType::Reference { referent, .. } = &function.registers[dst as usize] else {
+                    return Err(VmArtifactError::InvalidRegister { register: dst });
+                };
                 registers[dst as usize] = Some(borrow_value(
                     &registers,
                     &[],
@@ -15524,6 +15700,7 @@ fn execute(
                     &fields,
                     unique,
                     reborrow,
+                    referent,
                 )?);
             }
             VmInstruction::DerefCopy { dst, reference } => {
@@ -17675,6 +17852,96 @@ fn execute_with_arguments_with_host(
     budget: &mut ExecutionBudget,
     host: &mut Option<&mut dyn VmHost>,
 ) -> Result<VmValue, VmArtifactError> {
+    execute_program_profiled(program, definition, arguments, depth, budget, host, None)
+}
+
+// Recycling leaves the caller stack unchanged. Loans into surviving callers
+// therefore retain their coordinates, while loans into the current register
+// frame must prevent recycling. Referenced owners and captured shared storage
+// must themselves be free of frame-relative capabilities: a surviving outer
+// allocation can still contain a label belonging to the frame being recycled.
+// The scan is iterative, budgeted, and measured.
+fn recyclable_tail_arguments(
+    registers: &[Option<VmValue>],
+    arguments: &[u32],
+    callers: &[RuntimeProgramCaller],
+    budget: &mut ExecutionBudget,
+    profile: &mut VmAuthoringProfile,
+) -> Result<bool, VmArtifactError> {
+    let mut pending = Vec::new();
+    budget.reserve_allocation(arguments.len())?;
+    for argument in arguments {
+        pending.push((registers[*argument as usize].as_ref().ok_or(
+            VmArtifactError::ReadBeforeWrite { register: *argument },
+        )?, true));
+    }
+    while let Some((value, allow_callers)) = pending.pop() {
+        budget.tick()?;
+        profile.inspected_tail_argument_elements += 1;
+        let fields = match value {
+            VmValue::Reference {
+                target: target @ ReferenceTarget::Caller { caller_depth, .. }, ..
+            } if allow_callers && (*caller_depth as usize) < callers.len() => {
+                budget.reserve_allocation(1)?;
+                // Deliberately inspect the whole owner, not only a projection.
+                // Nested frame-relative loans fail closed rather than following
+                // an unbounded/cyclic reference graph without a retention proof.
+                pending.push((reference_target(registers, callers, target)?, false));
+                continue;
+            }
+            VmValue::Reference {
+                target: ReferenceTarget::Captured(value), unique: false, ..
+            } => {
+                budget.reserve_allocation(1)?;
+                pending.push((value.as_ref(), false));
+                continue;
+            }
+            VmValue::Reference { .. } | VmValue::Label { .. } | VmValue::Resumption { .. } => {
+                return Ok(false);
+            }
+            VmValue::Tuple(fields)
+            | VmValue::Array { values: fields, .. }
+            | VmValue::Record { fields, .. }
+            | VmValue::Enum { fields, .. }
+            | VmValue::Callable { captures: fields, .. } => fields.as_ref(),
+            _ => continue,
+        };
+        budget.reserve_allocation(fields.len())?;
+        pending.extend(fields.iter().map(|value| (value, allow_callers)));
+    }
+    Ok(true)
+}
+
+// Block results may forward a call result through Copy/Move before returning.
+// Only a straight result-forwarding chain is erasable here: no stores, drops,
+// calls, jumps, or other work may be skipped. Charge even unsuccessful scans.
+fn tail_return_suffix(
+    instructions: &[VmInstruction],
+    mut result: u32,
+    budget: &mut ExecutionBudget,
+) -> Result<bool, VmArtifactError> {
+    for instruction in instructions {
+        budget.tick()?;
+        match instruction {
+            VmInstruction::Copy { dst, src } | VmInstruction::Move { dst, src } if *src == result => {
+                result = *dst;
+            }
+            VmInstruction::Return { value } => return Ok(*value == result),
+            _ => return Ok(false),
+        }
+    }
+    Ok(false)
+}
+
+fn execute_program_profiled(
+    program: &CandidateVmProgram,
+    definition: DefKey,
+    arguments: &[VmValue],
+    depth: u32,
+    budget: &mut ExecutionBudget,
+    host: &mut Option<&mut dyn VmHost>,
+    mut profile: Option<&mut VmAuthoringProfile>,
+) -> Result<VmValue, VmArtifactError> {
     if depth >= budget.limits.max_call_depth {
         return Err(VmArtifactError::CallDepthLimit {
             limit: budget.limits.max_call_depth,
@@ -17707,6 +17974,11 @@ fn execute_with_arguments_with_host(
     let mut next_handler_id = 0u64;
     let mut pc = 0usize;
     loop {
+        if let Some(profile) = profile.as_deref_mut() {
+            profile.peak_call_depth = profile.peak_call_depth.max(
+                depth.saturating_add(callers.len() as u32).saturating_add(1),
+            );
+        }
         let function = program
             .functions
             .get(&definition)
@@ -18605,6 +18877,10 @@ fn execute_with_arguments_with_host(
                     definition,
                     callers: callers.clone(),
                 };
+                budget.reserve_value("handler clause payload", values.len())?;
+                let clause_values = values.iter().cloned().map(|value| {
+                    transfer_to_ancestor_frame(value, &registers, &callers, owner_depth, budget)
+                }).collect::<Result<Vec<_>, _>>()?;
                 // A matching ancestor owns the handler clause. Discard the
                 // active callee path from live execution only after storing
                 // it in the continuation; `Resume` restores it below.
@@ -18617,7 +18893,7 @@ fn execute_with_arguments_with_host(
                     registers = owner.registers;
                     callers.truncate(owner_depth);
                 }
-                for (destination, value) in payload_destinations.iter().zip(values.iter().cloned())
+                for (destination, value) in payload_destinations.iter().zip(clause_values)
                 {
                     registers[*destination as usize] = Some(value);
                 }
@@ -18700,6 +18976,11 @@ fn execute_with_arguments_with_host(
                 if frame.continuation.is_replay() {
                     frame.suspended = None;
                 }
+                let resumed = transfer_to_resumed_frame(
+                    resumed, &registers, &callers, frame.call_depth,
+                    continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
+                    budget,
+                )?;
                 let RuntimeContinuation {
                     target,
                     dst,
@@ -18746,6 +19027,11 @@ fn execute_with_arguments_with_host(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 budget.reserve_allocation(registers.len())?;
+                let resumed = transfer_to_resumed_frame(
+                    resumed, &registers, &callers, frame.call_depth,
+                    continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
+                    budget,
+                )?;
                 let RuntimeContinuation {
                     target,
                     dst: continuation_dst,
@@ -18843,6 +19129,11 @@ fn execute_with_arguments_with_host(
                 // snapshot abandons dynamically newer frames before restoring
                 // the continuation's original deep-frame suffix.
                 handlers.truncate(index + 1);
+                let resumed = transfer_to_resumed_frame(
+                    resumed, &registers, &callers, handlers[index].call_depth,
+                    continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
+                    budget,
+                )?;
                 let RuntimeContinuation {
                     target,
                     dst,
@@ -18901,6 +19192,12 @@ fn execute_with_arguments_with_host(
                 }
                 budget.reserve_allocation(continuation.registers.len())?;
                 let continuation_program = continuation.program.clone();
+                let original_callers = continuation_program.as_ref()
+                    .map(|program| program.callers.as_slice()).unwrap_or(&[]);
+                budget.reserve_value("forwarded clause payload", continuation.performed.payloads.len())?;
+                let clause_values = continuation.performed.payloads.iter().cloned().map(|value| {
+                    transfer_to_ancestor_frame(value, &continuation.registers, original_callers, owner_depth, budget)
+                }).collect::<Result<Vec<_>, _>>()?;
                 if let Some(program) = &continuation_program {
                     if owner_depth > program.callers.len() {
                         return Err(VmArtifactError::HandlerStateMismatch);
@@ -18922,7 +19219,7 @@ fn execute_with_arguments_with_host(
                 }
                 for (destination, payload) in payload_destinations
                     .iter()
-                    .zip(continuation.performed.payloads.iter().cloned())
+                    .zip(clause_values)
                 {
                     registers[*destination as usize] = Some(payload);
                 }
@@ -18986,6 +19283,9 @@ fn execute_with_arguments_with_host(
                 unique,
                 reborrow,
             } => {
+                let VmType::Reference { referent, .. } = &function.registers[*dst as usize] else {
+                    return Err(VmArtifactError::InvalidRegister { register: *dst });
+                };
                 registers[*dst as usize] = Some(borrow_value(
                     &registers,
                     &callers,
@@ -18996,6 +19296,7 @@ fn execute_with_arguments_with_host(
                     fields,
                     *unique,
                     *reborrow,
+                    referent,
                 )?);
             }
             VmInstruction::DerefCopy { dst, reference } => {
@@ -19072,6 +19373,7 @@ fn execute_with_arguments_with_host(
                         replacement = transfer_call_frame_value(
                             &replacement,
                             &registers,
+                            &callers,
                             UniqueReferenceTransfer::ToCaller,
                         )?;
                     }
@@ -19637,6 +19939,30 @@ fn execute_with_arguments_with_host(
                 arguments,
             } => {
                 budget.reserve_value("call arguments", arguments.len())?;
+                if *callee == definition
+                    && handlers.is_empty()
+                    && resumption_returns.is_empty()
+                    && let Some(profile) = profile.as_deref_mut()
+                    && tail_return_suffix(&function.instructions[pc + 1..], *dst, budget)?
+                    && recyclable_tail_arguments(&registers, arguments, &callers, budget, profile)?
+                {
+                    // Clone only the small argument vector before clearing
+                    // registers; aggregate contents retain their Arc backing.
+                    // Do not run the ordinary call rebasing here: no frame
+                    // is pushed, so surviving caller loans must not move.
+                    // No source-visible storage destructor is skipped: the
+                    // verified suffix only forwards and returns call_result.
+                    let values: Vec<_> = arguments.iter().map(|argument| {
+                        registers[*argument as usize].clone()
+                    }).collect();
+                    registers.fill(None);
+                    for (index, value) in values.into_iter().enumerate() {
+                        registers[index] = value;
+                    }
+                    profile.recycled_tail_calls += 1;
+                    pc = 0;
+                    continue;
+                }
                 let values = arguments
                     .iter()
                     .map(|argument| {
@@ -19649,6 +19975,7 @@ fn execute_with_arguments_with_host(
                                 transfer_call_frame_value(
                                     &value,
                                     &registers,
+                                    &callers,
                                     UniqueReferenceTransfer::IntoCallee,
                                 )
                             })
@@ -19696,7 +20023,7 @@ fn execute_with_arguments_with_host(
                         registers[*capture as usize]
                             .as_ref()
                             .ok_or(VmArtifactError::ReadBeforeWrite { register: *capture })
-                            .and_then(|value| freeze_frame_value(value, &registers))
+                            .and_then(|value| freeze_frame_value(value, &registers, &callers))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 let signature = register_type(function, *dst)?;
@@ -19800,6 +20127,7 @@ fn execute_with_arguments_with_host(
                             transfer_call_frame_value(
                                 value,
                                 &registers,
+                                &callers,
                                 UniqueReferenceTransfer::IntoCallee,
                             )
                         })
@@ -19896,6 +20224,7 @@ fn execute_with_arguments_with_host(
                     let value = transfer_call_frame_value(
                         &value,
                         &registers,
+                        &callers,
                         UniqueReferenceTransfer::ToCaller,
                     )?;
                     let caller = callers.pop().expect("checked nonempty call stack");
@@ -20040,6 +20369,312 @@ impl ExecutionBudget {
 mod tests {
     use super::*;
     use crate::{MirBlock, MirScopeId, PrimitiveRole};
+
+    #[test]
+    fn borrowing_empty_projected_arrays_preserves_verified_element_types() {
+        let bytes = VmType::Array(Box::new(VmType::U8));
+        let empty = VmValue::Array { values: Arc::from([]), capacity: 0 };
+        let tuple = VmValue::Tuple(Arc::from([empty.clone()]));
+        let layout = VmType::Tuple(vec![bytes.clone()]);
+        let registers = vec![Some(tuple.clone())];
+        for unique in [false, true] {
+            let parent = borrow_value(&registers, &[], 0, &tuple, &[], unique, false, &layout).unwrap();
+            let projected = borrow_value(&registers, &[], 0, &parent, &[0], unique, true, &bytes).unwrap();
+            assert!(value_matches_vm_type(&projected, &VmType::Reference {
+                unique, referent: Box::new(bytes.clone()),
+            }));
+            assert!(matches!(projected, VmValue::Reference {
+                target: ReferenceTarget::Register(0), fields, ..
+            } if fields.as_ref() == [0]));
+        }
+        let nested = VmValue::Array { values: Arc::from([empty]), capacity: 1 };
+        let nested_layout = VmType::Array(Box::new(bytes.clone()));
+        assert_eq!(borrowed_value_type(&nested, &nested_layout), nested_layout);
+
+        // Existing residents are not retyped to fit a forged destination, and
+        // shared loans still cannot be upgraded to unique loans.
+        let units = VmValue::Array { values: Arc::from([VmValue::Unit]), capacity: 1 };
+        let reference = borrow_value(&[], &[], 0, &units, &[], false, false, &bytes).unwrap();
+        assert!(!value_matches_vm_type(&reference, &VmType::Reference {
+            unique: false, referent: Box::new(bytes),
+        }));
+        let shared = borrow_value(&registers, &[], 0, &tuple, &[], false, false, &layout).unwrap();
+        assert!(borrow_value(&registers, &[], 0, &shared, &[], true, true, &layout).is_err());
+    }
+
+    #[test]
+    fn ordinary_call_shared_loans_keep_the_surviving_owner_and_projection() {
+        let registers = vec![Some(VmValue::Tuple(Arc::from([VmValue::I64(42)])))];
+        let fields = Arc::from([0]);
+        let reference = VmValue::Reference {
+            target: ReferenceTarget::Register(0), fields: Arc::clone(&fields),
+            unique: false, referent: VmType::I64,
+        };
+        let incoming = transfer_call_frame_value(
+            &reference, &registers, &[], UniqueReferenceTransfer::IntoCallee,
+        ).unwrap();
+        assert!(matches!(&incoming, VmValue::Reference {
+            target: ReferenceTarget::Caller { caller_depth: 0, register: 0 },
+            fields: actual, unique: false, ..
+        } if Arc::ptr_eq(actual, &fields)));
+        let nested = transfer_call_frame_value(
+            &incoming, &[], &[], UniqueReferenceTransfer::IntoCallee,
+        ).unwrap();
+        assert!(matches!(&nested, VmValue::Reference {
+            target: ReferenceTarget::Caller { caller_depth: 1, register: 0 }, ..
+        }));
+        let returned = transfer_call_frame_value(
+            &nested, &[], &[], UniqueReferenceTransfer::ToCaller,
+        ).unwrap();
+        let returned = transfer_call_frame_value(
+            &returned, &[], &[], UniqueReferenceTransfer::ToCaller,
+        ).unwrap();
+        assert!(matches!(&returned, VmValue::Reference {
+            target: ReferenceTarget::Register(0), fields: actual, unique: false, ..
+        } if Arc::ptr_eq(actual, &fields)));
+    }
+
+    #[test]
+    fn ordinary_call_reuses_the_frozen_capture_without_rebuilding_it() {
+        let owner = Arc::new(VmValue::Tuple(Arc::from([VmValue::I64(42)])));
+        let fields = Arc::from([0]);
+        let reference = VmValue::Reference {
+            target: ReferenceTarget::Captured(Arc::clone(&owner)), fields: Arc::clone(&fields),
+            unique: false, referent: VmType::I64,
+        };
+        for direction in [UniqueReferenceTransfer::IntoCallee, UniqueReferenceTransfer::ToCaller] {
+            let transferred = transfer_call_frame_value(&reference, &[], &[], direction).unwrap();
+            assert!(matches!(&transferred, VmValue::Reference {
+                target: ReferenceTarget::Captured(actual), fields: actual_fields, unique: false, ..
+            } if Arc::ptr_eq(actual, &owner) && Arc::ptr_eq(actual_fields, &fields)));
+        }
+    }
+
+    #[test]
+    fn ordinary_call_still_freezes_shared_local_returns_and_rejects_unique_escape() {
+        let registers = vec![Some(VmValue::I64(42))];
+        let reference = VmValue::Reference {
+            target: ReferenceTarget::Register(0), fields: Arc::from([]),
+            unique: false, referent: VmType::I64,
+        };
+        let returned = transfer_call_frame_value(
+            &reference, &registers, &[], UniqueReferenceTransfer::ToCaller,
+        ).unwrap();
+        assert!(matches!(returned, VmValue::Reference {
+            target: ReferenceTarget::Captured(value), unique: false, ..
+        } if matches!(*value, VmValue::I64(42))));
+        let reference = VmValue::Reference {
+            target: ReferenceTarget::Register(0), fields: Arc::from([]),
+            unique: true, referent: VmType::I64,
+        };
+        assert!(matches!(transfer_call_frame_value(
+            &reference, &registers, &[], UniqueReferenceTransfer::ToCaller,
+        ), Err(VmArtifactError::UnsupportedEscapingUniqueReference)));
+        assert!(matches!(freeze_frame_value(&reference, &registers, &[]),
+            Err(VmArtifactError::UnsupportedEscapingUniqueReference)));
+    }
+
+    #[test]
+    fn ordinary_call_frame_translation_checks_scope_and_work_limits() {
+        let callers = vec![tail_caller(VmValue::I64(42)); 3];
+        let reference = VmValue::Reference {
+            target: ReferenceTarget::Caller { caller_depth: 1, register: 1 },
+            fields: Arc::from([]), unique: false, referent: VmType::I64,
+        };
+        let mut budget = ExecutionBudget {
+            limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
+        };
+        let sibling = transfer_to_resumed_frame(reference.clone(), &[], &callers, 1, 2, &mut budget).unwrap();
+        assert!(matches!(sibling, VmValue::Reference {
+            target: ReferenceTarget::Caller { caller_depth: 0, register: 1 }, ..
+        }));
+        assert_eq!(budget.instructions, 3);
+        assert!(matches!(transfer_to_ancestor_frame(reference.clone(), &[], &callers, 4, &mut budget),
+            Err(VmArtifactError::HandlerStateMismatch)));
+        assert!(matches!(transfer_to_resumed_frame(reference.clone(), &[], &callers, 2, 1, &mut budget),
+            Err(VmArtifactError::HandlerStateMismatch)));
+        budget.limits.max_instructions = budget.instructions;
+        assert!(matches!(transfer_to_ancestor_frame(reference, &[], &callers, 1, &mut budget),
+            Err(VmArtifactError::InstructionLimit { .. })));
+    }
+
+    #[test]
+    fn authoring_tail_suffix_only_erases_straight_result_forwarding() {
+        let cases = [
+            (vec![VmInstruction::Return { value: 0 }], true),
+            (vec![VmInstruction::Copy { dst: 1, src: 0 }, VmInstruction::Move { dst: 2, src: 1 },
+                VmInstruction::Return { value: 2 }], true),
+            (vec![VmInstruction::Return { value: 1 }], false),
+            (vec![VmInstruction::Copy { dst: 1, src: 2 }, VmInstruction::Return { value: 1 }], false),
+            (vec![VmInstruction::ConstI64 { dst: 1, value: 42 }, VmInstruction::Return { value: 0 }], false),
+            (vec![VmInstruction::Store { dst: 1, src: 0 }, VmInstruction::Return { value: 1 }], false),
+            (vec![VmInstruction::Jump { target: 0 }], false),
+            (vec![], false),
+        ];
+        for (instructions, expected) in cases {
+            let mut budget = ExecutionBudget {
+                limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
+            };
+            assert_eq!(tail_return_suffix(&instructions, 0, &mut budget).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn authoring_tail_suffix_inspection_is_budgeted() {
+        let mut budget = ExecutionBudget {
+            limits: VmExecutionLimits { max_instructions: 1, ..Default::default() },
+            instructions: 0, allocated_elements: 0,
+        };
+        assert!(matches!(tail_return_suffix(&[
+            VmInstruction::Copy { dst: 1, src: 0 }, VmInstruction::Return { value: 1 },
+        ], 0, &mut budget), Err(VmArtifactError::InstructionLimit { limit: 1 })));
+    }
+
+    #[test]
+    fn authoring_tail_recycling_rejects_nested_frame_capabilities() {
+        let definition = DefKey(Digest::of_bytes(b"tail-safety"));
+        let capabilities = vec![
+            VmValue::Reference {
+                target: ReferenceTarget::Register(1), fields: Arc::from([]),
+                unique: true, referent: VmType::I64,
+            },
+            VmValue::Reference {
+                target: ReferenceTarget::Register(1), fields: Arc::from([]),
+                unique: false, referent: VmType::I64,
+            },
+            VmValue::Reference {
+                target: ReferenceTarget::Caller { caller_depth: 1, register: 0 }, fields: Arc::from([]),
+                unique: true, referent: VmType::I64,
+            },
+            VmValue::Reference {
+                target: ReferenceTarget::Captured(Arc::new(VmValue::I64(1))), fields: Arc::from([]),
+                unique: true, referent: VmType::I64,
+            },
+            VmValue::Label {
+                owner: definition, label: 0, target: 0, destination: 0,
+                call_depth: 0, handler_depth: 0, signature: VmType::Unit,
+            },
+            VmValue::Resumption { frame: 1, signature: VmType::Unit },
+        ];
+        for capability in capabilities {
+            let registers = vec![Some(VmValue::Callable {
+                callee: definition,
+                captures: Arc::from([VmValue::Tuple(Arc::from([capability]))]),
+                signature: VmType::Unit,
+            })];
+            let mut budget = ExecutionBudget {
+                limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
+            };
+            let mut profile = VmAuthoringProfile::default();
+            assert!(!recyclable_tail_arguments(&registers, &[0], &[], &mut budget, &mut profile).unwrap());
+            assert_eq!(profile.inspected_tail_argument_elements, 3);
+        }
+    }
+
+    #[test]
+    fn authoring_tail_recycling_accepts_surviving_caller_loans_and_shared_captures() {
+        let definition = DefKey(Digest::of_bytes(b"tail-surviving-owner"));
+        let callers = vec![tail_caller(VmValue::I64(42)); 3];
+        for target in [
+            ReferenceTarget::Caller { caller_depth: 0, register: 1 },
+            ReferenceTarget::Caller { caller_depth: 2, register: 1 },
+            ReferenceTarget::Captured(Arc::new(VmValue::Tuple(Arc::from([VmValue::I64(42)])))),
+        ] {
+            for unique in [false, true] {
+                let captured = matches!(&target, ReferenceTarget::Captured(_));
+                let registers = vec![Some(VmValue::Callable {
+                    callee: definition,
+                    captures: Arc::from([VmValue::Tuple(Arc::from([VmValue::Reference {
+                        target: target.clone(), fields: Arc::from([]), unique, referent: VmType::I64,
+                    }]))]),
+                    signature: VmType::Unit,
+                })];
+                let mut budget = ExecutionBudget {
+                    limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
+                };
+                let mut profile = VmAuthoringProfile::default();
+                assert_eq!(recyclable_tail_arguments(&registers, &[0], &callers, &mut budget, &mut profile).unwrap(),
+                    !(captured && unique));
+                assert_eq!(profile.inspected_tail_argument_elements, if !captured { 4 } else if !unique { 5 } else { 3 });
+            }
+        }
+    }
+
+    #[test]
+    fn authoring_tail_recycling_inspects_capabilities_hidden_in_shared_captures() {
+        for target in [
+            ReferenceTarget::Register(0),
+            ReferenceTarget::Caller { caller_depth: 0, register: 0 },
+        ] {
+            let registers = vec![Some(VmValue::Reference {
+                target: ReferenceTarget::Captured(Arc::new(VmValue::Tuple(Arc::from([VmValue::Reference {
+                    target, fields: Arc::from([]), unique: false, referent: VmType::I64,
+                }])))),
+                fields: Arc::from([]), unique: false, referent: VmType::I64,
+            })];
+            let mut budget = ExecutionBudget {
+                limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
+            };
+            let mut profile = VmAuthoringProfile::default();
+            assert!(!recyclable_tail_arguments(&registers, &[0], &[], &mut budget, &mut profile).unwrap());
+            assert_eq!(profile.inspected_tail_argument_elements, 3);
+        }
+    }
+
+    fn tail_caller(value: VmValue) -> RuntimeProgramCaller {
+        RuntimeProgramCaller {
+            definition: DefKey(Digest::of_bytes(b"tail-owner")),
+            registers: vec![None, Some(value)], pc: 0, return_destination: 0,
+        }
+    }
+
+    #[test]
+    fn authoring_tail_recycling_checks_capabilities_inside_surviving_owners() {
+        let definition = DefKey(Digest::of_bytes(b"tail-owner-capability"));
+        let capabilities = vec![
+            VmValue::Label {
+                owner: definition, label: 0, target: 0, destination: 0,
+                call_depth: 1, handler_depth: 0, signature: VmType::Unit,
+            },
+            VmValue::Resumption { frame: 1, signature: VmType::Unit },
+            VmValue::Reference {
+                target: ReferenceTarget::Register(1), fields: Arc::from([]),
+                unique: false, referent: VmType::I64,
+            },
+        ];
+        for capability in capabilities {
+            let callers = vec![tail_caller(VmValue::Callable {
+                callee: definition, captures: Arc::from([VmValue::Tuple(Arc::from([capability]))]),
+                signature: VmType::Unit,
+            })];
+            let registers = vec![Some(VmValue::Reference {
+                target: ReferenceTarget::Caller { caller_depth: 0, register: 1 },
+                fields: Arc::from([]), unique: true, referent: VmType::Unit,
+            })];
+            let mut budget = ExecutionBudget {
+                limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
+            };
+            let mut profile = VmAuthoringProfile::default();
+            assert!(!recyclable_tail_arguments(&registers, &[0], &callers, &mut budget, &mut profile).unwrap());
+            assert_eq!(profile.inspected_tail_argument_elements, 4);
+        }
+    }
+
+    #[test]
+    fn authoring_tail_argument_inspection_obeys_work_and_allocation_limits() {
+        let registers = vec![Some(VmValue::I64(42))];
+        let mut budget = ExecutionBudget {
+            limits: VmExecutionLimits { max_instructions: 0, ..Default::default() },
+            instructions: 0, allocated_elements: 0,
+        };
+        assert!(matches!(recyclable_tail_arguments(&registers, &[0], &[], &mut budget, &mut VmAuthoringProfile::default()),
+            Err(VmArtifactError::InstructionLimit { limit: 0 })));
+        budget.limits.max_instructions = 100;
+        budget.limits.max_allocation_elements = 0;
+        budget.allocated_elements = 0;
+        assert!(matches!(recyclable_tail_arguments(&registers, &[0], &[], &mut budget, &mut VmAuthoringProfile::default()),
+            Err(VmArtifactError::AllocationLimit { limit: 0 })));
+    }
 
     fn edge_target(parameters: Vec<MirLocal>) -> MirBlock {
         MirBlock {
@@ -20250,6 +20885,24 @@ mod tests {
             verify(artifact).unwrap().run_u8(),
             Err(VmArtifactError::Trap)
         );
+    }
+
+    #[test]
+    fn wide_integer_to_f32_rounds_once_at_halfway_boundaries() {
+        let input = 9_223_372_586_610_589_697_u64;
+        assert_ne!(input as f32, (input as f64) as f32);
+        for (from, value) in [
+            (ScalarType::U64, VmValue::U64(input)),
+            (ScalarType::Usize, VmValue::Usize(input)),
+            (ScalarType::U128, VmValue::U128(input as u128)),
+            (ScalarType::I128, VmValue::I128(input as i128)),
+        ] {
+            let converted = execute_float_intrinsic(
+                FloatPrimitive::Convert { from, to: ScalarType::F32, checked: false },
+                &[0], &[Some(value)],
+            ).unwrap();
+            assert_eq!(expect_f32(converted).unwrap().to_bits(), (input as f32).to_bits());
+        }
     }
 
     #[test]

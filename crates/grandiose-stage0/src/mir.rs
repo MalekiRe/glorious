@@ -28422,7 +28422,7 @@ impl Lowerer<'_> {
                 match (operator.as_str(), &ty) {
                     (
                         "+",
-                        Type::Scalar(crate::types::ScalarType::I64 | crate::types::ScalarType::F64),
+                        Type::Scalar(crate::types::ScalarType::I64 | crate::types::ScalarType::F32 | crate::types::ScalarType::F64),
                     ) => {
                         self.instructions
                             .push(MirInstruction::Copy { dst, src: value });
@@ -28439,16 +28439,20 @@ impl Lowerer<'_> {
                             right: value,
                         });
                     }
-                    ("-", Type::Scalar(crate::types::ScalarType::F64)) => {
-                        let zero = self.alloc(Type::Scalar(crate::types::ScalarType::F64), id);
-                        self.instructions.push(MirInstruction::ConstF64 {
-                            dst: zero,
-                            bits: canonical_f64_bits(0.0f64.to_bits()),
-                        });
-                        self.instructions.push(MirInstruction::SubF64 {
+                    ("-", Type::Scalar(scalar @ (crate::types::ScalarType::F32 | crate::types::ScalarType::F64))) => {
+                        // Negation is not subtraction from +0: that loses
+                        // the sign of zero. Use the existing width-specific
+                        // IEEE operation for both floating representations.
+                        self.instructions.push(MirInstruction::FloatIntrinsic {
                             dst,
-                            left: zero,
-                            right: value,
+                            primitive: crate::runtime_manifest::FloatPrimitive::Neg {
+                                width: if *scalar == crate::types::ScalarType::F32 {
+                                    crate::runtime_manifest::FloatWidth::F32
+                                } else {
+                                    crate::runtime_manifest::FloatWidth::F64
+                                },
+                            },
+                            arguments: vec![value],
                         });
                     }
                     ("!", Type::Scalar(crate::types::ScalarType::Bool)) => {

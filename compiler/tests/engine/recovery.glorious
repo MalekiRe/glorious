@@ -1,0 +1,225 @@
+use std::*;
+use kernel::database;
+use kernel::database::create;
+use kernel::database::family;
+use kernel::engine;
+use kernel::identity;
+use kernel::operation;
+use kernel::query;
+pub mod kernel;
+
+pub struct World { version: u64 }
+pub struct Product { answer: i64 }
+pub type Db = database::Database<World, Product>;
+pub struct Keys { strict: database::Key<u32>, child: database::Key<u32>, parent: database::Key<u32> }
+pub struct Inputs { keys: Keys, fingerprint: identity::Digest, revision: identity::RevisionId }
+
+fn twice(db: &mut Db, ticket: engine::Ticket) -> Result<engine::Event, database::Failure> {
+    handle database::step(&mut *db, ticket) {
+        Result::Ok(engine::Event::Continue) => database::step(&mut *db, ticket), other => other,
+    }
+}
+fn drive(db: &mut Db, ticket: engine::Ticket) -> Result<engine::Event, database::Failure> {
+    handle twice(&mut *db, ticket) {
+        Result::Ok(engine::Event::Continue) => twice(&mut *db, ticket), other => other,
+    }
+}
+
+fn finished(db: &Db) -> i64 {
+    handle database::stats(db) {
+        Result::Err(_) => 1,
+        Result::Ok(stats) => handle stats.products == 2 {
+            false => 2,
+            true => handle stats.queries.memos == 2 {
+                false => 3,
+                true => handle stats.queries.edges == 1 {
+                    false => 4,
+                    true => handle stats.queries.attempts == 0 {
+                        false => 5,
+                        true => handle stats.queries.sessions == 0 { false => 6, true => 42 },
+                    },
+                },
+            },
+        },
+    }
+}
+
+fn strict_value(db: &mut Db, strict: database::Session, allowed: database::Session, outcome: engine::Outcome) -> i64 {
+    handle database::value(& *db, strict, outcome) {
+        Result::Err(database::Failure::Engine(engine::Failure::Query(query::Failure::RecoveredProduct))) =>
+            handle database::close(&mut *db, strict) {
+                Result::Err(_) => 7,
+                Result::Ok(_) => handle database::close(&mut *db, allowed) {
+                    Result::Ok(_) => finished(& *db), _ => 8,
+                },
+            },
+        _ => 9,
+    }
+}
+
+fn strict_hit(db: &mut Db, inputs: Inputs, allowed: database::Session, outcome: engine::Outcome) -> i64 {
+    handle database::open(&mut *db, inputs.revision, query::RecoveryPolicy::Reject, 0, 100) {
+        Result::Err(_) => 10,
+        Result::Ok(strict) => handle database::start(&mut *db, strict, inputs.keys.parent, None) {
+            Result::Err(_) => 11,
+            Result::Ok(ticket) => handle drive(&mut *db, ticket) {
+                Result::Err(database::Failure::Engine(engine::Failure::Query(query::Failure::RecoveredProduct))) =>
+                    strict_value(&mut *db, strict, allowed, outcome),
+                _ => 12,
+            },
+        },
+    }
+}
+
+fn answer(db: &Db, session: database::Session, outcome: engine::Outcome) -> i64 {
+    handle database::value(db, session, outcome) { Result::Ok(value) => value.answer, _ => 0 }
+}
+
+fn allowed_value(db: &mut Db, inputs: Inputs, session: database::Session, outcome: engine::Outcome) -> i64 {
+    handle answer(& *db, session, outcome) == 42 { false => 13, true => strict_hit(&mut *db, inputs, session, outcome) }
+}
+
+fn allowed_hit(db: &mut Db, inputs: Inputs, session: database::Session) -> i64 {
+    handle database::start(&mut *db, session, inputs.keys.parent, None) {
+        Result::Err(_) => 14,
+        Result::Ok(ticket) => handle drive(&mut *db, ticket) {
+            Result::Ok(engine::Event::Ready(outcome)) => handle outcome.completeness {
+                query::Completeness::Recovered => allowed_value(&mut *db, inputs, session, outcome),
+                _ => 15,
+            },
+            _ => 16,
+        },
+    }
+}
+
+fn reopen(db: &mut Db, inputs: Inputs, cancelled: database::Session) -> i64 {
+    handle database::close(&mut *db, cancelled) {
+        Result::Err(_) => 17,
+        Result::Ok(_) => handle database::open(&mut *db, inputs.revision, query::RecoveryPolicy::Allow, 0, 100) {
+            Result::Ok(session) => allowed_hit(&mut *db, inputs, session), _ => 18,
+        },
+    }
+}
+
+fn late_cancel(db: &mut Db, inputs: Inputs, session: database::Session, parent: engine::Ticket) -> i64 {
+    handle database::cancel(&mut *db, session) {
+        Result::Err(_) => 19,
+        Result::Ok(_) => handle drive(&mut *db, parent) {
+            Result::Err(database::Failure::Engine(engine::Failure::Control(operation::Failure::Cancelled))) =>
+                reopen(&mut *db, inputs, session),
+            _ => 20,
+        },
+    }
+}
+
+fn transitive(db: &mut Db, inputs: Inputs, session: database::Session, parent: engine::Ticket, child: engine::Ticket) -> i64 {
+    handle drive(&mut *db, child) {
+        Result::Ok(engine::Event::Ready(outcome)) => handle outcome.completeness {
+            query::Completeness::Recovered => handle database::publish(&mut *db, parent,
+                Product { answer: 42 }, inputs.fingerprint, query::Completeness::Complete) {
+                Result::Ok(_) => late_cancel(&mut *db, inputs, session, parent), _ => 21,
+            },
+            _ => 22,
+        },
+        _ => 23,
+    }
+}
+
+fn recovered_child(db: &mut Db, inputs: Inputs, session: database::Session, parent: engine::Ticket) -> i64 {
+    handle database::start(&mut *db, session, inputs.keys.child, Result::Ok(parent)) {
+        Result::Ok(child) => transitive(&mut *db, inputs, session, parent, child), _ => 24,
+    }
+}
+
+fn allowed_parent(db: &mut Db, inputs: Inputs, session: database::Session) -> i64 {
+    handle database::start(&mut *db, session, inputs.keys.parent, None) {
+        Result::Err(_) => 25,
+        Result::Ok(parent) => handle drive(&mut *db, parent) {
+            Result::Ok(engine::Event::Compute { key: _ }) => recovered_child(&mut *db, inputs, session, parent),
+            _ => 26,
+        },
+    }
+}
+
+fn child_survived(db: &mut Db, inputs: Inputs, session: database::Session) -> i64 {
+    handle database::stats(& *db) {
+        Result::Err(_) => 27,
+        Result::Ok(stats) => handle stats.products == 1 {
+            false => 28,
+            true => handle stats.queries.memos == 1 {
+                false => 29,
+                true => handle stats.queries.attempts == 0 {
+                    false => 30, true => allowed_parent(&mut *db, inputs, session),
+                },
+            },
+        },
+    }
+}
+
+fn reject_parent(db: &mut Db, inputs: Inputs, session: database::Session, child: engine::Ticket) -> i64 {
+    handle drive(&mut *db, child) {
+        Result::Err(database::Failure::Engine(engine::Failure::Query(query::Failure::RecoveredProduct))) =>
+            child_survived(&mut *db, inputs, session),
+        _ => 31,
+    }
+}
+
+fn first_child(db: &mut Db, inputs: Inputs, session: database::Session, parent: engine::Ticket) -> i64 {
+    handle database::start(&mut *db, session, inputs.keys.child, Result::Ok(parent)) {
+        Result::Err(_) => 32,
+        Result::Ok(child) => handle drive(&mut *db, child) {
+            Result::Ok(engine::Event::Compute { key: _ }) => handle database::publish(&mut *db, child,
+                Product { answer: 40 }, inputs.fingerprint, query::Completeness::Recovered) {
+                Result::Ok(_) => reject_parent(&mut *db, inputs, session, child), _ => 33,
+            },
+            _ => 34,
+        },
+    }
+}
+
+fn strict_parent(db: &mut Db, inputs: Inputs, session: database::Session) -> i64 {
+    handle database::start(&mut *db, session, inputs.keys.strict, None) {
+        Result::Err(_) => 35,
+        Result::Ok(parent) => handle drive(&mut *db, parent) {
+            Result::Ok(engine::Event::Compute { key: _ }) => first_child(&mut *db, inputs, session, parent),
+            _ => 36,
+        },
+    }
+}
+
+fn imported(db: &mut Db, keys: Keys, fingerprint: identity::Digest) -> i64 {
+    handle database::import(&mut *db, World { version: 1 }, fingerprint, None) {
+        Result::Err(_) => 37,
+        Result::Ok(revision) => handle database::open(&mut *db, revision, query::RecoveryPolicy::Allow, 3, 100) {
+            Result::Ok(session) => strict_parent(&mut *db, Inputs { keys: keys, fingerprint: fingerprint, revision: revision }, session),
+            _ => 38,
+        },
+    }
+}
+
+fn permissive(db: &mut Db, strict: database::Key<u32>, fingerprint: identity::Digest) -> i64 {
+    handle family<u32>(&mut *db, 1, query::RecoveryPolicy::Allow, engine::ReusePolicy::Tracked, 8) {
+        Result::Err(_) => 39,
+        Result::Ok(family) => handle database::intern(&mut family, 2) {
+            Result::Err(_) => 40,
+            Result::Ok(child) => handle database::intern(&mut family, 3) {
+                Result::Ok(parent) => imported(&mut *db, Keys { strict: strict, child: child, parent: parent }, fingerprint),
+                _ => 41,
+            },
+        },
+    }
+}
+
+fn initialized(fingerprint: identity::Digest) -> i64 {
+    let db = create<World, Product>(76, 8, 8, 16, 16, 16);
+    handle family<u32>(&mut db, 1, query::RecoveryPolicy::Reject, engine::ReusePolicy::Tracked, 8) {
+        Result::Err(_) => 43,
+        Result::Ok(family) => handle database::intern(&mut family, 1) {
+            Result::Ok(strict) => permissive(&mut db, strict, fingerprint), _ => 44,
+        },
+    }
+}
+
+pub fn main() -> i64 {
+    handle identity::hash(b"world") { Result::Ok(fingerprint) => initialized(fingerprint), _ => 45 }
+}

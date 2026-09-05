@@ -1,0 +1,155 @@
+use std::*;
+use kernel::database;
+use kernel::database::create;
+use kernel::database::family;
+use kernel::engine;
+use kernel::identity;
+use kernel::query;
+use kernel::operation;
+pub mod kernel;
+
+pub struct World { version: u64 }
+pub struct Product { answer: i64, names: Vec<u32> }
+pub type Db = database::Database<World, Product>;
+
+// These fixtures have a structurally bounded demand ancestry. Production
+// providers drive the same one-step API with their explicit work queues.
+fn twice(db: &mut Db, ticket: engine::Ticket) -> Result<engine::Event, database::Failure> {
+    handle database::step(&mut *db, ticket) {
+        Result::Ok(engine::Event::Continue) => database::step(&mut *db, ticket),
+        other => other,
+    }
+}
+fn drive(db: &mut Db, ticket: engine::Ticket) -> Result<engine::Event, database::Failure> {
+    handle twice(&mut *db, ticket) {
+        Result::Ok(engine::Event::Continue) => twice(&mut *db, ticket),
+        other => other,
+    }
+}
+
+fn final_hit(db: &mut Db, session: database::Session, key: database::Key<u32>) -> i64 {
+    handle database::start(&mut *db, session, key, None) {
+        Result::Err(_) => 1,
+        Result::Ok(ticket) => handle drive(&mut *db, ticket) {
+            Result::Ok(engine::Event::Ready(outcome)) => handle outcome.execution {
+                engine::Execution::Memoized { revision: _ } => handle database::value(& *db, session, outcome) {
+                    Result::Ok(value) => handle value.answer == 42 {
+                        true => handle database::close(&mut *db, session) { Result::Ok(_) => 42, _ => 2 },
+                        false => 3,
+                    },
+                    _ => 4,
+                },
+                _ => 5,
+            },
+            _ => 6,
+        },
+    }
+}
+
+fn zero_work_hit(db: &mut Db, revision: identity::RevisionId, key: database::Key<u32>) -> i64 {
+    handle database::open(&mut *db, revision, query::RecoveryPolicy::Reject, 0, 100) {
+        Result::Err(_) => 7,
+        Result::Ok(session) => final_hit(&mut *db, session, key),
+    }
+}
+
+fn cancelled(db: &mut Db, revision: identity::RevisionId, session: database::Session,
+    key: database::Key<u32>, outcome: engine::Outcome) -> i64 {
+    handle database::start(&mut *db, session, key, None) {
+        Result::Err(database::Failure::Engine(engine::Failure::Control(operation::Failure::Cancelled))) =>
+            handle database::value(& *db, session, outcome) {
+                Result::Err(database::Failure::Engine(engine::Failure::Control(operation::Failure::Cancelled))) =>
+                    handle database::close(&mut *db, session) {
+                        Result::Ok(_) => zero_work_hit(&mut *db, revision, key),
+                        _ => 8,
+                    },
+                _ => 9,
+            },
+        _ => 10,
+    }
+}
+
+fn hit(db: &mut Db, revision: identity::RevisionId, session: database::Session, key: database::Key<u32>) -> i64 {
+    handle database::start(&mut *db, session, key, None) {
+        Result::Err(_) => 11,
+        Result::Ok(ticket) => handle drive(&mut *db, ticket) {
+            Result::Ok(engine::Event::Ready(outcome)) => handle database::stats(& *db) {
+                Result::Ok(stats) => handle healthy(stats) {
+                    false => 12,
+                    true => handle database::cancel(&mut *db, session) {
+                        Result::Ok(_) => cancelled(&mut *db, revision, session, key, outcome),
+                        _ => 13,
+                    },
+                },
+                _ => 14,
+            },
+            _ => 15,
+        },
+    }
+}
+
+fn healthy(stats: database::Stats) -> Bool {
+    handle stats.queries.memos == 1 {
+        false => false,
+        true => handle stats.queries.attempts == 0 {
+            false => false, true => stats.products == 1,
+        },
+    }
+}
+
+fn committed(db: &mut Db, revision: identity::RevisionId, session: database::Session,
+    key: database::Key<u32>, ticket: engine::Ticket) -> i64 {
+    handle drive(&mut *db, ticket) {
+        Result::Ok(engine::Event::Ready(outcome)) => handle outcome.execution {
+            engine::Execution::Recomputed(engine::Reason::Cold) => hit(&mut *db, revision, session, key),
+            _ => 16,
+        },
+        _ => 17,
+    }
+}
+
+fn started(db: &mut Db, revision: identity::RevisionId, session: database::Session,
+    key: database::Key<u32>, ticket: engine::Ticket, fingerprint: identity::Digest) -> i64 {
+    handle drive(&mut *db, ticket) {
+        Result::Ok(engine::Event::Compute { key: _ }) => handle database::publish(&mut *db, ticket,
+            Product { answer: 42, names: Vec::new() }, fingerprint, query::Completeness::Complete) {
+            Result::Ok(_) => committed(&mut *db, revision, session, key, ticket),
+            _ => 18,
+        },
+        _ => 19,
+    }
+}
+
+fn admitted(db: &mut Db, revision: identity::RevisionId, key: database::Key<u32>, fingerprint: identity::Digest) -> i64 {
+    handle database::open(&mut *db, revision, query::RecoveryPolicy::Reject, 1, 100) {
+        Result::Err(_) => 20,
+        Result::Ok(session) => handle database::start(&mut *db, session, key, None) {
+            Result::Err(_) => 21,
+            Result::Ok(ticket) => started(&mut *db, revision, session, key, ticket, fingerprint),
+        },
+    }
+}
+
+fn configured(db: &mut Db, revision: identity::RevisionId, fingerprint: identity::Digest) -> i64 {
+    handle family<u32>(&mut *db, 1, query::RecoveryPolicy::Reject, engine::ReusePolicy::Tracked, 8) {
+        Result::Err(_) => 22,
+        Result::Ok(family) => handle database::intern(&mut family, 7) {
+            Result::Err(_) => 23,
+            Result::Ok(key) => admitted(&mut *db, revision, key, fingerprint),
+        },
+    }
+}
+
+fn initialized(fingerprint: identity::Digest) -> i64 {
+    let db = create<World, Product>(73, 8, 8, 16, 16, 16);
+    handle database::import(&mut db, World { version: 1 }, fingerprint, None) {
+        Result::Err(_) => 24,
+        Result::Ok(revision) => configured(&mut db, revision, fingerprint),
+    }
+}
+
+pub fn main() -> i64 {
+    handle identity::hash(b"query-world") {
+        Result::Err(_) => 25, Result::Ok(fingerprint) => initialized(fingerprint),
+    }
+}

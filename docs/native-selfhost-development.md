@@ -1,5 +1,9 @@
 # Native Self-Host Development Strategy
 
+Historical proposal. The active replacement uses the format-aware Stage0/G1
+bootstrap in [GSC-2](../GSC-2-glorious-incremental-self-hosted-compiler-spec.md).
+The native workflow below is not an implemented replacement build dependency.
+
 ## Purpose
 
 During development and test iteration, run the self-host compiler as a

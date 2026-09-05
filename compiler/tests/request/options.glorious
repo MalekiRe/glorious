@@ -1,0 +1,148 @@
+use std::*;
+use kernel::operation;
+use request::options;
+pub mod kernel;
+pub mod request;
+pub mod source;
+struct Pair { key: String, value: String }
+fn eq(a: i64, b: i64) -> i64 { handle a == b { true => 1, false => 0 } }
+fn same(a: &String, b: &String) -> i64 { handle Eq::eq(a, b) { true => 1, false => 0 } }
+fn text(bytes: Slice<u8>) -> String {
+    let values = Vec<u8>::new(); Vec::extend_from_slice(&mut values, bytes);
+    handle String::from_utf8(values) { Result::Ok(value) => value, Result::Err(_) => String::new() }
+}
+fn limits() -> options::Limits { options::Limits { entries: 100, key_bytes: 1000, value_bytes: 1000 } }
+fn steps(builder: &mut options::Builder, controls: &mut operation::Controls, count: usize) -> Result<usize, request::Failure> {
+    handle options::step(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            request::Event::Continue => steps(builder, controls, count + 1), request::Event::Ready => Result::Ok(count + 1),
+        },
+    }
+}
+fn run(builder: &mut options::Builder, controls: &mut operation::Controls) -> Result<options::Admitted, request::Failure> {
+    handle steps(&mut *builder, &mut *controls, 0) { Result::Err(error) => Result::Err(error), Result::Ok(_) => options::finish(builder, & *controls) }
+}
+fn expect<T>(value: Result<T, request::Failure>, code: i64) -> i64 where T: Use<[0, 1]> {
+    handle value {
+        Result::Ok(_) => eq(code, 0),
+        Result::Err(error) => handle error {
+            request::Failure::Closed => eq(code, 1), request::Failure::Busy => eq(code, 2),
+            request::Failure::Control(operation::Failure::Cancelled) => eq(code, 3),
+            request::Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: _, requested: _ }) => eq(code, 4), _ => 0,
+        },
+    }
+}
+fn rows(value: &options::Admitted, expected: &Vec<Pair>, cursor: usize, score: i64) -> i64 {
+    handle cursor == Vec::len(expected) {
+        true => handle options::entry(value, cursor) { Result::Ok(_) => 0, Result::Err(_) => score },
+        false => handle options::entry(value, cursor) {
+            Result::Err(_) => 0,
+            Result::Ok(entry) => {
+                let wanted = Vec::get_unchecked(expected, cursor);
+                let key = HashMapEntry::key(entry); let actual = HashMapEntry::value(entry);
+                let fields = same(key, &wanted.key) * same(actual, &wanted.value);
+                handle options::get(value, &wanted.key) {
+                    Result::Err(_) => 0,
+                    Result::Ok(found) => rows(value, expected, cursor + 1, score * fields * same(found, &wanted.value)),
+                }
+            },
+        },
+    }
+}
+fn map_rows(value: &HashMap<String, String>, expected: &Vec<Pair>, cursor: usize, score: i64) -> i64 {
+    handle cursor == Vec::len(expected) {
+        true => score,
+        false => {
+            let wanted = Vec::get_unchecked(expected, cursor);
+            handle HashMap::get(value, &wanted.key) {
+                Result::Err(_) => 0, Result::Ok(found) => map_rows(value, expected, cursor + 1, score * same(found, &wanted.value)),
+            }
+        },
+    }
+}
+fn absent(value: &options::Admitted) -> i64 {
+    let key = Str::to_string("missing_option_not_in_fixture");
+    handle options::get(value, &key) { Result::Err(_) => 1, Result::Ok(_) => 0 }
+}
+fn retained(value: options::Admitted, expected: Vec<Pair>) -> i64 {
+    let count = eq(as<i64>(options::len(&value)), as<i64>(Vec::len(&expected)));
+    let score = count * rows(&value, &expected, 0, 1) * absent(&value);
+    let map = options::into_map(value);
+    score * eq(as<i64>(HashMap::len(&map)), as<i64>(Vec::len(&expected))) * map_rows(&map, &expected, 0, 1)
+}
+fn check(values: HashMap<String, String>, expected: Vec<Pair>) -> i64 {
+    let controls = operation::create(1000000, 1000000);
+    let builder = options::begin(values, limits());
+    let result = run(&mut builder, &mut controls);
+    let closed = expect(options::finish(&mut builder, &controls), 1);
+    handle result { Result::Err(_) => 0, Result::Ok(value) => closed * retained(value, expected) }
+}
+@CASES@
+fn builder(limits: options::Limits) -> options::Builder {
+    let values = HashMap<String, String>::new();
+    HashMap::insert(&mut values, Str::to_string("b"), Str::to_string("2"));
+    HashMap::insert(&mut values, Str::to_string("a"), Str::to_string("1"));
+    options::begin(values, limits)
+}
+fn advance(builder: &mut options::Builder, controls: &mut operation::Controls, count: usize) -> () {
+    handle count == 0 { true => (), false => { options::step(&mut *builder, &mut *controls); advance(builder, controls, count - 1) } }
+}
+fn cancelled(builder: &mut options::Builder, controls: &mut operation::Controls, finishing: usize) -> i64 {
+    handle finishing { 0 => expect(options::step(builder, controls), 3), _ => expect(options::finish(builder, & *controls), 3) }
+}
+fn cancel_at(point: usize, finishing: usize) -> i64 {
+    let builder = builder(limits()); let controls = operation::create(1000000, 1000000);
+    advance(&mut builder, &mut controls, point); let spent = operation::work_spent(&controls); operation::cancel(&mut controls);
+    let score = cancelled(&mut builder, &mut controls, finishing); let fresh = operation::create(1000000, 1000000);
+    score + expect(options::finish(&mut builder, &fresh), 1) + eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent))
+}
+fn early_at(point: usize) -> i64 {
+    let builder = builder(limits()); let controls = operation::create(1000000, 1000000);
+    advance(&mut builder, &mut controls, point);
+    expect(options::finish(&mut builder, &controls), 2) + expect(options::finish(&mut builder, &controls), 1)
+}
+fn transitions(point: usize, ready: usize, score: i64) -> i64 {
+    handle point == ready {
+        true => score + cancel_at(point, 0) + cancel_at(point, 1),
+        false => transitions(point + 1, ready, score + cancel_at(point, 0) + cancel_at(point, 1) + early_at(point)),
+    }
+}
+fn budget(limit: u64) -> i64 {
+    let builder = builder(limits()); let controls = operation::create(limit, 1000000);
+    let score = expect(run(&mut builder, &mut controls), 4); let spent = operation::work_spent(&controls);
+    let fresh = operation::create(1000000, 1000000);
+    score + expect(options::finish(&mut builder, &fresh), 1) + eq(as<i64>(operation::work_spent(&controls)), as<i64>(spent))
+}
+fn lifecycle() -> i64 {
+    let builder = builder(limits()); let controls = operation::create(1000000, 1000000);
+    handle steps(&mut builder, &mut controls, 0) {
+        Result::Err(_) => 0,
+        Result::Ok(ready) => eq(as<i64>(ready), 11) * (expect(options::finish(&mut builder, &controls), 0)
+            + expect(options::finish(&mut builder, &controls), 1) + transitions(0, ready, 0)
+            + budget(0) + budget(5) + budget(10) + budget(18)),
+    }
+}
+fn capacity(limits: options::Limits, expected: u32, ceiling: usize) -> i64 {
+    let builder = builder(limits); let controls = operation::create(1000000, 1000000);
+    let result = run(&mut builder, &mut controls);
+    let closed = expect(options::finish(&mut builder, &controls), 1);
+    handle result {
+        Result::Err(error) => handle error {
+            request::Failure::Capacity { name: name, limit: limit } =>
+                closed + eq(as<i64>(name), as<i64>(expected)) * eq(as<i64>(limit), as<i64>(ceiling)), _ => 0,
+        },
+        _ => 0,
+    }
+}
+fn capacities() -> i64 {
+    let controls = operation::create(1000000, 1000000);
+    let exact = builder(options::Limits { entries: 2, key_bytes: 1, value_bytes: 1 });
+    let score = expect(run(&mut exact, &mut controls), 0) + expect(options::finish(&mut exact, &controls), 1);
+    let aborted = builder(limits()); advance(&mut aborted, &mut controls, 4); options::abort(&mut aborted);
+    score + expect(options::step(&mut aborted, &mut controls), 1) + expect(options::finish(&mut aborted, &controls), 1)
+        + capacity(options::Limits { entries: 1, key_bytes: 100, value_bytes: 100 }, 7, 1)
+        + capacity(options::Limits { entries: 100, key_bytes: 0, value_bytes: 100 }, 8, 0)
+        + capacity(options::Limits { entries: 100, key_bytes: 100, value_bytes: 0 }, 9, 0)
+}
+main() -> (i64, i64, i64) { (oracles(), lifecycle(), capacities()) }

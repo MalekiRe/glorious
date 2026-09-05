@@ -1,0 +1,235 @@
+use std::*;
+use kernel::database;
+use kernel::database::create;
+use kernel::database::family;
+use kernel::engine;
+use kernel::identity;
+use kernel::query;
+pub mod kernel;
+
+pub struct World { version: u64 }
+pub struct Product { answer: i64 }
+pub type Db = database::Database<World, Product>;
+pub struct Keys { parent: database::Key<u32>, child: database::Key<u32> }
+pub struct Inputs { keys: Keys, old: identity::Digest, new: identity::Digest }
+
+fn twice(db: &mut Db, ticket: engine::Ticket) -> Result<engine::Event, database::Failure> {
+    handle database::step(&mut *db, ticket) {
+        Result::Ok(engine::Event::Continue) => database::step(&mut *db, ticket), other => other,
+    }
+}
+fn drive(db: &mut Db, ticket: engine::Ticket) -> Result<engine::Event, database::Failure> {
+    handle twice(&mut *db, ticket) {
+        Result::Ok(engine::Event::Continue) => twice(&mut *db, ticket), other => other,
+    }
+}
+
+fn gc2(db: &mut Db) -> Result<database::CollectionStep, database::Failure> {
+    handle database::collect_step(&mut *db) {
+        Result::Ok(database::CollectionStep::Continue) => database::collect_step(&mut *db), other => other,
+    }
+}
+fn gc4(db: &mut Db) -> Result<database::CollectionStep, database::Failure> {
+    handle gc2(&mut *db) { Result::Ok(database::CollectionStep::Continue) => gc2(&mut *db), other => other }
+}
+fn gc8(db: &mut Db) -> Result<database::CollectionStep, database::Failure> {
+    handle gc4(&mut *db) { Result::Ok(database::CollectionStep::Continue) => gc4(&mut *db), other => other }
+}
+fn gc16(db: &mut Db) -> Result<database::CollectionStep, database::Failure> {
+    handle gc8(&mut *db) { Result::Ok(database::CollectionStep::Continue) => gc8(&mut *db), other => other }
+}
+
+fn kept(db: &Db, session: database::Session, outcome: engine::Outcome) -> i64 {
+    handle database::stats(db) {
+        Result::Err(_) => 1,
+        Result::Ok(stats) => handle stats.products == 2 {
+            false => 2,
+            true => handle stats.queries.memos == 2 {
+                false => 3,
+                true => handle database::value(db, session, outcome) {
+                    Result::Ok(product) => product.answer, _ => 4,
+                },
+            },
+        },
+    }
+}
+
+fn collected(db: &mut Db, session: database::Session, outcome: engine::Outcome) -> i64 {
+    handle gc16(&mut *db) {
+        Result::Ok(database::CollectionStep::Done(report)) => handle report.revisions == 1 {
+            false => 5,
+            true => handle report.memos == 2 {
+                false => 6,
+                true => handle report.products == 1 {
+                    false => 7,
+                    true => handle report.edges == 1 {
+                        false => 8, true => kept(& *db, session, outcome),
+                    },
+                },
+            },
+        },
+        _ => 9,
+    }
+}
+
+fn retired(db: &mut Db, revision: identity::RevisionId, session: database::Session, outcome: engine::Outcome) -> i64 {
+    handle database::retire(&mut *db, revision) {
+        Result::Err(_) => 10,
+        Result::Ok(_) => handle database::collect(&mut *db) {
+            Result::Ok(_) => collected(&mut *db, session, outcome), _ => 11,
+        },
+    }
+}
+
+fn shared(db: &mut Db, revision: identity::RevisionId, session: database::Session, outcome: engine::Outcome) -> i64 {
+    handle database::stats(& *db) {
+        Result::Err(_) => 12,
+        Result::Ok(stats) => handle stats.products == 3 {
+            false => 13,
+            true => handle stats.queries.memos == 4 {
+                false => 14,
+                true => handle stats.queries.edges == 2 {
+                    false => 15, true => retired(&mut *db, revision, session, outcome),
+                },
+            },
+        },
+    }
+}
+
+fn reused(db: &mut Db, revision: identity::RevisionId, session: database::Session, parent: engine::Ticket) -> i64 {
+    handle drive(&mut *db, parent) {
+        Result::Ok(engine::Event::Ready(outcome)) => handle outcome.execution {
+            engine::Execution::ReusedFromParent { parent: ancestor } => handle identity::same_revision(ancestor, revision) {
+                false => 16, true => shared(&mut *db, revision, session, outcome),
+            },
+            _ => 17,
+        },
+        _ => 18,
+    }
+}
+
+fn child_done(db: &mut Db, inputs: Inputs, revision: identity::RevisionId,
+    session: database::Session, parent: engine::Ticket, child: engine::Ticket) -> i64 {
+    handle drive(&mut *db, child) {
+        Result::Ok(engine::Event::Ready(_)) => reused(&mut *db, revision, session, parent),
+        _ => 19,
+    }
+}
+
+fn recheck_child(db: &mut Db, inputs: Inputs, revision: identity::RevisionId,
+    session: database::Session, parent: engine::Ticket) -> i64 {
+    handle database::start(&mut *db, session, inputs.keys.child, Result::Ok(parent)) {
+        Result::Err(_) => 20,
+        Result::Ok(child) => handle drive(&mut *db, child) {
+            Result::Ok(engine::Event::Compute { key: _ }) => handle database::publish(&mut *db, child,
+                Product { answer: 40 }, inputs.old, query::Completeness::Complete) {
+                Result::Ok(_) => child_done(&mut *db, inputs, revision, session, parent, child), _ => 21,
+            },
+            _ => 22,
+        },
+    }
+}
+
+fn recheck_parent(db: &mut Db, inputs: Inputs, revision: identity::RevisionId, session: database::Session) -> i64 {
+    handle database::start(&mut *db, session, inputs.keys.parent, None) {
+        Result::Err(_) => 23,
+        Result::Ok(parent) => handle drive(&mut *db, parent) {
+            Result::Ok(engine::Event::Read(read)) => handle identity::equal(read.fingerprint, inputs.old) {
+                false => 24, true => recheck_child(&mut *db, inputs, revision, session, parent),
+            },
+            _ => 25,
+        },
+    }
+}
+
+fn next_revision(db: &mut Db, inputs: Inputs, revision: identity::RevisionId) -> i64 {
+    handle database::import(&mut *db, World { version: 2 }, inputs.new, Result::Ok(revision)) {
+        Result::Err(_) => 26,
+        Result::Ok(next) => handle database::open(&mut *db, next, query::RecoveryPolicy::Reject, 1, 100) {
+            Result::Ok(session) => recheck_parent(&mut *db, inputs, revision, session), _ => 27,
+        },
+    }
+}
+
+fn root_published(db: &mut Db, inputs: Inputs, revision: identity::RevisionId,
+    session: database::Session, parent: engine::Ticket) -> i64 {
+    handle drive(&mut *db, parent) {
+        Result::Ok(engine::Event::Ready(_)) => handle database::close(&mut *db, session) {
+            Result::Ok(_) => next_revision(&mut *db, inputs, revision), _ => 28,
+        },
+        _ => 29,
+    }
+}
+
+fn root_child_done(db: &mut Db, inputs: Inputs, revision: identity::RevisionId,
+    session: database::Session, parent: engine::Ticket, child: engine::Ticket) -> i64 {
+    handle drive(&mut *db, child) {
+        Result::Ok(engine::Event::Ready(_)) => handle database::publish(&mut *db, parent,
+            Product { answer: 42 }, inputs.old, query::Completeness::Complete) {
+            Result::Ok(_) => root_published(&mut *db, inputs, revision, session, parent), _ => 30,
+        },
+        _ => 31,
+    }
+}
+
+fn root_child(db: &mut Db, inputs: Inputs, revision: identity::RevisionId,
+    session: database::Session, parent: engine::Ticket) -> i64 {
+    handle database::start(&mut *db, session, inputs.keys.child, Result::Ok(parent)) {
+        Result::Err(_) => 32,
+        Result::Ok(child) => handle drive(&mut *db, child) {
+            Result::Ok(engine::Event::Compute { key: _ }) => handle database::publish(&mut *db, child,
+                Product { answer: 40 }, inputs.old, query::Completeness::Complete) {
+                Result::Ok(_) => root_child_done(&mut *db, inputs, revision, session, parent, child), _ => 33,
+            },
+            _ => 34,
+        },
+    }
+}
+
+fn root_parent(db: &mut Db, inputs: Inputs, revision: identity::RevisionId, session: database::Session) -> i64 {
+    handle database::start(&mut *db, session, inputs.keys.parent, None) {
+        Result::Err(_) => 35,
+        Result::Ok(parent) => handle drive(&mut *db, parent) {
+            Result::Ok(engine::Event::Compute { key: _ }) => root_child(&mut *db, inputs, revision, session, parent),
+            _ => 36,
+        },
+    }
+}
+
+fn imported(db: &mut Db, inputs: Inputs) -> i64 {
+    handle database::import(&mut *db, World { version: 1 }, inputs.old, None) {
+        Result::Err(_) => 37,
+        Result::Ok(revision) => handle database::open(&mut *db, revision, query::RecoveryPolicy::Reject, 2, 100) {
+            Result::Ok(session) => root_parent(&mut *db, inputs, revision, session), _ => 38,
+        },
+    }
+}
+
+fn child_family(db: &mut Db, parent: database::Key<u32>, old: identity::Digest, new: identity::Digest) -> i64 {
+    handle family<u32>(&mut *db, 1, query::RecoveryPolicy::Reject, engine::ReusePolicy::Never, 8) {
+        Result::Err(_) => 39,
+        Result::Ok(child) => handle database::intern(&mut child, 7) {
+            Result::Ok(key) => imported(&mut *db, Inputs { keys: Keys { parent: parent, child: key }, old: old, new: new }),
+            _ => 40,
+        },
+    }
+}
+
+fn initialized(old: identity::Digest, new: identity::Digest) -> i64 {
+    let db = create<World, Product>(75, 8, 8, 16, 16, 16);
+    handle family<u32>(&mut db, 1, query::RecoveryPolicy::Reject, engine::ReusePolicy::Tracked, 8) {
+        Result::Err(_) => 41,
+        Result::Ok(parent) => handle database::intern(&mut parent, 7) {
+            Result::Ok(key) => child_family(&mut db, key, old, new), _ => 43,
+        },
+    }
+}
+
+pub fn main() -> i64 {
+    handle identity::hash(b"world-1") {
+        Result::Err(_) => 44,
+        Result::Ok(old) => handle identity::hash(b"world-2") {
+            Result::Ok(new) => initialized(old, new), _ => 45,
+        },
+    }
+}

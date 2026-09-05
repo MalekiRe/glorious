@@ -1,0 +1,203 @@
+use std::*;
+use kernel::diagnostic;
+use kernel::diagnostic::CompileDiagnostic;
+use kernel::diagnostic::Class;
+use kernel::diagnostic::Severity;
+use kernel::diagnostic::Span;
+use kernel::identity;
+use kernel::identity::Digest;
+use kernel::operation;
+pub mod kernel;
+
+type Results = (i64, i64, i64, i64);
+fn text(value: Str) -> String { Str::to_string(value) }
+fn span(file: Digest, start: u32) -> Span { Span { file: identity::FileKey { digest: file }, start: start, end: start + 1 } }
+fn value(code: Str, message: Str, severity: Severity, primary: Option<Span>, fingerprint: Option<Digest>) -> CompileDiagnostic {
+    CompileDiagnostic { code: text(code), class: Class::Source, severity: severity, message: text(message), primary: primary,
+        input_fingerprint: fingerprint, related: Vec::new(), facts: Vec::new(), explanation: Vec::new() }
+}
+fn note() -> CompileDiagnostic {
+    CompileDiagnostic { code: text("A0000"), class: Class::Request, severity: Severity::Note, message: text("request note"),
+        primary: None, input_fingerprint: None, related: Vec::new(), facts: Vec::new(), explanation: Vec::new() }
+}
+fn base(file: Digest, fingerprint: Digest, right: Bool) -> CompileDiagnostic {
+    let item = value("G1000", "shared failure", Severity::Error, Result::Ok(span(file, 4)), Result::Ok(fingerprint));
+    Vec::push(&mut item.related, diagnostic::Related { label: text("z site"), span: span(file, 12) });
+    Vec::push(&mut item.related, diagnostic::Related { label: text("a site"), span: span(file, 16) });
+    Vec::push(&mut item.related, diagnostic::Related { label: text("z site"), span: span(file, 12) });
+    Vec::push(&mut item.facts, diagnostic::Fact { name: text("observed"), value: text("open") });
+    Vec::push(&mut item.explanation, diagnostic::Explanation { kind: text("type"), message: text("closed ABI") });
+    handle right {
+        false => (),
+        true => {
+            Vec::push(&mut item.facts, diagnostic::Fact { name: text("expected"), value: text("closed") });
+            Vec::push(&mut item.explanation, diagnostic::Explanation { kind: text("effect"), message: text("entry boundary") });
+        },
+    };
+    item
+}
+fn fill(builder: &mut diagnostic::Builder, controls: &mut operation::Controls, file: Digest, first: Digest, later: Digest, selected: u32) -> () {
+    diagnostic::record(&mut *builder, &mut *controls, value("G0000", "later error", Severity::Error, Result::Ok(span(file, 10)), None));
+    diagnostic::record(&mut *builder, &mut *controls, base(file, first, Result<(), ()>::Err(())));
+    diagnostic::record(&mut *builder, &mut *controls, value("A1000", "warning", Severity::Warning, Result::Ok(span(file, 4)), None));
+    diagnostic::record(&mut *builder, &mut *controls, base(file, later, Result<(), ()>::Ok(())));
+    diagnostic::record(&mut *builder, &mut *controls, note());
+    let bad = value("G9999", "bad related span", Severity::Error, Result::Ok(span(file, 20)), Result::Ok(later));
+    Vec::push(&mut bad.related, diagnostic::Related { label: text("missing"), span: span(later, 0) });
+    diagnostic::record(&mut *builder, &mut *controls, bad);
+    extra(builder, controls, file, selected);
+}
+fn extra(builder: &mut diagnostic::Builder, controls: &mut operation::Controls, file: Digest, selected: u32) -> () {
+    handle selected {
+        0 => (),
+        _ => {
+            diagnostic::record(&mut *builder, &mut *controls, value("G2000", "early zero", Severity::Error, Result::Ok(span(file, 0)), None));
+            diagnostic::record(&mut *builder, &mut *controls, value("G2000", "early one", Severity::Error, Result::Ok(span(file, 1)), None));
+            diagnostic::record(&mut *builder, &mut *controls, value("G2000", "early two", Severity::Error, Result::Ok(span(file, 2)), None));
+            ()
+        },
+    }
+}
+fn length(span: Span, known: Digest) -> Option<u32> {
+    handle identity::equal(span.file.digest, known) { true => Result::Ok(32), false => None }
+}
+fn drive(builder: &mut diagnostic::Builder, controls: &mut operation::Controls, file: Digest, fuel: usize)
+    -> Result<(), diagnostic::Failure> {
+    handle fuel == 0 {
+        true => Result::Err(diagnostic::Failure::Invariant),
+        false => handle diagnostic::step(&mut *builder, &mut *controls) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(event) => handle event {
+                diagnostic::Event::Ready => Result::Ok(()),
+                diagnostic::Event::Continue => drive(builder, controls, file, fuel - 1),
+                diagnostic::Event::Validate(span) => handle diagnostic::answer(&mut *builder, &mut *controls, length(span, file)) {
+                    Result::Err(error) => Result::Err(error), Result::Ok(_) => drive(builder, controls, file, fuel - 1),
+                },
+            },
+        },
+    }
+}
+
+// Test-only exact-field encoding: lengths/counts/ordinals are u64 LE; semantic
+// digests retain all 32 canonical bytes. This is not a compiler wire format.
+fn word(buffer: &mut ByteBuf, value: usize) -> () { ByteBuf::put_u64(buffer, as<u64>(value)); () }
+fn string(buffer: &mut ByteBuf, value: &String) -> () {
+    word(&mut *buffer, String::len(value));
+    ByteBuf::append(buffer, Str::as_bytes(String::as_str(value)));
+    ()
+}
+fn dump_span(buffer: &mut ByteBuf, value: Span) -> () {
+    identity::write_digest(&mut *buffer, value.file.digest);
+    word(&mut *buffer, as<usize>(value.start));
+    word(buffer, as<usize>(value.end));
+}
+fn primary(buffer: &mut ByteBuf, value: Option<Span>) -> () {
+    handle value { Result::Err(_) => word(buffer, 0), Result::Ok(span) => { word(&mut *buffer, 1); dump_span(buffer, span); } }
+}
+fn fingerprint(buffer: &mut ByteBuf, value: Option<Digest>) -> () {
+    handle value {
+        Result::Err(_) => word(buffer, 0),
+        Result::Ok(digest) => { word(&mut *buffer, 1); identity::write_digest(buffer, digest); () },
+    }
+}
+fn related(buffer: &mut ByteBuf, values: &Vec<diagnostic::Related>, index: usize) -> () {
+    handle Vec::get(values, index) {
+        Result::Err(_) => (), Result::Ok(value) => {
+            string(&mut *buffer, &value.label);
+            dump_span(&mut *buffer, value.span);
+            related(buffer, values, index + 1)
+        },
+    }
+}
+fn facts(buffer: &mut ByteBuf, values: &Vec<diagnostic::Fact>, index: usize) -> () {
+    handle Vec::get(values, index) {
+        Result::Err(_) => (), Result::Ok(value) => {
+            string(&mut *buffer, &value.name);
+            string(&mut *buffer, &value.value);
+            facts(buffer, values, index + 1)
+        },
+    }
+}
+fn explanation(buffer: &mut ByteBuf, values: &Vec<diagnostic::Explanation>, index: usize) -> () {
+    handle Vec::get(values, index) {
+        Result::Err(_) => (), Result::Ok(value) => {
+            string(&mut *buffer, &value.kind);
+            string(&mut *buffer, &value.message);
+            explanation(buffer, values, index + 1)
+        },
+    }
+}
+fn dump(buffer: &mut ByteBuf, value: &CompileDiagnostic) -> () {
+    string(&mut *buffer, &value.code);
+    word(&mut *buffer, as<usize>(diagnostic::class(value.class)));
+    word(&mut *buffer, as<usize>(diagnostic::severity(value.severity)));
+    string(&mut *buffer, &value.message);
+    primary(&mut *buffer, value.primary);
+    fingerprint(&mut *buffer, value.input_fingerprint);
+    word(&mut *buffer, Vec::len(&value.related));
+    related(&mut *buffer, &value.related, 0);
+    word(&mut *buffer, Vec::len(&value.facts));
+    facts(&mut *buffer, &value.facts, 0);
+    word(&mut *buffer, Vec::len(&value.explanation));
+    explanation(buffer, &value.explanation, 0)
+}
+fn dump_all(buffer: &mut ByteBuf, values: Slice<CompileDiagnostic>, index: usize) -> () {
+    handle Slice::get(values, index) {
+        Result::Err(_) => (), Result::Ok(value) => { dump(&mut *buffer, value); dump_all(buffer, values, index + 1) },
+    }
+}
+fn oracle(selected: u32) -> Result<Digest, identity::IdentityError> {
+    handle selected {
+        0 => identity::decode(b"@ORACLE0@"),
+        1 => identity::decode(b"@ORACLE1@"),
+        2 => identity::decode(b"@ORACLE2@"),
+        _ => identity::decode(b"@ORACLE3@"),
+    }
+}
+fn check(batch: diagnostic::Batch, selected: u32) -> i64 {
+    let values = diagnostic::values(&batch);
+    let buffer = ByteBuf::new(16384);
+    word(&mut buffer, Slice::len(&values));
+    dump_all(&mut buffer, values, 0);
+    handle identity::hash(ByteBuf::view(&buffer)) {
+        Result::Err(_) => 1,
+        Result::Ok(actual) => handle oracle(selected) {
+            Result::Err(_) => 2, Result::Ok(expected) => handle identity::equal(actual, expected) { true => 42, false => 3 },
+        },
+    }
+}
+fn policy(world: Digest, selected: u32) -> diagnostic::Policy {
+    handle selected {
+        0 => diagnostic::Policy { validate_spans: false, error_limit: None, input_fingerprint: None },
+        2 => diagnostic::Policy { validate_spans: true, error_limit: Result::Ok(0), input_fingerprint: Result::Ok(world) },
+        3 => diagnostic::Policy { validate_spans: true, error_limit: None, input_fingerprint: Result::Ok(world) },
+        _ => diagnostic::Policy { validate_spans: true, error_limit: Result::Ok(3), input_fingerprint: Result::Ok(world) },
+    }
+}
+fn run(file: Digest, first: Digest, later: Digest, selected: u32) -> i64 {
+    let builder = diagnostic::begin(diagnostic::Limits { diagnostics: 20, provenance: 50 }, policy(first, selected));
+    let controls = operation::create(10000, 10000);
+    fill(&mut builder, &mut controls, file, first, later, selected);
+    diagnostic::seal(&mut builder);
+    handle drive(&mut builder, &mut controls, file, 5000) {
+        Result::Err(_) => 4,
+        Result::Ok(_) => handle diagnostic::finish(&mut builder, &controls) { Result::Err(_) => 5, Result::Ok(batch) => check(batch, selected) },
+    }
+}
+fn batch(file: Digest, first: Digest, later: Digest) -> Results {
+    let canonical = run(file, first, later, 0);
+    let validated = run(file, first, later, 1);
+    let zero_limit = run(file, first, later, 2);
+    let invalid_span = run(file, first, later, 3);
+    (canonical, validated, zero_limit, invalid_span)
+}
+fn failed(code: i64) -> Results { (code, code, code, code) }
+pub fn main() -> Results {
+    handle identity::hash(b"diagnostic-file") {
+        Result::Err(_) => failed(6),
+        Result::Ok(file) => handle identity::hash(b"first-world") {
+            Result::Err(_) => failed(7),
+            Result::Ok(first) => handle identity::hash(b"later-world") { Result::Err(_) => failed(8), Result::Ok(later) => batch(file, first, later) },
+        },
+    }
+}

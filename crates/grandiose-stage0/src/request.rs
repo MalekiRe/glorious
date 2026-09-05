@@ -75,11 +75,15 @@ pub struct CompilerBuildIdentity {
 /// one-shot deep handler frames, explicit forwarding, and continuation
 /// cancellation. Cache generation two
 /// records the total canonical ordering of recovered and open effect-row
-/// types, which changes semantic-product fingerprints.
+/// types, which changes semantic-product fingerprints. Cache generation
+/// three separates the checked-integer-division runtime authority tag from
+/// f32 addition in request, bound-manifest, and bootstrap fingerprints.
+/// Cache generation four records explicitly framed request/bootstrap input
+/// collections and complete bootstrap runtime-authority commitments.
 pub const STAGE0_LANGUAGE_GENERATION: u32 = 1;
 pub const STAGE0_QUERY_GENERATION: u32 = 1;
 pub const STAGE0_INTERFACE_GENERATION: u32 = 1;
-pub const STAGE0_CACHE_GENERATION: u32 = 2;
+pub const STAGE0_CACHE_GENERATION: u32 = 4;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 48;
 pub const STAGE0_VERIFIER_GENERATION: u32 = 6;
 
@@ -373,7 +377,7 @@ impl CompilationRequest {
 
 fn fingerprint_world(request: &CompilationRequest) -> Digest {
     let mut bytes = Vec::new();
-    put(&mut bytes, b"grandiose-stage0-world-v1");
+    put(&mut bytes, b"grandiose-stage0-world-v2");
     put(&mut bytes, &request.build.compiler.as_bytes());
     for generation in [
         request.build.language_generation,
@@ -387,7 +391,7 @@ fn fingerprint_world(request: &CompilationRequest) -> Digest {
     }
     put(&mut bytes, &[mode_tag(&request.mode)]);
     if let CompilationMode::Bootstrap(stage) = &request.mode {
-        put(&mut bytes, b"bootstrap-stage-v1");
+        put(&mut bytes, b"bootstrap-stage-v2");
         put(&mut bytes, &stage.ordinal.to_le_bytes());
         put(&mut bytes, &stage.producer.as_bytes());
         put(&mut bytes, &[stage.optimization_level]);
@@ -396,47 +400,60 @@ fn fingerprint_world(request: &CompilationRequest) -> Digest {
             &mut bytes,
             &stage.limits.max_total_source_bytes.to_le_bytes(),
         );
+        put(&mut bytes, &[u8::from(stage.expected_artifact.is_some())]);
         if let Some(expected) = stage.expected_artifact {
-            put(&mut bytes, b"expected-artifact");
             put(&mut bytes, &expected.as_bytes());
         }
     }
     put(&mut bytes, request.root_package.0.as_bytes());
     put(&mut bytes, request.target.as_bytes());
+    put(&mut bytes, &(request.sources.len() as u64).to_le_bytes());
     for source in &request.sources {
         put(&mut bytes, source.package.0.as_bytes());
         put(&mut bytes, source.logical_path.as_str().as_bytes());
         put(&mut bytes, &source.key.0.as_bytes());
         put(&mut bytes, &source.digest.as_bytes());
     }
+    put(&mut bytes, &(request.semantic_options.len() as u64).to_le_bytes());
     for (key, value) in &request.semantic_options {
         put(&mut bytes, key.as_bytes());
         put(&mut bytes, value.as_bytes());
     }
+    put(&mut bytes, &(request.codegen_options.len() as u64).to_le_bytes());
     for (key, value) in &request.codegen_options {
         put(&mut bytes, key.as_bytes());
         put(&mut bytes, value.as_bytes());
     }
+    put(&mut bytes, &(request.capability_manifest.len() as u64).to_le_bytes());
     for capability in &request.capability_manifest {
         put(&mut bytes, capability.as_bytes());
     }
-    if let Some(manifest) = &request.runtime_manifest {
-        put(&mut bytes, b"runtime-manifest");
-        put(&mut bytes, manifest.standard_library.0.as_bytes());
+    put_runtime_manifest(&mut bytes, request.runtime_manifest.as_ref());
+    Digest::of_bytes(&bytes)
+}
+
+// A sequence of length-prefixed values alone does not distinguish adjacent
+// variable-length collections. Every list has a count and every optional
+// section has a discriminator. Share the complete runtime input encoding with
+// bootstrap commitments so authority fields cannot disappear in that projection.
+pub(crate) fn put_runtime_manifest(bytes: &mut Vec<u8>, manifest: Option<&RuntimeManifestInput>) {
+    put(bytes, &[u8::from(manifest.is_some())]);
+    if let Some(manifest) = manifest {
+        put(bytes, manifest.standard_library.0.as_bytes());
+        put(bytes, &(manifest.selectors.len() as u64).to_le_bytes());
         for selector in &manifest.selectors {
-            put(&mut bytes, &[selector.role.stable_tag()]);
-            put(&mut bytes, selector.module_path.as_bytes());
-            put(&mut bytes, selector.name.as_bytes());
+            put(bytes, &[selector.role.stable_tag()]);
+            put(bytes, selector.module_path.as_bytes());
+            put(bytes, selector.name.as_bytes());
         }
+        put(bytes, &(manifest.host_imports.len() as u64).to_le_bytes());
         for host in &manifest.host_imports {
-            put(&mut bytes, b"runtime-host");
-            put(&mut bytes, host.module_path.as_bytes());
-            put(&mut bytes, host.name.as_bytes());
-            put(&mut bytes, host.capability.as_bytes());
-            put(&mut bytes, host.symbol.as_bytes());
+            put(bytes, host.module_path.as_bytes());
+            put(bytes, host.name.as_bytes());
+            put(bytes, host.capability.as_bytes());
+            put(bytes, host.symbol.as_bytes());
         }
     }
-    Digest::of_bytes(&bytes)
 }
 
 fn mode_tag(mode: &CompilationMode) -> u8 {
@@ -525,7 +542,7 @@ fn validate_bootstrap_stage(
     Ok(())
 }
 
-fn put(output: &mut Vec<u8>, value: &[u8]) {
+pub(crate) fn put(output: &mut Vec<u8>, value: &[u8]) {
     output.extend_from_slice(&(value.len() as u64).to_le_bytes());
     output.extend_from_slice(value);
 }

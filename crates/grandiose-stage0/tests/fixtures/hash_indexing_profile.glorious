@@ -1,0 +1,28 @@
+use std::*;
+pub type Map = HashMap<usize, usize>;
+fn fill(map: &mut Map, key: usize) -> () {
+    handle key == @SIZE@ {
+        true => (),
+        false => { HashMap::insert(&mut *map, key, key); fill(&mut *map, key + 1) },
+    }
+}
+fn probe(map: &Map, key: usize) -> i64 {
+    handle HashMap::get(map, &key) {
+        Result::Err(_) => 0,
+        Result::Ok(value) => handle *value == key { false => 0, true => 1 },
+    }
+}
+fn four(map: &Map, key: usize) -> i64 {
+    probe(map, key) + probe(map, key) + probe(map, key) + probe(map, key)
+}
+fn sixteen(map: &Map, key: usize) -> i64 {
+    four(map, key) + four(map, key) + four(map, key) + four(map, key)
+}
+pub fn main() -> i64 {
+    let map = HashMap<usize, usize>::new();
+    fill(&mut map, 0);
+    handle @READ@ == 0 {
+        true => 42,
+        false => handle sixteen(&map, HashMap::len(&map) - 1) == 16 { false => 0, true => 42 },
+    }
+}

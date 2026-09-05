@@ -1,0 +1,168 @@
+use std::*;
+use kernel::identity;
+use kernel::operation;
+use request::names;
+pub mod kernel;
+pub mod request;
+
+fn owned(bytes: Slice<u8>) -> Vec<u8> { let result = Vec<u8>::new(); Vec::extend_from_slice(&mut result, bytes); result }
+fn text(bytes: Slice<u8>) -> String {
+    handle String::from_utf8(owned(bytes)) { Result::Ok(value) => value, Result::Err(_) => String::new() }
+}
+fn same(left: Slice<u8>, right: Slice<u8>) -> i64 { handle Slice::lex_compare(left, right) { Ordering::Equal => 1, _ => 0 } }
+fn equal(left: i64, right: i64) -> i64 { handle left == right { true => 1, false => 0 } }
+fn alias_steps(builder: &mut names::AliasBuilder, controls: &mut operation::Controls) -> Result<(), request::Failure> {
+    handle names::step_alias(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            request::Event::Ready => Result::Ok(()), request::Event::Continue => alias_steps(builder, controls),
+        },
+    }
+}
+fn alias_result(builder: &mut names::AliasBuilder, controls: &mut operation::Controls) -> Result<names::PackageAlias, request::Failure> {
+    handle alias_steps(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error), Result::Ok(_) => names::finish_alias(builder, & *controls),
+    }
+}
+fn alias_case(input: Slice<u8>, expected: Slice<u8>, rejected: i64) -> i64 {
+    let controls = operation::create(10000, 10000);
+    let builder = names::begin_alias(identity::PackageKey { value: text(input) }, 1000);
+    handle alias_result(&mut builder, &mut controls) {
+        Result::Err(error) => handle error {
+            request::Failure::Rejected(request::InputError::InvalidPackageModuleAlias(package)) =>
+                equal(rejected, 1) * same(Str::as_bytes(String::as_str(&package.value)), input),
+            _ => 0,
+        },
+        Result::Ok(value) => {
+            let package = names::package(&value);
+            let alias = names::alias_text(&value);
+            equal(rejected, 0) * same(Str::as_bytes(alias), expected) * same(Str::as_bytes(String::as_str(&package.value)), input)
+        },
+    }
+}
+fn capability_steps(builder: &mut names::CapabilityBuilder, controls: &mut operation::Controls) -> Result<(), request::Failure> {
+    handle names::step_capability(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(event) => handle event {
+            request::Event::Ready => Result::Ok(()), request::Event::Continue => capability_steps(builder, controls),
+        },
+    }
+}
+fn capability_result(builder: &mut names::CapabilityBuilder, controls: &mut operation::Controls) -> Result<names::Capability, request::Failure> {
+    handle capability_steps(&mut *builder, &mut *controls) {
+        Result::Err(error) => Result::Err(error), Result::Ok(_) => names::finish_capability(builder, & *controls),
+    }
+}
+fn capability_case(input: Slice<u8>, rejected: i64) -> i64 {
+    let controls = operation::create(10000, 10000);
+    let builder = names::begin_capability(text(input), 1000);
+    handle capability_result(&mut builder, &mut controls) {
+        Result::Err(error) => handle error {
+            request::Failure::Rejected(request::InputError::InvalidCapability(value)) =>
+                equal(rejected, 1) * same(Str::as_bytes(String::as_str(&value)), input),
+            _ => 0,
+        },
+        Result::Ok(value) => {
+            let view = names::capability_text(&value);
+            equal(rejected, 0) * same(Str::as_bytes(view), input)
+        },
+    }
+}
+@CASES@
+fn expect<T>(value: Result<T, request::Failure>, expected: i64) -> i64 where T: Use<[0, 1]> {
+    handle value {
+        Result::Ok(_) => equal(expected, 0),
+        Result::Err(error) => handle error {
+            request::Failure::Closed => equal(expected, 1),
+            request::Failure::Busy => equal(expected, 2),
+            request::Failure::Control(operation::Failure::Cancelled) => equal(expected, 3),
+            request::Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: _, requested: _ }) => equal(expected, 4),
+            request::Failure::Capacity { name: 2, limit: _ } => equal(expected, 5),
+            request::Failure::Capacity { name: 3, limit: _ } => equal(expected, 6),
+            _ => 0,
+        },
+    }
+}
+fn advance_alias(builder: &mut names::AliasBuilder, controls: &mut operation::Controls, count: usize) -> () {
+    handle count == 0 { true => (), false => {
+        names::step_alias(&mut *builder, &mut *controls); advance_alias(builder, controls, count - 1)
+    } }
+}
+fn advance_capability(builder: &mut names::CapabilityBuilder, controls: &mut operation::Controls, count: usize) -> () {
+    handle count == 0 { true => (), false => {
+        names::step_capability(&mut *builder, &mut *controls); advance_capability(builder, controls, count - 1)
+    } }
+}
+fn alias_cancel(phase: usize, finishing: usize) -> i64 {
+    let controls = operation::create(1000, 1000);
+    let builder = names::begin_alias(identity::PackageKey { value: Str::to_string("lib@invalid♥") }, 3);
+    advance_alias(&mut builder, &mut controls, phase);
+    let spent = operation::work_spent(&controls);
+    operation::cancel(&mut controls);
+    let cancelled = handle finishing {
+        0 => expect(names::step_alias(&mut builder, &mut controls), 3),
+        _ => expect(names::finish_alias(&mut builder, &controls), 3),
+    };
+    let work = equal(as<i64>(spent), as<i64>(operation::work_spent(&controls)));
+    let fresh = operation::create(1000, 1000);
+    cancelled + work + expect(names::step_alias(&mut builder, &mut fresh), 1) + expect(names::finish_alias(&mut builder, &fresh), 1)
+}
+fn capability_cancel(phase: usize, finishing: usize) -> i64 {
+    let controls = operation::create(1000, 1000);
+    let builder = names::begin_capability(Str::to_string("fsé"), 4);
+    advance_capability(&mut builder, &mut controls, phase);
+    let spent = operation::work_spent(&controls);
+    operation::cancel(&mut controls);
+    let cancelled = handle finishing {
+        0 => expect(names::step_capability(&mut builder, &mut controls), 3),
+        _ => expect(names::finish_capability(&mut builder, &controls), 3),
+    };
+    let work = equal(as<i64>(spent), as<i64>(operation::work_spent(&controls)));
+    let fresh = operation::create(1000, 1000);
+    cancelled + work + expect(names::step_capability(&mut builder, &mut fresh), 1) + expect(names::finish_capability(&mut builder, &fresh), 1)
+}
+fn alias_cleanup(mode: usize) -> i64 {
+    let ceiling = handle mode { 0 => as<usize>(2), _ => as<usize>(3) };
+    let budget = handle mode { 1 => as<u64>(0), _ => as<u64>(1000) };
+    let controls = operation::create(budget, 1000);
+    let builder = names::begin_alias(identity::PackageKey { value: Str::to_string("lib") }, ceiling);
+    let result = handle mode {
+        0 => expect(alias_steps(&mut builder, &mut controls), 5),
+        1 => expect(alias_steps(&mut builder, &mut controls), 4),
+        2 => expect(names::finish_alias(&mut builder, &controls), 2),
+        3 => { names::abort_alias(&mut builder); expect(names::finish_alias(&mut builder, &controls), 1) },
+        _ => expect(alias_result(&mut builder, &mut controls), 0),
+    };
+    let fresh = operation::create(1000, 1000);
+    result + expect(names::finish_alias(&mut builder, &fresh), 1)
+}
+fn capability_cleanup(mode: usize) -> i64 {
+    let ceiling = handle mode { 0 => as<usize>(3), _ => as<usize>(4) };
+    let budget = handle mode { 1 => as<u64>(0), _ => as<u64>(1000) };
+    let controls = operation::create(budget, 1000);
+    let builder = names::begin_capability(Str::to_string("fsé"), ceiling);
+    let result = handle mode {
+        0 => expect(capability_steps(&mut builder, &mut controls), 6),
+        1 => expect(capability_steps(&mut builder, &mut controls), 4),
+        2 => expect(names::finish_capability(&mut builder, &controls), 2),
+        3 => { names::abort_capability(&mut builder); expect(names::finish_capability(&mut builder, &controls), 1) },
+        _ => expect(capability_result(&mut builder, &mut controls), 0),
+    };
+    let fresh = operation::create(1000, 1000);
+    result + expect(names::finish_capability(&mut builder, &fresh), 1)
+}
+fn lifecycle(index: usize) -> i64 {
+    handle index == 5 {
+        true => 0, false => {
+            let aliases = alias_cancel(index, 0) + alias_cancel(index, 1) + alias_cleanup(index);
+            let capabilities = capability_cancel(index, 0) + capability_cancel(index, 1) + capability_cleanup(index);
+            aliases + capabilities + lifecycle(index + 1)
+        },
+    }
+}
+pub fn main() -> (i64, i64, i64) {
+    let aliases = alias_cases();
+    let capabilities = capability_cases();
+    let lifecycle = lifecycle(0);
+    (aliases, capabilities, lifecycle)
+}

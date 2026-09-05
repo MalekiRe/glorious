@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use grandiose_stage0::{
     BootstrapLimits, BootstrapStage, CompilationMode, CompilationRequest, CompilerBuildIdentity,
-    CompilerDatabase, Digest, InputError, LogicalPath, PackageKey, PrimitiveRole,
+    CompilerDatabase, Digest, HostImportSelector, InputError, LogicalPath, PackageKey, PrimitiveRole,
     PrimitiveSelector, RetentionReport, RevisionError, RuntimeManifestInput,
     STAGE0_BYTECODE_GENERATION, STAGE0_VERIFIER_GENERATION, SourceInput,
 };
@@ -31,6 +31,219 @@ fn request(sources: Vec<SourceInput>) -> CompilationRequest {
         capability_manifest: vec![],
         runtime_manifest: None,
     }
+}
+
+fn authority_tag_requests() -> (CompilationRequest, CompilationRequest) {
+    let mut integer = request(vec![SourceInput::new(
+        PackageKey("app@0.1.0".into()),
+        LogicalPath::parse("src/main.glorious").unwrap(),
+        b"main() { () }".as_slice(),
+    )]);
+    integer.runtime_manifest = Some(RuntimeManifestInput {
+        standard_library: PackageKey("std@0.1.0".into()),
+        selectors: vec![PrimitiveSelector {
+            role: PrimitiveRole::IntCheckedDiv,
+            module_path: "crate".into(),
+            name: "primitive".into(),
+        }],
+        host_imports: vec![],
+    });
+    let mut float = integer.clone();
+    float.runtime_manifest.as_mut().unwrap().selectors[0].role =
+        PrimitiveRole::parse_selector_name("f32-add").unwrap();
+    (integer, float)
+}
+
+#[test]
+fn malformed_float_authority_returns_input_error_instead_of_panicking() {
+    let (mut input, _) = authority_tag_requests();
+    input.runtime_manifest.as_mut().unwrap().selectors[0].role = PrimitiveRole::Float(
+        grandiose_stage0::runtime_manifest::FloatPrimitive::Convert {
+            from: grandiose_stage0::ScalarType::F32,
+            to: grandiose_stage0::ScalarType::F32,
+            checked: false,
+        });
+    assert!(matches!(input.normalize(), Err(InputError::InvalidRuntimeManifest)));
+}
+
+#[test]
+fn authority_tags_distinguish_checked_division_from_float_addition_in_world_fingerprints() {
+    let (integer, float) = authority_tag_requests();
+    assert_ne!(
+        integer.normalize().unwrap().fingerprint,
+        float.normalize().unwrap().fingerprint,
+        "different runtime grants must not alias before declaration binding"
+    );
+}
+
+#[test]
+fn authority_tag_changes_cannot_deduplicate_distinct_revision_worlds() {
+    let (integer, float) = authority_tag_requests();
+    let database = CompilerDatabase::new();
+    let integer_id = database.import(integer, None).unwrap();
+    let float_id = database.import(float, Some(integer_id)).unwrap();
+    assert_ne!(integer_id, float_id, "runtime authority is semantic world input");
+    let integer = database.open(integer_id).unwrap();
+    let float = database.open(float_id).unwrap();
+    assert_ne!(
+        integer.world().runtime_manifest.as_ref().unwrap().selectors,
+        float.world().runtime_manifest.as_ref().unwrap().selectors,
+        "opening the float revision must not return the old integer grant"
+    );
+}
+
+#[test]
+fn authority_tag_correction_invalidates_the_previous_canonical_cache_generation() {
+    let (mut current, _) = authority_tag_requests();
+    current.build = CompilerBuildIdentity::stage0(Digest::of_bytes(b"stage0-test"));
+    assert_eq!(current.build.cache_generation, 4);
+    assert_eq!(grandiose_stage0::STAGE0_CACHE_GENERATION, 4);
+    let mut stale = current.clone();
+    stale.build.cache_generation = 2;
+    assert_ne!(
+        current.normalize().unwrap().fingerprint,
+        stale.normalize().unwrap().fingerprint
+    );
+}
+
+#[test]
+fn framed_worlds_invalidate_the_previous_canonical_cache_generation() {
+    let (mut current, _) = authority_tag_requests();
+    current.build = CompilerBuildIdentity::stage0(Digest::of_bytes(b"stage0-test"));
+    let mut stale = current.clone();
+    stale.build.cache_generation = 3;
+    assert_ne!(current.normalize().unwrap().fingerprint, stale.normalize().unwrap().fingerprint);
+}
+
+#[test]
+fn world_fingerprint_frames_semantic_and_codegen_option_maps_separately() {
+    let (mut semantic, _) = authority_tag_requests();
+    semantic.runtime_manifest = None;
+    semantic.semantic_options.insert("flag".into(), "value".into());
+    let mut codegen = semantic.clone();
+    codegen.semantic_options.clear();
+    codegen.codegen_options.insert("flag".into(), "value".into());
+    assert_ne!(
+        semantic.clone().normalize().unwrap().fingerprint,
+        codegen.clone().normalize().unwrap().fingerprint,
+        "moving a pair between distinct option maps must change the world"
+    );
+    let database = CompilerDatabase::new();
+    let first = database.import(semantic, None).unwrap();
+    let second = database.import(codegen, Some(first)).unwrap();
+    assert_ne!(first, second);
+}
+
+#[test]
+fn world_fingerprint_frames_capabilities_separately_from_optional_runtime_manifests() {
+    let (mut capabilities, _) = authority_tag_requests();
+    capabilities.runtime_manifest = None;
+    capabilities.capability_manifest = vec!["runtime-manifest".into(), "std@0.1.0".into()];
+    let mut runtime = capabilities.clone();
+    runtime.capability_manifest.clear();
+    runtime.runtime_manifest = Some(RuntimeManifestInput {
+        standard_library: PackageKey("std@0.1.0".into()),
+        selectors: vec![], host_imports: vec![],
+    });
+    assert_ne!(
+        capabilities.clone().normalize().unwrap().fingerprint,
+        runtime.clone().normalize().unwrap().fingerprint,
+        "capability strings cannot impersonate an optional manifest section"
+    );
+    let database = CompilerDatabase::new();
+    let first = database.import(capabilities, None).unwrap();
+    let second = database.import(runtime, Some(first)).unwrap();
+    assert_ne!(first, second);
+}
+
+#[test]
+fn world_v2_matches_an_independently_written_complete_framed_transcript() {
+    let producer = Digest::of_bytes(b"v2-producer");
+    let package = PackageKey("app@0.1.0".into());
+    let a = SourceInput::new(package.clone(), LogicalPath::parse("src/a.glorious").unwrap(), b"".as_slice());
+    let z = SourceInput::new(package, LogicalPath::parse("src/z.glorious").unwrap(), b"z()".as_slice());
+    let mut input = request(vec![z.clone(), a.clone()]);
+    input.build = CompilerBuildIdentity {
+        compiler: producer, language_generation: 11, query_generation: 12,
+        interface_generation: 13, cache_generation: 4, bytecode_generation: 15,
+        verifier_generation: 16,
+    };
+    input.mode = CompilationMode::Bootstrap(BootstrapStage {
+        ordinal: 2, producer, optimization_level: 2,
+        limits: BootstrapLimits::new(4, 4096), expected_artifact: Some(producer),
+    });
+    input.semantic_options = BTreeMap::from([("".into(), "\0".into()), ("mode".into(), "é".into())]);
+    input.codegen_options.insert("optimization-level".into(), "2".into());
+    input.capability_manifest = vec!["é:io".into(), "fs.read".into()];
+    input.runtime_manifest = Some(RuntimeManifestInput {
+        standard_library: PackageKey("std@0.1.0".into()),
+        selectors: vec![
+            PrimitiveSelector { role: PrimitiveRole::IntCheckedDiv, module_path: "crate::int".into(), name: "divide".into() },
+            PrimitiveSelector { role: PrimitiveRole::parse_selector_name("f32-add").unwrap(), module_path: "crate::float".into(), name: "add".into() },
+        ],
+        host_imports: vec![
+            HostImportSelector { module_path: "crate::io".into(), name: "write".into(), capability: "fs.write".into(), symbol: "host-write".into() },
+            HostImportSelector { module_path: "crate::io".into(), name: "read".into(), capability: "fs.read".into(), symbol: "host\0read".into() },
+        ],
+    });
+    let world = input.clone().normalize().unwrap();
+    // Do not call the production encoder or walk its normalized containers:
+    // this transcript locks field widths, boundaries, option tags, and order.
+    fn field(bytes: &mut Vec<u8>, value: impl AsRef<[u8]>) {
+        let value = value.as_ref();
+        bytes.extend((value.len() as u64).to_le_bytes());
+        bytes.extend(value);
+    }
+    let mut bytes = Vec::new();
+    field(&mut bytes, b"grandiose-stage0-world-v2");
+    field(&mut bytes, producer.as_bytes());
+    for generation in [11_u32, 12, 13, 4, 15, 16] { field(&mut bytes, generation.to_le_bytes()); }
+    field(&mut bytes, [5]);
+    field(&mut bytes, b"bootstrap-stage-v2");
+    field(&mut bytes, 2_u32.to_le_bytes());
+    field(&mut bytes, producer.as_bytes());
+    field(&mut bytes, [2]);
+    field(&mut bytes, 4_u32.to_le_bytes());
+    field(&mut bytes, 4096_u64.to_le_bytes());
+    field(&mut bytes, [1]);
+    field(&mut bytes, producer.as_bytes());
+    field(&mut bytes, b"app@0.1.0");
+    field(&mut bytes, b"g1-vm");
+    field(&mut bytes, 2_u64.to_le_bytes());
+    for (source, path) in [(&a, "src/a.glorious"), (&z, "src/z.glorious")] {
+        field(&mut bytes, b"app@0.1.0");
+        field(&mut bytes, path);
+        field(&mut bytes, source.key.0.as_bytes());
+        field(&mut bytes, source.digest.as_bytes());
+    }
+    field(&mut bytes, 2_u64.to_le_bytes());
+    for value in ["", "\0", "mode", "é"] { field(&mut bytes, value); }
+    field(&mut bytes, 1_u64.to_le_bytes());
+    field(&mut bytes, b"optimization-level");
+    field(&mut bytes, b"2");
+    field(&mut bytes, 2_u64.to_le_bytes());
+    field(&mut bytes, b"fs.read");
+    field(&mut bytes, "é:io");
+    field(&mut bytes, [1]);
+    field(&mut bytes, b"std@0.1.0");
+    field(&mut bytes, 2_u64.to_le_bytes());
+    field(&mut bytes, [69]);
+    field(&mut bytes, b"crate::float");
+    field(&mut bytes, b"add");
+    field(&mut bytes, [182]);
+    field(&mut bytes, b"crate::int");
+    field(&mut bytes, b"divide");
+    field(&mut bytes, 2_u64.to_le_bytes());
+    for value in ["crate::io", "read", "fs.read", "host\0read", "crate::io", "write", "fs.write", "host-write"] {
+        field(&mut bytes, value);
+    }
+    assert_eq!(world.fingerprint, Digest::of_bytes(&bytes));
+    input.sources.reverse();
+    input.capability_manifest.reverse();
+    let runtime = input.runtime_manifest.as_mut().unwrap();
+    runtime.selectors.reverse();
+    runtime.host_imports.reverse();
+    assert_eq!(world.fingerprint, input.normalize().unwrap().fingerprint);
 }
 
 #[test]

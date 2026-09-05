@@ -1,0 +1,771 @@
+use std::*;
+use super::kernel::database;
+use super::kernel::engine;
+use super::kernel::identity;
+use super::kernel::identity::Digest;
+use super::kernel::identity::FileKey;
+use super::kernel::identity::RevisionId;
+use super::kernel::operation;
+use super::kernel::query;
+use super::kernel::storage;
+use super::kernel::storage::Handle;
+use super::kernel::storage::Arena;
+use super::source;
+
+// Implemented by the immutable admitted world, not by individual providers.
+// Full request normalization and its public facade remain separate work.
+pub trait World { source<'a>(world: &'a Self, file: FileKey) -> Option<&'a source::Blob>; }
+pub enum Family { SourceBytes, LineIndex }
+struct Key { family: Family, file: FileKey }
+pub struct Limits {
+    revisions: usize, sessions: usize, attempts: usize, memos: usize, reads: usize, keys: usize,
+    source_products: usize, line_products: usize, drivers: usize, frames: usize, source_bytes: usize, lines: usize,
+}
+pub enum Failure { Database(database::Failure), Source(source::Failure), MissingSource(FileKey), Closed, Closing, Busy, Capacity, Invariant, Cancelled }
+pub struct Session { private handle: Handle }
+pub struct Query<T> { private handle: Handle }
+pub struct Value<T> { private outcome: engine::Outcome }
+pub enum Event<T> { Continue, Waiting, Ready(Value<T>) }
+pub enum CloseStep { Continue, Done }
+pub enum CollectionStep { Continue, Done(database::Collected) }
+pub struct Stats { core: database::Stats, sources: usize, lines: usize, drivers: usize, sessions: usize,
+    source_keys: database::KeyStats, line_keys: database::KeyStats }
+
+// Neither the product tag nor its typed-store handle can be supplied by a
+// provider or a public caller. Only publication below constructs these refs.
+enum ProductKind { Source(Handle), Lines(Handle) }
+struct Product { kind: ProductKind }
+struct Stores { sources: Arena<source::Blob>, lines: Arena<source::LineIndex> }
+enum SessionPhase { Active, Closing { cursor: usize } }
+struct Request { core: database::Session, phase: SessionPhase }
+enum Phase { Engine, SourceInput, NeedSource, AwaitSource, AwaitReplay, BeginLines, Lines }
+struct Frame { key: Key, interned: database::Key<FileKey>, ticket: engine::Ticket,
+    phase: Phase, source: Option<engine::Outcome>, builder: Option<source::LineBuilder> }
+impl Use<[0, 1]> for Frame {}
+enum Mode { Running, Failed(Failure) }
+struct Driver { session: Session, frames: Vec<Frame>, mode: Mode }
+impl Use<[0, 1]> for Driver {}
+enum Step { Continue, Waiting, Child(Key), Done(engine::Outcome) }
+struct Disposal { token: database::Released<Product>, removed: Bool }
+impl Use<[0, 1]> for Disposal {}
+enum Collection {
+    Idle, Core, BeginRoots { report: database::Collected },
+    Roots { cursor: engine::RootCursor, report: database::Collected },
+    SourceKeys { cursor: usize, report: database::Collected },
+    LineKeys { cursor: usize, report: database::Collected },
+}
+pub struct Registry<W> {
+    private core: database::Database<W, Product>, private sources: database::Family<FileKey>, private lines: database::Family<FileKey>,
+    private stores: Stores, private requests: Arena<Request>, private drivers: Arena<Driver>,
+    private limits: Limits, private disposal: Option<Disposal>, private collection: Collection,
+}
+pub impl<W> Use<[0, 1]> for Registry<W> where W: Use<[0, 1]> {}
+
+pub fn create<W>(id: u64, limits: Limits) -> Result<Registry<W>, Failure> {
+    let core = database::create<W, Product>(id, limits.revisions, limits.sessions, limits.attempts, limits.memos, limits.reads);
+    handle database::family<FileKey, W, Product>(&mut core, 1, query::RecoveryPolicy::Reject, engine::ReusePolicy::Tracked, limits.keys) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(sources) => handle database::family<FileKey, W, Product>(&mut core, 1, query::RecoveryPolicy::Reject, engine::ReusePolicy::Tracked, limits.keys) {
+            Result::Err(error) => Result::Err(Failure::Database(error)),
+            Result::Ok(lines) => Result::Ok(Registry { core: core, sources: sources, lines: lines,
+                stores: Stores { sources: storage::namespace(id, 1099511627776, limits.source_products),
+                    lines: storage::namespace(id, 1099511627777, limits.line_products) },
+                drivers: storage::namespace(id, 1099511627778, limits.drivers),
+                requests: storage::namespace(id, 1099511627779, limits.sessions), limits: limits, disposal: None, collection: Collection::Idle }),
+        },
+    }
+}
+pub fn import<W>(registry: &mut Registry<W>, world: W, fingerprint: Digest, parent: Option<RevisionId>) -> Result<RevisionId, Failure>
+    where W: Use<[0, 1]> {
+    handle available(& *registry) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle database::import(&mut registry.core, world, fingerprint, parent) {
+            Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(revision) => Result::Ok(revision),
+        },
+    }
+}
+pub fn open<W>(registry: &mut Registry<W>, revision: RevisionId, work: u64, memory: u64) -> Result<Session, Failure> {
+    handle available(& *registry) {
+        Result::Err(error) => Result::Err(error), Result::Ok(_) => open_ready(registry, revision, work, memory),
+    }
+}
+fn open_ready<W>(registry: &mut Registry<W>, revision: RevisionId, work: u64, memory: u64) -> Result<Session, Failure> {
+    handle database::open(&mut registry.core, revision, query::RecoveryPolicy::Reject, work, memory) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(core) => handle storage::insert(&mut registry.requests, Request { core: core, phase: SessionPhase::Active }) {
+            Result::Err(_) => { database::close(&mut registry.core, core); Result::Err(Failure::Capacity) },
+            Result::Ok(slot) => Result::Ok(Session { handle: slot }),
+        },
+    }
+}
+fn active(requests: &Arena<Request>, session: Session) -> Result<database::Session, Failure> {
+    handle storage::get(requests, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(request) => handle request.phase { SessionPhase::Active => Result::Ok(request.core), _ => Result::Err(Failure::Closing) },
+    }
+}
+fn available<W>(registry: &Registry<W>) -> Result<(), Failure> {
+    handle registry.collection {
+        Collection::Idle => handle database::available(&registry.core) {
+            Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(_) => Result::Ok(()),
+        },
+        _ => Result::Err(Failure::Database(database::Failure::Collecting)),
+    }
+}
+fn admitted<W>(registry: &Registry<W>, session: Session) -> Result<database::Session, Failure> {
+    handle available(registry) { Result::Err(error) => Result::Err(error), Result::Ok(_) => active(&registry.requests, session) }
+}
+fn intern(sources: &mut database::Family<FileKey>, lines: &mut database::Family<FileKey>, key: Key)
+    -> Result<database::Key<FileKey>, Failure> {
+    handle key.family { Family::SourceBytes => intern_one(sources, key.file), Family::LineIndex => intern_one(lines, key.file) }
+}
+fn intern_one(family: &mut database::Family<FileKey>, file: FileKey) -> Result<database::Key<FileKey>, Failure> {
+    handle database::intern(family, file) { Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(key) => Result::Ok(key) }
+}
+fn frame<W>(core: &mut database::Database<W, Product>, sources: &mut database::Family<FileKey>, lines: &mut database::Family<FileKey>,
+    session: database::Session, key: Key, parent: Option<engine::Ticket>) -> Result<Frame, Failure> {
+    handle intern(sources, lines, key) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(interned) => handle database::start(core, session, interned, parent) {
+            Result::Err(error) => Result::Err(Failure::Database(error)),
+            Result::Ok(ticket) => Result::Ok(Frame { key: key, interned: interned, ticket: ticket,
+                phase: Phase::Engine, source: None, builder: None }),
+        },
+    }
+}
+fn start<T, W>(registry: &mut Registry<W>, session: Session, key: Key) -> Result<Query<T>, Failure> {
+    handle available(& *registry) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle active(&registry.requests, session) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(core) => handle registry.limits.frames == 0 {
+                true => Result::Err(Failure::Capacity),
+                false => handle frame(&mut registry.core, &mut registry.sources, &mut registry.lines, core, key, None) {
+                    Result::Err(error) => Result::Err(error), Result::Ok(frame) => install(registry, session, frame),
+                },
+            },
+        },
+    }
+}
+fn install<T, W>(registry: &mut Registry<W>, session: Session, frame: Frame) -> Result<Query<T>, Failure> {
+    let ticket = frame.ticket;
+    let frames = Vec<Frame>::new();
+    Vec::push(&mut frames, frame);
+    handle storage::insert(&mut registry.drivers, Driver { session: session, frames: frames, mode: Mode::Running }) {
+        Result::Err(_) => { database::abort(&mut registry.core, ticket); Result::Err(Failure::Capacity) },
+        Result::Ok(slot) => Result::Ok(Query { handle: slot }),
+    }
+}
+pub fn source_bytes<W>(registry: &mut Registry<W>, session: Session, file: FileKey) -> Result<Query<source::Blob>, Failure> {
+    start(registry, session, Key { family: Family::SourceBytes, file: file })
+}
+pub fn line_index<W>(registry: &mut Registry<W>, session: Session, file: FileKey) -> Result<Query<source::LineIndex>, Failure> {
+    start(registry, session, Key { family: Family::LineIndex, file: file })
+}
+pub fn execution<T>(value: Value<T>) -> engine::Execution { value.outcome.execution }
+pub fn fingerprint<T>(value: Value<T>) -> Digest { value.outcome.fingerprint }
+
+fn product<W>(core: &database::Database<W, Product>, session: database::Session, outcome: engine::Outcome) -> Result<ProductKind, Failure> {
+    handle database::value(core, session, outcome) {
+        Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(value) => Result::Ok(value.kind),
+    }
+}
+fn blob<'a, W>(core: &database::Database<W, Product>, stores: &'a Stores, session: database::Session, outcome: engine::Outcome)
+    -> Result<&'a source::Blob, Failure> {
+    handle product(core, session, outcome) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(kind) => handle kind {
+            ProductKind::Source(key) => handle storage::get(&stores.sources, key) {
+                Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(value) => Result::Ok(value),
+            },
+            _ => Result::Err(Failure::Invariant),
+        },
+    }
+}
+pub fn source_value<'a, W>(registry: &'a Registry<W>, session: Session, value: Value<source::Blob>) -> Result<&'a source::Blob, Failure> {
+    handle admitted(registry, session) {
+        Result::Err(error) => Result::Err(error), Result::Ok(core) => blob(&registry.core, &registry.stores, core, value.outcome),
+    }
+}
+pub fn line_value<'a, W>(registry: &'a Registry<W>, session: Session, value: Value<source::LineIndex>) -> Result<&'a source::LineIndex, Failure> {
+    handle admitted(registry, session) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(core) => handle product(&registry.core, core, value.outcome) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(kind) => handle kind {
+                ProductKind::Lines(key) => handle storage::get(&registry.stores.lines, key) {
+                    Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(value) => Result::Ok(value),
+                },
+                _ => Result::Err(Failure::Invariant),
+            },
+        },
+    }
+}
+pub fn stats<W>(registry: &Registry<W>) -> Result<Stats, Failure> {
+    handle available(registry) { Result::Err(error) => Result::Err(error), Result::Ok(_) => idle_stats(registry) }
+}
+fn idle_stats<W>(registry: &Registry<W>) -> Result<Stats, Failure> {
+    handle database::stats(&registry.core) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(core) => Result::Ok(Stats { core: core, sources: storage::count(&registry.stores.sources),
+            lines: storage::count(&registry.stores.lines), drivers: storage::count(&registry.drivers), sessions: storage::count(&registry.requests),
+            source_keys: database::key_stats(&registry.sources), line_keys: database::key_stats(&registry.lines) }),
+    }
+}
+pub fn work_spent<W>(registry: &Registry<W>, session: Session) -> Result<u64, Failure> {
+    handle admitted(registry, session) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(core) => handle database::work_spent(&registry.core, core) {
+            Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(spent) => Result::Ok(spent),
+        },
+    }
+}
+
+fn charge<W>(core: &mut database::Database<W, Product>, session: database::Session, amount: u64) -> Result<(), Failure> {
+    handle database::request_controls(core, session) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(controls) => handle operation::charge(controls, amount) {
+            Result::Err(error) => Result::Err(Failure::Source(source::Failure::Control(error))), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+// This is the only world access in the driver. The provider algorithm below
+// receives a checked immutable blob, never the world or a database reference.
+fn pinned_source<'a, W>(core: &'a database::Database<W, Product>, session: database::Session, file: FileKey)
+    -> Result<&'a source::Blob, Failure> where W: World {
+    handle database::world(core, session) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(world) => handle World::source(world, file) {
+            Result::Err(_) => Result::Err(Failure::MissingSource(file)),
+            Result::Ok(value) => handle identity::equal(source::file(value).digest, file.digest) {
+                false => Result::Err(Failure::Invariant),
+                true => Result::Ok(value),
+            },
+        },
+    }
+}
+fn input_blob<W>(core: &database::Database<W, Product>, session: database::Session, file: FileKey, limit: usize)
+    -> Result<source::Blob, Failure> where W: World {
+    handle pinned_source(core, session, file) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(value) => handle as<usize>(source::length(value)) <= limit {
+            false => Result::Err(Failure::Capacity), true => Result::Ok(*value),
+        },
+    }
+}
+fn input_size<W>(core: &database::Database<W, Product>, session: database::Session, file: FileKey, limit: usize)
+    -> Result<u32, Failure> where W: World {
+    handle pinned_source(core, session, file) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(value) => handle as<usize>(source::length(value)) <= limit {
+            false => Result::Err(Failure::Capacity), true => Result::Ok(source::length(value)),
+        },
+    }
+}
+fn input_fingerprint<W>(core: &database::Database<W, Product>, session: database::Session, file: FileKey)
+    -> Result<Digest, Failure> where W: World {
+    handle pinned_source(core, session, file) { Result::Err(error) => Result::Err(error), Result::Ok(value) => Result::Ok(source::fingerprint(value)) }
+}
+fn observe<W>(core: &mut database::Database<W, Product>, ticket: engine::Ticket, identity: query::ReadIdentity, fingerprint: Digest) -> Result<(), Failure> {
+    handle database::observe(core, ticket, query::Read { identity: identity, fingerprint: fingerprint, completeness: query::Completeness::Complete }) {
+        Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(_) => Result::Ok(()),
+    }
+}
+fn next(frame: &mut Frame, phase: Phase) -> Result<Step, Failure> { (*frame).phase = phase; Result::Ok(Step::Continue) }
+fn publish_source<W>(core: &mut database::Database<W, Product>, stores: &mut Stores, ticket: engine::Ticket, value: source::Blob) -> Result<(), Failure> {
+    let fingerprint = source::fingerprint(&value);
+    handle storage::insert(&mut stores.sources, value) {
+        Result::Err(_) => Result::Err(Failure::Capacity),
+        Result::Ok(key) => handle database::publish(core, ticket, Product { kind: ProductKind::Source(key) }, fingerprint, query::Completeness::Complete) {
+            Result::Err(error) => { storage::remove(&mut stores.sources, key); Result::Err(Failure::Database(error)) },
+            Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+fn publish_lines<W>(core: &mut database::Database<W, Product>, stores: &mut Stores, ticket: engine::Ticket, value: source::LineIndex) -> Result<(), Failure> {
+    let fingerprint = source::line_fingerprint(&value);
+    handle storage::insert(&mut stores.lines, value) {
+        Result::Err(_) => Result::Err(Failure::Capacity),
+        Result::Ok(key) => handle database::publish(core, ticket, Product { kind: ProductKind::Lines(key) }, fingerprint, query::Completeness::Complete) {
+            Result::Err(error) => { storage::remove(&mut stores.lines, key); Result::Err(Failure::Database(error)) },
+            Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+fn source_input<W>(core: &mut database::Database<W, Product>, stores: &mut Stores, session: database::Session, frame: &mut Frame, limits: Limits)
+    -> Result<Step, Failure> where W: World {
+    handle input_size(& *core, session, frame.key.file, limits.source_bytes) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(length) => handle charge(&mut *core, session, wrapping_add(as<u64>(length), 1)) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle input_blob(& *core, session, frame.key.file, limits.source_bytes) {
+                Result::Err(error) => Result::Err(error), Result::Ok(value) => record_source(core, stores, frame, value),
+            },
+        },
+    }
+}
+fn record_source<W>(core: &mut database::Database<W, Product>, stores: &mut Stores, frame: &mut Frame, value: source::Blob) -> Result<Step, Failure> {
+    let identity = database::key_identity(frame.interned);
+    let input = query::read_identity(query::family(identity), query::key(identity), 1);
+    handle observe(&mut *core, frame.ticket, input, source::fingerprint(&value)) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle publish_source(core, stores, frame.ticket, value) {
+            Result::Err(error) => Result::Err(error), Result::Ok(_) => next(frame, Phase::Engine),
+        },
+    }
+}
+fn read_file(family: &database::Family<FileKey>, read: query::ReadIdentity) -> Result<FileKey, Failure> {
+    handle database::key_value(family, read) { Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(file) => Result::Ok(*file) }
+}
+fn read_key(sources: &database::Family<FileKey>, lines: &database::Family<FileKey>, read: query::ReadIdentity) -> Result<Key, Failure> {
+    handle query::family(read) {
+        0 => handle read_file(sources, read) { Result::Err(error) => Result::Err(error), Result::Ok(file) => Result::Ok(Key { family: Family::SourceBytes, file: file }) },
+        1 => handle read_file(lines, read) { Result::Err(error) => Result::Err(error), Result::Ok(file) => Result::Ok(Key { family: Family::LineIndex, file: file }) },
+        _ => Result::Err(Failure::Invariant),
+    }
+}
+fn replay_input<W>(core: &mut database::Database<W, Product>, sources: &database::Family<FileKey>, session: database::Session,
+    frame: &mut Frame, read: query::ReadIdentity) -> Result<Step, Failure> where W: World {
+    handle read_file(sources, read) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(file) => handle input_fingerprint(& *core, session, file) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(fingerprint) => handle charge(&mut *core, session, 1) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(_) => handle observe(core, frame.ticket, read, fingerprint) {
+                    Result::Err(error) => Result::Err(error), Result::Ok(_) => Result::Ok(Step::Continue),
+                },
+            },
+        },
+    }
+}
+fn replay<W>(core: &mut database::Database<W, Product>, sources: &database::Family<FileKey>, lines: &database::Family<FileKey>,
+    session: database::Session, frame: &mut Frame, read: query::ReadIdentity) -> Result<Step, Failure> where W: World {
+    handle query::projection(read) {
+        1 => replay_input(core, sources, session, frame, read),
+        0 => handle read_key(sources, lines, read) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(key) => { (*frame).phase = Phase::AwaitReplay; Result::Ok(Step::Child(key)) },
+        },
+        _ => Result::Err(Failure::Invariant),
+    }
+}
+fn computed(frame: &mut Frame, key: engine::Key) -> Result<Step, Failure> {
+    handle query::same(database::key_identity(frame.interned), engine::key_identity(key)) {
+        false => Result::Err(Failure::Invariant),
+        true => handle frame.key.family { Family::SourceBytes => next(frame, Phase::SourceInput), Family::LineIndex => next(frame, Phase::NeedSource) },
+    }
+}
+fn checked_outcome<W>(core: &database::Database<W, Product>, session: database::Session, frame: &Frame, outcome: engine::Outcome) -> Result<Step, Failure> {
+    handle product(core, session, outcome) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(kind) => handle frame.key.family {
+            Family::SourceBytes => handle kind { ProductKind::Source(_) => Result::Ok(Step::Done(outcome)), _ => Result::Err(Failure::Invariant) },
+            Family::LineIndex => handle kind { ProductKind::Lines(_) => Result::Ok(Step::Done(outcome)), _ => Result::Err(Failure::Invariant) },
+        },
+    }
+}
+fn engine_step<W>(core: &mut database::Database<W, Product>, sources: &database::Family<FileKey>, lines: &database::Family<FileKey>,
+    session: database::Session, frame: &mut Frame) -> Result<Step, Failure> where W: World {
+    handle database::step(&mut *core, frame.ticket) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(event) => handle event {
+            engine::Event::Continue => Result::Ok(Step::Continue), engine::Event::Waiting => Result::Ok(Step::Waiting),
+            engine::Event::Compute { key } => computed(frame, key),
+            engine::Event::Read(read) => replay(core, sources, lines, session, frame, read.identity),
+            engine::Event::Ready(outcome) => checked_outcome(& *core, session, & *frame, outcome),
+            engine::Event::Reuse { product: _ } => Result::Err(Failure::Invariant),
+        },
+    }
+}
+fn begin_lines<W>(core: &mut database::Database<W, Product>, stores: &Stores, session: database::Session,
+    frame: &mut Frame, outcome: engine::Outcome, limit: usize) -> Result<Step, Failure> {
+    handle blob(& *core, stores, session, outcome) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(value) => handle database::request_controls(core, session) {
+            Result::Err(error) => Result::Err(Failure::Database(error)),
+            Result::Ok(controls) => handle source::begin_lines(value, limit, controls) {
+                Result::Err(error) => Result::Err(Failure::Source(error)),
+                Result::Ok(builder) => { (*frame).builder = Result::Ok(builder); next(frame, Phase::Lines) },
+            },
+        },
+    }
+}
+fn line_algorithm(builder: &mut source::LineBuilder, value: &source::Blob, controls: &mut operation::Controls) -> Result<Option<source::LineIndex>, Failure> {
+    handle source::step_lines(&mut *builder, value, &mut *controls) {
+        Result::Err(error) => Result::Err(Failure::Source(error)),
+        Result::Ok(event) => handle event {
+            source::Event::Continue => Result::Ok(None),
+            source::Event::Ready => handle source::finish_lines(builder, & *controls) {
+                Result::Err(error) => Result::Err(Failure::Source(error)), Result::Ok(value) => Result::Ok(Result::Ok(value)),
+            },
+        },
+    }
+}
+fn line_work<W>(core: &mut database::Database<W, Product>, stores: &Stores, session: database::Session,
+    frame: &mut Frame, outcome: engine::Outcome) -> Result<Option<source::LineIndex>, Failure> {
+    handle blob(& *core, stores, session, outcome) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(value) => handle database::request_controls(core, session) {
+            Result::Err(error) => Result::Err(Failure::Database(error)),
+            Result::Ok(controls) => handle Result::as_mut(&mut frame.builder) {
+                Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(builder) => line_algorithm(builder, value, controls),
+            },
+        },
+    }
+}
+fn lines_step<W>(core: &mut database::Database<W, Product>, stores: &mut Stores, session: database::Session,
+    frame: &mut Frame, outcome: engine::Outcome) -> Result<Step, Failure> {
+    handle line_work(&mut *core, & *stores, session, &mut *frame, outcome) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(ready) => handle ready {
+            Result::Err(_) => Result::Ok(Step::Continue),
+            Result::Ok(value) => {
+                (*frame).builder = None;
+                handle publish_lines(core, stores, frame.ticket, value) {
+                    Result::Err(error) => Result::Err(error), Result::Ok(_) => next(frame, Phase::Engine),
+                }
+            },
+        },
+    }
+}
+fn advance<W>(core: &mut database::Database<W, Product>, sources: &database::Family<FileKey>, lines: &database::Family<FileKey>,
+    stores: &mut Stores, session: database::Session, frame: &mut Frame, limits: Limits) -> Result<Step, Failure> where W: World {
+    handle frame.phase {
+        Phase::Engine => engine_step(core, sources, lines, session, frame),
+        Phase::SourceInput => source_input(core, stores, session, frame, limits),
+        Phase::NeedSource => {
+            (*frame).phase = Phase::AwaitSource;
+            Result::Ok(Step::Child(Key { family: Family::SourceBytes, file: frame.key.file }))
+        },
+        Phase::BeginLines => handle frame.source {
+            Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(outcome) => begin_lines(core, & *stores, session, frame, outcome, limits.lines),
+        },
+        Phase::Lines => handle frame.source {
+            Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(outcome) => lines_step(core, stores, session, frame, outcome),
+        },
+        _ => Result::Err(Failure::Invariant),
+    }
+}
+
+fn cleanup<W>(core: &mut database::Database<W, Product>, driver: &mut Driver) -> Bool {
+    handle Vec::pop(&mut driver.frames) {
+        Result::Err(_) => true,
+        Result::Ok(frame) => { database::abort(core, frame.ticket); Vec::is_empty(&driver.frames) },
+    }
+}
+fn failed(driver: &mut Driver, error: Failure) -> Result<Step, Failure> {
+    (*driver).mode = Mode::Failed(error);
+    Result::Ok(Step::Continue)
+}
+fn child<W>(core: &mut database::Database<W, Product>, sources: &mut database::Family<FileKey>, lines: &mut database::Family<FileKey>,
+    session: database::Session, driver: &mut Driver, parent: engine::Ticket, key: Key, limit: usize) -> Result<Step, Failure> {
+    handle Vec::len(&driver.frames) < limit {
+        false => failed(driver, Failure::Capacity),
+        true => handle frame(core, sources, lines, session, key, Result::Ok(parent)) {
+            Result::Err(error) => failed(driver, error),
+            Result::Ok(frame) => { Vec::push(&mut driver.frames, frame); Result::Ok(Step::Continue) },
+        },
+    }
+}
+fn delivered(driver: &mut Driver, outcome: engine::Outcome) -> Result<Step, Failure> {
+    Vec::pop(&mut driver.frames);
+    handle Vec::len(&driver.frames) {
+        0 => Result::Ok(Step::Done(outcome)),
+        length => handle Vec::get_mut(&mut driver.frames, length - 1) {
+            Result::Err(_) => failed(driver, Failure::Invariant),
+            Result::Ok(parent) => handle parent.phase {
+                Phase::AwaitReplay => next(parent, Phase::Engine),
+                Phase::AwaitSource => { (*parent).source = Result::Ok(outcome); next(parent, Phase::BeginLines) },
+                _ => Result::Err(Failure::Invariant),
+            },
+        },
+    }
+}
+fn advanced<W>(core: &mut database::Database<W, Product>, sources: &mut database::Family<FileKey>, lines: &mut database::Family<FileKey>,
+    session: database::Session, driver: &mut Driver, parent: engine::Ticket, result: Result<Step, Failure>, limit: usize) -> Result<Step, Failure> {
+    handle result {
+        Result::Err(error) => failed(driver, error),
+        Result::Ok(event) => handle event {
+            Step::Child(key) => child(core, sources, lines, session, driver, parent, key, limit),
+            Step::Done(outcome) => delivered(driver, outcome), other => Result::Ok(other),
+        },
+    }
+}
+fn running<W>(core: &mut database::Database<W, Product>, sources: &mut database::Family<FileKey>, lines: &mut database::Family<FileKey>,
+    stores: &mut Stores, session: database::Session, driver: &mut Driver, limits: Limits) -> Result<Step, Failure> where W: World {
+    handle Vec::len(&driver.frames) {
+        0 => Result::Err(Failure::Invariant),
+        length => handle Vec::get_mut(&mut driver.frames, length - 1) {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(frame) => {
+                let ticket = frame.ticket;
+                let result = advance(&mut *core, & *sources, & *lines, stores, session, frame, limits);
+                advanced(core, sources, lines, session, driver, ticket, result, limits.frames)
+            },
+        },
+    }
+}
+fn tick<W>(core: &mut database::Database<W, Product>, sources: &mut database::Family<FileKey>, lines: &mut database::Family<FileKey>,
+    stores: &mut Stores, requests: &Arena<Request>, driver: &mut Driver, limits: Limits) -> Result<Step, Failure> where W: World {
+    handle driver.mode {
+        Mode::Failed(error) => handle cleanup(core, driver) { true => Result::Err(error), false => Result::Ok(Step::Continue) },
+        Mode::Running => handle active(requests, driver.session) {
+            Result::Err(error) => failed(driver, error),
+            Result::Ok(session) => handle database::check(& *core, session) {
+                Result::Err(error) => failed(driver, Failure::Database(error)),
+                Result::Ok(_) => {
+                    let result = running(core, sources, lines, stores, session, &mut *driver, limits);
+                    handle result { Result::Err(error) => failed(driver, error), other => other }
+                },
+            },
+        },
+    }
+}
+fn poll_checked<T, W>(registry: &mut Registry<W>, query: Query<T>) -> Result<Step, Failure> where W: World {
+    handle storage::get_mut(&mut registry.drivers, query.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(driver) => tick(&mut registry.core, &mut registry.sources, &mut registry.lines, &mut registry.stores,
+            &registry.requests, driver, registry.limits),
+    }
+}
+fn poll_result<T, W>(registry: &mut Registry<W>, query: Query<T>, result: Result<Step, Failure>) -> Result<Event<T>, Failure> {
+    handle result {
+        Result::Err(error) => { storage::remove(&mut registry.drivers, query.handle); Result::Err(error) },
+        Result::Ok(event) => handle event {
+            Step::Continue => Result::Ok(Event::Continue), Step::Waiting => Result::Ok(Event::Waiting),
+            Step::Done(outcome) => {
+                storage::remove(&mut registry.drivers, query.handle);
+                Result::Ok(Event::Ready(Value { outcome: outcome }))
+            },
+            Step::Child(_) => Result::Err(Failure::Invariant),
+        },
+    }
+}
+pub fn poll<T, W>(registry: &mut Registry<W>, query: Query<T>) -> Result<Event<T>, Failure> where W: World {
+    handle available(& *registry) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => {
+            let result = poll_checked(&mut *registry, query);
+            poll_result(registry, query, result)
+        },
+    }
+}
+pub fn abort<T, W>(registry: &mut Registry<W>, query: Query<T>) -> Result<(), Failure> {
+    handle available(& *registry) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle storage::get_mut(&mut registry.drivers, query.handle) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(driver) => { (*driver).mode = Mode::Failed(Failure::Cancelled); Result::Ok(()) },
+        },
+    }
+}
+pub fn cancel<W>(registry: &mut Registry<W>, session: Session) -> Result<(), Failure> {
+    handle storage::get(&registry.requests, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(request) => handle database::cancel(&mut registry.core, request.core) {
+            Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+
+// Closing owns cleanup even when the caller has discarded every Query handle.
+// A step visits one driver slot or discards one provider frame. Only after all
+// attempts are gone may the core session release its revision pin.
+pub fn begin_close<W>(registry: &mut Registry<W>, session: Session) -> Result<(), Failure> {
+    handle available(& *registry) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle storage::get_mut(&mut registry.requests, session.handle) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(request) => handle request.phase {
+                SessionPhase::Closing { cursor: _ } => Result::Ok(()),
+                SessionPhase::Active => handle database::cancel(&mut registry.core, request.core) {
+                    Result::Err(error) => Result::Err(Failure::Database(error)),
+                    Result::Ok(_) => { (*request).phase = SessionPhase::Closing { cursor: 0 }; Result::Ok(()) },
+                },
+            },
+        },
+    }
+}
+fn closing(requests: &Arena<Request>, session: Session) -> Result<(database::Session, usize), Failure> {
+    handle storage::get(requests, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(request) => handle request.phase {
+            SessionPhase::Active => Result::Err(Failure::Busy), SessionPhase::Closing { cursor } => Result::Ok((request.core, cursor)),
+        },
+    }
+}
+fn close_next(requests: &mut Arena<Request>, session: Session, cursor: usize) -> Result<CloseStep, Failure> {
+    handle storage::get_mut(requests, session.handle) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(request) => { (*request).phase = SessionPhase::Closing { cursor: cursor }; Result::Ok(CloseStep::Continue) },
+    }
+}
+fn close_driver<W>(core: &mut database::Database<W, Product>, drivers: &mut Arena<Driver>, key: Handle, session: Session) -> Bool {
+    handle storage::get_mut(drivers, key) {
+        Result::Err(_) => true,
+        Result::Ok(driver) => handle storage::equal(driver.session.handle, session.handle) { false => true, true => cleanup(core, driver) },
+    }
+}
+fn belongs(drivers: &Arena<Driver>, key: Handle, session: Session) -> Bool {
+    handle storage::get(drivers, key) { Result::Err(_) => false, Result::Ok(driver) => storage::equal(driver.session.handle, session.handle) }
+}
+fn close_slot<W>(registry: &mut Registry<W>, session: Session, cursor: usize, key: Handle) -> Result<CloseStep, Failure> {
+    handle belongs(&registry.drivers, key, session) {
+        false => close_next(&mut registry.requests, session, cursor + 1),
+        true => handle close_driver(&mut registry.core, &mut registry.drivers, key, session) {
+            false => Result::Ok(CloseStep::Continue),
+            true => { storage::remove(&mut registry.drivers, key); close_next(&mut registry.requests, session, cursor + 1) },
+        },
+    }
+}
+fn close_scan<W>(registry: &mut Registry<W>, session: Session, core: database::Session, cursor: usize) -> Result<CloseStep, Failure> {
+    handle cursor == storage::slot_count(&registry.drivers) {
+        true => handle database::close(&mut registry.core, core) {
+            Result::Err(error) => Result::Err(Failure::Database(error)),
+            Result::Ok(_) => { storage::remove(&mut registry.requests, session.handle); Result::Ok(CloseStep::Done) },
+        },
+        false => handle storage::key_at(&registry.drivers, cursor) {
+            Result::Err(_) => close_next(&mut registry.requests, session, cursor + 1),
+            Result::Ok(key) => close_slot(registry, session, cursor, key),
+        },
+    }
+}
+pub fn close_step<W>(registry: &mut Registry<W>, session: Session) -> Result<CloseStep, Failure> {
+    handle available(& *registry) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle closing(&registry.requests, session) {
+            Result::Err(error) => Result::Err(error), Result::Ok((core, cursor)) => close_scan(registry, session, core, cursor),
+        },
+    }
+}
+
+pub fn retire<W>(registry: &mut Registry<W>, revision: RevisionId) -> Result<(), Failure> {
+    handle available(& *registry) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle database::retire(&mut registry.core, revision) {
+            Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+pub fn collect<W>(registry: &mut Registry<W>) -> Result<(), Failure> {
+    handle available(& *registry) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle database::collect(&mut registry.core) {
+            Result::Err(error) => Result::Err(Failure::Database(error)),
+            Result::Ok(_) => { (*registry).collection = Collection::Core; Result::Ok(()) },
+        },
+    }
+}
+fn remove_product(stores: &mut Stores, product: ProductKind) -> Result<(), Failure> {
+    handle product {
+        ProductKind::Source(key) => handle storage::remove(&mut stores.sources, key) { Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(_) => Result::Ok(()) },
+        ProductKind::Lines(key) => handle storage::remove(&mut stores.lines, key) { Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(_) => Result::Ok(()) },
+    }
+}
+fn remove_released(stores: &mut Stores, disposal: &mut Disposal) -> Result<Bool, Failure> {
+    handle database::released_value(&disposal.token) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(product) => handle remove_product(stores, product.kind) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => { (*disposal).removed = Result<(), ()>::Ok(()); Result::Ok(Result<(), ()>::Err(())) },
+        },
+    }
+}
+fn dispose<W>(core: &mut database::Database<W, Product>, stores: &mut Stores, disposal: &mut Disposal) -> Result<Bool, Failure> {
+    handle disposal.removed {
+        false => remove_released(stores, disposal),
+        true => handle database::finish_release(core, &mut disposal.token) {
+            Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(_) => Result::Ok(Result<(), ()>::Ok(())),
+        },
+    }
+}
+fn collection<W>(registry: &mut Registry<W>) -> Result<CollectionStep, Failure> where W: Use<[0, 1]> {
+    handle database::collect_step_with_products(&mut registry.core) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(event) => handle event {
+            database::ProductCollectionStep::Continue => Result::Ok(CollectionStep::Continue),
+            database::ProductCollectionStep::Done(report) => collect_next(registry, Collection::BeginRoots { report: report }),
+            database::ProductCollectionStep::Release(token) => {
+                (*registry).disposal = Result::Ok(Disposal { token: token, removed: false });
+                Result::Ok(CollectionStep::Continue)
+            },
+        },
+    }
+}
+fn collect_products<W>(registry: &mut Registry<W>) -> Result<CollectionStep, Failure> where W: Use<[0, 1]> {
+    handle Result::as_mut(&mut registry.disposal) {
+        Result::Err(_) => collection(registry),
+        Result::Ok(disposal) => handle dispose(&mut registry.core, &mut registry.stores, disposal) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(done) => handle done {
+                false => Result::Ok(CollectionStep::Continue),
+                true => { (*registry).disposal = None; Result::Ok(CollectionStep::Continue) },
+            },
+        },
+    }
+}
+
+fn collect_next<W>(registry: &mut Registry<W>, phase: Collection) -> Result<CollectionStep, Failure> {
+    (*registry).collection = phase;
+    Result::Ok(CollectionStep::Continue)
+}
+fn begin_roots<W>(registry: &mut Registry<W>, report: database::Collected) -> Result<CollectionStep, Failure> {
+    handle database::key_roots(&registry.core) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(cursor) => collect_next(registry, Collection::Roots { cursor: cursor, report: report }),
+    }
+}
+fn mark_root<W>(registry: &mut Registry<W>, identity: query::ReadIdentity) -> Result<(), Failure> {
+    handle query::family(identity) {
+        0 => mark_key(&mut registry.sources, identity),
+        1 => mark_key(&mut registry.lines, identity),
+        _ => Result::Err(Failure::Invariant),
+    }
+}
+fn mark_key(family: &mut database::Family<FileKey>, identity: query::ReadIdentity) -> Result<(), Failure> {
+    handle database::mark_key(family, identity) {
+        Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(_) => Result::Ok(()),
+    }
+}
+fn collect_roots<W>(registry: &mut Registry<W>, cursor: engine::RootCursor, report: database::Collected) -> Result<CollectionStep, Failure> {
+    handle database::key_root_step(&registry.core, cursor) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(step) => handle step {
+            engine::RootStep::Done => collect_next(registry, Collection::SourceKeys { cursor: 0, report: report }),
+            engine::RootStep::Continue(next) => collect_next(registry, Collection::Roots { cursor: next, report: report }),
+            engine::RootStep::Key { identity, next } => handle mark_root(&mut *registry, identity) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(_) => collect_next(registry, Collection::Roots { cursor: next, report: report }),
+            },
+        },
+    }
+}
+fn collect_source_keys<W>(registry: &mut Registry<W>, cursor: usize, report: database::Collected) -> Result<CollectionStep, Failure> {
+    handle database::sweep_key_step(&mut registry.sources, cursor) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(step) => handle step {
+            database::KeySweepStep::Done => collect_next(registry, Collection::LineKeys { cursor: 0, report: report }),
+            database::KeySweepStep::Continue { next } => collect_next(registry, Collection::SourceKeys { cursor: next, report: report }),
+        },
+    }
+}
+fn collect_line_keys<W>(registry: &mut Registry<W>, cursor: usize, report: database::Collected) -> Result<CollectionStep, Failure> {
+    handle database::sweep_key_step(&mut registry.lines, cursor) {
+        Result::Err(error) => Result::Err(Failure::Database(error)),
+        Result::Ok(step) => handle step {
+            database::KeySweepStep::Done => { (*registry).collection = Collection::Idle; Result::Ok(CollectionStep::Done(report)) },
+            database::KeySweepStep::Continue { next } => collect_next(registry, Collection::LineKeys { cursor: next, report: report }),
+        },
+    }
+}
+pub fn collect_step<W>(registry: &mut Registry<W>) -> Result<CollectionStep, Failure> where W: Use<[0, 1]> {
+    handle registry.collection {
+        Collection::Idle => Result::Err(Failure::Invariant),
+        Collection::Core => collect_products(registry),
+        Collection::BeginRoots { report } => begin_roots(registry, report),
+        Collection::Roots { cursor, report } => collect_roots(registry, cursor, report),
+        Collection::SourceKeys { cursor, report } => collect_source_keys(registry, cursor, report),
+        Collection::LineKeys { cursor, report } => collect_line_keys(registry, cursor, report),
+    }
+}

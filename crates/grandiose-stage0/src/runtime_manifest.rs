@@ -133,6 +133,21 @@ pub enum FloatPrimitive {
 }
 
 impl FloatPrimitive {
+    fn is_valid(self) -> bool {
+        match self {
+            Self::Convert { from, to, checked } => {
+                let float_from = matches!(from, ScalarType::F32 | ScalarType::F64);
+                let float_to = matches!(to, ScalarType::F32 | ScalarType::F64);
+                if checked {
+                    float_from && is_runtime_integer(to)
+                } else {
+                    float_to && (is_runtime_integer(from) || (float_from && from != to))
+                }
+            }
+            _ => true,
+        }
+    }
+
     pub(crate) fn scalar_signature(self) -> (Vec<ScalarType>, ScalarType) {
         match self {
             Self::Binary { width, .. } => {
@@ -222,8 +237,8 @@ impl FloatPrimitive {
                 }) * 12
                     + runtime_integer_ordinal(to).expect("validated float selector")
             }
-            // `parse_selector_name` and manifest construction admit only the
-            // four conversion forms above.
+            // Selector parsing, canonicalization, and direct binding validate
+            // public enum constructions before these private tag operations.
             Self::Convert { .. } => unreachable!("invalid floating runtime conversion"),
             Self::ToBits { width } => 74 + width_ordinal(width),
             Self::FromBits { width } => 76 + width_ordinal(width),
@@ -245,16 +260,8 @@ impl FloatPrimitive {
         if let Some((from, to)) = head.split_once("-to-") {
             let from = parse_scalar_name(from)?;
             let to = parse_scalar_name(to)?;
-            let float_from = matches!(from, ScalarType::F32 | ScalarType::F64);
-            let float_to = matches!(to, ScalarType::F32 | ScalarType::F64);
-            let integer_from = is_runtime_integer(from);
-            let integer_to = is_runtime_integer(to);
-            if ((float_from || integer_from) && float_to && !checked)
-                || (float_from && integer_to && checked)
-            {
-                return Some(Self::Convert { from, to, checked });
-            }
-            return None;
+            let primitive = Self::Convert { from, to, checked };
+            return primitive.is_valid().then_some(primitive);
         }
         for (suffix, operation) in [
             ("-add", FloatBinaryOp::Add),
@@ -575,9 +582,18 @@ pub enum PrimitiveRole {
 }
 
 impl PrimitiveRole {
-    /// Stable protocol tag used by request and manifest fingerprints.  Legacy
-    /// tags remain byte-for-byte unchanged; the newly introduced finite float
-    /// family occupies the following contiguous range.
+    fn validate(self) -> Result<(), ManifestError> {
+        if matches!(self, Self::Float(primitive) if !primitive.is_valid()) {
+            Err(ManifestError::InvalidRole(self))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Stable protocol tag used by request and manifest fingerprints. The
+    /// float family occupies 69..=146. Checked division was incorrectly
+    /// appended to the legacy list at tag 69; its corrected tag is 182.
+    /// Every other existing tag remains unchanged.
     pub(crate) fn stable_tag(self) -> u8 {
         if let Self::Float(primitive) = self {
             return 69 + primitive.ordinal();
@@ -618,9 +634,10 @@ impl PrimitiveRole {
             Self::StaticGetShared => return 165,
             Self::StaticAsArray => return 166,
             Self::StaticRawAsArray => return 181,
+            Self::IntCheckedDiv => return 182,
             _ => {}
         }
-        const LEGACY: [&str; 70] = [
+        const LEGACY: [&str; 69] = [
             "branch-bool",
             "text-byte-len",
             "text-concat",
@@ -690,7 +707,6 @@ impl PrimitiveRole {
             "int-convert-wrapping-to-u128",
             "int-convert-checked-to-i128",
             "int-convert-wrapping-to-i128",
-            "int-checked-div",
         ];
         LEGACY
             .iter()
@@ -1047,6 +1063,7 @@ pub struct TrustedRuntimeManifest {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManifestError {
+    InvalidRole(PrimitiveRole),
     DuplicateRole(PrimitiveRole),
     MissingDeclaration {
         module_path: String,
@@ -1079,6 +1096,9 @@ pub enum ManifestError {
 impl RuntimeManifestInput {
     pub fn canonicalize(&mut self) -> Result<(), ManifestError> {
         self.selectors.sort();
+        for selector in &self.selectors {
+            selector.role.validate()?;
+        }
         for pair in self.selectors.windows(2) {
             if pair[0].role == pair[1].role {
                 return Err(ManifestError::DuplicateRole(pair[0].role));
@@ -1120,6 +1140,7 @@ impl RuntimeManifestInput {
             .collect::<Vec<_>>();
         let mut selectors = BTreeMap::new();
         for selector in &self.selectors {
+            selector.role.validate()?;
             if selectors.insert(selector.role, selector).is_some() {
                 return Err(ManifestError::DuplicateRole(selector.role));
             }
@@ -2303,6 +2324,226 @@ fn manifest_digest(
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn malformed_float_self_conversion_selectors_are_rejected() {
+        for name in ["f32-to-f32", "f64-to-f64", "f32-to-f64-checked", "f64-to-f32-checked"] {
+            assert_eq!(PrimitiveRole::parse_selector_name(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn malformed_float_conversion_roles_are_rejected_before_world_hashing() {
+        let scalars = [ScalarType::Bool, ScalarType::U8, ScalarType::U16, ScalarType::U32,
+            ScalarType::U64, ScalarType::U128, ScalarType::I8, ScalarType::I16, ScalarType::I32,
+            ScalarType::I64, ScalarType::I128, ScalarType::Usize, ScalarType::Isize,
+            ScalarType::F32, ScalarType::F64, ScalarType::Char, ScalarType::Text, ScalarType::Bytes];
+        let mut admitted = 0;
+        for from in scalars {
+            for to in scalars {
+                for checked in [false, true] {
+                    let float_from = matches!(from, ScalarType::F32 | ScalarType::F64);
+                    let float_to = matches!(to, ScalarType::F32 | ScalarType::F64);
+                    let valid = (!checked && float_to && (is_runtime_integer(from) || (float_from && from != to)))
+                        || (checked && float_from && is_runtime_integer(to));
+                    let role = PrimitiveRole::Float(FloatPrimitive::Convert { from, to, checked });
+                    let mut input = RuntimeManifestInput { standard_library: PackageKey("std@0.1.0".into()),
+                        selectors: vec![PrimitiveSelector { role, module_path: "crate".into(), name: "leaf".into() }], host_imports: vec![] };
+                    let canonicalized = input.canonicalize();
+                    assert_eq!(canonicalized.is_ok(), valid, "{role:?}");
+                    if valid {
+                        admitted += 1;
+                        assert_eq!(PrimitiveRole::parse_selector_name(role.selector_name()), Some(role));
+                        assert!((69..=146).contains(&role.stable_tag()));
+                    } else {
+                        assert_eq!(canonicalized, Err(ManifestError::InvalidRole(role)));
+                        assert_eq!(input.bind([], &ElaboratedInterface::default()), Err(ManifestError::InvalidRole(role)));
+                    }
+                }
+            }
+        }
+        assert_eq!(admitted, 50);
+    }
+
+    #[test]
+    fn historical_checked_float_operation_aliases_keep_their_canonical_authority() {
+        for width in ["f32", "f64"] {
+            for operation in ["add", "sub", "mul", "div", "rem", "neg", "eq", "ne", "lt", "le", "gt", "ge"] {
+                let name = format!("{width}-{operation}");
+                let canonical = PrimitiveRole::parse_selector_name(&name).unwrap();
+                assert_eq!(PrimitiveRole::parse_selector_name(format!("{name}-checked")), Some(canonical));
+                assert_eq!(canonical.selector_name(), name);
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_authority_tags_are_unique_across_the_complete_finite_role_inventory() {
+        // Keep the non-float inventory explicit, including every declaration
+        // variant. The 78 valid parameterized float leaves are added below.
+        let mut roles = vec![
+            PrimitiveRole::Abort,
+            PrimitiveRole::BranchBool,
+            PrimitiveRole::TextByteLen,
+            PrimitiveRole::TextConcat,
+            PrimitiveRole::TextEq,
+            PrimitiveRole::TextFromUtf8Checked,
+            PrimitiveRole::TextAsBytes,
+            PrimitiveRole::CharFromU32Checked,
+            PrimitiveRole::CharToU32,
+            PrimitiveRole::BytesLen,
+            PrimitiveRole::BytesConcat,
+            PrimitiveRole::BytesGet,
+            PrimitiveRole::BytesSlice,
+            PrimitiveRole::BytesFromArrayMove,
+            PrimitiveRole::BytesToArray,
+            PrimitiveRole::BytesUtf8ValidUpTo,
+            PrimitiveRole::Blake3,
+            PrimitiveRole::U32CheckedAdd,
+            PrimitiveRole::U32CheckedSub,
+            PrimitiveRole::U32CheckedMul,
+            PrimitiveRole::U32CheckedDiv,
+            PrimitiveRole::U32CheckedRem,
+            PrimitiveRole::U32WrappingAdd,
+            PrimitiveRole::U32WrappingSub,
+            PrimitiveRole::U32WrappingMul,
+            PrimitiveRole::U32WrappingShl,
+            PrimitiveRole::U32WrappingShr,
+            PrimitiveRole::U32CheckedShl,
+            PrimitiveRole::U32CheckedShr,
+            PrimitiveRole::U32Eq,
+            PrimitiveRole::U32Lt,
+            PrimitiveRole::U32Le,
+            PrimitiveRole::U32ToUsize,
+            PrimitiveRole::UsizeToU32Checked,
+            PrimitiveRole::IntCheckedAdd,
+            PrimitiveRole::IntCheckedDiv,
+            PrimitiveRole::IntWrappingAdd,
+            PrimitiveRole::IntConvertCheckedToI64,
+            PrimitiveRole::IntConvertWrappingToI64,
+            PrimitiveRole::IntConvertWrappingToU32,
+            PrimitiveRole::IntConvertWrappingToUsize,
+            PrimitiveRole::IntConvertWrappingToU8,
+            PrimitiveRole::IntConvertWrappingToU16,
+            PrimitiveRole::IntConvertWrappingToI16,
+            PrimitiveRole::IntWrappingSub,
+            PrimitiveRole::IntWrappingMul,
+            PrimitiveRole::IntWrappingNeg,
+            PrimitiveRole::IntEqual,
+            PrimitiveRole::IntLess,
+            PrimitiveRole::IntGreater,
+            PrimitiveRole::IntBitAnd,
+            PrimitiveRole::IntBitOr,
+            PrimitiveRole::IntBitXor,
+            PrimitiveRole::IntBitNot,
+            PrimitiveRole::IntShr,
+            PrimitiveRole::IntShl,
+            PrimitiveRole::IntConvertCheckedToU32,
+            PrimitiveRole::IntConvertCheckedToUsize,
+            PrimitiveRole::IntConvertCheckedToU8,
+            PrimitiveRole::IntConvertCheckedToU16,
+            PrimitiveRole::IntConvertCheckedToI16,
+            PrimitiveRole::IntConvertCheckedToI32,
+            PrimitiveRole::IntConvertWrappingToI32,
+            PrimitiveRole::IntConvertCheckedToI8,
+            PrimitiveRole::IntConvertWrappingToI8,
+            PrimitiveRole::IntConvertCheckedToU64,
+            PrimitiveRole::IntConvertWrappingToU64,
+            PrimitiveRole::IntConvertCheckedToIsize,
+            PrimitiveRole::IntConvertWrappingToIsize,
+            PrimitiveRole::IntConvertCheckedToU128,
+            PrimitiveRole::IntConvertWrappingToU128,
+            PrimitiveRole::IntConvertCheckedToI128,
+            PrimitiveRole::IntConvertWrappingToI128,
+            PrimitiveRole::ArrayNew,
+            PrimitiveRole::ArrayLen,
+            PrimitiveRole::ArrayUtf8ValidUpTo,
+            PrimitiveRole::ArrayPushUtf8Char,
+            PrimitiveRole::ArrayExtendFromSlice,
+            PrimitiveRole::ArrayInsertMove,
+            PrimitiveRole::ArrayRemoveMove,
+            PrimitiveRole::ArrayAppendMove,
+            PrimitiveRole::ArrayInsertFromSlice,
+            PrimitiveRole::ArrayInsertUtf8FromSlice,
+            PrimitiveRole::ArrayTruncateDiscard,
+            PrimitiveRole::ArrayReverseMove,
+            PrimitiveRole::ArraySplitOffMove,
+            PrimitiveRole::ArraySplitBorrowUnique,
+            PrimitiveRole::ArrayPopUtf8Char,
+            PrimitiveRole::ArrayUtf8CharAt,
+            PrimitiveRole::ArrayGetCopy,
+            PrimitiveRole::ArrayGetMove,
+            PrimitiveRole::ArrayGetBorrowShared,
+            PrimitiveRole::ArrayGetBorrowUnique,
+            PrimitiveRole::ArraySetMove,
+            PrimitiveRole::ArrayEmpty,
+            PrimitiveRole::ArrayPushMove,
+            PrimitiveRole::ArrayPopMove,
+            PrimitiveRole::ArrayCapacity,
+            PrimitiveRole::ArrayReserve,
+            PrimitiveRole::ArrayFinishDrained,
+            PrimitiveRole::StaticLen,
+            PrimitiveRole::StaticSubslice,
+            PrimitiveRole::StaticGetShared,
+            PrimitiveRole::StaticAsArray,
+            PrimitiveRole::StaticRawAsArray,
+        ];
+        for width in ["f32", "f64"] {
+            for operation in ["add", "sub", "mul", "div", "rem", "neg", "eq", "ne", "lt", "le", "gt", "ge"] {
+                roles.push(PrimitiveRole::parse_selector_name(format!("{width}-{operation}")).unwrap());
+            }
+            for direction in ["to", "from"] {
+                roles.push(PrimitiveRole::parse_selector_name(format!("{width}-{direction}-bits")).unwrap());
+            }
+        }
+        for name in ["f32-to-f64", "f64-to-f32"] {
+            roles.push(PrimitiveRole::parse_selector_name(name).unwrap());
+        }
+        for integer in ["u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize"] {
+            for width in ["f32", "f64"] {
+                for name in [format!("{integer}-to-{width}"), format!("{width}-to-{integer}-checked")] {
+                    roles.push(PrimitiveRole::parse_selector_name(name).unwrap());
+                }
+            }
+        }
+        assert_eq!(roles.len(), 183);
+        assert_eq!(roles.iter().copied().collect::<BTreeSet<_>>().len(), 183);
+        let mut tags = BTreeMap::new();
+        for role in roles {
+            assert_eq!(PrimitiveRole::parse_selector_name(role.selector_name()), Some(role));
+            let previous = tags.insert(role.stable_tag(), role);
+            assert!(previous.is_none(), "runtime tag {} aliases {previous:?} and {role:?}", role.stable_tag());
+        }
+        assert_eq!(tags.keys().copied().collect::<Vec<_>>(), (0..=182).collect::<Vec<u8>>());
+        // Shared immutable witnesses for the source-owned role comparator.
+        // Check exact tags here, where the native private encoding is visible;
+        // the source fixture separately executes its own metadata functions.
+        let mut witnessed = BTreeMap::new();
+        for line in include_str!("../../../compiler/spec/runtime-authority.tsv").lines().skip(1) {
+            let (name, tag) = line.split_once('\t').unwrap();
+            let role = PrimitiveRole::parse_selector_name(name).unwrap();
+            let tag = tag.parse::<u8>().unwrap();
+            assert_eq!(role.selector_name(), name);
+            assert_eq!(role.stable_tag(), tag, "{name}");
+            assert!(witnessed.insert(tag, role).is_none(), "duplicate witness tag");
+        }
+        assert_eq!(witnessed, tags, "source witness inventory must cover every native role");
+        assert_eq!(PrimitiveRole::IntCheckedDiv.stable_tag(), 182);
+        assert_eq!(PrimitiveRole::parse_selector_name("f32-add").unwrap().stable_tag(), 69);
+    }
+
+    #[test]
+    fn bound_manifest_fingerprints_distinguish_integer_division_and_float_addition_authority() {
+        let package = PackageKey("std@0.1.0".into());
+        let definition = DefKey(Digest::of_bytes(b"same-declaration"));
+        let integer = BTreeMap::from([(PrimitiveRole::IntCheckedDiv, definition)]);
+        let float = BTreeMap::from([(PrimitiveRole::parse_selector_name("f32-add").unwrap(), definition)]);
+        assert_ne!(
+            manifest_digest(&package, &integer, &BTreeMap::new()),
+            manifest_digest(&package, &float, &BTreeMap::new())
+        );
+    }
+
 
     #[test]
     fn canonical_float_leaf_selectors_are_finite_unique_and_round_trip() {

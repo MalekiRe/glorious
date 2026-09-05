@@ -1,0 +1,533 @@
+use std::*;
+use super::identity;
+use super::identity::Digest;
+use super::identity::RevisionId;
+use super::operation;
+pub mod node;
+use node::Node;
+
+pub enum Status {
+    Cold, Green { parent: RevisionId }, Red { parent: RevisionId, first_changed: Node },
+    Cycle { parent: Option<RevisionId>, member: Node }, Incomplete { missing: Node },
+}
+pub struct Trace { revision: RevisionId, node: Node, fingerprint: Digest, dependencies: Vec<Node>, status: Status }
+pub struct Limits { nodes: usize, edges: usize }
+pub enum Failure { Foreign, Closed, Busy, Capacity, ParentChanged, Invariant, Control(operation::Failure) }
+pub enum Progress { Continue, Ready }
+struct Row { version: u64, traces: Vec<Trace>, index: HashMap<Node, usize> }
+pub struct Ledger { private database: u64, private limit: usize, private version: u64, private revisions: HashMap<RevisionId, Option<Row>> }
+pub impl Use<[0, 1]> for Ledger {}
+struct Fact { node: Node, fingerprint: Digest, dependencies: Vec<Node> }
+enum Color { Unseen, Active, Done(Status) }
+struct Walk { fact: usize, cursor: usize, changed: Option<Node>, cycle: Option<Node>, missing: Option<Node> }
+enum Phase {
+    Recording, Roots { outer: usize, inner: usize },
+    Edges { fact: usize, outer: usize, inner: usize },
+    Dedup { fact: usize, read: usize, write: usize }, Trim { fact: usize, length: usize },
+    Walking, Comparing { fact: usize, parent_trace: usize, cursor: usize },
+    Freeze { cursor: usize }, Complete,
+}
+struct Work {
+    facts: Vec<Fact>, index: HashMap<Node, usize>, roots: Vec<usize>, colors: Vec<Color>,
+    stack: Vec<Walk>, root: usize, phase: Phase, edges: usize, output: Row,
+}
+pub struct Transaction {
+    private revision: RevisionId, private parent: Option<RevisionId>, private parent_version: Option<u64>,
+    private limits: Limits, private work: Option<Work>,
+}
+pub impl Use<[0, 1]> for Transaction {}
+
+pub fn create(database: u64, revisions: usize) -> Ledger {
+    Ledger { database: database, limit: revisions, version: 0, revisions: HashMap::new() }
+}
+fn version(ledger: &Ledger, parent: Option<RevisionId>) -> Option<u64> {
+    handle parent {
+        Result::Err(_) => None,
+        Result::Ok(revision) => handle row(ledger, revision) {
+            Result::Err(_) => None, Result::Ok(row) => Result::Ok(row.version),
+        },
+    }
+}
+fn row<'a>(ledger: &'a Ledger, revision: RevisionId) -> Option<&'a Row> {
+    handle HashMap::get<'a, RevisionId, Option<Row>>(&ledger.revisions, &revision) {
+        Result::Err(_) => None,
+        Result::Ok(slot) => handle Result::as_ref(slot) { Result::Err(_) => None, Result::Ok(value) => Result::Ok(value) },
+    }
+}
+fn same_version(left: Option<u64>, right: Option<u64>) -> Bool {
+    handle left {
+        Result::Err(_) => handle right { Result::Err(_) => true, _ => false },
+        Result::Ok(a) => handle right { Result::Ok(b) => a == b, _ => false },
+    }
+}
+fn parent_valid(revision: RevisionId, parent: Option<RevisionId>) -> Bool {
+    handle parent {
+        Result::Err(_) => true,
+        Result::Ok(value) => handle value.database == revision.database { false => false, true => value.ordinal < revision.ordinal },
+    }
+}
+pub fn begin(ledger: &Ledger, revision: RevisionId, parent: Option<RevisionId>, limits: Limits) -> Result<Transaction, Failure> {
+    handle revision.database == ledger.database {
+        false => Result::Err(Failure::Foreign),
+        true => handle parent_valid(revision, parent) {
+            false => Result::Err(Failure::Foreign),
+            true => Result::Ok(Transaction { revision: revision, parent: parent, parent_version: version(ledger, parent),
+                limits: limits, work: Result::Ok(Work { facts: Vec::new(), index: HashMap::new(), roots: Vec::new(),
+                    colors: Vec::new(), stack: Vec::new(), root: 0, edges: 0, phase: Phase::Recording,
+                    output: Row { version: 0, traces: Vec::new(), index: HashMap::new() } }) }),
+        },
+    }
+}
+pub fn abort(transaction: &mut Transaction) -> () { (*transaction).work = None; }
+fn parent_unchanged(ledger: &Ledger, transaction: &Transaction) -> Result<(), Failure> {
+    // Once an error has discarded staging, subsequent uses observe a closed
+    // transaction, not a stale-parent condition that is no longer actionable.
+    handle Result::as_ref(&transaction.work) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(_) => check_parent_version(ledger, transaction),
+    }
+}
+fn check_parent_version(ledger: &Ledger, transaction: &Transaction) -> Result<(), Failure> {
+    handle ledger.database == transaction.revision.database {
+        false => Result::Err(Failure::Foreign),
+        true => handle same_version(version(ledger, transaction.parent), transaction.parent_version) {
+            false => Result::Err(Failure::ParentChanged), true => Result::Ok(()),
+        },
+    }
+}
+fn index_of(work: &Work, key: &Node) -> Option<usize> {
+    handle HashMap::get(&work.index, key) { Result::Err(_) => None, Result::Ok(index) => Result::Ok(*index) }
+}
+fn old_edges(work: &Work, index: Option<usize>) -> usize {
+    handle index { Result::Err(_) => 0, Result::Ok(index) => Vec::len(&Vec::get_unchecked(&work.facts, index).dependencies) }
+}
+fn write_at<T>(values: &mut Vec<T>, index: usize, incoming: T) -> Result<(), Failure> where T: Use<[0, 1]> {
+    handle Vec::get_mut(values, index) {
+        Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(value) => { *value = incoming; Result::Ok(()) },
+    }
+}
+pub fn record(transaction: &mut Transaction, controls: &mut operation::Controls, node: Node,
+    fingerprint: Digest, dependencies: Vec<Node>) -> Result<(), Failure> {
+    let result = record_checked(&mut *transaction, controls, node, fingerprint, dependencies);
+    handle result { Result::Ok(_) => Result::Ok(()), Result::Err(error) => { abort(transaction); Result::Err(error) } }
+}
+fn record_checked(transaction: &mut Transaction, controls: &mut operation::Controls, node: Node,
+    fingerprint: Digest, dependencies: Vec<Node>) -> Result<(), Failure> {
+    handle operation::charge(controls, 1) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
+        Result::Ok(_) => handle Result::as_mut(&mut transaction.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle work.phase {
+                Phase::Recording => record_open(work, transaction.limits, node, fingerprint, dependencies),
+                _ => Result::Err(Failure::Busy),
+            },
+        },
+    }
+}
+fn record_open(work: &mut Work, limits: Limits, node: Node, fingerprint: Digest, dependencies: Vec<Node>) -> Result<(), Failure> {
+    let index = index_of(& *work, &node);
+    let retained = work.edges - old_edges(& *work, index);
+    handle Vec::len(&dependencies) <= limits.edges - retained {
+        false => Result::Err(Failure::Capacity),
+        true => {
+            (*work).edges = retained + Vec::len(&dependencies);
+            let fact = Fact { node: node, fingerprint: fingerprint, dependencies: dependencies };
+            handle index {
+                Result::Ok(index) => write_at(&mut work.facts, index, fact),
+                Result::Err(_) => handle Vec::len(&work.facts) < limits.nodes {
+                    false => Result::Err(Failure::Capacity),
+                    true => {
+                        let index = Vec::len(&work.facts);
+                        HashMap::insert(&mut work.index, node, index);
+                        Vec::push(&mut work.facts, fact);
+                        Vec::push(&mut work.roots, index);
+                        Vec::push(&mut work.colors, Color::Unseen);
+                        Result::Ok(())
+                    },
+                },
+            }
+        },
+    }
+}
+pub fn seal(transaction: &mut Transaction) -> Result<(), Failure> {
+    let result = seal_open(&mut *transaction);
+    handle result { Result::Ok(_) => Result::Ok(()), Result::Err(error) => { abort(transaction); Result::Err(error) } }
+}
+fn seal_open(transaction: &mut Transaction) -> Result<(), Failure> {
+    handle Result::as_mut(&mut transaction.work) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(work) => handle work.phase {
+            Phase::Recording => { (*work).phase = Phase::Roots { outer: 1, inner: 1 }; Result::Ok(()) },
+            _ => Result::Err(Failure::Busy),
+        },
+    }
+}
+
+// Sorting, deduplication, DFS, parent comparison, and freezing all have
+// explicit cursors. A poll does one comparison, edge, or stack transition.
+pub fn step(ledger: &Ledger, transaction: &mut Transaction, controls: &mut operation::Controls) -> Result<Progress, Failure> {
+    let result = step_checked(ledger, &mut *transaction, controls);
+    handle result { Result::Ok(progress) => Result::Ok(progress), Result::Err(error) => { abort(transaction); Result::Err(error) } }
+}
+fn step_checked(ledger: &Ledger, transaction: &mut Transaction, controls: &mut operation::Controls) -> Result<Progress, Failure> {
+    handle operation::charge(controls, 1) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
+        Result::Ok(_) => handle parent_unchanged(ledger, & *transaction) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle Result::as_mut(&mut transaction.work) {
+                Result::Err(_) => Result::Err(Failure::Closed),
+                Result::Ok(work) => advance(ledger, transaction.revision, transaction.parent, work),
+            },
+        },
+    }
+}
+fn continuing() -> Result<Progress, Failure> { Result::Ok(Progress::Continue) }
+fn advance(ledger: &Ledger, revision: RevisionId, parent: Option<RevisionId>, work: &mut Work) -> Result<Progress, Failure> {
+    handle work.phase {
+        Phase::Recording => Result::Err(Failure::Busy), Phase::Complete => Result::Ok(Progress::Ready),
+        Phase::Roots { outer: outer, inner: inner } => sort_roots(work, outer, inner),
+        Phase::Edges { fact: fact, outer: outer, inner: inner } => sort_edges(work, fact, outer, inner),
+        Phase::Dedup { fact: fact, read: read, write: write } => dedup(work, fact, read, write),
+        Phase::Trim { fact: fact, length: length } => trim(work, fact, length),
+        Phase::Walking => walk(ledger, parent, work),
+        Phase::Comparing { fact: fact, parent_trace: old, cursor: cursor } => compare_parent(ledger, parent, work, fact, old, cursor),
+        Phase::Freeze { cursor: cursor } => freeze(work, revision, cursor),
+    }
+}
+fn root_order(work: &Work, a: usize, b: usize) -> Ordering {
+    let left = *Vec::get_unchecked(&work.roots, a);
+    let right = *Vec::get_unchecked(&work.roots, b);
+    node::compare(&Vec::get_unchecked(&work.facts, left).node, &Vec::get_unchecked(&work.facts, right).node)
+}
+fn sort_roots(work: &mut Work, outer: usize, inner: usize) -> Result<Progress, Failure> {
+    handle outer >= Vec::len(&work.roots) {
+        true => { (*work).phase = Phase::Edges { fact: 0, outer: 1, inner: 1 }; continuing() },
+        false => handle inner == 0 {
+            true => { (*work).phase = Phase::Roots { outer: outer + 1, inner: outer + 1 }; continuing() },
+            false => handle root_order(& *work, inner - 1, inner) {
+                Ordering::Greater => {
+                    Vec::swap(&mut work.roots, inner - 1, inner);
+                    (*work).phase = Phase::Roots { outer: outer, inner: inner - 1 }; continuing()
+                },
+                _ => { (*work).phase = Phase::Roots { outer: outer + 1, inner: outer + 1 }; continuing() },
+            },
+        },
+    }
+}
+fn sort_edges(work: &mut Work, fact: usize, outer: usize, inner: usize) -> Result<Progress, Failure> {
+    handle fact >= Vec::len(&work.facts) {
+        true => { (*work).phase = Phase::Walking; continuing() },
+        false => handle Vec::get_mut(&mut work.facts, fact) {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(value) => {
+                (*work).phase = edge_sort_step(&mut value.dependencies, fact, outer, inner);
+                continuing()
+            },
+        },
+    }
+}
+fn edge_sort_step(edges: &mut Vec<Node>, fact: usize, outer: usize, inner: usize) -> Phase {
+    handle outer >= Vec::len(& *edges) {
+        true => handle Vec::len(& *edges) == 0 {
+            true => Phase::Trim { fact: fact, length: 0 },
+            false => Phase::Dedup { fact: fact, read: 1, write: 1 },
+        },
+        false => handle inner == 0 {
+            true => Phase::Edges { fact: fact, outer: outer + 1, inner: outer + 1 },
+            false => handle node::compare(Vec::get_unchecked(& *edges, inner - 1), Vec::get_unchecked(& *edges, inner)) {
+                Ordering::Greater => { Vec::swap(&mut *edges, inner - 1, inner); Phase::Edges { fact: fact, outer: outer, inner: inner - 1 } },
+                _ => Phase::Edges { fact: fact, outer: outer + 1, inner: outer + 1 },
+            },
+        },
+    }
+}
+fn dedup(work: &mut Work, fact: usize, read: usize, write: usize) -> Result<Progress, Failure> {
+    handle Vec::get_mut(&mut work.facts, fact) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(value) => handle read >= Vec::len(&value.dependencies) {
+            true => { (*work).phase = Phase::Trim { fact: fact, length: write }; continuing() },
+            false => handle node::same(Vec::get_unchecked(&value.dependencies, read), Vec::get_unchecked(&value.dependencies, write - 1)) {
+                true => { (*work).phase = Phase::Dedup { fact: fact, read: read + 1, write: write }; continuing() },
+                false => {
+                    let key = *Vec::get_unchecked(&value.dependencies, read);
+                    handle write_at(&mut value.dependencies, write, key) {
+                        Result::Err(error) => Result::Err(error),
+                        Result::Ok(_) => { (*work).phase = Phase::Dedup { fact: fact, read: read + 1, write: write + 1 }; continuing() },
+                    }
+                },
+            },
+        },
+    }
+}
+fn trim(work: &mut Work, fact: usize, length: usize) -> Result<Progress, Failure> {
+    handle Vec::get_mut(&mut work.facts, fact) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(value) => handle Vec::len(&value.dependencies) > length {
+            true => { Vec::pop(&mut value.dependencies); continuing() },
+            false => { (*work).phase = Phase::Edges { fact: fact + 1, outer: 1, inner: 1 }; continuing() },
+        },
+    }
+}
+
+fn push(work: &mut Work, fact: usize) -> Result<Progress, Failure> {
+    handle write_at(&mut work.colors, fact, Color::Active) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => {
+            Vec::push(&mut work.stack, Walk { fact: fact, cursor: 0, changed: None, cycle: None, missing: None });
+            continuing()
+        },
+    }
+}
+fn walk(ledger: &Ledger, parent: Option<RevisionId>, work: &mut Work) -> Result<Progress, Failure> {
+    handle Vec::len(&work.stack) {
+        0 => handle work.root < Vec::len(&work.roots) {
+            false => { (*work).phase = Phase::Freeze { cursor: 0 }; continuing() },
+            true => {
+                let index = *Vec::get_unchecked(&work.roots, work.root);
+                (*work).root = work.root + 1;
+                handle *Vec::get_unchecked(&work.colors, index) {
+                    Color::Unseen => push(work, index), Color::Done(_) => continuing(), _ => Result::Err(Failure::Invariant),
+                }
+            },
+        },
+        length => {
+            let frame = *Vec::get_unchecked(&work.stack, length - 1);
+            let fact = Vec::get_unchecked(&work.facts, frame.fact);
+            handle Vec::get(&fact.dependencies, frame.cursor) {
+                Result::Err(_) => finish_node(ledger, parent, work, frame),
+                Result::Ok(child) => visit(work, parent, *child, length - 1),
+            }
+        },
+    }
+}
+fn visit(work: &mut Work, parent: Option<RevisionId>, child: Node, top: usize) -> Result<Progress, Failure> {
+    handle Vec::get_mut(&mut work.stack, top) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(frame) => {
+            (*frame).cursor = frame.cursor + 1;
+            visit_child(work, parent, child)
+        },
+    }
+}
+fn visit_child(work: &mut Work, parent: Option<RevisionId>, child: Node) -> Result<Progress, Failure> {
+    handle index_of(& *work, &child) {
+        Result::Err(_) => observe(work, Status::Incomplete { missing: child }, child),
+        Result::Ok(index) => handle *Vec::get_unchecked(&work.colors, index) {
+            Color::Unseen => push(work, index),
+            Color::Active => observe(work, Status::Cycle { parent: parent, member: child }, child),
+            Color::Done(status) => observe(work, status, child),
+        },
+    }
+}
+fn first(target: &mut Option<Node>, incoming: Node) -> () {
+    handle Result::as_ref(& *target) { Result::Err(_) => { *target = Result::Ok(incoming); }, _ => () }
+}
+fn observe(work: &mut Work, status: Status, child: Node) -> Result<Progress, Failure> {
+    handle Vec::len(&work.stack) {
+        0 => continuing(),
+        length => handle Vec::get_mut(&mut work.stack, length - 1) {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(frame) => {
+                observe_frame(frame, status, child);
+                continuing()
+            },
+        },
+    }
+}
+fn observe_frame(frame: &mut Walk, status: Status, child: Node) -> () {
+    handle status {
+        Status::Green { parent: _ } => (),
+        Status::Cold => first(&mut frame.changed, child),
+        Status::Red { parent: _, first_changed: changed } => first(&mut frame.changed, changed),
+        Status::Cycle { parent: _, member: member } => { first(&mut frame.cycle, member); first(&mut frame.changed, member); },
+        Status::Incomplete { missing: missing } => { first(&mut frame.missing, missing); first(&mut frame.changed, missing); },
+    }
+}
+fn complete_node(work: &mut Work, fact: usize, status: Status) -> Result<Progress, Failure> {
+    let child = Vec::get_unchecked(&work.facts, fact).node;
+    handle write_at(&mut work.colors, fact, Color::Done(status)) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => {
+            Vec::pop(&mut work.stack);
+            (*work).phase = Phase::Walking;
+            observe(work, status, child)
+        },
+    }
+}
+fn finish_node(ledger: &Ledger, parent: Option<RevisionId>, work: &mut Work, frame: Walk) -> Result<Progress, Failure> {
+    handle frame.missing {
+        Result::Ok(node) => complete_node(work, frame.fact, Status::Incomplete { missing: node }),
+        Result::Err(_) => handle frame.cycle {
+            Result::Ok(node) => complete_node(work, frame.fact, Status::Cycle { parent: parent, member: node }),
+            Result::Err(_) => match_parent(ledger, parent, work, frame),
+        },
+    }
+}
+fn parent_index(ledger: &Ledger, parent: Option<RevisionId>, node: &Node) -> Option<usize> {
+    handle parent {
+        Result::Err(_) => None,
+        Result::Ok(revision) => handle row(ledger, revision) {
+            Result::Err(_) => None,
+            Result::Ok(row) => handle HashMap::get(&row.index, node) { Result::Err(_) => None, Result::Ok(index) => Result::Ok(*index) },
+        },
+    }
+}
+fn parent_trace<'a>(ledger: &'a Ledger, parent: Option<RevisionId>, index: usize) -> Option<&'a Trace> {
+    handle parent {
+        Result::Err(_) => None,
+        Result::Ok(revision) => handle row(ledger, revision) {
+            Result::Err(_) => None, Result::Ok(row) => Vec::get(&row.traces, index),
+        },
+    }
+}
+fn changed_status(parent: Option<RevisionId>, node: Node, changed: Option<Node>) -> Status {
+    handle parent {
+        Result::Err(_) => Status::Cold,
+        Result::Ok(revision) => handle changed {
+            Result::Err(_) => Status::Red { parent: revision, first_changed: node },
+            Result::Ok(key) => Status::Red { parent: revision, first_changed: key },
+        },
+    }
+}
+fn reject_reuse(work: &mut Work, parent: Option<RevisionId>, frame: Walk) -> Result<Progress, Failure> {
+    let node = Vec::get_unchecked(&work.facts, frame.fact).node;
+    complete_node(work, frame.fact, changed_status(parent, node, frame.changed))
+}
+fn same_shape(left: &Fact, right: &Trace) -> Bool {
+    handle identity::equal(left.fingerprint, right.fingerprint) {
+        false => false, true => Vec::len(&left.dependencies) == Vec::len(&right.dependencies),
+    }
+}
+fn match_parent(ledger: &Ledger, parent: Option<RevisionId>, work: &mut Work, frame: Walk) -> Result<Progress, Failure> {
+    let fact = Vec::get_unchecked(&work.facts, frame.fact);
+    handle parent_index(ledger, parent, &fact.node) {
+        Result::Err(_) => complete_node(work, frame.fact, Status::Cold),
+        Result::Ok(index) => handle parent_trace(ledger, parent, index) {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(old) => handle same_shape(fact, old) {
+                false => reject_reuse(work, parent, frame),
+                true => { (*work).phase = Phase::Comparing { fact: frame.fact, parent_trace: index, cursor: 0 }; continuing() },
+            },
+        },
+    }
+}
+fn compare_parent(ledger: &Ledger, parent: Option<RevisionId>, work: &mut Work, fact: usize, old: usize, cursor: usize) -> Result<Progress, Failure> {
+    handle parent {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(revision) => handle parent_trace(ledger, parent, old) {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(previous) => compare_edge(work, revision, fact, old, previous, cursor),
+        },
+    }
+}
+fn compare_edge(work: &mut Work, parent: RevisionId, fact: usize, old_index: usize, old: &Trace, cursor: usize) -> Result<Progress, Failure> {
+    let value = Vec::get_unchecked(&work.facts, fact);
+    handle cursor >= Vec::len(&value.dependencies) {
+        true => complete_node(work, fact, Status::Green { parent: parent }),
+        false => handle node::same(Vec::get_unchecked(&value.dependencies, cursor), Vec::get_unchecked(&old.dependencies, cursor)) {
+            true => { (*work).phase = Phase::Comparing { fact: fact, parent_trace: old_index, cursor: cursor + 1 }; continuing() },
+            false => handle Vec::last(&work.stack) {
+                Result::Err(_) => Result::Err(Failure::Invariant),
+                Result::Ok(frame) => reject_reuse(work, Result::Ok(parent), *frame),
+            },
+        },
+    }
+}
+fn freeze(work: &mut Work, revision: RevisionId, cursor: usize) -> Result<Progress, Failure> {
+    handle cursor < Vec::len(&work.roots) {
+        false => { (*work).phase = Phase::Complete; Result::Ok(Progress::Ready) },
+        true => {
+            let index = *Vec::get_unchecked(&work.roots, cursor);
+            let fact = Vec::get_unchecked(&work.facts, index);
+            handle *Vec::get_unchecked(&work.colors, index) {
+                Color::Done(status) => {
+                    let trace = Trace { revision: revision, node: fact.node, fingerprint: fact.fingerprint, dependencies: fact.dependencies, status: status };
+                    HashMap::insert(&mut work.output.index, fact.node, cursor);
+                    Vec::push(&mut work.output.traces, trace);
+                    (*work).phase = Phase::Freeze { cursor: cursor + 1 };
+                    continuing()
+                },
+                _ => Result::Err(Failure::Invariant),
+            }
+        },
+    }
+}
+pub fn commit(ledger: &mut Ledger, transaction: &mut Transaction, controls: &operation::Controls) -> Result<(), Failure> {
+    let result = commit_checked(ledger, &mut *transaction, controls);
+    handle result { Result::Ok(_) => Result::Ok(()), Result::Err(error) => { abort(transaction); Result::Err(error) } }
+}
+fn commit_checked(ledger: &mut Ledger, transaction: &mut Transaction, controls: &operation::Controls) -> Result<(), Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
+        Result::Ok(_) => handle parent_unchanged(& *ledger, & *transaction) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle Result::as_ref(&transaction.work) {
+                Result::Err(_) => Result::Err(Failure::Closed),
+                Result::Ok(work) => handle work.phase {
+                    Phase::Complete => publish(ledger, transaction, controls), _ => Result::Err(Failure::Busy),
+                },
+            },
+        },
+    }
+}
+fn room(ledger: &Ledger, revision: RevisionId) -> Bool {
+    handle HashMap::contains_key(&ledger.revisions, &revision) { true => true, false => HashMap::len(&ledger.revisions) < ledger.limit }
+}
+fn publish(ledger: &mut Ledger, transaction: &mut Transaction, controls: &operation::Controls) -> Result<(), Failure> {
+    handle ledger.version == 18446744073709551615 {
+        true => Result::Err(Failure::Capacity),
+        false => handle room(& *ledger, transaction.revision) {
+            false => Result::Err(Failure::Capacity),
+            true => handle Option::take(&mut transaction.work) {
+                Result::Err(_) => Result::Err(Failure::Closed),
+                Result::Ok(work) => {
+                    let next = wrapping_add(ledger.version, 1);
+                    let row = Row { version: next, traces: work.output.traces, index: work.output.index };
+                    publish_row(ledger, transaction.revision, row, controls)
+                },
+            },
+        },
+    }
+}
+// Allocate a missing directory entry BEFORE the final cancellation check.
+// There is no yield or observable placeholder between preparation and commit.
+// A replacement keeps its old row until the one non-failing slot assignment.
+fn publish_row(ledger: &mut Ledger, revision: RevisionId, row: Row, controls: &operation::Controls) -> Result<(), Failure> {
+    let existing = HashMap::contains_key(&ledger.revisions, &revision);
+    reserve_row_slot(&mut ledger.revisions, revision, existing);
+    let next = row.version;
+    let result = publish_slot(&mut ledger.revisions, revision, row, controls);
+    handle result {
+        Result::Ok(_) => { (*ledger).version = next; Result::Ok(()) },
+        Result::Err(error) => {
+            discard_empty_slot(&mut ledger.revisions, revision, existing);
+            Result::Err(error)
+        },
+    }
+}
+fn reserve_row_slot(rows: &mut HashMap<RevisionId, Option<Row>>, revision: RevisionId, existing: Bool) -> () {
+    handle existing { true => (), false => { HashMap::insert(rows, revision, None); () } }
+}
+fn discard_empty_slot(rows: &mut HashMap<RevisionId, Option<Row>>, revision: RevisionId, existing: Bool) -> () {
+    handle existing { true => (), false => { HashMap::remove(rows, &revision); () } }
+}
+fn publish_slot(rows: &mut HashMap<RevisionId, Option<Row>>, revision: RevisionId, row: Row,
+    controls: &operation::Controls) -> Result<(), Failure> {
+    handle HashMap::get_mut(rows, &revision) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(slot) => handle operation::check(controls) {
+            Result::Err(error) => Result::Err(Failure::Control(error)),
+            Result::Ok(_) => { *slot = Result::Ok(row); Result::Ok(()) },
+        },
+    }
+}
+pub fn trace<'a>(ledger: &'a Ledger, revision: RevisionId, node: &Node) -> Option<&'a Trace> {
+    handle parent_index(ledger, Result::Ok(revision), node) {
+        Result::Err(_) => None, Result::Ok(index) => parent_trace(ledger, Result::Ok(revision), index),
+    }
+}
+pub fn traces<'a>(ledger: &'a Ledger, revision: RevisionId) -> Option<Slice<'a, Trace>> {
+    handle row(ledger, revision) { Result::Err(_) => None, Result::Ok(row) => Result::Ok(Vec::as_slice(&row.traces)) }
+}
+pub fn remove_revision(ledger: &mut Ledger, revision: RevisionId) -> () { HashMap::remove(&mut ledger.revisions, &revision); () }
+pub fn revision_count(ledger: &Ledger) -> usize { HashMap::len(&ledger.revisions) }

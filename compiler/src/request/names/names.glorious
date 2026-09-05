@@ -1,0 +1,205 @@
+use std::*;
+use super::Failure;
+use super::InputError;
+use super::Event;
+use super::super::kernel::identity::PackageKey;
+use super::super::kernel::operation;
+
+// These values certify one input name, not uniqueness within a whole world.
+pub struct PackageAlias { private package: PackageKey, private alias: String }
+pub struct Capability { private value: String }
+pub struct AliasBuilder { private work: Option<AliasWork>, private limit: usize }
+pub impl Use<[0, 1]> for AliasBuilder {}
+struct AliasWork { package: PackageKey, alias: String, cursor: usize, ready: Bool }
+enum AliasIssue { Invalid, Capacity }
+pub struct CapabilityBuilder { private work: Option<CapabilityWork>, private limit: usize }
+pub impl Use<[0, 1]> for CapabilityBuilder {}
+struct CapabilityWork { value: String, cursor: usize, ready: Bool }
+
+pub fn package<'a>(value: &'a PackageAlias) -> &'a PackageKey { &value.package }
+pub fn alias_text<'a>(value: &'a PackageAlias) -> Str<'a> { String::as_str(&value.alias) }
+pub fn capability_text<'a>(value: &'a Capability) -> Str<'a> { String::as_str(&value.value) }
+pub fn alias_parts(value: PackageAlias) -> (PackageKey, String) {
+    handle value { PackageAlias { package: package, alias: alias } => (package, alias) }
+}
+fn charge(controls: &mut operation::Controls) -> Result<(), Failure> {
+    handle operation::charge(controls, 1) {
+        Result::Err(error) => Result::Err(Failure::Control(error)), Result::Ok(_) => Result::Ok(()),
+    }
+}
+pub fn begin_alias(package: PackageKey, limit: usize) -> AliasBuilder {
+    AliasBuilder { work: Result::Ok(AliasWork { package: package, alias: String::new(), cursor: 0, ready: false }), limit: limit }
+}
+pub fn abort_alias(builder: &mut AliasBuilder) -> () { (*builder).work = None; }
+fn letter(byte: u8) -> Bool {
+    handle byte >= 65 {
+        false => false,
+        true => handle byte <= 90 { true => true, false => handle byte >= 97 { false => false, true => byte <= 122 } },
+    }
+}
+fn allowed(byte: u8, first: Bool) -> Bool {
+    handle byte == 95 {
+        true => true,
+        false => handle letter(byte) {
+            true => true, false => handle first {
+                true => false, false => handle byte >= 48 { false => false, true => byte <= 57 },
+            },
+        },
+    }
+}
+fn alias_done(work: &mut AliasWork) -> Result<Event, AliasIssue> {
+    handle String::is_empty(&work.alias) {
+        true => Result::Err(AliasIssue::Invalid),
+        false => { (*work).ready = Result<(), ()>::Ok(()); Result::Ok(Event::Ready) },
+    }
+}
+fn mapped_byte(byte: u8) -> u8 { handle byte { 45 => 95, _ => byte } }
+fn alias_byte(work: &mut AliasWork, limit: usize) -> Result<Event, AliasIssue> {
+    handle work.ready {
+        true => Result::Ok(Event::Ready),
+        false => handle work.cursor == String::len(&work.package.value) {
+            true => alias_done(work),
+            false => handle *Slice::get_unchecked(Str::as_bytes(String::as_str(&work.package.value)), work.cursor) {
+                64 => alias_done(work),
+                byte => {
+                    let mapped = mapped_byte(byte);
+                    handle allowed(mapped, String::is_empty(&work.alias)) {
+                        false => Result::Err(AliasIssue::Invalid),
+                        true => handle String::len(&work.alias) < limit {
+                            false => Result::Err(AliasIssue::Capacity),
+                            true => {
+                                String::push(&mut work.alias, as<char>(mapped));
+                                (*work).cursor = work.cursor + 1;
+                                Result::Ok(Event::Continue)
+                            },
+                        },
+                    }
+                },
+            },
+        },
+    }
+}
+fn invalid_alias(builder: &mut AliasBuilder) -> Result<Event, Failure> {
+    handle Option::take(&mut builder.work) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(work) => Result::Err(Failure::Rejected(InputError::InvalidPackageModuleAlias(work.package))),
+    }
+}
+fn alias_checked(builder: &mut AliasBuilder, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle charge(controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle Result::as_mut(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle alias_byte(work, builder.limit) {
+                Result::Err(issue) => handle issue {
+                    AliasIssue::Invalid => invalid_alias(builder),
+                    AliasIssue::Capacity => Result::Err(Failure::Capacity { name: 2, limit: builder.limit }),
+                },
+                Result::Ok(event) => Result::Ok(event),
+            },
+        },
+    }
+}
+pub fn step_alias(builder: &mut AliasBuilder, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    let result = alias_checked(&mut *builder, controls);
+    handle result {
+        Result::Ok(event) => Result::Ok(event), Result::Err(error) => { abort_alias(builder); Result::Err(error) },
+    }
+}
+pub fn finish_alias(builder: &mut AliasBuilder, controls: &operation::Controls) -> Result<PackageAlias, Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => { abort_alias(builder); Result::Err(Failure::Control(error)) },
+        Result::Ok(_) => handle Option::take(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle work.ready {
+                false => Result::Err(Failure::Busy),
+                true => Result::Ok(PackageAlias { package: work.package, alias: work.alias }),
+            },
+        },
+    }
+}
+
+pub fn begin_capability(value: String, limit: usize) -> CapabilityBuilder {
+    CapabilityBuilder { work: Result::Ok(CapabilityWork { value: value, cursor: 0, ready: false }), limit: limit }
+}
+pub fn abort_capability(builder: &mut CapabilityBuilder) -> () { (*builder).work = None; }
+// The Rust request boundary uses Unicode White_Space, not ASCII-only blanks
+// or all Unicode format characters. The oracle fixture enumerates its full
+// positive set and every ASCII code point plus boundary/format controls.
+pub fn whitespace(character: char) -> Bool {
+    let scalar = as<u32>(character);
+    handle scalar {
+        32 => true, 133 => true, 160 => true, 5760 => true,
+        8232 => true, 8233 => true, 8239 => true, 8287 => true, 12288 => true,
+        _ => handle scalar >= 9 {
+            false => false,
+            true => handle scalar <= 13 {
+                true => true, false => handle scalar >= 8192 { false => false, true => scalar <= 8202 },
+            },
+        },
+    }
+}
+fn next_character(value: &String, cursor: usize) -> Option<char> {
+    let view = String::as_str(value);
+    handle Str::char_at(view, cursor) {
+        Result::Err(_) => None, Result::Ok(character) => Result::Ok(character),
+    }
+}
+fn capability_character(work: &mut CapabilityWork) -> Result<Event, ()> {
+    handle String::is_empty(&work.value) {
+        true => Result::Err(()),
+        false => handle work.cursor == String::len(&work.value) {
+            true => { (*work).ready = Result<(), ()>::Ok(()); Result::Ok(Event::Ready) },
+            false => handle next_character(&work.value, work.cursor) {
+                Result::Err(_) => Result::Err(()),
+                Result::Ok(character) => handle as<u32>(character) == 42 {
+                    true => Result::Err(()),
+                    false => handle whitespace(character) {
+                        true => Result::Err(()),
+                        false => {
+                            (*work).cursor = work.cursor + char_utf8_len(character);
+                            Result::Ok(Event::Continue)
+                        },
+                    },
+                },
+            },
+        },
+    }
+}
+fn invalid_capability(builder: &mut CapabilityBuilder) -> Result<Event, Failure> {
+    handle Option::take(&mut builder.work) {
+        Result::Err(_) => Result::Err(Failure::Closed),
+        Result::Ok(work) => Result::Err(Failure::Rejected(InputError::InvalidCapability(work.value))),
+    }
+}
+fn capability_checked(builder: &mut CapabilityBuilder, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle charge(controls) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle Result::as_mut(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle String::len(&work.value) <= builder.limit {
+                false => Result::Err(Failure::Capacity { name: 3, limit: builder.limit }),
+                true => handle capability_character(work) {
+                    Result::Ok(event) => Result::Ok(event), Result::Err(_) => invalid_capability(builder),
+                },
+            },
+        },
+    }
+}
+pub fn step_capability(builder: &mut CapabilityBuilder, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    let result = capability_checked(&mut *builder, controls);
+    handle result {
+        Result::Ok(event) => Result::Ok(event), Result::Err(error) => { abort_capability(builder); Result::Err(error) },
+    }
+}
+pub fn finish_capability(builder: &mut CapabilityBuilder, controls: &operation::Controls) -> Result<Capability, Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => { abort_capability(builder); Result::Err(Failure::Control(error)) },
+        Result::Ok(_) => handle Option::take(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle work.ready {
+                false => Result::Err(Failure::Busy), true => Result::Ok(Capability { value: work.value }),
+            },
+        },
+    }
+}

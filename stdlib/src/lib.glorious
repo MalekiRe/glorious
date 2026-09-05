@@ -38,6 +38,10 @@ __g1_array_push_move<T>(value: &mut Array<T>, item: T) -> () { () }
 __g1_array_pop_move<T>(value: &mut Array<T>) -> T { () }
 __g1_array_capacity<T>(value: &Array<T>) -> usize { () }
 __g1_array_reserve<T>(value: &mut Array<T>, additional: usize) -> () { () }
+// Existing deterministic byte mechanisms, admitted by their exact selectors.
+__g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () }
+__g1_bytes_to_array(value: Bytes) -> Array<u8> { () }
+__g1_blake3(value: Bytes) -> Bytes { () }
 __g1_static_len(value: __StaticData<Utf8Bytes>) -> usize { () }
 __g1_static_subslice(value: __StaticData<Utf8Bytes>, start: usize, length: usize) -> __StaticData<Utf8Bytes> { () }
 __g1_static_get_shared(value: __StaticData<Utf8Bytes>, index: usize) -> &'static u8 { () }
@@ -106,6 +110,43 @@ __g1_f64_le(left: f64, right: f64) -> u32 { () }
 __g1_f64_gt(left: f64, right: f64) -> u32 { () }
 __g1_f64_ge(left: f64, right: f64) -> u32 { () }
 __g1_f64_to_i64_checked(value: f64) -> i64 { () }
+// Remaining width-specific bindings to existing numeric VM operations.
+__g1_u8_to_f32(value: u8) -> f32 { () }
+__g1_u8_to_f64(value: u8) -> f64 { () }
+__g1_u16_to_f32(value: u16) -> f32 { () }
+__g1_u16_to_f64(value: u16) -> f64 { () }
+__g1_u32_to_f32(value: u32) -> f32 { () }
+__g1_u32_to_f64(value: u32) -> f64 { () }
+__g1_u64_to_f32(value: u64) -> f32 { () }
+__g1_u64_to_f64(value: u64) -> f64 { () }
+__g1_u128_to_f32(value: u128) -> f32 { () }
+__g1_u128_to_f64(value: u128) -> f64 { () }
+__g1_usize_to_f32(value: usize) -> f32 { () }
+__g1_usize_to_f64(value: usize) -> f64 { () }
+__g1_i8_to_f32(value: i8) -> f32 { () }
+__g1_i8_to_f64(value: i8) -> f64 { () }
+__g1_i16_to_f32(value: i16) -> f32 { () }
+__g1_i16_to_f64(value: i16) -> f64 { () }
+__g1_i32_to_f32(value: i32) -> f32 { () }
+__g1_i32_to_f64(value: i32) -> f64 { () }
+__g1_i64_to_f64(value: i64) -> f64 { () }
+__g1_i128_to_f32(value: i128) -> f32 { () }
+__g1_i128_to_f64(value: i128) -> f64 { () }
+__g1_isize_to_f32(value: isize) -> f32 { () }
+__g1_isize_to_f64(value: isize) -> f64 { () }
+__g1_f32_to_f64(value: f32) -> f64 { () }
+__g1_f64_to_f32(value: f64) -> f32 { () }
+__g1_f64_to_u8_checked(value: f64) -> u8 { () }
+__g1_f64_to_u16_checked(value: f64) -> u16 { () }
+__g1_f64_to_u32_checked(value: f64) -> u32 { () }
+__g1_f64_to_u64_checked(value: f64) -> u64 { () }
+__g1_f64_to_u128_checked(value: f64) -> u128 { () }
+__g1_f64_to_usize_checked(value: f64) -> usize { () }
+__g1_f64_to_i8_checked(value: f64) -> i8 { () }
+__g1_f64_to_i16_checked(value: f64) -> i16 { () }
+__g1_f64_to_i32_checked(value: f64) -> i32 { () }
+__g1_f64_to_i128_checked(value: f64) -> i128 { () }
+__g1_f64_to_isize_checked(value: f64) -> isize { () }
 
 
 pub enum Result<T, E> { Ok(T), Err(E) }
@@ -219,10 +260,10 @@ pub fn slice_mut_len<'a, T>(value: &SliceMut<'a, T>) -> usize { value.length }
 pub fn slice_mut_is_empty<'a, T>(value: &SliceMut<'a, T>) -> Bool {
     handle value.length { 0 => true, _ => false }
 }
-pub fn slice_get_unchecked<T>(value: Slice<'_, T>, index: usize) -> &T {
+pub fn slice_get_unchecked<'a, T>(value: Slice<'a, T>, index: usize) -> &'a T {
     __g1_array_get_borrow_shared(value.storage, value.start + index)
 }
-pub fn slice_get<T>(value: Slice<'_, T>, index: usize) -> Option<&T> {
+pub fn slice_get<'a, T>(value: Slice<'a, T>, index: usize) -> Option<&'a T> {
     handle index < value.length {
         true => Result::Ok(__g1_array_get_borrow_shared(value.storage, value.start + index)),
         false => Result::Err(()),
@@ -523,8 +564,24 @@ pub fn str_subslice(value: Str, start: usize, length: usize) -> Result<Str, Stri
         },
     }
 }
-pub fn str_as_bytes(value: Str) -> Slice<u8> {
+pub fn str_as_bytes<'a>(value: Str<'a>) -> Slice<'a, u8> {
     value.bytes
+}
+// Byte-indexed scalar access for stepped UTF-8 consumers. The scalar is
+// owned: no borrowed substring or iterator escapes through the result.
+pub fn str_char_at(value: Str, index: usize) -> Result<char, StringRangeError> {
+    handle index >= str_len(value) {
+        true => Result::Err(StringRangeError::OutOfBounds),
+        false => handle str_is_char_boundary(value, index) {
+            false => Result::Err(StringRangeError::NotCharBoundary),
+            true => handle __g1_array_utf8_char_at(
+                value.bytes.storage, value.bytes.start, value.bytes.length, index,
+            ) {
+                (character, 0) => Result::Err(StringRangeError::OutOfBounds),
+                (character, _) => Result::Ok(character),
+            },
+        },
+    }
 }
 pub fn str_chars(value: Str) -> Chars { Chars { text: value, position: 0 } }
 pub fn chars_next(value: &mut Chars) -> Option<char> {
@@ -549,6 +606,7 @@ pub let Str::slice = str_slice;
 pub let Str::subslice = str_subslice;
 pub let Str::as_bytes = str_as_bytes;
 pub let Str::chars = str_chars;
+pub let Str::char_at = str_char_at;
 pub let Chars::next = chars_next;
 
 
@@ -556,6 +614,127 @@ pub let Chars::next = chars_next;
 // the public dense collection; `Array` and its leaves are implementation
 // details of this package.
 pub struct Vec<T> { private storage: Array<T> }
+
+// BLAKE3's input is an exact borrowed byte window. The legacy immutable Bytes
+// representation remains private to these machine bindings.
+pub fn blake3(input: Slice<u8>) -> Vec<u8> {
+    let bytes = vec_new<u8>();
+    vec_extend_from_slice(&mut bytes, input);
+    Vec { storage: __g1_bytes_to_array(__g1_blake3(__g1_bytes_from_array_move(move bytes.storage))) }
+}
+
+// All extent checks precede mutation; a rejected fixed-width write leaves
+// the buffer unchanged. Allocation policy is separate from byte encoding.
+pub struct ByteBuf { private bytes: Vec<u8>, private limit: usize }
+pub enum ByteError { Limit, Truncated }
+
+pub fn byte_buf_new(limit: usize) -> ByteBuf {
+    ByteBuf { bytes: vec_new(), limit: limit }
+}
+pub fn byte_buf_len(buffer: &ByteBuf) -> usize { vec_len(&buffer.bytes) }
+pub fn byte_buf_view(buffer: &ByteBuf) -> Slice<u8> { vec_as_slice(&buffer.bytes) }
+pub fn byte_buf_finish(buffer: ByteBuf) -> Vec<u8> { move buffer.bytes }
+pub fn byte_buf_push(buffer: &mut ByteBuf, value: u8) -> Result<(), ByteError> {
+    handle vec_len(&buffer.bytes) < buffer.limit {
+        true => { vec_push(&mut buffer.bytes, value); Result::Ok(()) },
+        false => Result::Err(ByteError::Limit),
+    }
+}
+fn byte_buf_has_room(buffer: &ByteBuf, width: usize) -> Bool {
+    let length = vec_len(&buffer.bytes);
+    handle length <= buffer.limit {
+        false => false,
+        true => width <= buffer.limit - length,
+    }
+}
+fn byte_buf_push_word(bytes: &mut Vec<u8>, word: u64) -> () {
+    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(word));
+    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 8)));
+    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 16)));
+    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 24)));
+    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 32)));
+    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 40)));
+    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 48)));
+    vec_push(&mut *bytes, __g1_int_convert_wrapping_to_u8(bit_shr(word, 56)))
+}
+pub fn byte_buf_put_u64(buffer: &mut ByteBuf, word: u64) -> Result<(), ByteError> {
+    handle byte_buf_has_room(& *buffer, 8) {
+        true => { byte_buf_push_word(&mut buffer.bytes, word); Result::Ok(()) },
+        false => Result::Err(ByteError::Limit),
+    }
+}
+pub fn byte_buf_append(buffer: &mut ByteBuf, bytes: Slice<u8>) -> Result<(), ByteError> {
+    handle byte_buf_has_room(& *buffer, slice_len(&bytes)) {
+        true => { vec_extend_from_slice(&mut buffer.bytes, bytes); Result::Ok(()) },
+        false => Result::Err(ByteError::Limit),
+    }
+}
+pub fn byte_buf_patch(buffer: &mut ByteBuf, offset: usize, value: u8) -> Result<(), ByteError> {
+    handle vec_get_mut(&mut buffer.bytes, offset) {
+        Result::Ok(byte) => { *byte = value; Result::Ok(()) },
+        Result::Err(_) => Result::Err(ByteError::Truncated),
+    }
+}
+pub let ByteBuf::new = byte_buf_new;
+pub let ByteBuf::len = byte_buf_len;
+pub let ByteBuf::view = byte_buf_view;
+pub let ByteBuf::finish = byte_buf_finish;
+pub let ByteBuf::push = byte_buf_push;
+pub let ByteBuf::put_u64 = byte_buf_put_u64;
+pub let ByteBuf::append = byte_buf_append;
+pub let ByteBuf::patch = byte_buf_patch;
+
+// A cursor owns positions, not a borrowed view. Callers lend the immutable
+// input for each operation, so a suspended work frame need not retain a loan.
+pub struct ByteCursor { private position: usize }
+pub fn byte_cursor_new() -> ByteCursor {
+    ByteCursor { position: 0 }
+}
+pub fn byte_cursor_position(cursor: &ByteCursor) -> usize { cursor.position }
+fn byte_cursor_has(cursor: &ByteCursor, bytes: Slice<u8>, width: usize) -> Bool {
+    let length = slice_len(&bytes);
+    handle cursor.position <= length {
+        false => false,
+        true => width <= length - cursor.position,
+    }
+}
+pub fn byte_cursor_u8(cursor: &mut ByteCursor, bytes: Slice<u8>) -> Result<u8, ByteError> {
+    handle byte_cursor_has(& *cursor, bytes, 1) {
+        false => Result::Err(ByteError::Truncated),
+        true => {
+            let value = *slice_get_unchecked(bytes, cursor.position);
+            (*cursor).position = cursor.position + 1;
+            Result::Ok(value)
+        },
+    }
+}
+fn byte_cursor_word(bytes: Slice<u8>, offset: usize) -> u64 {
+    let b0 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset));
+    let b1 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 1));
+    let b2 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 2));
+    let b3 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 3));
+    let b4 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 4));
+    let b5 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 5));
+    let b6 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 6));
+    let b7 = __g1_int_convert_checked_to_u64(*slice_get_unchecked(bytes, offset + 7));
+    let low = bit_or(bit_or(b0, bit_shl(b1, 8)), bit_or(bit_shl(b2, 16), bit_shl(b3, 24)));
+    let high = bit_or(bit_or(bit_shl(b4, 32), bit_shl(b5, 40)), bit_or(bit_shl(b6, 48), bit_shl(b7, 56)));
+    bit_or(low, high)
+}
+pub fn byte_cursor_u64(cursor: &mut ByteCursor, bytes: Slice<u8>) -> Result<u64, ByteError> {
+    handle byte_cursor_has(& *cursor, bytes, 8) {
+        false => Result::Err(ByteError::Truncated),
+        true => {
+            let value = byte_cursor_word(bytes, cursor.position);
+            (*cursor).position = cursor.position + 8;
+            Result::Ok(value)
+        },
+    }
+}
+pub let ByteCursor::new = byte_cursor_new;
+pub let ByteCursor::position = byte_cursor_position;
+pub let ByteCursor::u8 = byte_cursor_u8;
+pub let ByteCursor::u64 = byte_cursor_u64;
 
 pub struct VecIntoIter<T> { private remaining: Vec<T> }
 
@@ -616,24 +795,24 @@ pub fn vec_pop<T>(value: &mut Vec<T>) -> Option<T> {
         _ => Result::Ok(__g1_array_pop_move(&mut value.storage)),
     }
 }
-pub fn vec_get_unchecked<T>(value: &Vec<T>, index: usize) -> &T {
+pub fn vec_get_unchecked<'a, T>(value: &'a Vec<T>, index: usize) -> &'a T {
     __g1_array_get_borrow_shared(&value.storage, index)
 }
-pub fn vec_get<T>(value: &Vec<T>, index: usize) -> Option<&T> {
+pub fn vec_get<'a, T>(value: &'a Vec<T>, index: usize) -> Option<&'a T> {
     handle index < vec_len(value) {
         true => Result::Ok(__g1_array_get_borrow_shared(&value.storage, index)),
         false => Result::Err(()),
     }
 }
-pub fn vec_first<T>(value: &Vec<T>) -> Option<&T> { vec_get(value, 0) }
-pub fn vec_last<T>(value: &Vec<T>) -> Option<&T> {
+pub fn vec_first<'a, T>(value: &'a Vec<T>) -> Option<&'a T> { vec_get(value, 0) }
+pub fn vec_last<'a, T>(value: &'a Vec<T>) -> Option<&'a T> {
     let length = vec_len(value);
     handle length {
         0 => Result::Err(()),
         _ => vec_get(value, length - 1),
     }
 }
-pub fn vec_get_mut<T>(value: &mut Vec<T>, index: usize) -> Option<&mut T> {
+pub fn vec_get_mut<'a, T>(value: &'a mut Vec<T>, index: usize) -> Option<&'a mut T> {
     let length = __g1_array_len(&value.storage);
     handle index < length {
         true => Result::Ok(__g1_array_get_borrow_unique(&mut value.storage, index)),
@@ -837,15 +1016,15 @@ pub fn vec_dedup<T>(value: &mut Vec<T>) -> ()
     where T: Eq, T: Use<[0, 1]> {
     vec_dedup_from(&mut *value, 0)
 }
-pub fn vec_as_slice<T>(value: &Vec<T>) -> Slice<'_, T> {
-    Slice<'_, T> {
+pub fn vec_as_slice<'a, T>(value: &'a Vec<T>) -> Slice<'a, T> {
+    Slice<'a, T> {
         storage: &value.storage,
         start: 0,
         length: __g1_array_len(&value.storage),
     }
 }
-pub fn vec_as_mut_slice<T>(value: &mut Vec<T>) -> SliceMut<'_, T> {
-    SliceMut<'_, T> {
+pub fn vec_as_mut_slice<'a, T>(value: &'a mut Vec<T>) -> SliceMut<'a, T> {
+    SliceMut<'a, T> {
         storage: &mut value.storage,
         start: 0,
         length: __g1_array_len(&value.storage),
@@ -902,11 +1081,18 @@ pub let Vec::into_iter = vec_into_iter;
 pub let VecIntoIter::next = vec_into_iter_next;
 pub let VecIntoIter::discard = vec_into_iter_discard;
 
-// The hash table has ordinary library-owned storage.  Its initial dense
-// layout keeps the VM surface small; hash calls establish the stable contract
-// now, while the library may later introduce buckets without a new VM value.
-pub struct HashMap<K, V> { private entries: Vec<HashMapEntry<K, V>> }
+// Open addressing is entirely library-owned. Buckets contain 0 for empty,
+// 1 for deleted, or a dense entry index + 2. Cached hashes and reverse bucket
+// positions are separate from residents: rehashing never copies a K or V,
+// and swap-removal repairs exactly one relocated entry's bucket.
+pub struct HashMap<K, V> {
+    private entries: Vec<HashMapEntry<K, V>>,
+    private indices: Vec<HashMapIndex>,
+    private buckets: Vec<usize>,
+    private deleted: usize,
+}
 pub struct HashMapEntry<K, V> { private key: K, private value: V }
+struct HashMapIndex { fingerprint: usize, bucket: usize }
 
 fn hash_key<K>(key: &K) -> usize
     where K: Hash {
@@ -914,27 +1100,114 @@ fn hash_key<K>(key: &K) -> usize
     Hash::hash(key, &mut state);
     hasher_finish(state)
 }
-fn hash_map_find_from<K, V>(value: &HashMap<K, V>, key: &K, index: usize) -> Option<usize>
+fn hash_bucket(fingerprint: usize, capacity: usize) -> usize {
+    bit_and(fingerprint, capacity - 1)
+}
+fn hash_bucket_set(buckets: &mut Vec<usize>, bucket: usize, slot: usize) -> () {
+    __g1_array_set_move(&mut (*buckets).storage, bucket, slot)
+}
+fn hash_map_matches<K, V>(value: &HashMap<K, V>, key: &K, fingerprint: usize, slot: usize) -> Bool
     where K: Eq {
-    handle index < vec_len(&(*value).entries) {
-        false => Result::Err(()),
-        true => {
-            let entry = vec_get_unchecked(&(*value).entries, index);
-            handle Eq::eq(&(*entry).key, key) {
-                true => Result::Ok(index),
-                false => hash_map_find_from(value, key, index + 1),
-            }
+    handle slot < 2 {
+        true => false,
+        false => handle vec_get_unchecked(&(*value).indices, slot - 2).fingerprint == fingerprint {
+            false => false,
+            true => Eq::eq(&vec_get_unchecked(&(*value).entries, slot - 2).key, key),
         },
+    }
+}
+fn hash_map_find_from<K, V>(value: &HashMap<K, V>, key: &K, fingerprint: usize, bucket: usize) -> Option<usize>
+    where K: Eq {
+    let slot = *vec_get_unchecked(&(*value).buckets, bucket);
+    handle slot == 0 {
+        true => Result::Err(()),
+        false => handle hash_map_matches(value, key, fingerprint, slot) {
+            true => Result::Ok(slot - 2),
+            false => hash_map_find_from(value, key, fingerprint, hash_bucket(bucket + 1, vec_len(&(*value).buckets))),
+        },
+    }
+}
+fn hash_map_find_hashed<K, V>(value: &HashMap<K, V>, key: &K, fingerprint: usize) -> Option<usize>
+    where K: Eq {
+    handle vec_len(&(*value).buckets) {
+        0 => Result::Err(()),
+        capacity => hash_map_find_from(value, key, fingerprint, hash_bucket(fingerprint, capacity)),
     }
 }
 fn hash_map_find<K, V>(value: &HashMap<K, V>, key: &K) -> Option<usize>
     where K: Eq, K: Hash {
-    let fingerprint = hash_key(key);
-    hash_map_find_from(value, key, fingerprint - fingerprint)
+    hash_map_find_hashed(value, key, hash_key(key))
 }
-pub fn hash_map_new<K, V>() -> HashMap<K, V> { HashMap { entries: vec_new() } }
+// At most 7/8 of buckets are occupied or deleted, so every probe terminates
+// at an empty bucket. Insertion may also reuse a deleted bucket, but only
+// after the complete lookup has established that no equal resident exists.
+fn hash_map_vacant(buckets: &Vec<usize>, bucket: usize) -> usize {
+    handle *vec_get_unchecked(buckets, bucket) < 2 {
+        true => bucket,
+        false => hash_map_vacant(buckets, hash_bucket(bucket + 1, vec_len(buckets))),
+    }
+}
+fn hash_map_reindex(buckets: &mut Vec<usize>, indices: &mut Vec<HashMapIndex>, index: usize) -> () {
+    handle index < vec_len(& *indices) {
+        false => (),
+        true => {
+            let fingerprint = vec_get_unchecked(& *indices, index).fingerprint;
+            let bucket = hash_map_vacant(& *buckets, hash_bucket(fingerprint, vec_len(& *buckets)));
+            hash_bucket_set(&mut *buckets, bucket, index + 2);
+            let entry = __g1_array_get_borrow_unique(&mut (*indices).storage, index);
+            (*entry).bucket = bucket;
+            hash_map_reindex(&mut *buckets, &mut *indices, index + 1)
+        },
+    }
+}
+fn hash_map_rehash<K, V>(value: &mut HashMap<K, V>, capacity: usize) -> () {
+    let buckets = vec_new<usize>();
+    vec_resize(&mut buckets, capacity, 0);
+    hash_map_reindex(&mut buckets, &mut (*value).indices, 0);
+    (*value).buckets = buckets;
+    (*value).deleted = as<usize>(0);
+}
+fn hash_map_prepare_insert<K, V>(value: &mut HashMap<K, V>) -> () {
+    let capacity = vec_len(&(*value).buckets);
+    handle capacity {
+        0 => hash_map_rehash(&mut *value, 8),
+        _ => handle vec_len(&(*value).entries) + (*value).deleted >= capacity - bit_shr(capacity, 3) {
+            false => (),
+            true => handle vec_len(&(*value).entries) < bit_shr(capacity, 1) {
+                true => hash_map_rehash(&mut *value, capacity),
+                // Overflow is a checked resource failure, never a wrapped
+                // zero capacity that could make probing non-terminating.
+                false => hash_map_rehash(&mut *value, capacity + capacity),
+            },
+        },
+    }
+}
+fn hash_map_append<K, V>(value: &mut HashMap<K, V>, key: K, item: V, fingerprint: usize) -> () {
+    hash_map_prepare_insert(&mut *value);
+    let capacity = vec_len(&(*value).buckets);
+    let bucket = hash_map_vacant(&(*value).buckets, hash_bucket(fingerprint, capacity));
+    handle *vec_get_unchecked(&(*value).buckets, bucket) == 1 {
+        false => (),
+        true => { (*value).deleted = (*value).deleted - 1; },
+    };
+    let index = vec_len(&(*value).entries);
+    vec_push(&mut (*value).entries, HashMapEntry { key: key, value: item });
+    vec_push(&mut (*value).indices, HashMapIndex { fingerprint: fingerprint, bucket: bucket });
+    hash_bucket_set(&mut (*value).buckets, bucket, index + 2)
+}
+pub fn hash_map_new<K, V>() -> HashMap<K, V> {
+    HashMap { entries: vec_new(), indices: vec_new(), buckets: vec_new(), deleted: 0 }
+}
 pub fn hash_map_len<K, V>(value: &HashMap<K, V>) -> usize { vec_len(&(*value).entries) }
 pub fn hash_map_is_empty<K, V>(value: &HashMap<K, V>) -> Bool { vec_is_empty(&(*value).entries) }
+// Dense residents can be inspected without copying keys/values or probing
+// buckets. Their order is unspecified and may change after any mutation.
+// Only shared views are exposed: mutating a resident key would break the index.
+pub fn hash_map_entries<'a, K, V>(value: &'a HashMap<K, V>) -> Slice<'a, HashMapEntry<K, V>> {
+    vec_as_slice(&value.entries)
+}
+pub fn hash_map_entry_key<'a, K, V>(value: &'a HashMapEntry<K, V>) -> &'a K { &value.key }
+pub fn hash_map_entry_value<'a, K, V>(value: &'a HashMapEntry<K, V>) -> &'a V { &value.value }
 pub fn hash_map_contains_key<K, V>(value: &HashMap<K, V>, key: &K) -> Bool
     where K: Eq, K: Hash {
     handle hash_map_find(value, key) {
@@ -955,81 +1228,102 @@ pub fn hash_map_get<'a, K, V>(value: &'a HashMap<K, V>, key: &K) -> Option<&'a V
         },
     }
 }
+pub fn hash_map_get_mut<'a, K, V>(value: &'a mut HashMap<K, V>, key: &K) -> Option<&'a mut V>
+    where K: Eq, K: Hash {
+    handle hash_map_find(& *value, key) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(index) => {
+            let entry = __g1_array_get_borrow_unique(&mut (*value).entries.storage, index);
+            Result::Ok(&mut (*entry).value)
+        },
+    }
+}
 pub fn hash_map_insert<K, V>(value: &mut HashMap<K, V>, key: K, item: V) -> Option<V>
     where K: Eq, K: Hash, K: Use<[0, 1]> {
-    handle hash_map_find(& *value, &key) {
+    let fingerprint = hash_key(&key);
+    handle hash_map_find_hashed(& *value, &key, fingerprint) {
         Result::Err(_) => {
-            vec_push(&mut (*value).entries, HashMapEntry { key: key, value: item });
+            hash_map_append(&mut *value, key, item, fingerprint);
             Result::Err(())
         },
-        Result::Ok(index) => handle vec_remove(&mut (*value).entries, index) {
-            Result::Ok(previous) => {
-                vec_push(&mut (*value).entries, HashMapEntry { key: key, value: item });
-                Result::Ok(previous.value)
-            },
-            Result::Err(_) => Result::Err(()),
+        Result::Ok(index) => {
+            let entry = __g1_array_get_borrow_unique(&mut (*value).entries.storage, index);
+            // Preserve the canonical resident key. Only the value changes;
+            // discarding the equal incoming key needs the bound above.
+            Result::Ok(replace(&mut (*entry).value, item))
+        },
+    }
+}
+fn hash_map_unindex<K, V>(value: &mut HashMap<K, V>, index: usize) -> () {
+    let bucket = vec_get_unchecked(&(*value).indices, index).bucket;
+    hash_bucket_set(&mut (*value).buckets, bucket, 1);
+    (*value).deleted = (*value).deleted + 1;
+    vec_swap_remove(&mut (*value).indices, index);
+    handle index < vec_len(&(*value).indices) {
+        false => (),
+        true => {
+            let moved_bucket = vec_get_unchecked(&(*value).indices, index).bucket;
+            hash_bucket_set(&mut (*value).buckets, moved_bucket, index + 2)
+        },
+    }
+}
+fn hash_map_remove_resident<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<HashMapEntry<K, V>>
+    where K: Eq, K: Hash {
+    handle hash_map_find(& *value, key) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(index) => {
+            hash_map_unindex(&mut *value, index);
+            vec_swap_remove(&mut (*value).entries, index)
         },
     }
 }
 pub fn hash_map_remove<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<V>
     where K: Eq, K: Hash, K: Use<[0, 1]> {
-    handle hash_map_find(& *value, key) {
+    handle hash_map_remove_resident(value, key) {
         Result::Err(_) => Result::Err(()),
-        Result::Ok(index) => handle vec_remove(&mut (*value).entries, index) {
-            Result::Ok(previous) => Result::Ok(previous.value),
-            Result::Err(_) => Result::Err(()),
-        },
+        Result::Ok(previous) => Result::Ok(previous.value),
+    }
+}
+// Transfer both fields; neither key nor value needs erasure evidence.
+pub fn hash_map_remove_entry<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<(K, V)>
+    where K: Eq, K: Hash {
+    handle hash_map_remove_resident(value, key) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(previous) => Result::Ok((previous.key, previous.value)),
     }
 }
 pub let HashMap::new = hash_map_new;
 pub let HashMap::len = hash_map_len;
 pub let HashMap::is_empty = hash_map_is_empty;
+pub let HashMap::entries = hash_map_entries;
+pub let HashMapEntry::key = hash_map_entry_key;
+pub let HashMapEntry::value = hash_map_entry_value;
 pub let HashMap::contains_key = hash_map_contains_key;
 pub let HashMap::get = hash_map_get;
+pub let HashMap::get_mut = hash_map_get_mut;
 pub let HashMap::insert = hash_map_insert;
 pub let HashMap::remove = hash_map_remove;
+pub let HashMap::remove_entry = hash_map_remove_entry;
 
-// Like HashMap, HashSet is a source-owned deterministic collection. The
-// initial dense Vec representation deliberately keeps the VM unaware of map
-// layouts; calling Hash establishes the stable hashing contract while a
-// future std-only bucket layout remains free to change.
-pub struct HashSet<T> { private entries: Vec<T> }
-fn hash_set_find_from<T>(value: &HashSet<T>, item: &T, index: usize) -> Option<usize>
-    where T: Eq {
-    handle index < vec_len(&(*value).entries) {
-        false => Result::Err(()),
-        true => {
-            let entry = vec_get_unchecked(&(*value).entries, index);
-            handle Eq::eq(entry, item) {
-                true => Result::Ok(index),
-                false => hash_set_find_from(value, item, index + 1),
-            }
-        },
-    }
-}
-fn hash_set_find<T>(value: &HashSet<T>, item: &T) -> Option<usize>
-    where T: Eq, T: Hash {
-    let fingerprint = hash_key(item);
-    hash_set_find_from(value, item, fingerprint - fingerprint)
-}
-pub fn hash_set_new<T>() -> HashSet<T> { HashSet { entries: vec_new() } }
-pub fn hash_set_len<T>(value: &HashSet<T>) -> usize { vec_len(&(*value).entries) }
-pub fn hash_set_is_empty<T>(value: &HashSet<T>) -> Bool { vec_is_empty(&(*value).entries) }
+// The set shares the map index while retaining the original resident on a
+// duplicate insertion and returning ownership of that resident on removal.
+pub struct HashSet<T> { private map: HashMap<T, ()> }
+pub fn hash_set_new<T>() -> HashSet<T> { HashSet { map: hash_map_new() } }
+pub fn hash_set_len<T>(value: &HashSet<T>) -> usize { hash_map_len(&(*value).map) }
+pub fn hash_set_is_empty<T>(value: &HashSet<T>) -> Bool { hash_map_is_empty(&(*value).map) }
 pub fn hash_set_contains<T>(value: &HashSet<T>, item: &T) -> Bool
     where T: Eq, T: Hash {
-    handle hash_set_find(value, item) {
-        Result::Ok(_) => true,
-        Result::Err(_) => false,
-    }
+    hash_map_contains_key(&(*value).map, item)
 }
 // A duplicate consumes `item` without storing it, so affine-erasure evidence
 // is required. `true` means a new resident was inserted.
 pub fn hash_set_insert<T>(value: &mut HashSet<T>, item: T) -> Bool
     where T: Eq, T: Hash, T: Use<[0, 1]> {
-    handle hash_set_find(& *value, &item) {
+    let fingerprint = hash_key(&item);
+    handle hash_map_find_hashed(&(*value).map, &item, fingerprint) {
         Result::Ok(_) => false,
         Result::Err(_) => {
-            vec_push(&mut (*value).entries, item);
+            hash_map_append(&mut (*value).map, item, (), fingerprint);
             true
         },
     }
@@ -1037,9 +1331,9 @@ pub fn hash_set_insert<T>(value: &mut HashSet<T>, item: T) -> Bool
 // Removal returns the resident, preserving its complete ownership contract.
 pub fn hash_set_remove<T>(value: &mut HashSet<T>, item: &T) -> Option<T>
     where T: Eq, T: Hash {
-    handle hash_set_find(& *value, item) {
+    handle hash_map_remove_resident(&mut (*value).map, item) {
         Result::Err(_) => Result::Err(()),
-        Result::Ok(index) => vec_remove(&mut (*value).entries, index),
+        Result::Ok(entry) => Result::Ok(entry.key),
     }
 }
 pub let HashSet::new = hash_set_new;
@@ -1218,8 +1512,8 @@ pub fn str_to_string(source: Str) -> String {
     string_push_str(&mut value, source);
     value
 }
-pub fn string_as_str(value: &String) -> Str {
-    Str { bytes: vec_as_slice(&value.storage) }
+pub fn string_as_str<'a>(value: &'a String) -> Str<'a> {
+    Str<'a> { bytes: vec_as_slice(&value.storage) }
 }
 pub fn utf8_error_valid_up_to(value: &Utf8Error) -> usize { value.valid_up_to }
 pub fn utf8_error_into_bytes(value: Utf8Error) -> Vec<u8> { value.bytes }
@@ -1254,6 +1548,347 @@ pub fn swap<T>(left: &mut T, right: &mut T) -> () {
 }
 
 pub trait Default { default() -> Self; }
+
+// Explicit, possibly lossy conversion. Implementations have no outward
+// effects and obey ordinary ownership rules; this trait grants no access to
+// private representations. Input-domain failure belongs in a checked API.
+pub trait As<T> { cast(value: Self) -> T; }
+pub fn as<T, S>(value: S) -> T where S: As<T> { As<T>::cast(value) }
+
+pub impl<T> As<T> for T { cast(value: T) -> T { value } }
+pub impl As<u16> for u8 { cast(value: u8) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for u8 { cast(value: u8) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for u8 { cast(value: u8) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for u8 { cast(value: u8) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for u8 { cast(value: u8) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for u8 { cast(value: u8) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for u8 { cast(value: u8) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for u8 { cast(value: u8) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for u8 { cast(value: u8) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for u8 { cast(value: u8) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for u8 { cast(value: u8) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for u16 { cast(value: u16) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u32> for u16 { cast(value: u16) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for u16 { cast(value: u16) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for u16 { cast(value: u16) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for u16 { cast(value: u16) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for u16 { cast(value: u16) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for u16 { cast(value: u16) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for u16 { cast(value: u16) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for u16 { cast(value: u16) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for u16 { cast(value: u16) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for u16 { cast(value: u16) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for u32 { cast(value: u32) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for u32 { cast(value: u32) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u64> for u32 { cast(value: u32) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for u32 { cast(value: u32) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for u32 { cast(value: u32) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for u32 { cast(value: u32) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for u32 { cast(value: u32) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for u32 { cast(value: u32) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for u32 { cast(value: u32) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for u32 { cast(value: u32) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for u32 { cast(value: u32) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for u64 { cast(value: u64) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for u64 { cast(value: u64) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for u64 { cast(value: u64) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u128> for u64 { cast(value: u64) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for u64 { cast(value: u64) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for u64 { cast(value: u64) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for u64 { cast(value: u64) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for u64 { cast(value: u64) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for u64 { cast(value: u64) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for u64 { cast(value: u64) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for u64 { cast(value: u64) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for u128 { cast(value: u128) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for u128 { cast(value: u128) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for u128 { cast(value: u128) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for u128 { cast(value: u128) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<usize> for u128 { cast(value: u128) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for u128 { cast(value: u128) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for u128 { cast(value: u128) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for u128 { cast(value: u128) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for u128 { cast(value: u128) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for u128 { cast(value: u128) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for u128 { cast(value: u128) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for usize { cast(value: usize) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for usize { cast(value: usize) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for usize { cast(value: usize) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for usize { cast(value: usize) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for usize { cast(value: usize) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<i8> for usize { cast(value: usize) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for usize { cast(value: usize) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for usize { cast(value: usize) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for usize { cast(value: usize) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for usize { cast(value: usize) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for usize { cast(value: usize) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for i8 { cast(value: i8) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for i8 { cast(value: i8) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for i8 { cast(value: i8) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for i8 { cast(value: i8) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for i8 { cast(value: i8) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for i8 { cast(value: i8) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i16> for i8 { cast(value: i8) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for i8 { cast(value: i8) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for i8 { cast(value: i8) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for i8 { cast(value: i8) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for i8 { cast(value: i8) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for i16 { cast(value: i16) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for i16 { cast(value: i16) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for i16 { cast(value: i16) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for i16 { cast(value: i16) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for i16 { cast(value: i16) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for i16 { cast(value: i16) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for i16 { cast(value: i16) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i32> for i16 { cast(value: i16) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for i16 { cast(value: i16) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for i16 { cast(value: i16) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for i16 { cast(value: i16) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for i32 { cast(value: i32) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for i32 { cast(value: i32) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for i32 { cast(value: i32) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for i32 { cast(value: i32) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for i32 { cast(value: i32) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for i32 { cast(value: i32) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for i32 { cast(value: i32) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for i32 { cast(value: i32) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i64> for i32 { cast(value: i32) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for i32 { cast(value: i32) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for i32 { cast(value: i32) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for i64 { cast(value: i64) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for i64 { cast(value: i64) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for i64 { cast(value: i64) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for i64 { cast(value: i64) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for i64 { cast(value: i64) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for i64 { cast(value: i64) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for i64 { cast(value: i64) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for i64 { cast(value: i64) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for i64 { cast(value: i64) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i128> for i64 { cast(value: i64) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<isize> for i64 { cast(value: i64) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for i128 { cast(value: i128) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for i128 { cast(value: i128) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for i128 { cast(value: i128) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for i128 { cast(value: i128) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for i128 { cast(value: i128) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for i128 { cast(value: i128) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for i128 { cast(value: i128) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for i128 { cast(value: i128) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for i128 { cast(value: i128) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for i128 { cast(value: i128) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<isize> for i128 { cast(value: i128) -> isize { __g1_int_convert_wrapping_to_isize(value) } }
+pub impl As<u8> for isize { cast(value: isize) -> u8 { __g1_int_convert_wrapping_to_u8(value) } }
+pub impl As<u16> for isize { cast(value: isize) -> u16 { __g1_int_convert_wrapping_to_u16(value) } }
+pub impl As<u32> for isize { cast(value: isize) -> u32 { __g1_int_convert_wrapping_to_u32(value) } }
+pub impl As<u64> for isize { cast(value: isize) -> u64 { __g1_int_convert_wrapping_to_u64(value) } }
+pub impl As<u128> for isize { cast(value: isize) -> u128 { __g1_int_convert_wrapping_to_u128(value) } }
+pub impl As<usize> for isize { cast(value: isize) -> usize { __g1_int_convert_wrapping_to_usize(value) } }
+pub impl As<i8> for isize { cast(value: isize) -> i8 { __g1_int_convert_wrapping_to_i8(value) } }
+pub impl As<i16> for isize { cast(value: isize) -> i16 { __g1_int_convert_wrapping_to_i16(value) } }
+pub impl As<i32> for isize { cast(value: isize) -> i32 { __g1_int_convert_wrapping_to_i32(value) } }
+pub impl As<i64> for isize { cast(value: isize) -> i64 { __g1_int_convert_wrapping_to_i64(value) } }
+pub impl As<i128> for isize { cast(value: isize) -> i128 { __g1_int_convert_wrapping_to_i128(value) } }
+pub impl As<f32> for u8 { cast(value: u8) -> f32 { __g1_u8_to_f32(value) } }
+pub impl As<f64> for u8 { cast(value: u8) -> f64 { __g1_u8_to_f64(value) } }
+pub impl As<f32> for u16 { cast(value: u16) -> f32 { __g1_u16_to_f32(value) } }
+pub impl As<f64> for u16 { cast(value: u16) -> f64 { __g1_u16_to_f64(value) } }
+pub impl As<f32> for u32 { cast(value: u32) -> f32 { __g1_u32_to_f32(value) } }
+pub impl As<f64> for u32 { cast(value: u32) -> f64 { __g1_u32_to_f64(value) } }
+pub impl As<f32> for u64 { cast(value: u64) -> f32 { __g1_u64_to_f32(value) } }
+pub impl As<f64> for u64 { cast(value: u64) -> f64 { __g1_u64_to_f64(value) } }
+pub impl As<f32> for u128 { cast(value: u128) -> f32 { __g1_u128_to_f32(value) } }
+pub impl As<f64> for u128 { cast(value: u128) -> f64 { __g1_u128_to_f64(value) } }
+pub impl As<f32> for usize { cast(value: usize) -> f32 { __g1_usize_to_f32(value) } }
+pub impl As<f64> for usize { cast(value: usize) -> f64 { __g1_usize_to_f64(value) } }
+pub impl As<f32> for i8 { cast(value: i8) -> f32 { __g1_i8_to_f32(value) } }
+pub impl As<f64> for i8 { cast(value: i8) -> f64 { __g1_i8_to_f64(value) } }
+pub impl As<f32> for i16 { cast(value: i16) -> f32 { __g1_i16_to_f32(value) } }
+pub impl As<f64> for i16 { cast(value: i16) -> f64 { __g1_i16_to_f64(value) } }
+pub impl As<f32> for i32 { cast(value: i32) -> f32 { __g1_i32_to_f32(value) } }
+pub impl As<f64> for i32 { cast(value: i32) -> f64 { __g1_i32_to_f64(value) } }
+pub impl As<f32> for i64 { cast(value: i64) -> f32 { __g1_i64_to_f32(value) } }
+pub impl As<f64> for i64 { cast(value: i64) -> f64 { __g1_i64_to_f64(value) } }
+pub impl As<f32> for i128 { cast(value: i128) -> f32 { __g1_i128_to_f32(value) } }
+pub impl As<f64> for i128 { cast(value: i128) -> f64 { __g1_i128_to_f64(value) } }
+pub impl As<f32> for isize { cast(value: isize) -> f32 { __g1_isize_to_f32(value) } }
+pub impl As<f64> for isize { cast(value: isize) -> f64 { __g1_isize_to_f64(value) } }
+pub impl As<f64> for f32 { cast(value: f32) -> f64 { __g1_f32_to_f64(value) } }
+pub impl As<f32> for f64 { cast(value: f64) -> f32 { __g1_f64_to_f32(value) } }
+
+// Float-to-integer policy stays in source: NaN -> zero, truncate toward
+// zero, and saturate at the target bounds. Widening f32 first is exact.
+fn cast_f64_to_u8(value: f64) -> u8 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, 0.0) {
+            true => 0,
+            false => handle f64_ge(value, 256.0) {
+                true => 255,
+                false => __g1_f64_to_u8_checked(value),
+            },
+        },
+    }
+}
+pub impl As<u8> for f32 { cast(value: f32) -> u8 { cast_f64_to_u8(__g1_f32_to_f64(value)) } }
+pub impl As<u8> for f64 { cast(value: f64) -> u8 { cast_f64_to_u8(value) } }
+fn cast_f64_to_u16(value: f64) -> u16 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, 0.0) {
+            true => 0,
+            false => handle f64_ge(value, 65536.0) {
+                true => 65535,
+                false => __g1_f64_to_u16_checked(value),
+            },
+        },
+    }
+}
+pub impl As<u16> for f32 { cast(value: f32) -> u16 { cast_f64_to_u16(__g1_f32_to_f64(value)) } }
+pub impl As<u16> for f64 { cast(value: f64) -> u16 { cast_f64_to_u16(value) } }
+fn cast_f64_to_u32(value: f64) -> u32 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, 0.0) {
+            true => 0,
+            false => handle f64_ge(value, 4294967296.0) {
+                true => 4294967295,
+                false => __g1_f64_to_u32_checked(value),
+            },
+        },
+    }
+}
+pub impl As<u32> for f32 { cast(value: f32) -> u32 { cast_f64_to_u32(__g1_f32_to_f64(value)) } }
+pub impl As<u32> for f64 { cast(value: f64) -> u32 { cast_f64_to_u32(value) } }
+fn cast_f64_to_u64(value: f64) -> u64 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, 0.0) {
+            true => 0,
+            false => handle f64_ge(value, 18446744073709551616.0) {
+                true => 18446744073709551615,
+                false => __g1_f64_to_u64_checked(value),
+            },
+        },
+    }
+}
+pub impl As<u64> for f32 { cast(value: f32) -> u64 { cast_f64_to_u64(__g1_f32_to_f64(value)) } }
+pub impl As<u64> for f64 { cast(value: f64) -> u64 { cast_f64_to_u64(value) } }
+fn cast_f64_to_u128(value: f64) -> u128 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, 0.0) {
+            true => 0,
+            false => handle f64_ge(value, 340282366920938463463374607431768211456.0) {
+                true => 340282366920938463463374607431768211455,
+                false => __g1_f64_to_u128_checked(value),
+            },
+        },
+    }
+}
+pub impl As<u128> for f32 { cast(value: f32) -> u128 { cast_f64_to_u128(__g1_f32_to_f64(value)) } }
+pub impl As<u128> for f64 { cast(value: f64) -> u128 { cast_f64_to_u128(value) } }
+fn cast_f64_to_usize(value: f64) -> usize {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, 0.0) {
+            true => 0,
+            false => handle f64_ge(value, 18446744073709551616.0) {
+                true => 18446744073709551615,
+                false => __g1_f64_to_usize_checked(value),
+            },
+        },
+    }
+}
+pub impl As<usize> for f32 { cast(value: f32) -> usize { cast_f64_to_usize(__g1_f32_to_f64(value)) } }
+pub impl As<usize> for f64 { cast(value: f64) -> usize { cast_f64_to_usize(value) } }
+fn cast_f64_to_i8(value: f64) -> i8 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, -128.0) {
+            true => wrapping_add(127, 1),
+            false => handle f64_ge(value, 128.0) {
+                true => 127,
+                false => __g1_f64_to_i8_checked(value),
+            },
+        },
+    }
+}
+pub impl As<i8> for f32 { cast(value: f32) -> i8 { cast_f64_to_i8(__g1_f32_to_f64(value)) } }
+pub impl As<i8> for f64 { cast(value: f64) -> i8 { cast_f64_to_i8(value) } }
+fn cast_f64_to_i16(value: f64) -> i16 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, -32768.0) {
+            true => wrapping_add(32767, 1),
+            false => handle f64_ge(value, 32768.0) {
+                true => 32767,
+                false => __g1_f64_to_i16_checked(value),
+            },
+        },
+    }
+}
+pub impl As<i16> for f32 { cast(value: f32) -> i16 { cast_f64_to_i16(__g1_f32_to_f64(value)) } }
+pub impl As<i16> for f64 { cast(value: f64) -> i16 { cast_f64_to_i16(value) } }
+fn cast_f64_to_i32(value: f64) -> i32 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, -2147483648.0) {
+            true => wrapping_add(2147483647, 1),
+            false => handle f64_ge(value, 2147483648.0) {
+                true => 2147483647,
+                false => __g1_f64_to_i32_checked(value),
+            },
+        },
+    }
+}
+pub impl As<i32> for f32 { cast(value: f32) -> i32 { cast_f64_to_i32(__g1_f32_to_f64(value)) } }
+pub impl As<i32> for f64 { cast(value: f64) -> i32 { cast_f64_to_i32(value) } }
+fn cast_f64_to_i64(value: f64) -> i64 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, -9223372036854775808.0) {
+            true => wrapping_add(9223372036854775807, 1),
+            false => handle f64_ge(value, 9223372036854775808.0) {
+                true => 9223372036854775807,
+                false => __g1_f64_to_i64_checked(value),
+            },
+        },
+    }
+}
+pub impl As<i64> for f32 { cast(value: f32) -> i64 { cast_f64_to_i64(__g1_f32_to_f64(value)) } }
+pub impl As<i64> for f64 { cast(value: f64) -> i64 { cast_f64_to_i64(value) } }
+fn cast_f64_to_i128(value: f64) -> i128 {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, -170141183460469231731687303715884105728.0) {
+            true => wrapping_add(170141183460469231731687303715884105727, 1),
+            false => handle f64_ge(value, 170141183460469231731687303715884105728.0) {
+                true => 170141183460469231731687303715884105727,
+                false => __g1_f64_to_i128_checked(value),
+            },
+        },
+    }
+}
+pub impl As<i128> for f32 { cast(value: f32) -> i128 { cast_f64_to_i128(__g1_f32_to_f64(value)) } }
+pub impl As<i128> for f64 { cast(value: f64) -> i128 { cast_f64_to_i128(value) } }
+fn cast_f64_to_isize(value: f64) -> isize {
+    handle f64_ne(value, value) {
+        true => 0,
+        false => handle f64_le(value, -9223372036854775808.0) {
+            true => wrapping_add(9223372036854775807, 1),
+            false => handle f64_ge(value, 9223372036854775808.0) {
+                true => 9223372036854775807,
+                false => __g1_f64_to_isize_checked(value),
+            },
+        },
+    }
+}
+pub impl As<isize> for f32 { cast(value: f32) -> isize { cast_f64_to_isize(__g1_f32_to_f64(value)) } }
+pub impl As<isize> for f64 { cast(value: f64) -> isize { cast_f64_to_isize(value) } }
+
+// Character casts expose code points, not encoding or representation tricks.
+pub impl As<u32> for char { cast(value: char) -> u32 { char_to_u32(value) } }
+pub impl As<char> for u8 { cast(value: u8) -> char { __g1_char_from_u32_checked(__g1_int_convert_wrapping_to_u32(value)) } }
 
 pub fn default_value<T>() -> T where T: Default { Default::default() }
 
@@ -1334,6 +1969,34 @@ pub let format_debug = format_debug_value;
 
 pub impl Eq for i64 { eq(left: &i64, right: &i64) -> Bool { *left == *right } }
 pub impl Eq for usize { eq(left: &usize, right: &usize) -> Bool { *left == *right } }
+pub impl Ord for String {
+    compare(left: &String, right: &String) -> Ordering {
+        let left_view = string_as_str(left);
+        let right_view = string_as_str(right);
+        slice_lex_compare(str_as_bytes(left_view), str_as_bytes(right_view))
+    }
+}
+pub impl Eq for String {
+    eq(left: &String, right: &String) -> Bool {
+        handle Ord::compare(left, right) { Ordering::Equal => true, _ => false }
+    }
+}
+fn hash_string_bytes(bytes: Slice<u8>, state: &mut Hasher, cursor: usize) -> () {
+    handle cursor < slice_len(&bytes) {
+        false => (),
+        true => {
+            hasher_write_usize(&mut *state, as<usize>(*slice_get_unchecked(bytes, cursor)));
+            hash_string_bytes(bytes, state, cursor + 1)
+        },
+    }
+}
+pub impl Hash for String {
+    hash(value: &String, state: &mut Hasher) -> () {
+        hasher_write_usize(&mut *state, string_len(value));
+        let view = string_as_str(value);
+        hash_string_bytes(str_as_bytes(view), state, 0)
+    }
+}
 pub impl Hash for usize {
     hash(value: &usize, state: &mut Hasher) -> () { hasher_write_usize(state, *value) }
 }
@@ -1372,6 +2035,20 @@ pub impl Display for String {
     display(value: &String, formatter: &mut Formatter) -> () {
         formatter_write_str(formatter, string_as_str(value))
     }
+}
+// At most twenty recursive frames on the current 64-bit usize ABI. The
+// quotient/remainder decomposition is total, including zero and usize::MAX;
+// no signed narrowing or new formatting primitive is involved.
+fn display_usize_decimal(value: usize, formatter: &mut Formatter) -> () {
+    let quotient = value / 10;
+    handle quotient == 0 {
+        true => (), false => display_usize_decimal(quotient, &mut *formatter),
+    };
+    let digit = value - quotient * 10;
+    vec_push(&mut formatter.output.storage, as<u8>(48 + digit));
+}
+pub impl Display for usize {
+    display(value: &usize, formatter: &mut Formatter) -> () { display_usize_decimal(*value, formatter) }
 }
 pub impl Debug for String {
     debug(value: &String, formatter: &mut Formatter) -> () {

@@ -7,8 +7,11 @@
 //! checkout, a warm cache, or host process state.
 
 use crate::{BootstrapLimits, BootstrapStage, Digest, NormalizedInputWorld, VerifiedVmProgram};
+use crate::request::{put as append, put_runtime_manifest};
 
-pub const BOOTSTRAP_MANIFEST_SCHEMA: u32 = 2;
+// Schema three rejects evidence using the ambiguous/unbound v1 input
+// commitments. The manifest's field layout and VM artifact schema are unchanged.
+pub const BOOTSTRAP_MANIFEST_SCHEMA: u32 = 3;
 pub const BOOTSTRAP_MANIFEST_MAGIC: [u8; 8] = *b"G0BM\r\n\x1a\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -337,38 +340,42 @@ fn source_semantics_fingerprint(world: &NormalizedInputWorld) -> Digest {
     let mut bytes = Vec::new();
     append(
         &mut bytes,
-        b"grandiose-stage0-bootstrap-source-semantics-v1",
+        b"grandiose-stage0-bootstrap-source-semantics-v2",
     );
+    for generation in [
+        world.build.language_generation,
+        world.build.query_generation,
+        world.build.interface_generation,
+        world.build.cache_generation,
+    ] {
+        append(&mut bytes, &generation.to_le_bytes());
+    }
     append(&mut bytes, world.root_package.0.as_bytes());
+    append(&mut bytes, &(world.sources.len() as u64).to_le_bytes());
     for source in world.sources.iter() {
         append(&mut bytes, source.package.0.as_bytes());
         append(&mut bytes, source.logical_path.as_str().as_bytes());
         append(&mut bytes, &source.digest.as_bytes());
     }
+    append(&mut bytes, &(world.semantic_options.len() as u64).to_le_bytes());
     for (key, value) in &world.semantic_options {
         append(&mut bytes, key.as_bytes());
         append(&mut bytes, value.as_bytes());
     }
-    if let Some(runtime) = &world.runtime_manifest {
-        append(&mut bytes, b"runtime-manifest");
-        append(&mut bytes, runtime.standard_library.0.as_bytes());
-        for selector in &runtime.selectors {
-            append(&mut bytes, &[selector.role.stable_tag()]);
-            append(&mut bytes, selector.module_path.as_bytes());
-            append(&mut bytes, selector.name.as_bytes());
-        }
-    }
+    put_runtime_manifest(&mut bytes, world.runtime_manifest.as_ref());
     Digest::of_bytes(&bytes)
 }
 
 fn codegen_fingerprint(world: &NormalizedInputWorld) -> Digest {
     let mut bytes = Vec::new();
-    append(&mut bytes, b"grandiose-stage0-bootstrap-codegen-v1");
+    append(&mut bytes, b"grandiose-stage0-bootstrap-codegen-v2");
     append(&mut bytes, world.target.as_bytes());
+    append(&mut bytes, &(world.codegen_options.len() as u64).to_le_bytes());
     for (key, value) in &world.codegen_options {
         append(&mut bytes, key.as_bytes());
         append(&mut bytes, value.as_bytes());
     }
+    append(&mut bytes, &(world.capability_manifest.len() as u64).to_le_bytes());
     for capability in world.capability_manifest.iter() {
         append(&mut bytes, capability.as_bytes());
     }
@@ -377,7 +384,131 @@ fn codegen_fingerprint(world: &NormalizedInputWorld) -> Digest {
     Digest::of_bytes(&bytes)
 }
 
-fn append(output: &mut Vec<u8>, value: &[u8]) {
-    output.extend_from_slice(&(value.len() as u64).to_le_bytes());
-    output.extend_from_slice(value);
+#[cfg(test)]
+mod authority_tests {
+    use super::*;
+    use crate::{
+        CompilationMode, CompilationRequest, CompilerBuildIdentity, LogicalPath,
+        HostImportSelector, PackageKey, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput, SourceInput,
+    };
+    use std::collections::BTreeMap;
+
+    fn request() -> CompilationRequest {
+        let package = PackageKey("app@0.1.0".into());
+        CompilationRequest {
+            build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"authority-regression")),
+            mode: CompilationMode::Check,
+            root_package: package.clone(),
+            sources: vec![SourceInput::new(
+                package, LogicalPath::parse("src/main.glorious").unwrap(),
+                b"main() { () }".as_slice(),
+            )],
+            target: "g1-vm".into(),
+            semantic_options: BTreeMap::new(),
+            codegen_options: BTreeMap::new(),
+            capability_manifest: vec![],
+            runtime_manifest: Some(RuntimeManifestInput {
+                standard_library: PackageKey("std@0.1.0".into()),
+                selectors: vec![PrimitiveSelector {
+                    role: PrimitiveRole::IntCheckedDiv,
+                    module_path: "crate".into(), name: "primitive".into(),
+                }],
+                host_imports: vec![],
+            }),
+        }
+    }
+
+    #[test]
+    fn bootstrap_source_semantics_distinguish_checked_division_from_float_addition() {
+        let integer = request();
+        let mut float = integer.clone();
+        float.runtime_manifest.as_mut().unwrap().selectors[0].role =
+            PrimitiveRole::parse_selector_name("f32-add").unwrap();
+        assert_ne!(
+            source_semantics_fingerprint(&integer.normalize().unwrap()),
+            source_semantics_fingerprint(&float.normalize().unwrap()),
+            "bootstrap convergence must bind the actual runtime role"
+        );
+    }
+
+    #[test]
+    fn bootstrap_codegen_frames_options_separately_from_capabilities() {
+        let mut options = request();
+        options.codegen_options.insert("aa".into(), "bb".into());
+        let mut capabilities = options.clone();
+        capabilities.codegen_options.clear();
+        capabilities.capability_manifest = vec!["aa".into(), "bb".into()];
+        assert_ne!(
+            codegen_fingerprint(&options.normalize().unwrap()),
+            codegen_fingerprint(&capabilities.normalize().unwrap()),
+            "different codegen inputs must not attest convergence"
+        );
+    }
+
+    #[test]
+    fn bootstrap_source_semantics_bind_every_host_import_field() {
+        let mut original = request();
+        original.runtime_manifest.as_mut().unwrap().host_imports.push(HostImportSelector {
+            module_path: "crate::io".into(), name: "read".into(),
+            capability: "fs-read".into(), symbol: "read-file".into(),
+        });
+        let fingerprint = source_semantics_fingerprint(&original.clone().normalize().unwrap());
+        for field in 0..5 {
+            let mut changed = original.clone();
+            let imports = &mut changed.runtime_manifest.as_mut().unwrap().host_imports;
+            match field {
+                0 => imports[0].module_path.push('x'),
+                1 => imports[0].name.push('x'),
+                2 => imports[0].capability.push('x'),
+                3 => imports[0].symbol.push('x'),
+                _ => imports.clear(),
+            }
+            assert_ne!(fingerprint, source_semantics_fingerprint(&changed.normalize().unwrap()),
+                "host input change {field} must change the source commitment");
+        }
+    }
+
+    #[test]
+    fn bootstrap_source_semantics_bind_semantic_generations_not_producer_identity() {
+        let original = request();
+        let fingerprint = source_semantics_fingerprint(&original.clone().normalize().unwrap());
+        for field in 0..4 {
+            let mut changed = original.clone();
+            match field {
+                0 => changed.build.language_generation += 1,
+                1 => changed.build.query_generation += 1,
+                2 => changed.build.interface_generation += 1,
+                _ => changed.build.cache_generation += 1,
+            }
+            assert_ne!(fingerprint, source_semantics_fingerprint(&changed.normalize().unwrap()),
+                "semantic generation {field} must change the source commitment");
+        }
+        let mut successor = original;
+        successor.build.compiler = Digest::of_bytes(b"successor-compiler");
+        assert_eq!(fingerprint, source_semantics_fingerprint(&successor.normalize().unwrap()),
+            "adjacent producers may converge under the same semantic contract");
+    }
+
+    #[test]
+    fn bootstrap_manifest_rejects_the_previous_commitment_schema() {
+        assert_eq!(BOOTSTRAP_MANIFEST_SCHEMA, 3);
+        let digest = Digest::of_bytes(b"schema-regression");
+        let manifest = BootstrapManifest {
+            schema: BOOTSTRAP_MANIFEST_SCHEMA,
+            stage: BootstrapStage {
+                ordinal: 1, producer: digest, optimization_level: 2,
+                limits: BootstrapLimits::new(1, 1024), expected_artifact: None,
+            },
+            world: digest, source_semantics: digest, codegen: digest,
+            artifact: digest, artifact_bytes: digest,
+        };
+        let mut bytes = manifest.encode().unwrap();
+        assert_eq!(BootstrapManifest::decode(&bytes).unwrap(), manifest);
+        bytes[8..12].copy_from_slice(&2_u32.to_le_bytes());
+        assert_eq!(BootstrapManifest::decode(&bytes), Err(BootstrapManifestError::UnsupportedSchema { found: 2 }));
+        let mut old = manifest;
+        old.schema = 2;
+        assert_eq!(old.encode(), Err(BootstrapManifestError::UnsupportedSchema { found: 2 }));
+        assert_eq!(old.compare_convergence(&old), Err(BootstrapConvergenceError::UnsupportedSchema { found: 2 }));
+    }
 }

@@ -878,6 +878,9 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
         request.runtime_manifest = Some(RuntimeManifestInput {
             standard_library,
             selectors: [
+                PrimitiveRole::BytesFromArrayMove,
+                PrimitiveRole::BytesToArray,
+                PrimitiveRole::Blake3,
                 PrimitiveRole::ArrayLen,
                 PrimitiveRole::ArrayUtf8ValidUpTo,
                 PrimitiveRole::ArrayPushUtf8Char,
@@ -1049,6 +1052,51 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
                 }),
             ]
             .into_iter()
+            // Complete the library's numeric conversion matrix using only
+            // existing, signature-checked VM roles. The public As trait and
+            // saturation policy are ordinary source, not manifest bindings.
+            .chain([
+                (crate::ScalarType::U8, crate::ScalarType::F32, false),
+                (crate::ScalarType::U8, crate::ScalarType::F64, false),
+                (crate::ScalarType::U16, crate::ScalarType::F32, false),
+                (crate::ScalarType::U16, crate::ScalarType::F64, false),
+                (crate::ScalarType::U32, crate::ScalarType::F32, false),
+                (crate::ScalarType::U32, crate::ScalarType::F64, false),
+                (crate::ScalarType::U64, crate::ScalarType::F32, false),
+                (crate::ScalarType::U64, crate::ScalarType::F64, false),
+                (crate::ScalarType::U128, crate::ScalarType::F32, false),
+                (crate::ScalarType::U128, crate::ScalarType::F64, false),
+                (crate::ScalarType::Usize, crate::ScalarType::F32, false),
+                (crate::ScalarType::Usize, crate::ScalarType::F64, false),
+                (crate::ScalarType::I8, crate::ScalarType::F32, false),
+                (crate::ScalarType::I8, crate::ScalarType::F64, false),
+                (crate::ScalarType::I16, crate::ScalarType::F32, false),
+                (crate::ScalarType::I16, crate::ScalarType::F64, false),
+                (crate::ScalarType::I32, crate::ScalarType::F32, false),
+                (crate::ScalarType::I32, crate::ScalarType::F64, false),
+                (crate::ScalarType::I64, crate::ScalarType::F64, false),
+                (crate::ScalarType::I128, crate::ScalarType::F32, false),
+                (crate::ScalarType::I128, crate::ScalarType::F64, false),
+                (crate::ScalarType::Isize, crate::ScalarType::F32, false),
+                (crate::ScalarType::Isize, crate::ScalarType::F64, false),
+                (crate::ScalarType::F32, crate::ScalarType::F64, false),
+                (crate::ScalarType::F64, crate::ScalarType::F32, false),
+                (crate::ScalarType::F64, crate::ScalarType::U8, true),
+                (crate::ScalarType::F64, crate::ScalarType::U16, true),
+                (crate::ScalarType::F64, crate::ScalarType::U32, true),
+                (crate::ScalarType::F64, crate::ScalarType::U64, true),
+                (crate::ScalarType::F64, crate::ScalarType::U128, true),
+                (crate::ScalarType::F64, crate::ScalarType::Usize, true),
+                (crate::ScalarType::F64, crate::ScalarType::I8, true),
+                (crate::ScalarType::F64, crate::ScalarType::I16, true),
+                (crate::ScalarType::F64, crate::ScalarType::I32, true),
+                (crate::ScalarType::F64, crate::ScalarType::I128, true),
+                (crate::ScalarType::F64, crate::ScalarType::Isize, true),
+            ].into_iter().map(|(from, to, checked)| {
+                PrimitiveRole::Float(crate::runtime_manifest::FloatPrimitive::Convert {
+                    from, to, checked,
+                })
+            }))
             .map(|role| PrimitiveSelector {
                 role,
                 module_path: "crate".into(),
@@ -2793,6 +2841,7 @@ fn materialize_concrete_instances(
         )?;
         instances.insert(executable, MirInstance { key, executable });
     }
+    let mut unmaterialized_trait_calls = BTreeMap::new();
     for function in functions.values_mut() {
         for block in &mut function.blocks {
             for instruction in &mut block.instructions {
@@ -2906,9 +2955,21 @@ fn materialize_concrete_instances(
                             ));
                         }
                     };
-                    *callee = *targets.get(&key).ok_or_else(|| {
-                        format!("selected trait-method instance was not materialized: {key:?}")
-                    })?;
+                    let Some(target) = targets.get(&key) else {
+                        // All source bodies are checked/lowered, but the
+                        // instance graph starts only at demanded roots. An
+                        // unused body may therefore contain a concrete trait
+                        // call with no executable specialization. Defer this
+                        // error until all call edges have been rewritten;
+                        // never admit it if its owner reaches the program.
+                        unmaterialized_trait_calls
+                            .entry(function.definition)
+                            .or_insert(key);
+                        generic_arguments.clear();
+                        *trait_instance = None;
+                        continue;
+                    };
+                    *callee = *target;
                     generic_arguments.clear();
                     *trait_instance = None;
                     continue;
@@ -2958,6 +3019,19 @@ fn materialize_concrete_instances(
                 };
                 *callee = *target;
                 generic_arguments.clear();
+            }
+        }
+    }
+    if !unmaterialized_trait_calls.is_empty() {
+        let roots = graph
+            .roots()
+            .keys()
+            .map(|key| targets.get(key).copied().unwrap_or(key.callable));
+        for definition in reachable_function_keys(functions, roots) {
+            if let Some(key) = unmaterialized_trait_calls.get(&definition) {
+                return Err(format!(
+                    "selected trait-method instance was not materialized: {key:?}"
+                ));
             }
         }
     }
@@ -4349,7 +4423,22 @@ fn reachable_functions(
     functions: &BTreeMap<DefKey, MirFunction>,
     entry: DefKey,
 ) -> BTreeMap<DefKey, MirFunction> {
-    let mut pending = BTreeSet::from([entry]);
+    reachable_function_keys(functions, [entry])
+        .into_iter()
+        .filter_map(|definition| {
+            functions
+                .get(&definition)
+                .cloned()
+                .map(|body| (definition, body))
+        })
+        .collect()
+}
+
+fn reachable_function_keys(
+    functions: &BTreeMap<DefKey, MirFunction>,
+    roots: impl IntoIterator<Item = DefKey>,
+) -> BTreeSet<DefKey> {
+    let mut pending = roots.into_iter().collect::<BTreeSet<_>>();
     let mut reachable = BTreeSet::new();
     while let Some(definition) = pending.pop_first() {
         if !reachable.insert(definition) {
@@ -4369,14 +4458,6 @@ fn reachable_functions(
         }
     }
     reachable
-        .into_iter()
-        .filter_map(|definition| {
-            functions
-                .get(&definition)
-                .cloned()
-                .map(|body| (definition, body))
-        })
-        .collect()
 }
 
 /// Build the body-grouping table from every operator declaration visible in
@@ -4600,6 +4681,93 @@ mod tests {
 
     fn key(name: &str) -> DefKey {
         DefKey(Digest::of_bytes(name.as_bytes()))
+    }
+
+    #[test]
+    fn unmaterialized_trait_calls_remain_errors_on_reachable_call_and_callable_edges() {
+        fn body(definition: DefKey, instructions: Vec<MirInstruction>) -> MirFunction {
+            MirFunction {
+                nominal_copy_descriptors: vec![],
+                definition,
+                captures: 0,
+                parameters: vec![],
+                locals: vec![MirLocalDecl {
+                    ty: Type::Unit,
+                    source: CoreId(u32::MAX),
+                }],
+                result: Type::Unit,
+                control: crate::MirControlTables::default(),
+                entry: MirBlockId(0),
+                blocks: vec![MirBlock {
+                    scope: crate::MirScopeId::ROOT,
+                    parameters: vec![],
+                    instructions,
+                    terminator: MirTerminator::Unreachable,
+                }],
+            }
+        }
+        let entry = key("missing-instance-entry");
+        let helper = key("missing-instance-helper");
+        let missing = MirInstruction::MakeCallable {
+            dst: MirLocal(0),
+            callee: key("undiscovered-trait-method"),
+            captures: vec![],
+            generic_arguments: vec![],
+            environment: None,
+            trait_instance: Some(crate::mir::MirTraitMethodInstance {
+                evidence: key("selected-evidence"),
+                trait_arguments: vec![],
+                method_arguments: vec![],
+                deferred: None,
+            }),
+        };
+        let mut graph = crate::InstanceGraph::default();
+        graph
+            .discover_root(
+                crate::InstanceRoot {
+                    key: crate::InstanceKey::new(entry, &[], vec![]).unwrap(),
+                    reason: "test".into(),
+                },
+                crate::InstanceLimits::default(),
+            )
+            .unwrap();
+        let signatures = crate::ElaboratedInterface::default();
+        let mut unused = std::collections::BTreeMap::from([
+            (entry, body(entry, vec![])),
+            (helper, body(helper, vec![missing.clone()])),
+        ]);
+        assert!(
+            super::materialize_concrete_instances(&mut unused, &graph, &signatures, None).is_ok()
+        );
+        for edge in [
+            MirInstruction::Call {
+                dst: MirLocal(0),
+                callee: helper,
+                arguments: vec![],
+                generic_arguments: vec![],
+                trait_instance: None,
+            },
+            MirInstruction::MakeCallable {
+                dst: MirLocal(0),
+                callee: helper,
+                captures: vec![],
+                generic_arguments: vec![],
+                trait_instance: None,
+                environment: None,
+            },
+        ] {
+            let mut functions = std::collections::BTreeMap::from([
+                (entry, body(entry, vec![edge])),
+                (helper, body(helper, vec![missing.clone()])),
+            ]);
+            let error =
+                super::materialize_concrete_instances(&mut functions, &graph, &signatures, None)
+                    .expect_err("a reachable owner must not hide an undiscovered method instance");
+            assert!(
+                error.contains("selected trait-method instance was not materialized"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

@@ -49,6 +49,253 @@ fn standard_prelude_and_source_defined_control_are_importable() {
 }
 
 #[test]
+fn standard_lifetime_generic_trait_method_preserves_nested_map_call_instances() {
+    let source = r#"
+        use std::*;
+        pub struct World { private values: HashMap<u64, usize> }
+        pub trait Lookup { get<'a>(value: &'a Self, key: u64) -> Option<&'a usize>; }
+        fn lookup<'a>(value: &'a World, key: u64) -> Option<&'a usize> { HashMap::get(&value.values, &key) }
+        pub impl Lookup for World {
+            get<'a>(value: &'a World, key: u64) -> Option<&'a usize> { lookup(value, key) }
+        }
+        fn main() -> i64 {
+            let map = HashMap<u64, usize>::new();
+            HashMap::insert(&mut map, as<u64>(10), as<usize>(32));
+            let world = World { values: map };
+            handle Lookup::get(&world, 10) { Result::Err(_) => 0, Result::Ok(value) => as<i64>(*value) }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let artifact = outcome.artifact.unwrap();
+    let decoded = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    assert_eq!(decoded.run_i64().unwrap(), 32);
+}
+
+#[test]
+fn standard_lifetime_generic_trait_method_does_not_extend_a_local_map_owner() {
+    let source = r#"
+        use std::*;
+        pub struct World { private values: HashMap<u64, usize> }
+        pub trait Lookup { get<'a>(value: &'a Self, key: u64) -> Option<&'a usize>; }
+        fn lookup<'a>(value: &'a World, key: u64) -> Option<&'a usize> { HashMap::get(&value.values, &key) }
+        pub impl Lookup for World {
+            get<'a>(value: &'a World, key: u64) -> Option<&'a usize> { lookup(value, key) }
+        }
+        fn escape() -> Option<&'static usize> {
+            let map = HashMap<u64, usize>::new();
+            HashMap::insert(&mut map, as<u64>(10), as<usize>(32));
+            let world = World { values: map }; Lookup::get(&world, 10)
+        }
+        fn main() -> i64 { handle escape() { Result::Err(_) => 0, Result::Ok(value) => as<i64>(*value) } }
+    "#;
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5017"), "{error:#?}");
+}
+
+#[test]
+fn standard_string_traits_use_exact_bytes_and_resolve_hash_collisions() {
+    fn literal(value: &str) -> String {
+        format!("b\"{}\"", value.bytes().map(|byte| format!("\\x{byte:02x}")).collect::<String>())
+    }
+    fn fingerprint(value: &str) -> usize {
+        value.bytes().fold(5381_usize.wrapping_mul(33).wrapping_add(value.len()),
+            |state, byte| state.wrapping_mul(33).wrapping_add(byte as usize))
+    }
+    let long = "a".repeat(100);
+    let pairs = [
+        ("", ""), ("", "a"), ("a", ""), ("a", "a"), ("a", "b"), ("a", "aa"),
+        ("ab", "a"), ("é", "z"), ("é", "e\u{301}"), ("a\0b", "a\0c"),
+        ("😀", "🦀"), ("Ab", "BA"), (long.as_str(), long.as_str()),
+    ];
+    let cases = pairs.iter().map(|(left, right)| {
+        let order = match left.cmp(right) { std::cmp::Ordering::Less => -1, std::cmp::Ordering::Equal => 0, std::cmp::Ordering::Greater => 1 };
+        format!("score = score + pair({}, {}, {order}, {}, {});\n", literal(left), literal(right), fingerprint(left), fingerprint(right))
+    }).collect::<String>();
+    let application = format!(r#"
+        use std::*;
+        fn equal(a: i64, b: i64) -> i64 {{ handle a == b {{ true => 1, false => 0 }} }}
+        fn text(bytes: Slice<u8>) -> String {{ let owned = Vec<u8>::new(); Vec::extend_from_slice(&mut owned, bytes);
+            handle String::from_utf8(owned) {{ Result::Ok(value) => value, Result::Err(_) => String::new() }} }}
+        fn hash(value: &String) -> usize {{ let state = Hasher::new(); Hash::hash(value, &mut state); Hasher::finish(state) }}
+        fn order(value: Ordering) -> i64 {{ handle value {{ Ordering::Less => -1, Ordering::Equal => 0, Ordering::Greater => 1 }} }}
+        fn is_equal(value: Bool) -> i64 {{ handle value {{ true => 1, false => 0 }} }}
+        fn pair(a: Slice<u8>, b: Slice<u8>, expected: i64, a_hash: usize, b_hash: usize) -> i64 {{
+            let left = text(a); let right = text(b);
+            equal(order(Ord::compare(&left, &right)), expected)
+                * equal(is_equal(Eq::eq(&left, &right)), is_equal(expected == 0))
+                * equal(as<i64>(hash(&left)), as<i64>(a_hash)) * equal(as<i64>(hash(&right)), as<i64>(b_hash))
+        }}
+        fn lookup(map: &HashMap<String, usize>, key: Str, expected: usize) -> i64 {{
+            let key = Str::to_string(key);
+            handle HashMap::get(map, &key) {{ Result::Err(_) => 0, Result::Ok(value) => equal(as<i64>(*value), as<i64>(expected)) }}
+        }}
+        fn maps() -> i64 {{
+            let a = Str::to_string("Ab"); let b = Str::to_string("BA");
+            let score = equal(as<i64>(hash(&a)), as<i64>(hash(&b))) * equal(is_equal(Eq::eq(&a, &b)), 0);
+            let map = HashMap<String, usize>::new();
+            HashMap::insert(&mut map, a, as<usize>(11)); HashMap::insert(&mut map, b, as<usize>(22));
+            score = score + lookup(&map, "Ab", 11) + lookup(&map, "BA", 22);
+            let previous = HashMap::insert(&mut map, Str::to_string("Ab"), as<usize>(33));
+            score + old(previous) + lookup(&map, "Ab", 33) + equal(as<i64>(HashMap::len(&map)), 2)
+        }}
+        fn old(value: Option<usize>) -> i64 {{ handle value {{ Result::Ok(value) => equal(as<i64>(value), 11), _ => 0 }} }}
+        main() -> i64 {{ let score = as<i64>(0); {cases} score + maps() }}
+    "#);
+    let outcome = StageZeroCompiler::new().compile(request(&application)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let bytes = outcome.artifact.unwrap().canonical_bytes();
+    let verified = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+    assert_eq!(verified.run_i64().unwrap(), pairs.len() as i64 + 6);
+}
+
+#[test]
+fn standard_slice_of_owned_strings_preserves_nested_view_provenance() {
+    let source = r#"
+        use std::*;
+        struct Capability { private value: String }
+        fn view<'a>(value: &'a Capability) -> Str<'a> { String::as_str(&value.value) }
+        fn score(left: Str, right: Str) -> i64 {
+            handle Slice::lex_compare(Str::as_bytes(left), Str::as_bytes(right)) { Ordering::Equal => 1, _ => 0 }
+        }
+        fn rows(values: Slice<Capability>, expected: &Vec<String>, cursor: usize, total: i64) -> i64 {
+            handle cursor == Slice::len(&values) {
+                true => total,
+                false => {
+                    let item = Slice::get_unchecked(values, cursor);
+                    let actual = view(item);
+                    let wanted = String::as_str(Vec::get_unchecked(expected, cursor));
+                    rows(values, expected, cursor + 1, total + score(actual, wanted))
+                },
+            }
+        }
+        main() -> i64 {
+            let values = Vec<Capability>::new(); let expected = Vec<String>::new();
+            Vec::push(&mut values, Capability { value: Str::to_string("a") });
+            Vec::push(&mut values, Capability { value: Str::to_string("é") });
+            Vec::push(&mut expected, Str::to_string("a")); Vec::push(&mut expected, Str::to_string("é"));
+            rows(Vec::as_slice(&values), &expected, 0, 0)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let program = grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 2);
+}
+
+#[test]
+fn slice_element_accessors_preserve_the_explicit_input_lifetime() {
+    let source = r#"
+        use std::*;
+        fn first<'a>(values: Slice<'a, i64>) -> Option<&'a i64> { Slice::get(values, 0) }
+        fn direct<'a>(values: Slice<'a, i64>) -> &'a i64 { Slice::get_unchecked(values, 0) }
+        main() -> i64 {
+            let values = Vec<i64>::new(); Vec::push(&mut values, 7);
+            let result = first(Vec::as_slice(&values));
+            handle result { Result::Err(_) => 0, Result::Ok(value) => *value + *direct(Vec::as_slice(&values)) }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let program = grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 14);
+}
+
+#[test]
+fn hash_map_resident_views_borrow_move_only_values_without_exposing_mutable_keys() {
+    let source = r#"
+        use std::*;
+        struct Payload { number: i64 }
+        pub impl Use<[0, 1]> for Payload {}
+        fn total(rows: Slice<HashMapEntry<String, Payload>>, cursor: usize, value: i64) -> i64 {
+            handle cursor == Slice::len(&rows) {
+                true => value,
+                false => {
+                    let entry = Slice::get_unchecked(rows, cursor);
+                    let key = HashMapEntry::key(entry); let payload = HashMapEntry::value(entry);
+                    total(rows, cursor + 1, value + payload.number + as<i64>(String::len(key)))
+                },
+            }
+        }
+        main() -> i64 {
+            let values = HashMap<String, Payload>::new();
+            HashMap::insert(&mut values, Str::to_string("Ab"), Payload { number: 11 });
+            HashMap::insert(&mut values, Str::to_string("BA"), Payload { number: 22 });
+            let first = total(HashMap::entries(&values), 0, 0);
+            HashMap::insert(&mut values, Str::to_string("Ab"), Payload { number: 33 });
+            let second = total(HashMap::entries(&values), 0, 0);
+            let key = Str::to_string("BA"); HashMap::remove(&mut values, &key);
+            HashMap::insert(&mut values, Str::to_string("c"), Payload { number: 44 });
+            first + second + total(HashMap::entries(&values), 0, 0)
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let program = grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 37 + 59 + 80);
+}
+
+#[test]
+fn hash_map_resident_views_do_not_escape_the_map_owner() {
+    let source = r#"
+        use std::*;
+        fn escape<'a>() -> &'a String {
+            let values = HashMap<String, String>::new();
+            HashMap::insert(&mut values, Str::to_string("a"), Str::to_string("b"));
+            let entries = HashMap::entries(&values);
+            let entry = Slice::get_unchecked(entries, 0);
+            HashMapEntry::key(entry)
+        }
+        main() -> i64 { let result = escape(); as<i64>(String::len(result)) }
+    "#;
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|error| matches!(error.code, "G4107" | "G5017" | "G5018")), "{error:#?}");
+}
+
+#[test]
+fn standard_usize_display_preserves_unsigned_decimal_boundaries() {
+    let values = [
+        0usize, 1, 9, 10, 99, 100, 999, 1000,
+        u32::MAX as usize, u32::MAX as usize + 1,
+        i64::MAX as usize, i64::MAX as usize + 1,
+        usize::MAX - 1, usize::MAX,
+    ];
+    let groups = values
+        .chunks(4)
+        .enumerate()
+        .map(|(index, values)| {
+            let cases = values
+                .iter()
+                .map(|value| format!("check({value}, \"{value}\")"))
+                .collect::<Vec<_>>()
+                .join(" + ");
+            format!("fn group{index}() -> i64 {{ {cases} }}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source = format!(
+        r#"
+        use std::*;
+        fn check(value: usize, expected: Str) -> i64 {{
+            let rendered = format(&value);
+            handle Slice::lex_compare(Str::as_bytes(String::as_str(&rendered)), Str::as_bytes(expected)) {{
+                Ordering::Equal => 1, _ => 0,
+            }}
+        }}
+        {groups}
+        pub fn main() -> i64 {{ group0() + group1() + group2() + group3() }}
+    "#
+    );
+    let outcome = StageZeroCompiler::new()
+        .compile(request(&source))
+        .expect("source decimal formatting must compile without a native formatting leaf");
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let bytes = outcome.artifact.unwrap().canonical_bytes();
+    let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+    assert_eq!(program.run_i64().unwrap(), values.len() as i64);
+}
+
+#[test]
 fn standard_take_uses_a_receiverless_default_constructor() {
     let outcome = StageZeroCompiler::new()
         .compile(request(
@@ -248,8 +495,6 @@ fn bundled_vec_partition_by_accepts_a_duplicable_capturing_closure() {
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 2);
 }
-
-
 
 #[test]
 fn scalar_eq_and_ord_are_standard_library_trait_implementations() {
@@ -648,7 +893,6 @@ fn bundled_str_lifetime_elision_ties_one_input_to_its_output_and_rejects_ambigui
     );
 }
 
-
 #[test]
 fn hasher_is_source_defined_and_deterministic() {
     let source = r#"
@@ -697,6 +941,83 @@ fn explicit_output_lifetime_can_select_one_of_two_borrowed_inputs() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn nested_map_vector_views_preserve_the_explicit_owner_lifetime() {
+    let source = r#"
+        use std::*;
+        pub struct Row { values: Vec<i64> }
+        pub struct Store { rows: HashMap<u32, Row> }
+        pub fn item<'a>(store: &'a Store, key: u32) -> Option<&'a i64> {
+            handle HashMap::get<'a, u32, Row>(&store.rows, &key) {
+                Result::Err(_) => None,
+                Result::Ok(row) => Vec::get(&row.values, 0),
+            }
+        }
+        pub fn view<'a>(store: &'a Store, key: u32) -> Option<Slice<'a, i64>> {
+            handle HashMap::get<'a, u32, Row>(&store.rows, &key) {
+                Result::Err(_) => None,
+                Result::Ok(row) => Result::Ok(Vec::as_slice(&row.values)),
+            }
+        }
+        pub fn item_mut<'a>(store: &'a mut Store, key: u32) -> Option<&'a mut i64> {
+            handle HashMap::get_mut<'a, u32, Row>(&mut store.rows, &key) {
+                Result::Err(_) => None,
+                Result::Ok(row) => Vec::get_mut(&mut row.values, 0),
+            }
+        }
+        pub fn view_mut<'a>(values: &'a mut Vec<i64>) -> SliceMut<'a, i64> {
+            Vec::as_mut_slice(values)
+        }
+        pub fn initialize(values: &mut Vec<i64>) -> () {
+            let window = view_mut(values);
+            let value = SliceMut::get_unchecked(window, 0);
+            *value = 20;
+            ()
+        }
+        pub fn update(store: &mut Store) -> () {
+            handle item_mut(&mut *store, 7) {
+                Result::Err(_) => (), Result::Ok(value) => { *value = *value + 1; () },
+            }
+        }
+        pub fn main() -> i64 {
+            let values = Vec::new();
+            Vec::push(&mut values, 19);
+            initialize(&mut values);
+            let store = Store { rows: HashMap::new() };
+            HashMap::insert(&mut store.rows, 7, Row { values: values });
+            update(&mut store);
+            handle item(&store, 7) {
+                Result::Err(_) => 1,
+                Result::Ok(value) => handle view(&store, 7) {
+                    Result::Err(_) => 2,
+                    Result::Ok(values) => *value + *Slice::get_unchecked(values, 0),
+                },
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+}
+
+#[test]
+fn named_vector_view_lifetimes_do_not_allow_local_owner_escape() {
+    let source = r#"
+        use std::*;
+        pub fn escape<'a>() -> &'a i64 {
+            let values = Vec::new();
+            Vec::push(&mut values, 42);
+            Vec::get_unchecked(&values, 0)
+        }
+        pub fn main() -> i64 { 42 }
+    "#;
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(
+        error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5017"),
+        "{error:?}"
+    );
 }
 
 #[test]
@@ -914,6 +1235,317 @@ fn hash_set_is_a_source_defined_deterministic_collection() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 7);
+}
+
+#[test]
+fn hash_tables_preserve_affine_values_across_growth_collisions_and_relocation() {
+    let template = r#"
+        use std::*;
+        pub struct Key { code: i64 }
+        pub impl Use<[0, 1]> for Key {}
+        pub impl Eq for Key {
+            eq(left: &Key, right: &Key) -> Bool { left.code == right.code }
+        }
+        pub impl Hash for Key {
+            hash(value: &Key, state: &mut Hasher) -> () { Hasher::write_usize(state, @HASH@); }
+        }
+        pub struct Payload { number: i64 }
+        pub impl Use<[0, 1]> for Payload {}
+        pub type Map = HashMap<Key, Payload>;
+
+        fn fill(map: &mut Map, next: i64) -> () {
+            handle next == 24 {
+                true => (),
+                false => {
+                    HashMap::insert(&mut *map, Key { code: next }, Payload { number: next });
+                    fill(&mut *map, next + 1)
+                },
+            }
+        }
+        fn remove(map: &mut Map, code: i64) -> i64 {
+            let key = Key { code: code };
+            handle HashMap::remove(&mut *map, &key) {
+                Result::Err(_) => 0,
+                Result::Ok(value) => handle value.number == code { false => 0, true => 1 },
+            }
+        }
+        fn replace_seven(map: &mut Map) -> i64 {
+            handle HashMap::insert(&mut *map, Key { code: 7 }, Payload { number: 70 }) {
+                Result::Err(_) => 0,
+                Result::Ok(value) => handle value.number == 7 { false => 0, true => 1 },
+            }
+        }
+        fn expected(code: i64) -> i64 { handle code == 7 { true => 70, false => code } }
+        fn present(map: &Map, code: i64, expected: i64) -> i64 {
+            let key = Key { code: code };
+            handle HashMap::get(map, &key) {
+                Result::Err(_) => 0,
+                Result::Ok(value) => handle value.number == expected { false => 0, true => 1 },
+            }
+        }
+        fn absent(map: &Map, code: i64) -> i64 {
+            let key = Key { code: code };
+            handle HashMap::contains_key(map, &key) { true => 0, false => 1 }
+        }
+        fn row(map: &Map, code: i64) -> i64 {
+            handle code {
+                0 => absent(map, code), 10 => absent(map, code), 23 => absent(map, code),
+                _ => present(map, code, expected(code)),
+            }
+        }
+        fn check(map: &Map, next: i64) -> i64 {
+            handle next == 24 { true => 0, false => row(map, next) + check(map, next + 1) }
+        }
+        fn finish(map: &Map, changed: i64) -> i64 {
+            handle changed == 4 {
+                false => 0,
+                true => handle HashMap::len(map) == 22 {
+                    false => 0,
+                    true => handle check(map, 0) == 24 {
+                        false => 0,
+                        true => handle present(map, 100, 1000) == 1 { false => 0, true => 42 },
+                    },
+                },
+            }
+        }
+        pub fn main() -> i64 {
+            let map = HashMap<Key, Payload>::new();
+            fill(&mut map, 0);
+            let replaced = replace_seven(&mut map);
+            let first = remove(&mut map, 0);
+            let middle = remove(&mut map, 10);
+            let last = remove(&mut map, 23);
+            HashMap::insert(&mut map, Key { code: 100 }, Payload { number: 1000 });
+            finish(&map, replaced + first + middle + last)
+        }
+    "#;
+    for hash in ["as<usize>(value.code)", "0"] {
+        let source = template.replace("@HASH@", hash);
+        let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+        assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+        let bytes = outcome.artifact.unwrap().canonical_bytes();
+        let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+        assert_eq!(
+            program.run_i64().unwrap(),
+            42,
+            "hash implementation: {hash}"
+        );
+    }
+}
+
+#[test]
+fn hash_tables_preserve_the_original_affine_set_resident_on_duplicate_insert() {
+    let source = r#"
+        use std::*;
+        pub struct Key { code: i64, payload: i64 }
+        pub impl Use<[0, 1]> for Key {}
+        pub impl Eq for Key {
+            eq(left: &Key, right: &Key) -> Bool { left.code == right.code }
+        }
+        pub impl Hash for Key {
+            hash(value: &Key, state: &mut Hasher) -> () { Hasher::write_usize(state, 0); }
+        }
+        fn removed(set: &HashSet<Key>, resident: Key) -> i64 {
+            let key = Key { code: 2, payload: 0 };
+            handle resident.payload == 10 {
+                false => 0,
+                true => handle HashSet::len(set) == 1 {
+                    false => 0,
+                    true => handle HashSet::contains(set, &key) {
+                        false => 0, true => 42,
+                    },
+                },
+            }
+        }
+        fn remove_first(set: &mut HashSet<Key>) -> i64 {
+            let key = Key { code: 1, payload: 0 };
+            handle HashSet::remove(&mut *set, &key) {
+                Result::Err(_) => 0, Result::Ok(resident) => removed(& *set, resident),
+            }
+        }
+        pub fn main() -> i64 {
+            let set = HashSet<Key>::new();
+            HashSet::insert(&mut set, Key { code: 1, payload: 10 });
+            HashSet::insert(&mut set, Key { code: 2, payload: 20 });
+            handle HashSet::insert(&mut set, Key { code: 1, payload: 99 }) {
+                true => 0, false => remove_first(&mut set),
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let bytes = outcome.artifact.unwrap().canonical_bytes();
+    assert_eq!(
+        grandiose_stage0::decode_and_verify_program(&bytes)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
+fn hash_tables_probe_past_tombstones_and_reuse_empty_tables() {
+    let source = r#"
+        use std::*;
+        pub struct Key { code: i64 }
+        pub impl Eq for Key { eq(left: &Key, right: &Key) -> Bool { left.code == right.code } }
+        pub impl Hash for Key {
+            hash(value: &Key, state: &mut Hasher) -> () { Hasher::write_usize(state, 0); }
+        }
+        pub type Map = HashMap<Key, i64>;
+        fn fill(map: &mut Map, code: i64) -> () {
+            handle code == 7 {
+                true => (),
+                false => {
+                    HashMap::insert(&mut *map, Key { code: code }, code);
+                    fill(&mut *map, code + 1)
+                },
+            }
+        }
+        fn remove(map: &mut Map, code: i64, expected: i64) -> i64 {
+            let key = Key { code: code };
+            handle HashMap::remove(&mut *map, &key) {
+                Result::Err(_) => 0,
+                Result::Ok(value) => handle value == expected { false => 0, true => 1 },
+            }
+        }
+        fn absent(map: &Map, code: i64) -> i64 {
+            let key = Key { code: code };
+            handle HashMap::get(map, &key) { Result::Ok(_) => 0, Result::Err(_) => 1 }
+        }
+        fn replace_three(map: &mut Map) -> i64 {
+            handle HashMap::insert(map, Key { code: 3 }, 30) {
+                Result::Err(_) => 0,
+                Result::Ok(old) => handle old == 3 { false => 0, true => 1 },
+            }
+        }
+        fn remove_even(map: &mut Map) -> i64 {
+            remove(&mut *map, 2, 2) + remove(&mut *map, 4, 4) + remove(&mut *map, 6, 6)
+        }
+        fn remove_odd(map: &mut Map) -> i64 {
+            remove(&mut *map, 1, 1) + remove(&mut *map, 3, 30) + remove(&mut *map, 5, 5)
+        }
+        fn cycle(map: &mut Map) -> i64 {
+            fill(&mut *map, 0);
+            let first = remove(&mut *map, 0, 0);
+            let replaced = replace_three(&mut *map);
+            let even = remove_even(&mut *map);
+            // Three residents and four tombstones trigger same-size cleanup.
+            HashMap::insert(&mut *map, Key { code: 7 }, 7);
+            let missing = absent(& *map, 0) + absent(& *map, 8);
+            let odd = remove_odd(&mut *map);
+            let last = remove(&mut *map, 7, 7);
+            let head = first + replaced + even;
+            handle HashMap::is_empty(& *map) { false => 0, true => head + missing + odd + last }
+        }
+        fn repeat(map: &mut Map, remaining: i64) -> i64 {
+            handle remaining == 0 {
+                true => 42,
+                false => handle cycle(&mut *map) == 11 {
+                    false => 0, true => repeat(&mut *map, remaining - 1),
+                },
+            }
+        }
+        pub fn main() -> i64 { let map = HashMap<Key, i64>::new(); repeat(&mut map, 20) }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let bytes = outcome.artifact.unwrap().canonical_bytes();
+    let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+    assert_eq!(program.run_i64().unwrap(), 42);
+    let (value, profile) = program
+        .run_i64_for_authoring(grandiose_stage0::VmExecutionLimits {
+            max_call_depth: 64,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(value, 42);
+    assert!(profile.peak_call_depth < 64);
+}
+
+#[test]
+fn hash_table_mutable_lookup_and_entry_removal_preserve_the_resident_key() {
+    let source = r#"
+        use std::*;
+        pub struct Key { code: i64, stamp: i64 }
+        pub impl Use<[0, 1]> for Key {}
+        pub impl Eq for Key { eq(left: &Key, right: &Key) -> Bool { left.code == right.code } }
+        pub impl Hash for Key {
+            hash(value: &Key, state: &mut Hasher) -> () { Hasher::write_usize(state, as<usize>(value.code)); }
+        }
+        pub struct Item { value: i64 }
+        pub impl Use<[0, 1]> for Item {}
+        pub type Map = HashMap<Key, Item>;
+        // The generic API must not demand that either field can be discarded.
+        fn take_entry<K, V>(map: &mut HashMap<K, V>, key: &K) -> Option<(K, V)>
+            where K: Eq, K: Hash { HashMap::remove_entry(map, key) }
+        fn update(map: &mut Map, key: &Key) -> () {
+            handle HashMap::get_mut(map, key) {
+                Result::Err(_) => (),
+                Result::Ok(item) => { (*item).value = item.value + 10; },
+            }
+        }
+        fn finish(map: &mut Map, key: &Key) -> i64 {
+            update(&mut *map, key);
+            handle take_entry(&mut *map, key) {
+                Result::Err(_) => 0,
+                Result::Ok((resident, item)) => handle resident.stamp == 10 {
+                    false => 0,
+                    true => handle HashMap::is_empty(& *map) { false => 0, true => item.value },
+                },
+            }
+        }
+        pub fn main() -> i64 {
+            let map = HashMap<Key, Item>::new();
+            HashMap::insert(&mut map, Key { code: 1, stamp: 10 }, Item { value: 7 });
+            let key = Key { code: 1, stamp: 0 };
+            handle HashMap::insert(&mut map, Key { code: 1, stamp: 99 }, Item { value: 32 }) {
+                Result::Err(_) => 0,
+                Result::Ok(old) => handle old.value == 7 { false => 0, true => finish(&mut map, &key) },
+            }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    let bytes = outcome.artifact.unwrap().canonical_bytes();
+    assert_eq!(
+        grandiose_stage0::decode_and_verify_program(&bytes)
+            .unwrap()
+            .run_i64()
+            .unwrap(),
+        42
+    );
+}
+
+#[test]
+fn hash_table_indexed_lookup_work_does_not_scan_unrelated_entries() {
+    let template = include_str!("fixtures/hash_indexing_profile.glorious");
+    // Subtract the identical construction workload. These are logical VM
+    // work ticks, NOT a claim about backing-object copies or physical bytes.
+    let mut lookup_work = Vec::new();
+    for size in [8, 64] {
+        let mut work = Vec::new();
+        for read in [0, 1] {
+            let source = template
+                .replace("@SIZE@", &size.to_string())
+                .replace("@READ@", &read.to_string());
+            let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
+            let bytes = outcome.artifact.unwrap().canonical_bytes();
+            let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
+            let (value, profile) = program
+                .run_i64_for_authoring(grandiose_stage0::VmExecutionLimits {
+                    max_call_depth: 64,
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(value, 42);
+            assert!(profile.peak_call_depth < 64);
+            eprintln!("hash table size={size}, read={read}: {profile:?}");
+            work.push(profile.work_ticks);
+        }
+        lookup_work.push(work[1].checked_sub(work[0]).unwrap());
+    }
+    assert!(lookup_work[0] > 0);
+    assert_eq!(lookup_work[0], lookup_work[1], "{lookup_work:?}");
 }
 
 #[test]
@@ -1780,6 +2412,51 @@ fn str_chars_iterates_complete_utf8_characters_from_static_data() {
 }
 
 #[test]
+fn str_char_at_checks_byte_boundaries_and_returns_owned_scalars_from_static_and_dynamic_views() {
+    let source = r#"
+        use std::*;
+        fn scalar(value: Str, index: usize, expected: u32) -> usize {
+            handle Str::char_at(value, index) {
+                Result::Err(_) => 0,
+                Result::Ok(character) => handle char_to_u32(character) == expected { true => 1, false => 0 },
+            }
+        }
+        fn error(value: Str, index: usize, expected: usize) -> usize {
+            handle Str::char_at(value, index) {
+                Result::Ok(_) => 0,
+                Result::Err(problem) => handle problem {
+                    StringRangeError::OutOfBounds => handle expected == 0 { true => 1, false => 0 },
+                    StringRangeError::NotCharBoundary => handle expected == 1 { true => 1, false => 0 },
+                    _ => 0,
+                },
+            }
+        }
+        fn owned() -> Result<char, StringRangeError> {
+            let local = Str::to_string("é");
+            let view = String::as_str(&local);
+            Str::char_at(view, 0)
+        }
+        fn owned_case() -> usize {
+            handle owned() {
+                Result::Err(_) => 0, Result::Ok(character) => handle char_to_u32(character) == 233 { true => 1, false => 0 },
+            }
+        }
+        pub fn main() -> usize {
+            let text = Str::to_string("aé😀\0");
+            let view = String::as_str(&text);
+            let characters = scalar(view, 0, 97) + scalar(view, 1, 233) + scalar(view, 3, 128512) + scalar(view, 7, 0);
+            let boundaries = error(view, 2, 1) + error(view, 4, 1) + error(view, 5, 1) + error(view, 6, 1);
+            let bounds = error(view, 8, 0) + error(view, 9, 0) + error(view, 18446744073709551615, 0) + error("", 0, 0);
+            let literals = scalar("é", 0, 233) + error("é", 1, 1) + error("é", 2, 0);
+            characters + boundaries + bounds + literals + owned_case()
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 16);
+}
+
+#[test]
 fn str_chars_uses_the_same_iterator_for_dynamic_string_storage() {
     let source = r#"
         use std::*;
@@ -1814,6 +2491,119 @@ fn string_owns_a_vec_and_borrows_the_same_str_view() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 0);
+}
+
+#[test]
+fn named_string_views_preserve_the_nested_owner_lifetime() {
+    let source = r#"
+        use std::*;
+        pub struct Blob { text: String }
+        pub fn text<'a>(blob: &'a Blob) -> Str<'a> { String::as_str(&blob.text) }
+        pub fn bytes<'a>(blob: &'a Blob) -> Slice<'a, u8> { Str::as_bytes(text(blob)) }
+        pub fn main() -> i64 {
+            let blob = Blob { text: Str::to_string("*é😀") };
+            let view = bytes(&blob);
+            as<i64>(*Slice::get_unchecked(view, 0)) + as<i64>(Slice::len(&view))
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 49);
+}
+
+#[test]
+fn named_string_views_do_not_allow_local_owner_escape() {
+    let source = r#"
+        use std::*;
+        pub fn escape<'a>() -> Slice<'a, u8> {
+            let text = Str::to_string("local");
+            Str::as_bytes(String::as_str(&text))
+        }
+        pub fn main() -> i64 { 42 }
+    "#;
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5017"), "{error:?}");
+}
+
+#[test]
+fn implicit_string_views_do_not_allow_local_owner_escape() {
+    let source = r#"
+        use std::*;
+        fn view(value: Str) -> Str { value }
+        pub fn escape<'a>() -> Str<'a> {
+            let text = Str::to_string("local");
+            view(&text)
+        }
+        pub fn main() -> i64 { 42 }
+    "#;
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5017"), "{error:?}");
+}
+
+#[test]
+fn static_literal_views_satisfy_generic_lifetime_call_contexts() {
+    let source = r#"
+        use std::*;
+        fn text<'a>(value: Str<'a>) -> Slice<'a, u8> { Str::as_bytes(value) }
+        fn bytes<'a>(value: Slice<'a, u8>) -> Slice<'a, u8> { value }
+        pub fn literal<'a>() -> Str<'a> { "static" }
+        pub fn main() -> usize {
+            let direct = Str::as_bytes("abc");
+            let empty = Str::as_bytes("");
+            let unicode = text("é😀");
+            let raw = bytes(b"\x00\xff");
+            Slice::len(&direct) + Slice::len(&empty) + Slice::len(&unicode)
+                + Slice::len(&raw) + Str::len(literal<'static>())
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 17);
+}
+
+#[test]
+fn generic_literal_view_contexts_do_not_promote_local_string_borrows_to_static() {
+    let source = r#"
+        use std::*;
+        fn view<'a>(value: Str<'a>) -> Str<'a> { value }
+        pub fn escape() -> Str<'static> {
+            let text = Str::to_string("local");
+            view(&text)
+        }
+        pub fn main() -> i64 { 42 }
+    "#;
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5017"), "{error:?}");
+}
+
+#[test]
+fn empty_string_views_survive_nested_vector_extraction_and_calls() {
+    let source = r#"
+        use std::*;
+        fn owned(value: Slice<u8>) -> Vec<u8> {
+            let bytes = Vec<u8>::new();
+            Vec::extend_from_slice(&mut bytes, value);
+            bytes
+        }
+        fn digest(value: Vec<u8>) -> usize {
+            handle String::from_utf8(value) {
+                Result::Err(_) => 0,
+                Result::Ok(text) => {
+                    let fingerprint = blake3(Str::as_bytes(String::as_str(&text)));
+                    Vec::len(&fingerprint)
+                },
+            }
+        }
+        pub fn main() -> usize {
+            let inputs = Vec<Vec<u8>>::new();
+            Vec::push(&mut inputs, owned(b""));
+            handle Vec::get(&inputs, 0) { Result::Err(_) => 0, Result::Ok(bytes) => digest(*bytes) }
+        }
+    "#;
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
+    let program = outcome.artifact.unwrap();
+    assert_eq!(program.run_usize().unwrap(), 32);
 }
 
 #[test]
@@ -2014,7 +2804,6 @@ fn option_insertion_helpers_borrow_the_resident_value() {
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
 }
-
 
 #[test]
 fn bundled_vec_iter_lends_elements_in_source_defined_order() {

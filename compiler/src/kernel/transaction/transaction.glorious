@@ -1,0 +1,171 @@
+use std::*;
+use super::operation;
+
+pub enum TransactionError { Closed, MarkOrder, ForeignMark, Capacity, Unwinding, OrdinalOverflow }
+pub struct Mark { private database: u64, private owner: u64, private ordinal: u64 }
+struct Boundary { mark: Mark, offset: usize }
+enum Phase { Open, Unwinding { stop: usize } }
+
+// One uniquely named log per mutable domain. An inference log cannot address
+// query or package undo records. Ordinals never reset when an outer mark ends.
+pub struct UndoLog<U> {
+    private database: u64,
+    private owner: u64,
+    private next: u64,
+    private entries: Vec<U>,
+    private marks: Vec<Boundary>,
+    private phase: Phase,
+    private limit: usize,
+}
+pub enum UndoStep<U> { Apply(U), Done }
+
+pub fn create<U>(database: u64, owner: u64, limit: usize) -> UndoLog<U> {
+    UndoLog { database: database, owner: owner, next: 0, entries: Vec::new(),
+        marks: Vec::new(), phase: Phase::Open, limit: limit }
+}
+
+fn open<U>(log: &UndoLog<U>) -> Result<(), TransactionError> {
+    handle log.phase {
+        Phase::Open => Result::Ok(()),
+        Phase::Unwinding { stop: _ } => Result::Err(TransactionError::Unwinding),
+    }
+}
+
+pub fn mark<U>(log: &mut UndoLog<U>) -> Result<Mark, TransactionError> {
+    handle open(& *log) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle Vec::len(&log.marks) < log.limit {
+            false => Result::Err(TransactionError::Capacity),
+            true => handle log.next == 18446744073709551615 {
+                true => Result::Err(TransactionError::OrdinalOverflow),
+                false => {
+                    let key = Mark { database: log.database, owner: log.owner, ordinal: log.next };
+                    Vec::push(&mut log.marks, Boundary { mark: key, offset: Vec::len(&log.entries) });
+                    (*log).next = wrapping_add(log.next, 1);
+                    Result::Ok(key)
+                },
+            },
+        },
+    }
+}
+
+pub fn record<U>(log: &mut UndoLog<U>, undo: U) -> Result<(), TransactionError>
+    where U: Use<[0, 1]> {
+    handle open(& *log) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle Vec::len(&log.marks) == 0 {
+            true => Result::Err(TransactionError::Closed),
+            false => handle Vec::len(&log.entries) < log.limit {
+                false => Result::Err(TransactionError::Capacity),
+                true => { Vec::push(&mut log.entries, undo); Result::Ok(()) },
+            },
+        },
+    }
+}
+
+fn same_owner<U>(log: &UndoLog<U>, key: Mark) -> Bool {
+    handle key.database == log.database {
+        false => false,
+        true => key.owner == log.owner,
+    }
+}
+
+fn top<U>(log: &UndoLog<U>, key: Mark) -> Result<usize, TransactionError> {
+    handle same_owner(log, key) {
+        false => Result::Err(TransactionError::ForeignMark),
+        true => handle Vec::len(&log.marks) == 0 {
+            true => Result::Err(TransactionError::Closed),
+            false => {
+                let boundary = Vec::get_unchecked(&log.marks, Vec::len(&log.marks) - 1);
+                handle boundary.mark.ordinal == key.ordinal {
+                    false => Result::Err(TransactionError::MarkOrder),
+                    true => Result::Ok(boundary.offset),
+                }
+            },
+        },
+    }
+}
+
+// Inner commit removes only the boundary: an outer rollback still owns every
+// undo entry produced by the inner speculation.
+pub fn commit<U>(log: &mut UndoLog<U>, key: Mark) -> Result<(), TransactionError>
+    where U: Use<[0, 1]> {
+    handle open(& *log) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle top(& *log, key) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => {
+                Vec::pop(&mut log.marks);
+                forget_if_outer(&mut *log);
+                Result::Ok(())
+            },
+        },
+    }
+}
+
+fn forget_if_outer<U>(log: &mut UndoLog<U>) -> () where U: Use<[0, 1]> {
+    handle Vec::len(&log.marks) == 0 {
+        true => { (*log).entries = Vec::new(); },
+        false => (),
+    }
+}
+
+pub fn rollback<U>(log: &mut UndoLog<U>, key: Mark) -> Result<(), TransactionError> {
+    handle open(& *log) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle top(& *log, key) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(stop) => {
+                (*log).phase = Phase::Unwinding { stop: stop };
+                Result::Ok(())
+            },
+        },
+    }
+}
+
+// The typed domain must apply the returned undo before its next safe point.
+// Cleanup deliberately does not consult cancellation or refund spent work.
+// New writes/marks/commits remain rejected until the final Done transition.
+pub fn rollback_step<U>(log: &mut UndoLog<U>) -> Result<UndoStep<U>, TransactionError> {
+    handle log.phase {
+        Phase::Open => Result::Err(TransactionError::Closed),
+        Phase::Unwinding { stop: stop } => handle Vec::len(&log.entries) == stop {
+            true => {
+                Vec::pop(&mut log.marks);
+                (*log).phase = Phase::Open;
+                Result::Ok(UndoStep::Done)
+            },
+            false => handle Vec::pop(&mut log.entries) {
+                Result::Err(_) => Result::Err(TransactionError::Closed),
+                Result::Ok(undo) => Result::Ok(UndoStep::Apply(undo)),
+            },
+        },
+    }
+}
+
+pub fn scratch_count<U>(log: &UndoLog<U>) -> usize { Vec::len(&log.entries) }
+pub fn mark_count<U>(log: &UndoLog<U>) -> usize { Vec::len(&log.marks) }
+
+pub struct Publication<T> { private value: Option<T> }
+pub enum PublicationError { Closed, Control(operation::Failure) }
+
+pub fn stage<T>(value: T) -> Publication<T> { Publication { value: Result::Ok(value) } }
+pub fn abort<T>(publication: &mut Publication<T>) -> () where T: Use<[0, 1]> {
+    (*publication).value = None;
+}
+
+// Payloads are already immutable/preallocated here. The caller moves the
+// complete value+journal or request outcome into its visible slot on success.
+pub fn publish<T>(publication: &mut Publication<T>, controls: &operation::Controls)
+    -> Result<T, PublicationError> where T: Use<[0, 1]> {
+    handle operation::check(controls) {
+        Result::Err(error) => {
+            abort(&mut *publication);
+            Result::Err(PublicationError::Control(error))
+        },
+        Result::Ok(_) => handle Option::take(&mut publication.value) {
+            Result::Err(_) => Result::Err(PublicationError::Closed),
+            Result::Ok(value) => Result::Ok(value),
+        },
+    }
+}

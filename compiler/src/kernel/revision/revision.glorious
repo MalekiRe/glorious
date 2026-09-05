@@ -1,0 +1,273 @@
+use std::*;
+use super::identity::Digest;
+use super::identity::RevisionId;
+use super::storage;
+use super::storage::Handle;
+use super::storage::Arena;
+
+pub enum RevisionState { Active, Retired }
+pub enum RevisionError { Foreign, Unknown, Retired, StalePin, Capacity, OrdinalOverflow, Invariant }
+pub struct Snapshot { private pin: Handle }
+struct Pin { revision: RevisionId, record: Handle }
+struct Revision<W> {
+    id: RevisionId,
+    fingerprint: Digest,
+    parent: Option<RevisionId>,
+    state: RevisionState,
+    pins: usize,
+    world: W,
+}
+impl<W> Use<[0, 1]> for Revision<W> where W: Use<[0, 1]> {}
+pub struct Stats {
+    retained: usize, retired: usize, pinned_revisions: usize, snapshot_pins: usize,
+}
+pub struct History<W> {
+    private database: u64,
+    private next: u64,
+    private records: Arena<Revision<W>>,
+    private pins: Arena<Pin>,
+    private by_id: HashMap<RevisionId, Handle>,
+    private equivalent: HashMap<Digest, RevisionId>,
+    private stats: Stats,
+}
+pub enum CollectionStep { Done, Next { cursor: usize, collected: Option<RevisionId> } }
+
+pub fn create<W>(database: u64, revisions: usize, pins: usize) -> History<W> {
+    History { database: database, next: 0,
+        records: storage::namespace(database, 0, revisions),
+        pins: storage::namespace(database, 1, pins),
+        by_id: HashMap::new(), equivalent: HashMap::new(),
+        stats: Stats { retained: 0, retired: 0, pinned_revisions: 0, snapshot_pins: 0 } }
+}
+
+fn locate<W>(history: &History<W>, id: RevisionId) -> Result<Handle, RevisionError> {
+    handle id.database == history.database {
+        false => Result::Err(RevisionError::Foreign),
+        true => handle HashMap::get(&history.by_id, &id) {
+            Result::Ok(key) => Result::Ok(*key),
+            Result::Err(_) => Result::Err(RevisionError::Unknown),
+        },
+    }
+}
+
+fn active<W>(history: &History<W>, id: RevisionId) -> Result<Handle, RevisionError> {
+    handle locate(history, id) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(key) => handle storage::get(&history.records, key) {
+            Result::Err(_) => Result::Err(RevisionError::Invariant),
+            Result::Ok(record) => handle record.state {
+                RevisionState::Active => Result::Ok(key),
+                RevisionState::Retired => Result::Err(RevisionError::Retired),
+            },
+        },
+    }
+}
+
+fn parent_valid<W>(history: &History<W>, parent: Option<RevisionId>) -> Result<(), RevisionError> {
+    handle parent {
+        Result::Err(_) => Result::Ok(()),
+        Result::Ok(id) => handle active(history, id) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => Result::Ok(()),
+        },
+    }
+}
+
+fn existing<W>(history: &History<W>, fingerprint: Digest) -> Option<RevisionId> {
+    handle HashMap::get(&history.equivalent, &fingerprint) {
+        Result::Ok(id) => Result::Ok(*id),
+        Result::Err(_) => None,
+    }
+}
+
+// The request normalizer supplies the source-owned immutable world and exact
+// fingerprint. Parent admission deliberately precedes equivalent-world lookup.
+pub fn import<W>(history: &mut History<W>, world: W, fingerprint: Digest, parent: Option<RevisionId>)
+    -> Result<RevisionId, RevisionError> where W: Use<[0, 1]> {
+    handle parent_valid(& *history, parent) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle existing(& *history, fingerprint) {
+            Result::Ok(id) => Result::Ok(id),
+            Result::Err(_) => insert_revision(&mut *history, world, fingerprint, parent),
+        },
+    }
+}
+
+fn insert_revision<W>(history: &mut History<W>, world: W, fingerprint: Digest, parent: Option<RevisionId>)
+    -> Result<RevisionId, RevisionError> where W: Use<[0, 1]> {
+    handle history.next == 18446744073709551615 {
+        true => Result::Err(RevisionError::OrdinalOverflow),
+        false => {
+            let id = RevisionId { database: history.database, ordinal: history.next };
+            let record = Revision { id: id, fingerprint: fingerprint, parent: parent,
+                state: RevisionState::Active, pins: 0, world: world };
+            handle storage::insert(&mut history.records, record) {
+                Result::Err(_) => Result::Err(RevisionError::Capacity),
+                Result::Ok(key) => {
+                    HashMap::insert(&mut history.by_id, id, key);
+                    HashMap::insert(&mut history.equivalent, fingerprint, id);
+                    (*history).next = wrapping_add(history.next, 1);
+                    (*history).stats.retained = history.stats.retained + 1;
+                    Result::Ok(id)
+                },
+            }
+        },
+    }
+}
+
+fn increment_pins<W>(history: &mut History<W>, key: Handle) -> Result<(), RevisionError> {
+    handle storage::get_mut(&mut history.records, key) {
+        Result::Err(_) => Result::Err(RevisionError::Invariant),
+        Result::Ok(record) => {
+            let first = record.pins;
+            (*record).pins = record.pins + 1;
+            (*history).stats.snapshot_pins = history.stats.snapshot_pins + 1;
+            count_first(&mut history.stats, first);
+            Result::Ok(())
+        },
+    }
+}
+
+fn count_first(stats: &mut Stats, first: usize) -> () {
+    handle first {
+        0 => { (*stats).pinned_revisions = stats.pinned_revisions + 1; },
+        _ => (),
+    }
+}
+
+pub fn open<W>(history: &mut History<W>, id: RevisionId) -> Result<Snapshot, RevisionError> {
+    handle active(& *history, id) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(key) => handle storage::insert(&mut history.pins, Pin { revision: id, record: key }) {
+            Result::Err(_) => Result::Err(RevisionError::Capacity),
+            Result::Ok(pin) => handle increment_pins(&mut *history, key) {
+                Result::Err(error) => {
+                    storage::remove(&mut history.pins, pin);
+                    Result::Err(error)
+                },
+                Result::Ok(_) => Result::Ok(Snapshot { pin: pin }),
+            },
+        },
+    }
+}
+
+fn admitted<W>(history: &History<W>, snapshot: Snapshot) -> Result<Handle, RevisionError> {
+    handle storage::get(&history.pins, snapshot.pin) {
+        Result::Err(_) => Result::Err(RevisionError::StalePin),
+        Result::Ok(pin) => Result::Ok(pin.record),
+    }
+}
+
+pub fn world<'a, W>(history: &'a History<W>, snapshot: Snapshot) -> Result<&'a W, RevisionError> {
+    handle admitted(history, snapshot) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(key) => handle storage::get(&history.records, key) {
+            Result::Err(_) => Result::Err(RevisionError::Invariant),
+            Result::Ok(record) => Result::Ok(&record.world),
+        },
+    }
+}
+
+pub fn identity<W>(history: &History<W>, snapshot: Snapshot) -> Result<RevisionId, RevisionError> {
+    handle storage::get(&history.pins, snapshot.pin) {
+        Result::Err(_) => Result::Err(RevisionError::StalePin),
+        Result::Ok(pin) => Result::Ok(pin.revision),
+    }
+}
+
+pub fn parent<W>(history: &History<W>, snapshot: Snapshot) -> Result<Option<RevisionId>, RevisionError> {
+    handle admitted(history, snapshot) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(key) => handle storage::get(&history.records, key) {
+            Result::Err(_) => Result::Err(RevisionError::Invariant),
+            Result::Ok(record) => Result::Ok(record.parent),
+        },
+    }
+}
+
+pub fn fingerprint<W>(history: &History<W>, snapshot: Snapshot) -> Result<Digest, RevisionError> {
+    handle admitted(history, snapshot) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(key) => handle storage::get(&history.records, key) {
+            Result::Err(_) => Result::Err(RevisionError::Invariant),
+            Result::Ok(record) => Result::Ok(record.fingerprint),
+        },
+    }
+}
+
+fn count_last(stats: &mut Stats, remaining: usize) -> () {
+    handle remaining == 0 {
+        true => { (*stats).pinned_revisions = stats.pinned_revisions - 1; },
+        false => (),
+    }
+}
+
+pub fn close<W>(history: &mut History<W>, snapshot: Snapshot) -> Result<(), RevisionError> {
+    handle storage::remove(&mut history.pins, snapshot.pin) {
+        Result::Err(_) => Result::Err(RevisionError::StalePin),
+        Result::Ok(pin) => handle storage::get_mut(&mut history.records, pin.record) {
+            Result::Err(_) => Result::Err(RevisionError::Invariant),
+            Result::Ok(record) => {
+                (*record).pins = record.pins - 1;
+                count_last(&mut history.stats, record.pins);
+                (*history).stats.snapshot_pins = history.stats.snapshot_pins - 1;
+                Result::Ok(())
+            },
+        },
+    }
+}
+
+pub fn retire<W>(history: &mut History<W>, id: RevisionId) -> Result<(), RevisionError> {
+    handle locate(& *history, id) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(key) => handle storage::get_mut(&mut history.records, key) {
+            Result::Err(_) => Result::Err(RevisionError::Invariant),
+            Result::Ok(record) => handle record.state {
+                RevisionState::Retired => Result::Ok(()),
+                RevisionState::Active => {
+                    HashMap::remove(&mut history.equivalent, &record.fingerprint);
+                    (*record).state = RevisionState::Retired;
+                    (*history).stats.retired = history.stats.retired + 1;
+                    Result::Ok(())
+                },
+            },
+        },
+    }
+}
+
+pub fn stats<W>(history: &History<W>) -> Stats { history.stats }
+
+fn collectable<W>(history: &History<W>, key: Handle) -> Bool {
+    handle storage::get(&history.records, key) {
+        Result::Err(_) => false,
+        Result::Ok(record) => handle record.state {
+            RevisionState::Active => false,
+            RevisionState::Retired => record.pins == 0,
+        },
+    }
+}
+
+// One slot per scheduler safe point; no input-sized recursion or live borrowed
+// store view crosses a yield. The database removes query ownership for each
+// returned id before exposing its collection report.
+pub fn collect_step<W>(history: &mut History<W>, cursor: usize) -> Result<CollectionStep, RevisionError>
+    where W: Use<[0, 1]> {
+    handle cursor < storage::slot_count(&history.records) {
+        false => Result::Ok(CollectionStep::Done),
+        true => handle storage::key_at(&history.records, cursor) {
+            Result::Err(_) => Result::Ok(CollectionStep::Next { cursor: cursor + 1, collected: None }),
+            Result::Ok(key) => handle collectable(& *history, key) {
+                false => Result::Ok(CollectionStep::Next { cursor: cursor + 1, collected: None }),
+                true => handle storage::remove(&mut history.records, key) {
+                    Result::Err(_) => Result::Err(RevisionError::Invariant),
+                    Result::Ok(record) => {
+                        HashMap::remove(&mut history.by_id, &record.id);
+                        (*history).stats.retired = history.stats.retired - 1;
+                        (*history).stats.retained = history.stats.retained - 1;
+                        Result::Ok(CollectionStep::Next { cursor: cursor + 1, collected: Result::Ok(record.id) })
+                    },
+                },
+            },
+        },
+    }
+}

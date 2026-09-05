@@ -1,5 +1,10 @@
 # Grandiose VM and Future Self-Hosting Compiler Architecture
 
+The replacement compiler architecture and compiler size budgets in this
+document are superseded by [GSC-2](../GSC-2-glorious-incremental-self-hosted-compiler-spec.md).
+Its demand-driven database serves every compilation mode. The G1 runtime and
+bytecode contracts below remain applicable.
+
 Status: normative architecture for bytecode generation 1. The binary contract is
 specified in [bytecode.md](bytecode.md). Language semantics are specified by
 [the language core](../glorious-branded-environment-core-spec.md); where this

@@ -1,0 +1,184 @@
+use std::*;
+use kernel::database;
+use kernel::database::create;
+use kernel::database::PackageWorld;
+use kernel::database::Session;
+use kernel::engine;
+use kernel::identity;
+use kernel::identity::PackageKey;
+use kernel::package;
+use kernel::package::Action;
+use kernel::package::Event;
+use kernel::query;
+use kernel::revision;
+use kernel::operation;
+pub mod kernel;
+
+pub struct World { package: PackageKey }
+pub impl PackageWorld for World {
+    contains_package(world: &World, package: &PackageKey) -> Bool { Eq::eq(&world.package, package) }
+}
+pub type Db = database::Database<World, i64>;
+fn key(name: Str) -> PackageKey { PackageKey { value: Str::to_string(name) } }
+fn yes() -> Bool { true }
+fn no() -> Bool { false }
+fn package_error(error: package::Failure) -> u32 {
+    handle error {
+        package::Failure::PackageNotInRequest(_) => 1, package::Failure::ForeignBody => 2,
+        _ => 0,
+    }
+}
+fn engine_error(error: engine::Failure) -> u32 {
+    handle error {
+        engine::Failure::Package(error) => package_error(error), engine::Failure::Closed => 4,
+        engine::Failure::Control(operation::Failure::Cancelled) => 3, _ => 0,
+    }
+}
+fn failed(result: Result<Event, database::Failure>, code: u32) -> Bool {
+    handle result { Result::Err(database::Failure::Engine(error)) => engine_error(error) == code, _ => no() }
+}
+fn done(result: Result<Event, database::Failure>) -> Bool {
+    handle result { Result::Ok(Event::Done) => yes(), _ => no() }
+}
+fn retired(result: Result<Session, database::Failure>) -> Bool {
+    handle result { Result::Err(database::Failure::Revision(revision::RevisionError::Retired)) => yes(), _ => no() }
+}
+fn closed(result: Result<u64, database::Failure>) -> Bool {
+    handle result { Result::Err(database::Failure::Engine(engine::Failure::Closed)) => yes(), _ => no() }
+}
+fn points(value: Bool, score: i64) -> i64 { handle value { true => score, false => 0 } }
+fn act(db: &mut Db, session: Session, action: Action) -> Result<Event, database::Failure> {
+    database::package_action(db, session, action)
+}
+fn empty(db: &Db, session: Session) -> Bool {
+    handle database::package_stats(db, session) {
+        Result::Err(_) => no(),
+        Result::Ok(stats) => handle stats.active_packages == 0 {
+            false => no(),
+            true => handle stats.active_body_scratch == 0 { false => no(), true => stats.staged_body_products == 0 },
+        },
+    }
+}
+fn count(db: &Db, session: Session, bodies: u64) -> Bool {
+    handle database::package_stats(db, session) {
+        Result::Err(_) => no(), Result::Ok(stats) => stats.active_body_scratch == bodies,
+    }
+}
+fn spent(db: &Db, session: Session, amount: u64) -> Bool {
+    handle database::work_spent(db, session) { Result::Ok(value) => value == amount, _ => no() }
+}
+fn unpinned(db: &Db) -> Bool {
+    handle database::stats(db) { Result::Ok(stats) => stats.revisions.snapshot_pins == 0, _ => no() }
+}
+fn membership(db: &mut Db, session: Session) -> i64 {
+    let missing = failed(act(&mut *db, session, Action::Open(key("absent"))), 1);
+    let opened = done(act(&mut *db, session, Action::Open(key("present"))));
+    points(missing, 2) + points(opened, 2) + points(spent(& *db, session, 1), 2)
+}
+fn isolation(db: &mut Db, first: Session, second: Session, body: package::Body) -> i64 {
+    act(&mut *db, second, Action::Open(key("present")));
+    handle act(&mut *db, second, Action::OpenBody(key("present"))) {
+        Result::Ok(Event::Body(own)) => {
+            let foreign = failed(act(&mut *db, second, Action::PublishBody(body)), 2);
+            let preserved = count(& *db, second, 1);
+            act(&mut *db, second, Action::PublishBody(own));
+            points(foreign, 2) + points(preserved, 2) + points(count(& *db, first, 1), 1)
+                + points(count(& *db, second, 0), 1)
+        },
+        _ => 0,
+    }
+}
+fn retirement(db: &mut Db, revision: identity::RevisionId, first: Session, second: Session) -> i64 {
+    database::retire(&mut *db, revision);
+    let denied = retired(database::open(&mut *db, revision, query::RecoveryPolicy::Reject, 100, 100));
+    let pinned = done(act(&mut *db, second, Action::Stage(key("present"))));
+    database::cancel(&mut *db, first);
+    let cancelled = failed(act(&mut *db, first, Action::Stage(key("present"))), 3);
+    points(denied, 1) + points(pinned, 1) + points(cancelled, 2) + points(empty(& *db, first), 2)
+}
+fn reused(db: &mut Db, first: Session, body: package::Body, fingerprint: identity::Digest) -> i64 {
+    database::close(&mut *db, first);
+    let released = closed(database::work_spent(& *db, first));
+    handle database::import(&mut *db, World { package: key("present") }, fingerprint, None) {
+        Result::Err(_) => 0,
+        Result::Ok(revision) => handle database::open(&mut *db, revision, query::RecoveryPolicy::Reject, 100, 100) {
+            Result::Err(_) => 0,
+            Result::Ok(session) => points(released, 2) + reused_body(db, session, body),
+        },
+    }
+}
+fn reused_body(db: &mut Db, session: Session, old: package::Body) -> i64 {
+    act(&mut *db, session, Action::Open(key("present")));
+    handle act(&mut *db, session, Action::OpenBody(key("present"))) {
+        Result::Ok(Event::Body(body)) => {
+            let stale = failed(act(&mut *db, session, Action::PublishBody(old)), 2);
+            let retained = count(& *db, session, 1);
+            act(&mut *db, session, Action::AbandonBody(body));
+            database::close(&mut *db, session);
+            points(stale, 2) + points(retained, 2)
+        },
+        _ => 0,
+    }
+}
+fn sessions(db: &mut Db, revision: identity::RevisionId, first: Session, second: Session, fingerprint: identity::Digest) -> i64 {
+    let admission = membership(&mut *db, first);
+    handle act(&mut *db, first, Action::OpenBody(key("present"))) {
+        Result::Ok(Event::Body(body)) => {
+            let isolated = isolation(&mut *db, first, second, body);
+            let pinned = retirement(&mut *db, revision, first, second);
+            let stale = reused(&mut *db, first, body, fingerprint);
+            database::close(&mut *db, second);
+            admission + isolated + pinned + stale + points(unpinned(& *db), 6)
+        },
+        _ => 0,
+    }
+}
+fn initialized(fingerprint: identity::Digest) -> i64 {
+    let db = create<World, i64>(800, 4, 4, 8, 8, 8);
+    handle database::import(&mut db, World { package: key("present") }, fingerprint, None) {
+        Result::Err(_) => 0,
+        Result::Ok(revision) => handle database::open(&mut db, revision, query::RecoveryPolicy::Reject, 100, 100) {
+            Result::Err(_) => 0,
+            Result::Ok(first) => handle database::open(&mut db, revision, query::RecoveryPolicy::Reject, 100, 100) {
+                Result::Err(_) => 0, Result::Ok(second) => sessions(&mut db, revision, first, second, fingerprint),
+            },
+        },
+    }
+}
+fn shared_budget(db: &mut Db, revision: identity::RevisionId, session: Session) -> i64 {
+    act(&mut *db, session, Action::Open(key("present")));
+    handle database::family<u32>(&mut *db, 1, query::RecoveryPolicy::Reject, engine::ReusePolicy::Never, 4) {
+        Result::Err(_) => 0,
+        Result::Ok(family) => handle database::intern(&mut family, 1) {
+            Result::Err(_) => 0,
+            Result::Ok(key) => handle database::start(&mut *db, session, key, None) {
+                Result::Err(_) => 0,
+                Result::Ok(ticket) => {
+                    database::step(&mut *db, ticket);
+                    handle database::step(&mut *db, ticket) {
+                        Result::Err(database::Failure::Engine(engine::Failure::Control(operation::Failure::ResourceLimit { name: 0, ceiling: 1, requested: 1 }))) => {
+                            let bounded = spent(& *db, session, 1);
+                            act(&mut *db, session, Action::RollbackAll);
+                            points(bounded, 6) + points(empty(& *db, session), 6)
+                        },
+                        _ => 0,
+                    }
+                },
+            },
+        },
+    }
+}
+fn budget(fingerprint: identity::Digest) -> i64 {
+    let db = create<World, i64>(801, 4, 4, 8, 8, 8);
+    handle database::import(&mut db, World { package: key("present") }, fingerprint, None) {
+        Result::Err(_) => 0,
+        Result::Ok(revision) => handle database::open(&mut db, revision, query::RecoveryPolicy::Reject, 1, 100) {
+            Result::Err(_) => 0, Result::Ok(session) => shared_budget(&mut db, revision, session),
+        },
+    }
+}
+pub fn main() -> i64 {
+    handle identity::hash(b"package-session-world") {
+        Result::Err(_) => -1, Result::Ok(fingerprint) => initialized(fingerprint) + budget(fingerprint),
+    }
+}

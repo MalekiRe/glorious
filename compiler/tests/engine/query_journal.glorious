@@ -1,0 +1,124 @@
+use std::*;
+use kernel::identity;
+use kernel::storage;
+use kernel::storage::create;
+use kernel::query;
+use kernel::query::Read;
+use kernel::query::Completeness;
+use kernel::query::RecoveryPolicy;
+use kernel::operation;
+use kernel::transaction;
+pub mod kernel;
+
+pub struct Product { answer: i64 }
+
+fn reject_recovery(read: Read, fingerprint: identity::Digest) -> i64 {
+    let controls = operation::create(100, 100);
+    let frame = query::frame(RecoveryPolicy::Reject, 8);
+    handle query::record(&mut frame, &controls, read) {
+        Result::Err(query::Failure::RecoveredProduct) =>
+            handle query::freeze(&mut frame, Product { answer: 42 }, fingerprint, Completeness::Complete) {
+                Result::Err(query::Failure::Closed) => 42,
+                _ => 1,
+            },
+        _ => 2,
+    }
+}
+
+fn stop_old_branch(memo: &query::Memo<Product>, selector: Read, recovered: Read,
+    changed: identity::Digest) -> i64 {
+    let controls = operation::create(100, 100);
+    let replay = query::replay(memo);
+    let changed_selector = Read { identity: selector.identity, fingerprint: changed,
+        completeness: selector.completeness };
+    handle query::next(&replay, &controls) {
+        Result::Ok(Result::Ok(first)) => handle identity::equal(first.fingerprint, selector.fingerprint) {
+            false => 3,
+            true => handle query::validate(&mut replay, &controls, changed_selector) {
+                Result::Ok(query::Validation::Changed { index: 0 }) =>
+                    handle query::next(&replay, &controls) {
+                        Result::Err(query::Failure::ChangedRead) => reject_recovery(recovered, changed),
+                        _ => 4,
+                    },
+                _ => 5,
+            },
+        },
+        _ => 6,
+    }
+}
+
+fn replay_equal(memo: &query::Memo<Product>, selector: Read, branch: Read, changed: identity::Digest) -> i64 {
+    let controls = operation::create(100, 100);
+    let replay = query::replay(memo);
+    handle query::validate(&mut replay, &controls, selector) {
+        Result::Ok(query::Validation::Continue) => handle query::validate(&mut replay, &controls, branch) {
+            Result::Ok(query::Validation::Complete) => handle query::next(&replay, &controls) {
+                Result::Ok(Result::Err(_)) => stop_old_branch(memo, selector, branch, changed),
+                _ => 7,
+            },
+            _ => 8,
+        },
+        _ => 9,
+    }
+}
+
+fn published(memo: query::Memo<Product>, selector: Read, branch: Read, changed: identity::Digest) -> i64 {
+    handle memo.completeness {
+        Completeness::Complete => 10,
+        Completeness::Recovered => handle memo.value.answer == 42 {
+            false => 11,
+            true => handle query::read_count(&memo) == 2 {
+                false => 12,
+                true => replay_equal(&memo, selector, branch, changed),
+            },
+        },
+    }
+}
+
+fn recorded(frame: &mut query::Frame, selector: Read, branch: Read, changed: identity::Digest) -> i64 {
+    let controls = operation::create(100, 100);
+    handle query::freeze(&mut *frame, Product { answer: 42 }, changed, Completeness::Complete) {
+        Result::Err(_) => 13,
+        Result::Ok(pending) => handle transaction::publish(&mut pending, &controls) {
+            Result::Err(_) => 14,
+            Result::Ok(memo) => published(memo, selector, branch, changed),
+        },
+    }
+}
+
+fn start(key: storage::Handle, unchanged: identity::Digest, changed: identity::Digest) -> i64 {
+    let controls = operation::create(100, 100);
+    let frame = query::frame(RecoveryPolicy::Allow, 8);
+    let selector = Read { identity: query::read_identity(0, key, 0), fingerprint: unchanged,
+        completeness: Completeness::Complete };
+    let branch = Read { identity: query::read_identity(1, key, 0), fingerprint: unchanged,
+        completeness: Completeness::Recovered };
+    handle query::record(&mut frame, &controls, selector) {
+        Result::Err(_) => 15,
+        Result::Ok(_) => handle query::record(&mut frame, &controls, branch) {
+            Result::Err(_) => 16,
+            Result::Ok(_) => handle query::record(&mut frame, &controls, selector) {
+                Result::Err(_) => 17,
+                Result::Ok(_) => recorded(&mut frame, selector, branch, changed),
+            },
+        },
+    }
+}
+
+fn identified(unchanged: identity::Digest, changed: identity::Digest) -> i64 {
+    let keys = create<i64>(88);
+    handle storage::insert(&mut keys, 42) {
+        Result::Err(_) => 18,
+        Result::Ok(key) => start(key, unchanged, changed),
+    }
+}
+
+pub fn main() -> i64 {
+    handle identity::hash(b"unchanged") {
+        Result::Err(_) => 19,
+        Result::Ok(unchanged) => handle identity::hash(b"changed") {
+            Result::Err(_) => 20,
+            Result::Ok(changed) => identified(unchanged, changed),
+        },
+    }
+}

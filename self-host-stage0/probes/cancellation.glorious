@@ -1,3 +1,0 @@
-use operation_library::operation;
-
-pub fn main() -> Bool { operation::is_cancelled(operation::cancel(operation::active())) }

@@ -15,6 +15,47 @@ use grandiose_stage0::{
 };
 use std::collections::BTreeMap;
 
+fn authoring_tuple_program(second: VmType, instruction: VmInstruction) -> grandiose_stage0::VerifiedVmProgram {
+    let definition = DefKey(Digest::of_bytes(b"authoring-tuple-results"));
+    let function = VmFunction {
+        nominal_copy_descriptors: vec![], definition, captures: 0, parameters: 0,
+        registers: vec![VmType::I64, second.clone(), VmType::Tuple(vec![VmType::I64, second])],
+        instructions: vec![VmInstruction::ConstI64 { dst: 0, value: 12 }, instruction,
+            VmInstruction::MakeTuple { dst: 2, fields: vec![0, 1] }, VmInstruction::Return { value: 2 }],
+    };
+    let mut candidate = CandidateVmProgram {
+        schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None,
+        host_capabilities: vec![], entry: definition,
+        functions: BTreeMap::from([(definition, function)]), callable_environments: BTreeMap::new(),
+        fingerprint: Digest::of_bytes(b"stale-authoring-tuple"),
+    };
+    candidate.fingerprint = candidate.computed_fingerprint();
+    decode_and_verify_program(&encode_program(&candidate)).unwrap()
+}
+
+#[test]
+fn authoring_tuple_runner_preserves_results_types_and_existing_execution_limits() {
+    let program = authoring_tuple_program(VmType::I64, VmInstruction::ConstI64 { dst: 1, value: 34 });
+    let bytes = program.canonical_bytes();
+    let (values, profile) = program.run_tuple_i64_for_authoring(Default::default()).unwrap();
+    assert_eq!(values, [12, 34]);
+    assert_eq!(values, program.run_tuple_i64().unwrap());
+    assert!(profile.work_ticks > 0);
+    assert!(profile.charged_allocation_elements >= 2);
+    assert_eq!(program.canonical_bytes(), bytes);
+    assert!(matches!(program.run_tuple_i64_for_authoring(VmExecutionLimits {
+        max_instructions: 0, ..Default::default()
+    }), Err(VmArtifactError::InstructionLimit { limit: 0 })));
+    assert!(matches!(program.run_tuple_i64_for_authoring(VmExecutionLimits {
+        max_allocation_elements: 0, ..Default::default()
+    }), Err(VmArtifactError::AllocationLimit { limit: 0, .. })));
+    assert!(matches!(program.run_i64_for_authoring(Default::default()),
+        Err(VmArtifactError::ResultType { expected: VmType::I64, .. })));
+    let mixed = authoring_tuple_program(VmType::Bool, VmInstruction::ConstBool { dst: 1, value: true });
+    assert!(matches!(mixed.run_tuple_i64_for_authoring(Default::default()),
+        Err(VmArtifactError::ResultType { expected: VmType::I64, found: VmType::Bool })));
+}
+
 #[derive(Default)]
 struct RecordingVmHost {
     diagnostics: Vec<String>,

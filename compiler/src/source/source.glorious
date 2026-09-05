@@ -1,0 +1,264 @@
+use std::*;
+use super::kernel::identity;
+use super::kernel::identity::Digest;
+use super::kernel::identity::FileKey;
+use super::kernel::operation;
+
+// FileKey is admitted by the request normalizer. This constructor checks the
+// actual bytes; it neither opens a path nor invents a normalized-world identity.
+pub struct Blob { private stamp: Stamp, private text: String }
+struct Stamp { file: FileKey, fingerprint: Digest, length: u32 }
+pub enum Failure { Capacity, InvalidUtf8 { valid_up_to: usize }, Identity, SourceMismatch, Offset, Closed, Busy, Control(operation::Failure) }
+pub enum Event { Continue, Ready }
+pub struct LineIndex { private stamp: Stamp, private starts: Vec<u32>, private fingerprint: Digest }
+pub struct SourcePosition { line: u32, utf16_column: u32 }
+pub struct LineBuilder { private work: Option<LineWork> }
+pub impl Use<[0, 1]> for LineBuilder {}
+struct LineWork { stamp: Stamp, starts: Vec<u32>, cursor: u32, limit: usize }
+pub struct PositionBuilder { private work: Option<PositionWork> }
+pub impl Use<[0, 1]> for PositionBuilder {}
+struct PositionWork { stamp: Stamp, offset: u32, phase: PositionPhase }
+enum PositionPhase { Seek { low: usize, high: usize }, Count { line: u32, cursor: u32, column: u32 }, Done(SourcePosition) }
+
+fn control(controls: &mut operation::Controls, amount: u64) -> Result<(), Failure> {
+    handle operation::charge(controls, amount) { Result::Err(error) => Result::Err(Failure::Control(error)), Result::Ok(_) => Result::Ok(()) }
+}
+pub fn create(file: FileKey, bytes: Vec<u8>, limit: usize, controls: &mut operation::Controls) -> Result<Blob, Failure> {
+    handle operation::check(& *controls) {
+        Result::Err(error) => Result::Err(Failure::Control(error)),
+        Result::Ok(_) => handle Vec::len(&bytes) <= limit {
+            false => Result::Err(Failure::Capacity),
+            true => handle Vec::len(&bytes) <= 4294967295 {
+                false => Result::Err(Failure::Capacity), true => create_sized(file, bytes, controls),
+            },
+        },
+    }
+}
+fn create_sized(file: FileKey, bytes: Vec<u8>, controls: &mut operation::Controls) -> Result<Blob, Failure> {
+    // Logical byte work is charged before validation/hashing. The existing VM
+    // leaves are synchronous; this is not a physical allocation/polling claim.
+    handle control(&mut *controls, wrapping_add(as<u64>(Vec::len(&bytes)), 1)) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle String::from_utf8(bytes) {
+            Result::Err(error) => Result::Err(Failure::InvalidUtf8 { valid_up_to: Utf8Error::valid_up_to(&error) }),
+            Result::Ok(text) => handle identity::hash(Str::as_bytes(String::as_str(&text))) {
+                Result::Err(_) => Result::Err(Failure::Identity),
+                Result::Ok(fingerprint) => handle operation::check(& *controls) {
+                    Result::Err(error) => Result::Err(Failure::Control(error)),
+                    Result::Ok(_) => Result::Ok(Blob { stamp: Stamp { file: file, fingerprint: fingerprint,
+                        length: as<u32>(String::len(&text)) }, text: text }),
+                },
+            },
+        },
+    }
+}
+pub fn file(blob: &Blob) -> FileKey { blob.stamp.file }
+pub fn fingerprint(blob: &Blob) -> Digest { blob.stamp.fingerprint }
+pub fn length(blob: &Blob) -> u32 { blob.stamp.length }
+pub fn text<'a>(blob: &'a Blob) -> Str<'a> { String::as_str(&blob.text) }
+pub fn bytes<'a>(blob: &'a Blob) -> Slice<'a, u8> { Str::as_bytes(text(blob)) }
+fn matches(left: Stamp, right: Stamp) -> Bool {
+    handle identity::equal(left.file.digest, right.file.digest) {
+        false => false,
+        true => handle identity::equal(left.fingerprint, right.fingerprint) {
+            false => false, true => left.length == right.length,
+        },
+    }
+}
+
+pub fn begin_lines(blob: &Blob, limit: usize, controls: &mut operation::Controls) -> Result<LineBuilder, Failure> {
+    handle control(controls, 1) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle limit == 0 {
+            true => Result::Err(Failure::Capacity),
+            false => {
+                let starts = Vec<u32>::new();
+                Vec::push(&mut starts, 0);
+                Result::Ok(LineBuilder { work: Result::Ok(LineWork { stamp: blob.stamp, starts: starts, cursor: 0, limit: limit }) })
+            },
+        },
+    }
+}
+pub fn abort_lines(builder: &mut LineBuilder) -> () { (*builder).work = None; }
+pub fn step_lines(builder: &mut LineBuilder, blob: &Blob, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    let result = lines_checked(&mut *builder, blob, controls);
+    handle result { Result::Ok(event) => Result::Ok(event), Result::Err(error) => { abort_lines(builder); Result::Err(error) } }
+}
+fn lines_checked(builder: &mut LineBuilder, blob: &Blob, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle control(controls, 1) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle Result::as_mut(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle matches(work.stamp, blob.stamp) {
+                false => Result::Err(Failure::SourceMismatch), true => line_byte(work, blob),
+            },
+        },
+    }
+}
+fn line_byte(work: &mut LineWork, blob: &Blob) -> Result<Event, Failure> {
+    handle work.cursor == work.stamp.length {
+        true => Result::Ok(Event::Ready),
+        false => {
+            let contents = bytes(blob);
+            let byte = *Slice::get_unchecked(contents, as<usize>(work.cursor));
+            handle byte == 10 {
+                false => line_advance(work),
+                true => handle Vec::len(&work.starts) < work.limit {
+                    false => Result::Err(Failure::Capacity),
+                    true => handle Vec::len(&work.starts) < 4294967295 {
+                        false => Result::Err(Failure::Capacity),
+                        true => { Vec::push(&mut work.starts, work.cursor + 1); line_advance(work) },
+                    },
+                },
+            }
+        },
+    }
+}
+fn line_advance(work: &mut LineWork) -> Result<Event, Failure> {
+    (*work).cursor = work.cursor + 1;
+    handle work.cursor == work.stamp.length { true => Result::Ok(Event::Ready), false => Result::Ok(Event::Continue) }
+}
+fn index_fingerprint(stamp: Stamp) -> Result<Digest, Failure> {
+    // An internal, versioned, conservative source-origin projection. Private
+    // construction makes these exact bytes determine the index unambiguously.
+    let buffer = ByteBuf::new(128);
+    handle identity::part(&mut buffer, b"grandiose-line-index-v1") {
+        Result::Err(_) => Result::Err(Failure::Identity),
+        Result::Ok(_) => handle identity::write_digest(&mut buffer, stamp.file.digest) {
+            Result::Err(_) => Result::Err(Failure::Identity),
+            Result::Ok(_) => handle identity::write_digest(&mut buffer, stamp.fingerprint) {
+                Result::Err(_) => Result::Err(Failure::Identity),
+                Result::Ok(_) => handle identity::hash(ByteBuf::view(&buffer)) {
+                    Result::Err(_) => Result::Err(Failure::Identity), Result::Ok(value) => Result::Ok(value),
+                },
+            },
+        },
+    }
+}
+pub fn finish_lines(builder: &mut LineBuilder, controls: &operation::Controls) -> Result<LineIndex, Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => { abort_lines(builder); Result::Err(Failure::Control(error)) },
+        Result::Ok(_) => handle Option::take(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle work.cursor == work.stamp.length {
+                false => Result::Err(Failure::Busy),
+                true => handle index_fingerprint(work.stamp) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(fingerprint) => Result::Ok(LineIndex { stamp: work.stamp, starts: work.starts, fingerprint: fingerprint }),
+                },
+            },
+        },
+    }
+}
+pub fn line_count(index: &LineIndex) -> u32 { as<u32>(Vec::len(&index.starts)) }
+pub fn line_starts<'a>(index: &'a LineIndex) -> Slice<'a, u32> { Vec::as_slice(&index.starts) }
+pub fn line_fingerprint(index: &LineIndex) -> Digest { index.fingerprint }
+
+fn boundary(blob: &Blob, offset: u32) -> Bool {
+    handle offset == blob.stamp.length {
+        true => true,
+        false => handle offset < blob.stamp.length {
+            false => false,
+            true => {
+                let contents = bytes(blob);
+                let byte = *Slice::get_unchecked(contents, as<usize>(offset));
+                handle byte < 128 { true => true, false => byte >= 192 }
+            },
+        },
+    }
+}
+// Invalid offsets are distinguished from cancelled/failed computation. The
+// public facade maps Offset to the reference API's None, not a diagnostic.
+pub fn begin_position(index: &LineIndex, blob: &Blob, offset: u32, controls: &mut operation::Controls) -> Result<PositionBuilder, Failure> {
+    handle control(controls, 1) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle matches(index.stamp, blob.stamp) {
+            false => Result::Err(Failure::SourceMismatch),
+            true => handle boundary(blob, offset) {
+                false => Result::Err(Failure::Offset),
+                true => Result::Ok(PositionBuilder { work: Result::Ok(PositionWork { stamp: blob.stamp, offset: offset,
+                    phase: PositionPhase::Seek { low: 0, high: Vec::len(&index.starts) } }) }),
+            },
+        },
+    }
+}
+pub fn abort_position(builder: &mut PositionBuilder) -> () { (*builder).work = None; }
+pub fn step_position(builder: &mut PositionBuilder, index: &LineIndex, blob: &Blob, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    let result = position_checked(&mut *builder, index, blob, controls);
+    handle result { Result::Ok(event) => Result::Ok(event), Result::Err(error) => { abort_position(builder); Result::Err(error) } }
+}
+fn position_checked(builder: &mut PositionBuilder, index: &LineIndex, blob: &Blob, controls: &mut operation::Controls) -> Result<Event, Failure> {
+    handle control(controls, 1) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle Result::as_mut(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle matches(work.stamp, blob.stamp) {
+                false => Result::Err(Failure::SourceMismatch),
+                true => handle matches(work.stamp, index.stamp) {
+                    false => Result::Err(Failure::SourceMismatch), true => position_phase(work, index, blob),
+                },
+            },
+        },
+    }
+}
+fn position_next(work: &mut PositionWork, phase: PositionPhase) -> Result<Event, Failure> {
+    (*work).phase = phase;
+    Result::Ok(Event::Continue)
+}
+fn position_phase(work: &mut PositionWork, index: &LineIndex, blob: &Blob) -> Result<Event, Failure> {
+    handle work.phase {
+        PositionPhase::Done(_) => Result::Ok(Event::Ready),
+        PositionPhase::Seek { low, high } => seek(work, index, low, high),
+        PositionPhase::Count { line, cursor, column } => column_step(work, blob, line, cursor, column),
+    }
+}
+fn seek(work: &mut PositionWork, index: &LineIndex, low: usize, high: usize) -> Result<Event, Failure> {
+    handle low < high {
+        true => {
+            let middle = low + (high - low) / 2;
+            let start = *Vec::get_unchecked(&index.starts, middle);
+            handle start <= work.offset {
+                true => position_next(work, PositionPhase::Seek { low: middle + 1, high: high }),
+                false => position_next(work, PositionPhase::Seek { low: low, high: middle }),
+            }
+        },
+        false => {
+            // starts[0] is always zero, so partition_point is never zero.
+            let line = low - 1;
+            let start = *Vec::get_unchecked(&index.starts, line);
+            position_next(work, PositionPhase::Count { line: as<u32>(line), cursor: start, column: 0 })
+        },
+    }
+}
+fn column_step(work: &mut PositionWork, blob: &Blob, line: u32, cursor: u32, column: u32) -> Result<Event, Failure> {
+    handle cursor == work.offset {
+        true => {
+            (*work).phase = PositionPhase::Done(SourcePosition { line: line, utf16_column: column });
+            Result::Ok(Event::Ready)
+        },
+        false => {
+            let contents = bytes(blob);
+            let byte = *Slice::get_unchecked(contents, as<usize>(cursor));
+            // The blob is valid UTF-8 and both endpoints are scalar boundaries.
+            handle byte < 128 {
+                true => position_next(work, PositionPhase::Count { line: line, cursor: cursor + 1, column: column + 1 }),
+                false => handle byte < 224 {
+                    true => position_next(work, PositionPhase::Count { line: line, cursor: cursor + 2, column: column + 1 }),
+                    false => handle byte < 240 {
+                        true => position_next(work, PositionPhase::Count { line: line, cursor: cursor + 3, column: column + 1 }),
+                        false => position_next(work, PositionPhase::Count { line: line, cursor: cursor + 4, column: column + 2 }),
+                    },
+                },
+            }
+        },
+    }
+}
+pub fn finish_position(builder: &mut PositionBuilder, controls: &operation::Controls) -> Result<SourcePosition, Failure> {
+    handle operation::check(controls) {
+        Result::Err(error) => { abort_position(builder); Result::Err(Failure::Control(error)) },
+        Result::Ok(_) => handle Option::take(&mut builder.work) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(work) => handle work.phase { PositionPhase::Done(value) => Result::Ok(value), _ => Result::Err(Failure::Busy) },
+        },
+    }
+}

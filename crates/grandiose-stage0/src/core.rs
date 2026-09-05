@@ -353,6 +353,14 @@ fn call_reference_shape(
     let mut leaves = vec![];
     match reference_leaf_paths(signatures, result, &mut vec![], &mut leaves) {
         Ok(()) if leaves.is_empty() => CallReferenceShape::None,
+        // A frozen generic contract still forwards its argument path when
+        // that particular argument is static. Preserve the path contract
+        // rather than pairing Paths provenance with an External-only shape.
+        // Static arguments carry no local loan; retaining the path does not
+        // manufacture one or weaken the validator's exact shape check.
+        Ok(()) if matches!(origin, CallReferenceOrigin::Paths(_)) => {
+            CallReferenceShape::CallerPaths
+        }
         Ok(())
             if leaves.iter().all(|(_, leaf)| {
                 matches!(
@@ -365,9 +373,6 @@ fn call_reference_shape(
             }) =>
         {
             CallReferenceShape::External
-        }
-        Ok(()) if matches!(origin, CallReferenceOrigin::Paths(_)) => {
-            CallReferenceShape::CallerPaths
         }
         // A visible non-static reference whose relation is ambiguous is just
         // as unsafe as a representation that cannot be opened at all.
@@ -3832,6 +3837,13 @@ impl Elaborator<'_> {
                 }
                 self.generic_path(path, effect_arguments, expression.span)
             }
+            ExprKind::GenericPath {
+                path,
+                effect_arguments,
+                operation_arguments,
+            } if effect_arguments.is_empty() => {
+                self.generic_path(path, operation_arguments, expression.span)
+            }
             ExprKind::GenericPath { .. } => self.fail(
                 expression.span,
                 "G4184",
@@ -4391,9 +4403,23 @@ impl Elaborator<'_> {
             // path only handles a frozen direct function once its exact
             // callable result is available.
             ExprKind::Call { callee, arguments } if expected.is_some() => {
-                let ExprKind::Path(path) = &self.body.expression(callee).kind else {
-                    return self.expression(id);
+                let path = match &self.body.expression(callee).kind {
+                    ExprKind::Path(path) => path,
+                    ExprKind::GenericPath { path, .. }
+                        if matches!(
+                            self.index.resolve_path(DefinitionNamespace::Value, self.module, path),
+                            ResolutionState::Resolved(definition)
+                                if matches!(self.signatures.definitions.get(&definition), Some(ElaboratedHeader::Callable(_)))
+                        ) => path,
+                    _ => return self.expression(id),
                 };
+                // Lexical bindings shadow declaration paths. Looking up the
+                // global header first can mistake a local non-callable for
+                // the function it shadows and panic below. The ordinary call
+                // path handles both local Fn bounds and the G4105 diagnostic.
+                if path.len() == 1 && self.locals.lookup(&path[0]).is_some() {
+                    return self.expression(id);
+                }
                 if let Some(value) = self.trait_method_call(
                     path.clone(),
                     vec![],
@@ -4430,7 +4456,10 @@ impl Elaborator<'_> {
                     parameters, result, ..
                 } = self.expressions[callee.0 as usize].ty.clone()
                 else {
-                    unreachable!("frozen direct callable must elaborate to a callable type");
+                    // Explicit argument validation may already have rejected
+                    // this function application. Preserve that diagnostic;
+                    // a resolved declaration is not proof of a valid callee.
+                    return callee;
                 };
                 // Feed result evidence into generic type inference before
                 // elaborating contextual arguments, but defer a mismatch
@@ -4719,7 +4748,7 @@ impl Elaborator<'_> {
         // A string literal is compiler-emitted immutable data, but `Str` is
         // intentionally an ordinary source-defined view rather than another
         // compiler scalar. When the expected type is the distributed
-        // `Str` (whether it spells its lifetime as `'static` or elides it),
+        // `Str` (including a callable's not-yet-opened lifetime binder),
         // construct the sealed data literal first and invoke
         // std's manifest-bound wrapper. Keeping the final wrapping step as a
         // normal Core call lets `Str` evolve its private source layout without
@@ -4804,7 +4833,7 @@ impl Elaborator<'_> {
                 if actual == &definition
                     && matches!(
                         arguments.as_slice(),
-                        [GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided)]
+                        [GenericArgument::Lifetime(_)]
                     )
         )
     }
@@ -4824,7 +4853,7 @@ impl Elaborator<'_> {
                     && matches!(
                         arguments.as_slice(),
                         [
-                            GenericArgument::Lifetime(Lifetime::Static | Lifetime::Elided),
+                            GenericArgument::Lifetime(_),
                             GenericArgument::Type(Type::Scalar(ScalarType::U8)),
                         ]
                     )
@@ -4993,16 +5022,29 @@ impl Elaborator<'_> {
             .get(&definition)
             .and_then(callable)
             .cloned()?;
-        if !signature.generic_kinds.is_empty()
-            || signature.parameters.len() != 1
-            || !self.is_standard_str(&signature.result)
+        if signature.parameters.len() != 1
+            || !matches!(signature.generic_kinds.as_slice(), [] | [crate::GenericKind::Lifetime])
+        {
+            return None;
+        }
+        // The source accessor now explicitly preserves its owner's lifetime.
+        // Open that declaration binder through `call`, just like an ordinary
+        // named generic function; do not erase it to Elided or manufacture a
+        // static view. Retain support for the older elided library signature.
+        let arguments = signature.generic_kinds.iter().enumerate()
+            .map(|(index, _)| GenericArgument::Lifetime(Lifetime::Generic(index as u32)))
+            .collect::<Vec<_>>();
+        let signature = self.signatures.instantiate_callable_generic(definition, &arguments).ok()?;
+        let Type::Nominal { definition: expected_str, .. } = expected else { return None; };
+        if !matches!(&signature.result, Type::Nominal { definition, arguments }
+            if definition == expected_str && matches!(arguments.as_slice(), [GenericArgument::Lifetime(_)]))
         {
             return None;
         }
         let callee = self.alloc(
             CoreKind::Function {
                 definition,
-                arguments: vec![],
+                arguments,
                 host_import: self.signatures.host_imports.get(&definition).cloned(),
             },
             Type::Callable {
@@ -8537,9 +8579,25 @@ impl Elaborator<'_> {
                 "explicit generic arguments require a callable value",
             );
         };
-        let Some(arguments) = self.body_generic_arguments(
+        // Direct functions may specify a prefix of their type arguments and
+        // infer the remaining types from arguments/result context. This is
+        // declaration-driven, not special treatment of a library spelling.
+        // Omitted lifetime/row/const slots still require explicit arguments.
+        let kinds = signature.generic_kinds.clone();
+        if source_arguments.len() > kinds.len()
+            || kinds[source_arguments.len()..]
+                .iter()
+                .any(|kind| *kind != crate::GenericKind::Type)
+        {
+            return self.fail(
+                span,
+                "G4184",
+                "callable generic arguments do not match its declaration",
+            );
+        }
+        let Some(mut arguments) = self.body_generic_arguments(
             &source_arguments,
-            &signature.generic_kinds,
+            &kinds[..source_arguments.len()],
             span,
             "G4184",
             "callable generic arguments do not match its declaration",
@@ -8550,6 +8608,11 @@ impl Elaborator<'_> {
                 "callable generic arguments do not match its declaration",
             );
         };
+        arguments.extend(
+            kinds[source_arguments.len()..]
+                .iter()
+                .map(|_| GenericArgument::Type(self.inference.fresh())),
+        );
         let signature = match self
             .signatures
             .instantiate_callable_generic(definition, &arguments)
@@ -9938,9 +10001,18 @@ impl Elaborator<'_> {
         // already become `&'elided V`. Instance discovery then sees a false
         // non-concrete substitution and links the generic template instead
         // of its executable specialization.
-        if let CoreKind::Function { arguments, .. } =
-            &mut self.expressions[callee.0 as usize].kind
-        {
+        // A selected trait method carries its own method application too.
+        // Leaving that application in declaration-region coordinates has
+        // the same failure: its body and nested generic calls cannot be
+        // materialized even though the invocation's borrow contract passed.
+        // Trait relation arguments remain the solver-selected identity;
+        // only the invoked method's arguments are opened here.
+        let callee_arguments = match &mut self.expressions[callee.0 as usize].kind {
+            CoreKind::Function { arguments, .. } => Some(arguments),
+            CoreKind::TraitMethod { method_arguments, .. } => Some(method_arguments),
+            _ => None,
+        };
+        if let Some(arguments) = callee_arguments {
             for argument in arguments {
                 match substitute_call_generic_argument(
                     argument.clone(),
@@ -15616,7 +15688,7 @@ fn callable_reference_origin_from_contract(
 /// and instantiated with their canonical application arguments; an enum or
 /// opaque projection with a reference-bearing payload remains deliberately
 /// opaque because a path would depend on a runtime variant.
-fn reference_leaf_paths(
+pub(crate) fn reference_leaf_paths(
     signatures: &ElaboratedInterface,
     ty: &Type,
     path: &mut Vec<u32>,

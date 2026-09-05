@@ -1,7 +1,8 @@
 name: CI
 
-# Temporarily manual-only while the self-host parity campaign is in progress.
 on:
+  push:
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -18,26 +19,22 @@ jobs:
           components: rustfmt
       - name: Formatting
         run: cargo fmt --all -- --check
-      - name: Self-host baseline audit
-        run: tooling/self-host-stage0-audit.sh
-      - name: Self-host progress dashboard
-        run: tooling/self-host-stage0-status.sh
-      - name: Self-host semantic-fallback audit
-        run: tooling/self-host-semantic-fallback-audit.sh
       - name: Stage0 and VM
         env:
           CARGO_PROFILE_TEST_OPT_LEVEL: "1"
           RUST_TEST_THREADS: "8"
         run: tooling/test-with-budget.sh tooling/ram-gate.sh cargo test --workspace --all-targets
 
-  self-host-conformance:
+  compiler:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
-      - name: Self-host source conformance
-        run: tooling/test-with-budget.sh tooling/self-host-stage0-conformance.sh
+      - name: GSC-2 source capabilities and contracts
+        run: bash tooling/compiler-check.sh
 
   editor-metadata:
     runs-on: ubuntu-latest

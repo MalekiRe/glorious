@@ -1,6 +1,0 @@
-use service_library::service;
-use service_library::source;
-use service_library::identity;
-use compiler_support::__g1_text_as_bytes;
-pub fn score(value: service::ServiceOutcome) -> i64 { handle value { service::ServiceOutcome::Program => 1, service::ServiceOutcome::Diagnostics => 100, _ => 0 } }
-pub fn main() -> i64 { score(service::compile_source_named_header(source::input("header", "good", __g1_text_as_bytes("pub fn good"), identity::digest_of_text("pub fn good")))) + score(service::compile_source_named_header(source::input("header", "missing", __g1_text_as_bytes("pub fn"), identity::digest_of_text("pub fn")))) + score(service::compile_source_named_header(source::input("header", "trailing-invalid", __g1_text_as_bytes("pub fn good '"), identity::digest_of_text("pub fn good '")))) }
