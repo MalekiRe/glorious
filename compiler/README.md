@@ -29,9 +29,10 @@ Whole-request normalization and its complete fingerprint encoder now pass 56
 successful-input reference cases, including retained fields and world adapters.
 Cross-component failure ordering, cancellation/resource histories, and actual
 normalized-world registry import/reuse now pass executable comparisons too.
-The remaining query families, provider-derived canonical
-dependency facts, semantic compiler, G1 emitter, service, and bootstrap remain
-to be implemented.
+Committed source-query journals now also derive public input facts for the
+shared atomic request publisher, including memo hits and normalized worlds.
+The remaining query families and their dependency projections, semantic
+compiler, G1 emitter, service, and bootstrap remain to be implemented.
 See [progress and next gates](spec/progress.md).
 
 Development proceeds through the specification's executable M0–M10 gates. An
@@ -50,8 +51,8 @@ after changing the source/test closure. `--release` remains fail-closed.
 For a focused run, use `tooling/compiler-check.sh --filter gsc2_registry`.
 Reports record the filters and mark this as selected-test evidence, never a
 complete-suite pass. A filter matching no executed fixtures fails closed.
-The current full suite passes all **47 native test entries in 65.94 seconds**
-(`run-jgx73yx0`), including all retained batched scenario comparators. The
+The current full suite passes all **48 native test entries in 72.46 seconds**
+(`run-3x54nfxx`), including all retained batched scenario comparators. The
 earlier 590-second timeouts are historical; four native authoring optimizations
 removed repeated solver construction and fixed-identity hashing without
 raising any resource ceiling. See [performance measurements](../docs/stage0-performance.md)

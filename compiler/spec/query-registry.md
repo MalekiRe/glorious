@@ -99,14 +99,69 @@ not full-suite results. The newer complete run below supersedes their scope.
 The registry now owns and reclaims its key tables, with roots from active
 attempts, committed journals, and suspended replay. Future families must add
 any additional product/lease roots they introduce. Ground goal/term
-identities, provider-derived canonical
-dependency facts, actual request-outcome publication, hierarchical leases,
+identities, dependency projections for the remaining providers,
+complete compiler request-outcome publication, hierarchical leases,
 physical-cost certification, and the remaining families remain open. Logical
 work charges do not establish physical VM copying or host-polling bounds.
 The isolated partial-catalog adapter is not the normalized-world contract; the
 new end-to-end history uses the complete fingerprint and admission facade.
 No lexer, semantic frontend, G1 emission, or
 self-compilation is implied by these histories.
+
+### Provider-derived input facts and typed result publication
+
+`begin_publication` accepts an existing checked typed query value, not an
+arbitrary payload or caller-authored dependency facts. The publication adapter
+owns that staged result and a small explicit journal-walk stack. Each step
+charges the actual session controls and inspects one committed observation or
+one stack transition. Query edges resolve an actual ready child in the same
+pinned revision, with exact observed fingerprint and completeness checks.
+A checked-identity set bounds repeated child traversal by the memo limit.
+No provider is rerun, and reading the graph does not change execution provenance.
+
+The public ledger intentionally has no `LineIndex` node. Both current query
+families project their transitive raw-source observations into the established
+`Input(FileKey)` fact with the observed source digest and no semantic edges.
+Unknown family/projection shapes fail closed. The first-observation journal
+remains the single source of dependency evidence; this is a derived display
+projection, not another independently authored graph. Subsequent semantic
+families must supply their exact reference node/edge projections, not merely
+flatten everything into source leaves.
+
+After traversal, the existing request transaction prepares and commits the
+result adapter and canonical row. Pending rows remain hidden, and cancellation
+or failure discards staging without deleting previously published rows or
+committed source products. A publication holds no mutable registry borrow
+between steps. Its session pin preserves journals and keys across collection;
+semantic stepping remains blocked throughout the collection safe point.
+Dropping a publication adapter is not an effectful session close: its owner
+must still close/cancel the session, as for the existing database adapter.
+
+`tests/registry/dependencies.glorious` checks cold source publication, a
+recomputed line query with green input facts, parent-reused green facts,
+changed-source red facts with the exact changed edge, and memo-hit publication.
+The native comparator obtains the corresponding input traces from actual
+`StageZeroCompiler` compilations, including exact fingerprints, empty input
+edges, status, and parent identity. Source tests also reject zero-node staging,
+work exhaustion, and a foreign publication owner, preserve the cursor through
+collection, and cancel at every one of 24 projection/preparation boundaries.
+Their result is `[1, 1, 1, 1, 1, 1, 24]`.
+
+The normalized-world registry history separately publishes its original,
+unchanged-child, and changed-child line results through the same path, checks
+cold/green/red input rows, and retains its complete admission/reuse/retirement
+checks. The selected pair passes in 15.19 seconds (`run-u6xccevx`). This does
+not establish full `CompilationOutcome` parity, package publication, physical
+memory leases, later-family dependency projections, or self-compilation.
+
+The full source suite subsequently passes all 48 entries in 72.46 seconds:
+`target/compiler-check/run-3x54nfxx/report.json`, source-lock SHA-256
+`057eaf131e715d3d76087f5f574637021599c68126905cad31c40ba311220c50`.
+All source guards and VM work/allocation ceilings are unchanged. This is the
+latest complete source-suite evidence; the focused timings below are historical.
+The full Rust workspace also passes 2,450 tests with zero failures and the two
+existing ignored manual VM benchmarks in 78.520 seconds (local incremental
+build, not clean-checkout CI). Logs are in `/tmp/grandiose-dependencies-qI3Lxq/`.
 
 ### Real normalized-world history
 

@@ -77,6 +77,15 @@ below supersedes that interrupted attempt.
 
 ## Full Rust suite and ten-minute budget
 
+Latest follow-up: after the nested-completion fix and source-provider
+dependency publication, the same guarded workspace command passes **2,450
+tests, zero failures, two existing ignored manual VM benchmarks**, in
+**78.520 seconds** on a local incremental build. The expanded standalone
+source suite passes all 48 entries in 72.46 seconds (`run-3x54nfxx`).
+Logs for the workspace follow-up are in `/tmp/grandiose-dependencies-qI3Lxq/`.
+The original optimization-cohort results below remain historical measurements,
+not a claim that later compiler corrections preserve their artifact bytes.
+
 The full Rust workspace (`--workspace --all-targets`) passes after all four
 optimizations: **2,446 passed, zero failed, two ignored manual VM benchmarks**
 across 48 test binaries/targets. No additional tests were ignored or filtered.

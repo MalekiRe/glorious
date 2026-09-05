@@ -64,7 +64,7 @@ fn join(left: Completeness, right: Completeness) -> Completeness {
     handle left { Completeness::Recovered => Completeness::Recovered, Completeness::Complete => right }
 }
 
-fn equally_complete(left: Completeness, right: Completeness) -> Bool {
+pub fn equally_complete(left: Completeness, right: Completeness) -> Bool {
     handle left {
         Completeness::Complete => handle right { Completeness::Complete => true, Completeness::Recovered => false },
         Completeness::Recovered => handle right { Completeness::Complete => false, Completeness::Recovered => true },
@@ -162,6 +162,9 @@ pub fn frame_read(frame: &Frame, index: usize) -> Option<ReadIdentity> {
     }
 }
 pub fn memo_read<V>(memo: &Memo<V>, index: usize) -> Option<ReadIdentity> { read_at(&memo.reads, index) }
+pub fn observation<V>(memo: &Memo<V>, index: usize) -> Option<Read> {
+    handle Vec::get(&memo.reads, index) { Result::Err(_) => None, Result::Ok(read) => Result::Ok(*read) }
+}
 fn read_at(reads: &Vec<Read>, index: usize) -> Option<ReadIdentity> {
     handle Vec::get(reads, index) { Result::Err(_) => None, Result::Ok(read) => Result::Ok(read.identity) }
 }

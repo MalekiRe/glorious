@@ -7,6 +7,8 @@ use super::kernel::identity::FileKey;
 use super::kernel::identity::RevisionId;
 use super::kernel::operation;
 use super::kernel::query;
+use super::kernel::dependency;
+use super::kernel::publication;
 use super::kernel::storage;
 use super::kernel::storage::Handle;
 use super::kernel::storage::Arena;
@@ -25,6 +27,14 @@ pub enum Failure { Database(database::Failure), Source(source::Failure), Missing
 pub struct Session { private handle: Handle }
 pub struct Query<T> { private handle: Handle }
 pub struct Value<T> { private outcome: engine::Outcome }
+struct Visit { outcome: engine::Outcome, cursor: usize }
+struct Projection { stack: Vec<Visit>, seen: HashSet<query::ReadIdentity> }
+impl Use<[0, 1]> for Projection {}
+// The result and all derived facts stay private until the shared request
+// transaction commits. No provider/caller supplies a fact or fingerprint.
+pub struct Publication<T> { private session: Session, private value: Value<T>,
+    private projection: Option<Projection>, private staged: Option<database::Staged<Value<T>>>, private closed: Bool }
+pub impl<T> Use<[0, 1]> for Publication<T> {}
 pub enum Event<T> { Continue, Waiting, Ready(Value<T>) }
 pub enum CloseStep { Continue, Done }
 pub enum CollectionStep { Continue, Done(database::Collected) }
@@ -164,6 +174,150 @@ pub fn line_index<W>(registry: &mut Registry<W>, session: Session, file: FileKey
 }
 pub fn execution<T>(value: Value<T>) -> engine::Execution { value.outcome.execution }
 pub fn fingerprint<T>(value: Value<T>) -> Digest { value.outcome.fingerprint }
+
+pub fn begin_publication<T, W>(registry: &mut Registry<W>, session: Session, value: Value<T>, limits: publication::Limits)
+    -> Result<Publication<T>, Failure> {
+    handle admitted(& *registry, session) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(core) => handle product(&registry.core, core, value.outcome) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => handle database::begin_request(&mut registry.core, core, limits) {
+                Result::Err(error) => Result::Err(Failure::Database(error)),
+                Result::Ok(_) => {
+                    let stack = Vec<Visit>::new();
+                    Vec::push(&mut stack, Visit { outcome: value.outcome, cursor: 0 });
+                    Result::Ok(Publication { session: session, value: value,
+                        projection: Result::Ok(Projection { stack: stack, seen: HashSet::new() }), staged: None, closed: false })
+                },
+            },
+        },
+    }
+}
+fn project_input<W>(core: &mut database::Database<W, Product>, sources: &database::Family<FileKey>,
+    session: database::Session, read: query::Read) -> Result<(), Failure> {
+    // The legacy ledger has no LineIndex node. Its transparent internal query
+    // contributes the exact Input leaf, not a made-up semantic node/self-edge.
+    handle query::family(read.identity) == 0 {
+        false => Result::Err(Failure::Invariant),
+        true => handle read_file(sources, read.identity) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(file) => handle database::record_dependency(core, session,
+                dependency::node::Node::Input(file), read.fingerprint, Vec::new()) {
+                Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(_) => Result::Ok(()),
+            },
+        },
+    }
+}
+fn project_child<W>(core: &database::Database<W, Product>, sources: &database::Family<FileKey>, lines: &database::Family<FileKey>,
+    session: database::Session, projection: &mut Projection, visit: Visit, read: query::Read, limit: usize) -> Result<(), Failure> {
+    handle read_key(sources, lines, read.identity) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle database::observed_query(core, session, visit.outcome, visit.cursor) {
+            Result::Err(error) => Result::Err(Failure::Database(error)),
+            Result::Ok(child) => handle HashSet::contains(&projection.seen, &read.identity) {
+                true => Result::Ok(()),
+                false => handle HashSet::len(&projection.seen) < limit {
+                    false => Result::Err(Failure::Capacity),
+                    true => { HashSet::insert(&mut projection.seen, read.identity);
+                        Vec::push(&mut projection.stack, Visit { outcome: child, cursor: 0 }); Result::Ok(()) },
+                },
+            },
+        },
+    }
+}
+fn project_read<W>(core: &mut database::Database<W, Product>, sources: &database::Family<FileKey>, lines: &database::Family<FileKey>,
+    session: database::Session, projection: &mut Projection, visit: Visit, read: query::Read, limit: usize) -> Result<(), Failure> {
+    handle read.completeness {
+        query::Completeness::Recovered => Result::Err(Failure::Invariant),
+        query::Completeness::Complete => handle query::projection(read.identity) {
+            0 => project_child(& *core, sources, lines, session, projection, visit, read, limit),
+            1 => project_input(core, sources, session, read),
+            _ => Result::Err(Failure::Invariant),
+        },
+    }
+}
+fn projection_step<W>(core: &mut database::Database<W, Product>, sources: &database::Family<FileKey>, lines: &database::Family<FileKey>,
+    session: database::Session, projection: &mut Projection, limit: usize) -> Result<Bool, Failure> {
+    handle charge(&mut *core, session, 1) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle Vec::pop(&mut projection.stack) {
+            Result::Err(_) => Result::Ok(true),
+            Result::Ok(visit) => handle database::observation(& *core, session, visit.outcome, visit.cursor) {
+                Result::Err(error) => Result::Err(Failure::Database(error)),
+                Result::Ok(read) => handle read {
+                    Result::Err(_) => Result::Ok(false),
+                    Result::Ok(read) => {
+                        Vec::push(&mut projection.stack, Visit { outcome: visit.outcome, cursor: visit.cursor + 1 });
+                        handle project_read(core, sources, lines, session, projection, visit, read, limit) {
+                            Result::Err(error) => Result::Err(error), Result::Ok(_) => Result::Ok(false),
+                        }
+                    },
+                },
+            },
+        },
+    }
+}
+fn publication_step<T, W>(registry: &mut Registry<W>, session: database::Session, pending: &mut Publication<T>)
+    -> Result<database::PublicationStep, Failure> where W: database::DiagnosticWorld {
+    handle Result::as_mut(&mut pending.projection) {
+        Result::Err(_) => handle database::step_request(&mut registry.core, session) {
+            Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(step) => Result::Ok(step),
+        },
+        Result::Ok(projection) => handle projection_step(&mut registry.core, &registry.sources, &registry.lines,
+            session, projection, registry.limits.memos) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(done) => handle done {
+              false => Result::Ok(database::PublicationStep::Continue),
+              true => {
+                (*pending).projection = None;
+                handle database::stage_request(&mut registry.core, session, pending.value) {
+                    Result::Err(error) => Result::Err(Failure::Database(error)),
+                    Result::Ok(staged) => { (*pending).staged = Result::Ok(staged); Result::Ok(database::PublicationStep::Continue) },
+                }
+              },
+            },
+        },
+    }
+}
+pub fn step_publication<T, W>(registry: &mut Registry<W>, pending: &mut Publication<T>)
+    -> Result<database::PublicationStep, Failure> where W: database::DiagnosticWorld {
+    handle admitted(& *registry, pending.session) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(session) => handle pending.closed {
+            true => Result::Err(Failure::Closed),
+            false => {
+                let result = publication_step(&mut *registry, session, &mut *pending);
+                handle result {
+                    Result::Ok(step) => Result::Ok(step),
+                    Result::Err(error) => { database::abort_request(&mut registry.core, session);
+                        (*pending).projection = None; (*pending).staged = None;
+                        (*pending).closed = Result<(), ()>::Ok(()); Result::Err(error) },
+                }
+            },
+        },
+    }
+}
+pub fn finish_publication<T, W>(registry: &mut Registry<W>, pending: Publication<T>)
+    -> Result<database::Published<Value<T>>, Failure> {
+    handle admitted(& *registry, pending.session) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(session) => handle pending.staged {
+            Result::Err(_) => { database::abort_request(&mut registry.core, session); Result::Err(Failure::Closed) },
+            Result::Ok(staged) => handle database::finish_request(&mut registry.core, staged) {
+                Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(value) => Result::Ok(value),
+            },
+        },
+    }
+}
+pub fn request_traces<'a, W>(registry: &'a Registry<W>, session: Session)
+    -> Result<Option<Slice<'a, dependency::Trace>>, Failure> {
+    handle admitted(registry, session) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(session) => handle database::request_traces(&registry.core, session) {
+            Result::Err(error) => Result::Err(Failure::Database(error)), Result::Ok(traces) => Result::Ok(traces),
+        },
+    }
+}
 
 fn product<W>(core: &database::Database<W, Product>, session: database::Session, outcome: engine::Outcome) -> Result<ProductKind, Failure> {
     handle database::value(core, session, outcome) {

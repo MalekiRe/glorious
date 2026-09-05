@@ -1001,6 +1001,50 @@ pub fn product(engine: &Engine, session: Session, outcome: Outcome) -> Result<Ha
     }
 }
 
+// Inspect the committed journal through a checked result in this session's
+// pinned revision. Public Outcome fingerprint/provenance fields are not proof.
+pub fn observation(engine: &Engine, session: Session, outcome: Outcome, index: usize) -> Result<Option<Read>, Failure> {
+    handle product(engine, session, outcome) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle storage::get(&engine.cells, outcome.cell) {
+            Result::Err(_) => Result::Err(Failure::Closed),
+            Result::Ok(cell) => handle cell.state {
+                CellState::Pending { owner: _ } => Result::Err(Failure::Busy),
+                CellState::Ready { memo: memo, execution: _ } => Result::Ok(query::observation(&memo, index)),
+            },
+        },
+    }
+}
+pub fn observed_query(engine: &Engine, session: Session, parent: Outcome, index: usize) -> Result<Outcome, Failure> {
+    handle observation(engine, session, parent, index) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(read) => handle read {
+            Result::Err(_) => Result::Err(Failure::Invariant),
+            Result::Ok(read) => handle query::projection(read.identity) == 0 {
+                false => Result::Err(Failure::Invariant),
+                true => observed_child(engine, session, parent.revision, read),
+            },
+        },
+    }
+}
+fn observed_child(engine: &Engine, session: Session, revision: RevisionId, read: Read) -> Result<Outcome, Failure> {
+    handle indexed(engine, MemoKey { revision: revision, identity: read.identity }) {
+        Result::Err(_) => Result::Err(Failure::Invariant),
+        Result::Ok(cell) => handle ready(engine, cell) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(child) => handle identity::equal(child.fingerprint, read.fingerprint) {
+                false => Result::Err(Failure::Invariant),
+                true => handle query::equally_complete(read.completeness, child.completeness) {
+                    false => Result::Err(Failure::Invariant),
+                    true => handle product(engine, session, child) {
+                        Result::Err(error) => Result::Err(error), Result::Ok(_) => Result::Ok(child),
+                    },
+                },
+            },
+        },
+    }
+}
+
 pub fn abort(engine: &mut Engine, ticket: Ticket) -> () {
     handle info(& *engine, ticket) {
         Result::Err(_) => (),

@@ -53,9 +53,12 @@ This is the publication closure before the subsequent typed-store reclamation
 work, not a claim that later edits inherit those results.
 
 This is the shared publication mechanism, not `CompilationOutcome` API parity.
-The payload in these tests is synthetic; real package AST/Core/MIR products,
-artifacts/manifests, the concrete normalized world, closed provider capabilities,
-and compiler/service providers remain open. Counts are not hierarchical memory
+The original payloads above are synthetic. The registry now also publishes
+real typed source-query results and automatically derived input facts from
+committed journals, including fully normalized worlds; see
+[query-registry.md](query-registry.md#provider-derived-input-facts-and-typed-result-publication).
+Real package AST/Core/MIR products, artifacts/manifests, later provider
+capabilities, and compiler/service providers remain open. Counts are not hierarchical memory
 leases. VM aggregate copies, directory growth, and old-row release still need
 physical cost certification; a logically non-failing slot swap is not proof of
 bounded runtime allocation or crash-safe external artifact publication.

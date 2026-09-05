@@ -462,24 +462,27 @@ function, program counter, and instruction to a returned VM runtime error.
 ### Local command RAM gate
 
 Use `tooling/ram-gate.sh` for every local command that executes more than
-`cargo check`. It applies the repository's 8 GiB virtual-memory cap and uses
-three shared `/tmp/grandiose-ram-gate/slot-*.lock` `flock` slots, so at most
-three capped commands run across all worktrees. The wrapper sets
+`cargo check`. It applies a 16 GiB virtual-memory cap to `cargo test` and an
+8 GiB cap to direct non-Cargo commands, using four shared
+`/tmp/grandiose-ram-gate/slot-*.lock` `flock` slots across all worktrees. The wrapper sets
 `G1_TEST_MEMORY_CAPPED=1`, allowing memory-capped LLVM tests to avoid ASAN's
 large virtual-address reservation, and defaults Rust test executables to one
 in-process test thread; set `RUST_TEST_THREADS` explicitly only after measuring
-the suite's memory use. `cargo check` is deliberately passed through without
-taking a slot.
+the suite's memory use. The full Rust workspace has been validated with eight
+threads and test optimization level 1; see [measured performance](docs/stage0-performance.md).
+`cargo build` and `cargo check` deliberately pass through without taking a slot.
+Test commands also use `test-with-budget.sh` for the ten-minute command bound.
 
 ```sh
 cargo check --workspace
 ./tooling/ram-gate.sh cargo fmt --all -- --check
 ./tooling/ram-gate.sh cargo clippy --workspace --all-targets -- -D warnings
-./tooling/ram-gate.sh cargo test --workspace --all-targets
+CARGO_PROFILE_TEST_OPT_LEVEL=1 RUST_TEST_THREADS=8 \
+  ./tooling/test-with-budget.sh ./tooling/ram-gate.sh cargo test --workspace --all-targets
 
-./tooling/ram-gate.sh cargo test --manifest-path tooling/fmt/Cargo.toml --all-targets
-./tooling/ram-gate.sh cargo test --manifest-path tooling/grand/Cargo.toml --all-targets
-./tooling/ram-gate.sh cargo test --manifest-path tooling/lsp/Cargo.toml --all-targets
+./tooling/test-with-budget.sh ./tooling/ram-gate.sh cargo test --manifest-path tooling/fmt/Cargo.toml --all-targets
+./tooling/test-with-budget.sh ./tooling/ram-gate.sh cargo test --manifest-path tooling/grand/Cargo.toml --all-targets
+./tooling/test-with-budget.sh ./tooling/ram-gate.sh cargo test --manifest-path tooling/lsp/Cargo.toml --all-targets
 ```
 
 Useful design references:

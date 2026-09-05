@@ -131,7 +131,8 @@ and initial source products, not a complete compilation pipeline.
   capacity/work failures without leaked staging, and retry after exhaustion.
   The initial histories use trusted input adapters; a separate end-to-end
   history now drives this registry from fully normalized requests with sealed
-  fingerprints. Canonical provider-derived dependency facts remain open.
+  fingerprints. Committed source journals now derive canonical input facts
+  for atomic publication; the later families' projections remain open.
 - Stepped interner reclamation over a shared non-generic root walker. Roots
   include pending attempts, active journals, suspended replay reads, and
   retained memo keys/journals. Typed sweeps release map and arena residents,
@@ -197,6 +198,17 @@ and initial source products, not a complete compilation pipeline.
   including all integer/float pairs, user-defined conversions, and preserved
   ownership/effect checks. Authoring regressions cover direct f32 rounding and
   signed-zero-preserving float negation; this is not G1 bootstrap certification.
+- Source query publication now traverses checked committed observations and
+  stages the reference ledger's exact input facts, independent of execution
+  provenance. Cold, memoized, reused, recomputed-green, and changed-input
+  histories pass, including normalized worlds, capacity/work rejection,
+  foreign-owner/collection checks, and cancellation at all 24 preparation
+  boundaries. See [query-registry.md](query-registry.md). This publishes a
+  real typed source-query result, not a complete compiler package outcome.
+  The full expanded source suite passes 48 entries in 72.46 seconds
+  (`run-3x54nfxx`), with unchanged source-lock audit and resource guards.
+  The full Rust workspace passes 2,450 tests in 78.520 seconds, with zero
+  failures and the two existing ignored manual VM benchmarks.
 
 ## Gates still open
 
@@ -216,8 +228,8 @@ and extend the capability-limited provider protocol to the remaining families.
 Kernel histories use synthetic products, while separate registry histories
 now exercise actual source/index products and driver-recorded observations.
 The remaining per-family product stores and roots,
-hierarchical controls and memory leases, canonical
-dependency facts derived from actual providers independently of provenance, request-wide
+hierarchical controls and memory leases, canonical dependency projections for
+the remaining providers, request-wide
 publication of actual package products, and the full cancellation/retention
 history corpus remain open.
 The current engine is
@@ -231,8 +243,8 @@ self-compilation, C2/C3 convergence, and performance gates.
 
 The next critical work is finishing M1's collection/runtime contract and M2's
 closed registry, provider capabilities, and physical resource/product ownership
-contracts. The combined request-publication mechanism is still tested with
-synthetic payloads; the source-query registry does not establish publication of
-actual compiler request outcomes.
+contracts. The combined publisher now has both synthetic transaction histories
+and real typed source-query results with derived input facts; it does not yet
+publish complete compiler request outcomes.
 No lexer-first or scalar compiler prototype is being substituted for that
 architecture.

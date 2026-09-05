@@ -49,6 +49,9 @@ the ledger owner; staging is not visible through those accessors.
   session and owns publication/retirement of public rows. Three integrated
   histories pass; see [request-publication.md](request-publication.md).
   Low-level `begin` still only validates database/ordinal shape, not admission.
+  The closed source registry now also derives input facts from checked
+  committed provider journals, including memo-hit and parent-reuse paths;
+  see [query-registry.md](query-registry.md#provider-derived-input-facts-and-typed-result-publication).
 - Instance argument validation/normalization and construction of canonical
   substitution bytes belong to the future typed term/instance subsystem.
   The ledger currently accepts that trusted stable identity projection; it is
@@ -65,4 +68,6 @@ the ledger owner; staging is not visible through those accessors.
 The executable fixtures cover canonical keys, red/green value histories,
 dependency-identity changes, sibling parent selection, cycles, missing facts,
 cancellation, resource/capacity rejection, and parent replacement/retirement.
-These are synthetic ledger histories, not compiler provider or bootstrap parity.
+Those isolated ledger histories remain synthetic. The registry now adds real
+source-provider input comparisons; later semantic families and bootstrap parity
+remain open.

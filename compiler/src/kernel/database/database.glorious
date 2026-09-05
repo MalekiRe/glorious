@@ -345,6 +345,27 @@ pub fn record_dependency<W, V>(database: &mut Database<W, V>, session: Session, 
         },
     }
 }
+pub fn abort_request<W, V>(database: &mut Database<W, V>, session: Session) -> () {
+    engine::request_failed(&mut database.engine, session.core);
+}
+pub fn observation<W, V>(database: &Database<W, V>, session: Session, outcome: engine::Outcome, index: usize)
+    -> Result<Option<query::Read>, Failure> {
+    handle check(database, session) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle engine::observation(&database.engine, session.core, outcome, index) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(read) => Result::Ok(read),
+        },
+    }
+}
+pub fn observed_query<W, V>(database: &Database<W, V>, session: Session, outcome: engine::Outcome, index: usize)
+    -> Result<engine::Outcome, Failure> {
+    handle check(database, session) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => handle engine::observed_query(&database.engine, session.core, outcome, index) {
+            Result::Err(error) => Result::Err(Failure::Engine(error)), Result::Ok(child) => Result::Ok(child),
+        },
+    }
+}
 pub fn record_diagnostic<W, V>(database: &mut Database<W, V>, session: Session, value: diagnostic::CompileDiagnostic)
     -> Result<(), Failure> {
     handle available(& *database) {

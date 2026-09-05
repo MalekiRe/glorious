@@ -712,6 +712,63 @@ fn registry_history(mode: i64, expected: i64, evidence_name: &str) {
     );
 }
 
+#[test]
+fn gsc2_registry_projects_committed_reads_into_atomic_public_dependency_facts() {
+    use grandiose_stage0::{DependencyNode, DependencyStatus};
+    fn literal(value: &[u8]) -> String {
+        format!("b\"{}\"", value.iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>())
+    }
+    fn source_digest(value: Digest) -> String {
+        format!("digest(b\"{}\")", value.as_bytes().iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>())
+    }
+    let support = fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compiler/tests/registry/source.glorious")).unwrap();
+    let support = support.split("fn retained(").next().unwrap().to_owned();
+    let original = b"pub fn main() -> i64 { 42 }\n";
+    let changed = b"pub fn main() -> i64 { 43 }\n";
+    let package = PackageKey("app".into());
+    let input = SourceInput::new(package.clone(), LogicalPath::parse("src/main.glorious").unwrap(), original.as_slice());
+    let file = input.key;
+    let mut request = CompilationRequest {
+        build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"provider-dependency-reference")),
+        mode: CompilationMode::Build, root_package: package.clone(), sources: vec![input],
+        target: "stage0-vm".into(), semantic_options: BTreeMap::new(), codegen_options: BTreeMap::new(),
+        capability_manifest: vec![], runtime_manifest: None,
+    };
+    let compiler = StageZeroCompiler::new();
+    let mut parent = None;
+    for (index, bytes) in [original.as_slice(), original.as_slice(), original.as_slice(), changed.as_slice()].into_iter().enumerate() {
+        request.sources[0] = SourceInput::new(package.clone(), LogicalPath::parse("src/main.glorious").unwrap(), bytes);
+        request.semantic_options.insert("unrelated".into(), index.to_string());
+        let revision = compiler.import_revision(request.clone(), parent).unwrap();
+        compiler.compile_revision(revision).unwrap();
+        let trace = compiler.dependency_trace(revision, &DependencyNode::Input(file)).unwrap();
+        assert_eq!(trace.revision, revision);
+        assert_eq!(trace.node, DependencyNode::Input(file));
+        assert_eq!(trace.fingerprint, Digest::of_bytes(bytes));
+        assert!(trace.dependencies.is_empty());
+        assert_eq!(trace.status, match index {
+            0 => DependencyStatus::Cold,
+            1 | 2 => DependencyStatus::Green { parent: parent.unwrap() },
+            _ => DependencyStatus::Red { parent: parent.unwrap(), first_changed: DependencyNode::Input(file) },
+        });
+        parent = Some(revision);
+    }
+    let case = "registry/dependencies.glorious";
+    let program = source_program(case, &[
+        ("@SUPPORT@", support),
+        ("@FILE@", source_digest(file.0)),
+        ("@SECOND@", source_digest(Digest::of_bytes(b"dependency-unobserved-file"))),
+        ("@DIGEST0@", source_digest(Digest::of_bytes(original))),
+        ("@DIGEST1@", source_digest(Digest::of_bytes(changed))),
+        ("@ORIGINAL@", literal(original)),
+        ("@CHANGED@", literal(changed)),
+    ]);
+    let (results, profile) = program.run_tuple_i64_for_authoring(Default::default()).unwrap();
+    record_execution_values(case, &program, "", &format!("{results:?}"), Some(&profile));
+    assert_eq!(&results[..6], &[1, 1, 1, 1, 1, 1]);
+    assert!(results[6] > 10, "every projection/preparation boundary was cancelled: {results:?}");
+}
+
 fn gsc2_registry_key_slots_are_reclaimed_across_pinned_retirement_and_generation_reuse() {
     registry_history(4, 16 * 45 + 15 * 2, "registry/key-retirement-churn");
 }

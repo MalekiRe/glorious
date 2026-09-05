@@ -469,6 +469,8 @@ nested-completion lowering correction.
 
 Complete world commitments and real normalized-world import are now exercised;
 caller-supplied component digests are not being substituted for that boundary.
-Physical allocation/copy and transport-polling certification, provider-derived
-public dependency facts, request outcomes, the remaining query families, and
+The normalized-world history now also publishes its real line-query results
+with journal-derived cold/green/red input rows; see [query-registry.md](query-registry.md).
+Physical allocation/copy and transport-polling certification, dependency
+projections for later providers, complete request outcomes, the remaining query families, and
 the full compiler remain in scope.
