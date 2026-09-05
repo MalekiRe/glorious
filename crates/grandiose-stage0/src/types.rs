@@ -292,6 +292,15 @@ pub enum Mutability {
     Unique,
 }
 
+/// Raw pointer access permission, not a borrowing or ownership guarantee.
+/// In particular, `Mut` does not assert uniqueness and copying either pointer
+/// does not copy, move, or destroy its pointee.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerMutability {
+    Const,
+    Mut,
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ScalarType {
     Bool,
@@ -447,6 +456,10 @@ pub enum Type {
         lifetime: Lifetime,
         referent: Box<Type>,
     },
+    RawPointer {
+        mutability: PointerMutability,
+        pointee: Box<Type>,
+    },
     Callable {
         /// The number of higher-ranked lifetime binders that scope this
         /// callable's parameter/result tree. Bound lifetimes use their
@@ -599,7 +612,8 @@ impl InferContext {
             Type::StaticData { element, .. } => {
                 self.collect_unresolved_type_variables(*element, variables)
             }
-            Type::Reference { referent, .. } => {
+            Type::Reference { referent, .. }
+            | Type::RawPointer { pointee: referent, .. } => {
                 self.collect_unresolved_type_variables(*referent, variables)
             }
             Type::Callable {
@@ -758,6 +772,13 @@ impl InferContext {
                 Ok(Type::Array(Box::new(self.unify(*left, *right)?)))
             }
             (
+                Type::RawPointer { mutability: left_mutability, pointee: left },
+                Type::RawPointer { mutability: right_mutability, pointee: right },
+            ) if left_mutability == right_mutability => Ok(Type::RawPointer {
+                mutability: left_mutability,
+                pointee: Box::new(self.unify(*left, *right)?),
+            }),
+            (
                 Type::StaticData {
                     element: left_element,
                     tag: left_tag,
@@ -864,6 +885,10 @@ impl InferContext {
                     .collect::<Result<_, _>>()?,
             )),
             Type::Array(element) => Ok(Type::Array(Box::new(self.zonk(*element)?))),
+            Type::RawPointer { mutability, pointee } => Ok(Type::RawPointer {
+                mutability,
+                pointee: Box::new(self.zonk(*pointee)?),
+            }),
             Type::StaticData {
                 element,
                 tag,
@@ -1468,6 +1493,7 @@ impl InferContext {
                         .any(|argument| self.const_argument_occurs(variable, argument))
             }
             Type::Array(value)
+            | Type::RawPointer { pointee: value, .. }
             | Type::StaticData { element: value, .. }
             | Type::Reference {
                 referent: value, ..
@@ -1603,6 +1629,10 @@ impl InferContext {
                 .zip(&right)
                 .all(|(left, right)| self.types_may_unify(left, right)),
             (Type::Array(left), Type::Array(right)) => self.types_may_unify(&left, &right),
+            (
+                Type::RawPointer { mutability: left_mutability, pointee: left },
+                Type::RawPointer { mutability: right_mutability, pointee: right },
+            ) if left_mutability == right_mutability => self.types_may_unify(&left, &right),
             (
                 Type::StaticData {
                     element: left_element,
@@ -1758,6 +1788,7 @@ impl InferContext {
                         .any(|argument| self.effect_occurs_in_generic_argument(variable, argument))
             }
             Type::Array(element)
+            | Type::RawPointer { pointee: element, .. }
             | Type::StaticData { element, .. }
             | Type::Reference {
                 referent: element, ..
@@ -1810,6 +1841,7 @@ impl InferContext {
                         .any(|argument| self.generic_argument_occurs(variable, argument))
             }
             Type::Array(element)
+            | Type::RawPointer { pointee: element, .. }
             | Type::StaticData { element, .. }
             | Type::Reference {
                 referent: element, ..
@@ -2143,6 +2175,15 @@ fn encode_type(value: &Type, output: &mut Vec<u8>) {
             output.push(5);
             encode_type(element, output);
         }
+        Type::RawPointer { mutability, pointee } => {
+            // New identity tag; existing type encodings remain unchanged.
+            output.push(16);
+            output.push(match mutability {
+                PointerMutability::Const => 0,
+                PointerMutability::Mut => 1,
+            });
+            encode_type(pointee, output);
+        }
         Type::StaticData {
             element,
             tag,
@@ -2334,6 +2375,10 @@ pub(crate) fn canonicalize_type_identity(value: Type) -> Type {
                 .collect(),
         ),
         Type::Array(element) => Type::Array(Box::new(canonicalize_type_identity(*element))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability,
+            pointee: Box::new(canonicalize_type_identity(*pointee)),
+        },
         Type::StaticData {
             element,
             tag,
@@ -2409,6 +2454,7 @@ fn type_identity_is_well_formed(value: &Type) -> bool {
         }
         Type::Tuple(elements) => elements.iter().all(type_identity_is_well_formed),
         Type::Array(element)
+        | Type::RawPointer { pointee: element, .. }
         | Type::StaticData { element, .. }
         | Type::Reference {
             referent: element, ..

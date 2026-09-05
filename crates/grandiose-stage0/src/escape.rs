@@ -109,7 +109,7 @@ fn parameter_value(ty: &Type) -> Value {
         // inventing a body-local loan (for example `Str -> Result<Str, E>`).
         Type::Nominal { .. } | Type::Projection { .. } => Value::ExternalBorrowed,
         // Array length is not retained in `Type`, so it remains opaque.
-        Type::Array(_) | Type::StaticData { .. } => Value::None,
+        Type::Array(_) | Type::StaticData { .. } | Type::RawPointer { .. } => Value::None,
         Type::Callable { .. }
         | Type::Generic(_)
         | Type::Infer(_)
@@ -906,6 +906,10 @@ fn contains_open_type_parameter(value: &Type) -> bool {
         }
         Type::Infer(_)
         | Type::Unit
+        // A raw pointer has no resident/borrowed pointee to defer to a later
+        // ownership instantiation. Its type arguments still participate in
+        // type identity and specialization, independently of this loan walk.
+        | Type::RawPointer { .. }
         | Type::Never
         | Type::Scalar(_)
         | Type::ConstU32(_)

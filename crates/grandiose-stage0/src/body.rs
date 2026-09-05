@@ -13,6 +13,7 @@ use crate::{
     quantity::Quantity,
     scanner::TokenRange,
     source::{LexedFile, Span, TokenKind},
+    types::PointerMutability,
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -1622,6 +1623,22 @@ impl Parser<'_> {
         if self.at_operator("!") {
             self.position += 1;
             return Some(HeaderType::Never);
+        }
+        if self.at_operator("*") {
+            self.position += 1;
+            let mutability = match self.word() {
+                Some("const") => PointerMutability::Const,
+                Some("mut") => PointerMutability::Mut,
+                _ => {
+                    self.error_current("G4009", "raw pointer types require `*const T` or `*mut T`");
+                    return None;
+                }
+            };
+            self.position += 1;
+            return Some(HeaderType::RawPointer {
+                mutability,
+                pointee: Box::new(self.closure_type()?),
+            });
         }
         if self.at_operator("&") {
             self.position += 1;

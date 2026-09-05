@@ -10,7 +10,7 @@ use crate::{
     quantity::Quantity,
     scanner::{DeclarationKind, DeclarationShell, TokenRange},
     source::{LexedFile, Span, TokenKind},
-    types::{ConstKind, GenericKind},
+    types::{ConstKind, GenericKind, PointerMutability},
 };
 
 /// A declaration's generic binders, including the small but semantically
@@ -121,6 +121,10 @@ pub enum HeaderType {
         /// it the canonical `Lifetime::Elided` identity.
         lifetime: Option<String>,
         referent: Box<HeaderType>,
+    },
+    RawPointer {
+        mutability: PointerMutability,
+        pointee: Box<HeaderType>,
     },
     Never,
     Recovered,
@@ -1825,6 +1829,21 @@ impl Parser<'_> {
         }
         if self.operator("!") {
             return HeaderType::Never;
+        }
+        if self.operator("*") {
+            let mutability = match self.word() {
+                Some("const") => PointerMutability::Const,
+                Some("mut") => PointerMutability::Mut,
+                _ => {
+                    self.error("G3327", "raw pointer types require `*const T` or `*mut T`");
+                    return HeaderType::Recovered;
+                }
+            };
+            self.position += 1;
+            return HeaderType::RawPointer {
+                mutability,
+                pointee: Box::new(self.ty()),
+            };
         }
         if self.operator("&") {
             let lifetime = if self.word().is_some_and(|name| name.starts_with('\'')) {

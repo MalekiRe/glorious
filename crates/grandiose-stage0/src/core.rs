@@ -2189,6 +2189,7 @@ pub(crate) fn type_contains_inference(ty: &Type) -> bool {
                     .any(generic_argument_contains_inference)
         }
         Type::Array(element)
+        | Type::RawPointer { pointee: element, .. }
         | Type::StaticData { element, .. }
         | Type::Reference {
             referent: element, ..
@@ -2263,7 +2264,8 @@ fn type_contains_out_of_scope_bound_lifetime_in(ty: &Type, binders: &[u32]) -> b
                     generic_argument_contains_out_of_scope_bound_lifetime(argument, binders)
                 })
         }
-        Type::Array(element) | Type::StaticData { element, .. } => {
+        Type::Array(element) | Type::StaticData { element, .. }
+        | Type::RawPointer { pointee: element, .. } => {
             type_contains_out_of_scope_bound_lifetime_in(element, binders)
         }
         Type::Reference {
@@ -2787,6 +2789,7 @@ fn type_contains_effect_row_argument(value: &Type) -> bool {
         }
         Type::Tuple(values) => values.iter().any(type_contains_effect_row_argument),
         Type::Array(value)
+        | Type::RawPointer { pointee: value, .. }
         | Type::StaticData { element: value, .. }
         | Type::Reference {
             referent: value, ..
@@ -5597,6 +5600,10 @@ impl Elaborator<'_> {
                 name,
                 item_arguments,
             } => self.header_projection(subject, trait_path, trait_arguments, name, item_arguments),
+            HeaderType::RawPointer { mutability, pointee } => Type::RawPointer {
+                mutability: *mutability,
+                pointee: Box::new(self.header_type(pointee)),
+            },
             HeaderType::Path(path) => self.header_path(path, &[]),
             HeaderType::Application(base, arguments) => match base.as_ref() {
                 HeaderType::Path(path) => self.header_path(path, arguments),
@@ -5768,6 +5775,10 @@ impl Elaborator<'_> {
             Type::Array(value) => Type::Array(Box::new(
                 self.normalize_selectable_type_projections_inner(*value, active, hrtb_binders),
             )),
+            Type::RawPointer { mutability, pointee } => Type::RawPointer {
+                mutability,
+                pointee: Box::new(self.normalize_selectable_type_projections_inner(*pointee, active, hrtb_binders)),
+            },
             Type::Reference {
                 mutability,
                 lifetime,
@@ -5897,6 +5908,10 @@ impl Elaborator<'_> {
             Type::Array(value) => {
                 Type::Array(Box::new(self.normalize_nested_callable_effect_rows(*value)))
             }
+            Type::RawPointer { mutability, pointee } => Type::RawPointer {
+                mutability,
+                pointee: Box::new(self.normalize_nested_callable_effect_rows(*pointee)),
+            },
             Type::Reference {
                 mutability,
                 lifetime,
@@ -13974,7 +13989,8 @@ fn type_generic_arity(value: &Type) -> u32 {
             .unwrap_or(0),
         Type::Tuple(values) => values.iter().map(type_generic_arity).max().unwrap_or(0),
         Type::Array(value) => type_generic_arity(value),
-        Type::Reference { referent, .. } => type_generic_arity(referent),
+        Type::Reference { referent, .. }
+        | Type::RawPointer { pointee: referent, .. } => type_generic_arity(referent),
         Type::Callable {
             parameters,
             result,
@@ -14120,6 +14136,19 @@ fn align_lifetime_types(
         (Type::Array(expected), Type::Array(actual)) => Ok(Type::Array(Box::new(
             align_lifetime_types(expected, actual, substitution, mode, depth)?,
         ))),
+        (
+            Type::RawPointer { mutability: expected_mutability, pointee: expected_pointee },
+            Type::RawPointer { mutability: actual_mutability, pointee: actual_pointee },
+        ) if expected_mutability == actual_mutability => {
+            let pointee = align_lifetime_types(expected_pointee, actual_pointee, substitution, mode, depth)?;
+            // A writable pointer is invariant in stored values: shortening
+            // an embedded reference could otherwise enable an invalid write.
+            // Const pointers allow the ordinary covariant lifetime relation.
+            if *expected_mutability == crate::PointerMutability::Mut {
+                align_lifetime_types(actual_pointee, expected_pointee, substitution, mode, depth)?;
+            }
+            Ok(Type::RawPointer { mutability: *expected_mutability, pointee: Box::new(pointee) })
+        }
         (
             Type::Nominal {
                 definition: expected_definition,
@@ -14281,6 +14310,10 @@ fn open_hrtb_callable_body_type(value: Type, binder_depth: u32) -> Type {
             *value,
             binder_depth,
         ))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability,
+            pointee: Box::new(open_hrtb_callable_body_type(*pointee, binder_depth)),
+        },
         Type::Callable {
             lifetime_binders,
             parameters,
@@ -14675,6 +14708,10 @@ fn substitute_call_lifetimes(
             substitution,
             depth,
         )?))),
+        Type::RawPointer { mutability, pointee } => Ok(Type::RawPointer {
+            mutability,
+            pointee: Box::new(substitute_call_lifetimes(*pointee, substitution, depth)?),
+        }),
         Type::Reference {
             mutability,
             lifetime,
@@ -14824,6 +14861,7 @@ fn projection_is_concrete(value: &Type) -> bool {
                 && item_arguments.iter().all(generic_argument_is_concrete)
         }
         Type::Array(element)
+        | Type::RawPointer { pointee: element, .. }
         | Type::StaticData { element, .. }
         | Type::Reference {
             referent: element, ..
@@ -14981,7 +15019,8 @@ fn type_is_selectable_type_projection_argument(value: &Type, hrtb_binders: &[u32
         // A nested projection is selectable only once it has been selected
         // to a concrete type by the recursive normalizer above.
         Type::Projection { .. } => projection_is_concrete(value),
-        Type::Array(value) | Type::StaticData { element: value, .. } => {
+        Type::Array(value) | Type::StaticData { element: value, .. }
+        | Type::RawPointer { pointee: value, .. } => {
             type_is_selectable_type_projection_argument(value, hrtb_binders)
         }
         Type::Reference {
@@ -15782,6 +15821,10 @@ pub(crate) fn reference_leaf_paths(
             }
         }
         Type::Projection { .. } | Type::Generic(_) | Type::Infer(_) => return Err(()),
+        // The pointer is a value, but its pointee is not a resident reference
+        // leaf. Dereferencing/converting it must establish fresh unsafe
+        // obligations rather than inherit a fictitious checked loan here.
+        Type::RawPointer { .. } => {},
         Type::Callable { .. }
         | Type::Unit
         | Type::Never
@@ -15862,6 +15905,7 @@ fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bo
                 result
             }
             Type::Projection { .. } | Type::Generic(_) | Type::Infer(_) => true,
+            Type::RawPointer { .. } => false,
             Type::Callable { .. }
             | Type::Unit
             | Type::Never
@@ -15893,6 +15937,10 @@ pub(crate) fn instantiate_nominal_field_type(
         Type::Array(element) => Ok(Type::Array(Box::new(instantiate_nominal_field_type(
             element, arguments,
         )?))),
+        Type::RawPointer { mutability, pointee } => Ok(Type::RawPointer {
+            mutability: *mutability,
+            pointee: Box::new(instantiate_nominal_field_type(pointee, arguments)?),
+        }),
         Type::Reference {
             mutability,
             lifetime,

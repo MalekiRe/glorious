@@ -9439,6 +9439,10 @@ fn substitute_nominal_copy_type(value: &Type, arguments: &[GenericArgument]) -> 
         Type::Array(element) => {
             Type::Array(Box::new(substitute_nominal_copy_type(element, arguments)))
         }
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability: *mutability,
+            pointee: Box::new(substitute_nominal_copy_type(pointee, arguments)),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -9601,7 +9605,8 @@ fn validate_mir_type(ty: &Type, lifetime_binders: &mut Vec<u32>) -> Result<(), S
         Type::Tuple(elements) => elements
             .iter()
             .try_for_each(|element| validate_mir_type(element, lifetime_binders)),
-        Type::Array(element) | Type::StaticData { element, .. } => {
+        Type::Array(element) | Type::StaticData { element, .. }
+        | Type::RawPointer { pointee: element, .. } => {
             validate_mir_type(element, lifetime_binders)
         }
         Type::Reference {
@@ -10250,6 +10255,10 @@ fn type_contract_matches(
             })),
         Type::Array(value) => matches!(actual, Type::Array(actual_value)
             if type_contract_matches(value, actual_value, substitutions)),
+        Type::RawPointer { mutability, pointee } => matches!(actual,
+            Type::RawPointer { mutability: actual_mutability, pointee: actual_pointee }
+            if mutability == actual_mutability
+                && type_contract_matches(pointee, actual_pointee, substitutions)),
         Type::Reference {
             mutability,
             lifetime,
@@ -10552,7 +10561,8 @@ fn type_retains_generic_placeholder(value: &Type) -> bool {
                     .any(generic_argument_retains_generic_placeholder)
         }
         Type::Tuple(values) => values.iter().any(type_retains_generic_placeholder),
-        Type::Array(value) | Type::StaticData { element: value, .. } => {
+        Type::Array(value) | Type::StaticData { element: value, .. }
+        | Type::RawPointer { pointee: value, .. } => {
             type_retains_generic_placeholder(value)
         }
         Type::Reference {
@@ -32061,7 +32071,7 @@ impl Lowerer<'_> {
             Type::Array(element) => self.register_nominal_copy_descriptors(element),
             // References are independently duplicable/affine according to
             // their mutability; the referent is not inline storage.
-            Type::Reference { .. } => {}
+            Type::Reference { .. } | Type::RawPointer { .. } => {}
             Type::Callable {
                 parameters,
                 result,
@@ -32882,6 +32892,12 @@ fn collect_generic_substitutions(
             collect_generic_substitutions(value, actual, substitutions)
         }
         (
+            Type::RawPointer { mutability, pointee },
+            Type::RawPointer { mutability: actual_mutability, pointee: actual_pointee },
+        ) if mutability == actual_mutability => {
+            collect_generic_substitutions(pointee, actual_pointee, substitutions)
+        }
+        (
             Type::Reference {
                 mutability,
                 lifetime,
@@ -32947,6 +32963,10 @@ fn substitute_generic_type(value: Type, substitutions: &BTreeMap<u32, Type>) -> 
             *value,
             substitutions,
         )?))),
+        Type::RawPointer { mutability, pointee } => Some(Type::RawPointer {
+            mutability,
+            pointee: Box::new(substitute_generic_type(*pointee, substitutions)?),
+        }),
         Type::Reference {
             mutability,
             lifetime,

@@ -47,7 +47,10 @@ def main():
                        "crates/grandiose-stage0/src/request.rs", "crates/grandiose-stage0/src/runtime_manifest.rs",
                        "crates/grandiose-stage0/src/bootstrap.rs", "crates/grandiose-stage0/src/placeflow.rs",
                        "crates/grandiose-stage0/src/signature.rs", "crates/grandiose-stage0/src/trait_solver.rs",
-                       "crates/grandiose-stage0/src/coherence.rs", "crates/grandiose-stage0/src/resolution.rs"]
+                       "crates/grandiose-stage0/src/coherence.rs", "crates/grandiose-stage0/src/resolution.rs",
+                       "crates/grandiose-stage0/src/types.rs", "crates/grandiose-stage0/src/header.rs",
+                       "crates/grandiose-stage0/src/body.rs", "crates/grandiose-stage0/src/instance.rs",
+                       "crates/grandiose-stage0/src/escape.rs", "crates/grandiose-stage0/src/pattern.rs"]
     expected = {"schema": 1, "algorithm": "sha256", "files": closure(),
                 "authoring_overrides": {p: hashlib.sha256((ROOT / p).read_bytes()).hexdigest() for p in authoring_paths}}
     # Shared raw storage is a native/runtime prerequisite, not compiler source
@@ -73,6 +76,7 @@ def main():
         ROOT / "crates/grandiose-stage0/tests/request_and_revision.rs",
         ROOT / "crates/grandiose-stage0/tests/runtime_manifest.rs",
         ROOT / "crates/grandiose-stage0/tests/runtime_storage.rs",
+        ROOT / "crates/grandiose-stage0/tests/unsafe_memory.rs",
         ROOT / "crates/grandiose-stage0/tests/fixtures/hash_indexing_profile.glorious",
         ROOT / "crates/grandiose-stage0/tests/fixtures/array_update_profile.glorious",
         ROOT / "crates/grandiose-vm/tests/native_memory.rs",

@@ -3270,6 +3270,12 @@ fn bind_impl_head_type(
             bind_impl_head_type(template, value, bindings)
         }
         (
+            Type::RawPointer { mutability: template_mutability, pointee: template_pointee },
+            Type::RawPointer { mutability: value_mutability, pointee: value_pointee },
+        ) if template_mutability == value_mutability => {
+            bind_impl_head_type(template_pointee, value_pointee, bindings)
+        }
+        (
             Type::Reference {
                 mutability: template_mutability,
                 lifetime: template_lifetime,
@@ -3771,6 +3777,7 @@ fn register_specialized_nominal_copy_type(
                 });
         }
         Type::Reference { .. }
+        | Type::RawPointer { .. }
         | Type::Unit
         | Type::Never
         | Type::Scalar(_)
@@ -3840,6 +3847,10 @@ fn specialize_type(value: &Type, arguments: &[GenericArgument]) -> Type {
                 .collect(),
         ),
         Type::Array(element) => Type::Array(Box::new(specialize_type(element, arguments))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability: *mutability,
+            pointee: Box::new(specialize_type(pointee, arguments)),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -4191,6 +4202,10 @@ fn normalize_materialized_type(value: &Type, solver: &mut TraitSolver) -> Result
         Type::Array(element) => {
             Type::Array(Box::new(normalize_materialized_type(element, solver)?))
         }
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability: *mutability,
+            pointee: Box::new(normalize_materialized_type(pointee, solver)?),
+        },
         Type::Reference {
             mutability,
             lifetime,

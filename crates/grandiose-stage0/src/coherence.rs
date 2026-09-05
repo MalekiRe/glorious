@@ -349,6 +349,7 @@ fn collect_generic_names(
                 collect_generic_names(value, declared, used);
             }
         }
+        HeaderType::RawPointer { pointee, .. } => collect_generic_names(pointee, declared, used),
         HeaderType::Callable {
             parameters,
             result,
@@ -868,6 +869,15 @@ fn unify_overlap_type(left: &Type, right: &Type, bindings: &mut OverlapBindings)
             unify_overlap_type(left, right, bindings).map(|value| Type::Array(Box::new(value)))
         }
         (
+            Type::RawPointer { mutability: left_mutability, pointee: left },
+            Type::RawPointer { mutability: right_mutability, pointee: right },
+        ) if left_mutability == right_mutability => {
+            unify_overlap_type(left, right, bindings).map(|pointee| Type::RawPointer {
+                mutability: *left_mutability,
+                pointee: Box::new(pointee),
+            })
+        }
+        (
             Type::Reference {
                 mutability: left_mutability,
                 lifetime: left_lifetime,
@@ -1032,7 +1042,8 @@ fn contains_overlap_generic(value: &Type, index: u32, bindings: &OverlapBindings
         Type::Array(value) | Type::StaticData { element: value, .. } => {
             contains_overlap_generic(&value, index, bindings)
         }
-        Type::Reference { referent, .. } => contains_overlap_generic(&referent, index, bindings),
+        Type::Reference { referent, .. }
+        | Type::RawPointer { pointee: referent, .. } => contains_overlap_generic(&referent, index, bindings),
         Type::Projection {
             subject,
             trait_arguments,
@@ -1173,6 +1184,10 @@ fn resolve_overlap_type(value: &Type, bindings: &OverlapBindings) -> Type {
                 .collect(),
         ),
         Type::Array(value) => Type::Array(Box::new(resolve_overlap_type(value, bindings))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability: *mutability,
+            pointee: Box::new(resolve_overlap_type(pointee, bindings)),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -1329,6 +1344,10 @@ fn rebase_overlap_type(value: &Type, offset: u32) -> Type {
                 .collect(),
         ),
         Type::Array(value) => Type::Array(Box::new(rebase_overlap_type(value, offset))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability: *mutability,
+            pointee: Box::new(rebase_overlap_type(pointee, offset)),
+        },
         Type::Reference {
             mutability,
             lifetime,

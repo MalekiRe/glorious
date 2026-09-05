@@ -3063,6 +3063,7 @@ fn contains_open_type_parameter(value: &crate::types::Type) -> bool {
         }
         crate::types::Type::Infer(_)
         | crate::types::Type::Unit
+        | crate::types::Type::RawPointer { .. }
         | crate::types::Type::Never
         | crate::types::Type::Scalar(_)
         | crate::types::Type::ConstU32(_)

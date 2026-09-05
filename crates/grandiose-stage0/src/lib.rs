@@ -172,7 +172,7 @@ pub use trait_solver::{
 pub use types::{
     ConstInferVar, ConstKind, EffectInstance, EffectRow, EffectRowProjection, EffectTail,
     EffectVar, GenericArgument, GenericKind, InferContext, InferVar, Lifetime, Mutability,
-    ScalarType, StructuralConstError, StructuralU32Expr, Type, TypeError,
+    PointerMutability, ScalarType, StructuralConstError, StructuralU32Expr, Type, TypeError,
 };
 pub use useflow::{
     CallableEscapeBoundary, CallableEscapeFact, CallableUseFact, UseDiagnostic, UseFlow,

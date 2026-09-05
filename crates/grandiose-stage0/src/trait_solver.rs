@@ -364,7 +364,8 @@ pub(crate) fn type_projection_normalization_is_identity(value: &Type) -> bool {
             | GenericArgument::ConstInfer { .. } => true,
         }),
         Type::Tuple(values) => values.iter().all(type_projection_normalization_is_identity),
-        Type::Array(value) | Type::Reference { referent: value, .. } =>
+        Type::Array(value) | Type::Reference { referent: value, .. }
+        | Type::RawPointer { pointee: value, .. } =>
             type_projection_normalization_is_identity(value),
         Type::Callable { parameters, result, .. } =>
             parameters.iter().all(type_projection_normalization_is_identity)
@@ -1336,6 +1337,10 @@ impl TraitSolver {
             Type::Array(value) => Ok(Type::Array(Box::new(
                 self.normalize_type_projections_in_hrtb(*value, active, hrtb_binders)?,
             ))),
+            Type::RawPointer { mutability, pointee } => Ok(Type::RawPointer {
+                mutability,
+                pointee: Box::new(self.normalize_type_projections_in_hrtb(*pointee, active, hrtb_binders)?),
+            }),
             Type::Reference {
                 mutability,
                 lifetime,
@@ -2208,6 +2213,10 @@ impl TraitSolver {
             // backing bytes participate in user-visible auto-trait proofs.
             Type::StaticData { .. } => vec![],
             Type::Reference { referent, .. } => vec![(**referent).clone()],
+            // Neither a pointee's traits nor an empty field list establish
+            // arbitrary auto-trait invariants for an unchecked pointer.
+            // Explicit implementations must supply such evidence.
+            Type::RawPointer { .. } => return None,
             Type::Callable {
                 parameters, result, ..
             } => {
@@ -2995,6 +3004,13 @@ fn match_type_at(
             }
             _ => None,
         },
+        Type::RawPointer { mutability, pointee } => match actual {
+            Type::RawPointer { mutability: actual_mutability, pointee: actual_pointee }
+                if mutability == actual_mutability => {
+                    match_type_at(pointee, actual_pointee, substitution, binder_depth)
+                }
+            _ => None,
+        },
         Type::StaticData {
             element,
             tag,
@@ -3109,7 +3125,8 @@ fn has_free_hrtb_placeholder(value: &Type, callable_nesting: u32) -> bool {
             referent,
             ..
         } => *depth >= callable_nesting || has_free_hrtb_placeholder(referent, callable_nesting),
-        Type::Reference { referent, .. } | Type::Array(referent) => {
+        Type::Reference { referent, .. } | Type::Array(referent)
+        | Type::RawPointer { pointee: referent, .. } => {
             has_free_hrtb_placeholder(referent, callable_nesting)
         }
         Type::Nominal { arguments, .. } => arguments.iter().any(|argument| {
@@ -3417,6 +3434,10 @@ fn substitute_type(value: &Type, substitution: &ImplementationSubstitution) -> T
                 .collect(),
         ),
         Type::Array(value) => Type::Array(Box::new(substitute_type(value, substitution))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability: *mutability,
+            pointee: Box::new(substitute_type(pointee, substitution)),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -3667,7 +3688,8 @@ fn projection_is_concrete(value: &Type) -> bool {
         Type::Array(element) | Type::StaticData { element, .. } => {
             projection_is_concrete(element)
         }
-        Type::Reference { referent, .. } => projection_is_concrete(referent),
+        Type::Reference { referent, .. }
+        | Type::RawPointer { pointee: referent, .. } => projection_is_concrete(referent),
         Type::Callable {
             parameters, result, ..
         } => parameters.iter().all(projection_is_concrete) && projection_is_concrete(result),
@@ -3709,7 +3731,8 @@ fn projection_is_concrete_in_hrtb_scope(value: &Type, hrtb_binders: &[u32]) -> b
         Type::Array(element) | Type::StaticData { element, .. } => {
             projection_is_concrete_in_hrtb_scope(element, hrtb_binders)
         }
-        Type::Reference { referent, .. } => {
+        Type::Reference { referent, .. }
+        | Type::RawPointer { pointee: referent, .. } => {
             projection_is_concrete_in_hrtb_scope(referent, hrtb_binders)
         }
         Type::Callable {

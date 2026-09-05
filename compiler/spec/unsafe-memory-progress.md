@@ -12,7 +12,7 @@ self-hosting; it is not needed to implement or certify the initial VM/host ABI.
 |---|---|---|
 | U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
 | U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Initial Rust substrate passes native and Miri tests; guest budget/admission integration remains |
-| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Missing |
+| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Raw-pointer type propagation tested; unsafe scopes/contracts and execution remain |
 | U3 | Versioned raw-memory bytecode and safety metadata; host-selected unsafe-enabled execution, independent safe-only verification, authenticated native export admission | Missing |
 | U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
 | U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Missing |
@@ -84,7 +84,7 @@ All existing command and memory limits were retained. Miri ran under the direct
 the musl fallback reported no errors but tracked zero heap allocations, so it
 is not counted as a heap-safety certificate. Miri is the memory-model evidence.
 
-No source unsafe syntax, raw-pointer type, bytecode opcode, safety profile, native
+This U1 checkpoint introduced no source unsafe syntax, raw-pointer type, bytecode opcode, safety profile, native
 import certificate, or collection migration is claimed by this checkpoint.
 All frozen compiler parity contracts and U2–U6 remain open.
 
@@ -93,3 +93,39 @@ at `/tmp/grandiose-unsafe-foundation-qlNkxo/deferred-array-growth.patch` on the
 development machine; the tracked runtime was restored to committed `84a0cabd`.
 The already-committed copy-on-write correction remains. The temporary patch is
 not a build or implementation dependency.
+
+## U2: raw-pointer type foundation
+
+Stage0 accepts `*const T` and `*mut T` in declarations and typed closures.
+Pointer permission is distinct from safe-reference uniqueness. Pointee types,
+regions, projections, and mixed-kind generic arguments survive normalization,
+substitution, inference, coherent implementation selection, Core, and MIR.
+Canonical type identity distinguishes permission and pointee without changing
+existing safe-type encodings. Const pointees are covariant in nested lifetimes;
+writable pointees are invariant. Higher-ranked lifetimes cannot escape through
+pointer indirection.
+
+Copying a pointer neither copies a resident nor creates a loan of its pointee.
+Ownership/drop and safe-reference provenance traversal stop at the pointer;
+type substitution and lifetime validation traverse it. Raw pointers do not
+implicitly implement structural auto traits. Explicit implementations must
+supply any such invariants. Owned-layout recursion stops at pointer indirection.
+
+Twelve focused tests in `crates/grandiose-stage0/tests/unsafe_memory.rs` cover
+these contracts, including malformed syntax, permission mismatches, alias and
+projection specialization, typed closures, linear pointees, lifetime variance,
+higher-ranked escape rejection, and coherence. Safe pointer dereference and
+conversion to a safe reference remain rejected. The existing VM backend rejects
+raw-pointer types rather than encoding them as an old reference or integer.
+Unsafe syntax/call contracts, raw-memory execution, independent admission, and
+actual VM/native interop are not implemented by this type-only checkpoint.
+
+Validation on September 5: full workspace 2,481 passed, zero failed, two existing
+ignored manual benchmarks; build 34.69 seconds and all 48 source entries passed
+in 72.39 seconds. The focused 12-test group was rerun after adding explicit
+old-format VM-emission rejection coverage. Closure audits pass before and after;
+the lock now also tracks type/parser/instance and ownership visitor sources.
+Logs and source evidence: `/tmp/grandiose-raw-pointer-types-zaZWde/`.
+Source-lock SHA-256:
+`92b3be2a22f77e127bb8bff0de757ba7eeddce6bc26291d62c7823bdb5cead9d`.
+No frozen compiler parity contract is closed by these development tests.

@@ -1,17 +1,23 @@
 {
   "algorithm": "sha256",
   "authoring_overrides": {
+    "crates/grandiose-stage0/src/body.rs": "601693f8eb637efd1a5cbd4e00c1b4b43467314b45e756d380dcee6ababc0548",
     "crates/grandiose-stage0/src/bootstrap.rs": "b09e82013ee3653f07d9a62772b2bd0dbfab9501a4af2cba0a08851f3528a7fa",
-    "crates/grandiose-stage0/src/coherence.rs": "d7153bf7549627cedfab7e20c501e09b65ebd17002f03cb7d1050e9c190a9d0b",
-    "crates/grandiose-stage0/src/core.rs": "85fb0e31c1186437063f9cbfb6ba1fb64dde3680f1803c73889aaf9ca7740f43",
-    "crates/grandiose-stage0/src/mir.rs": "f1735428661d5487002c631897bc155d6e01069dae4e52028b427c4b71fc85df",
-    "crates/grandiose-stage0/src/placeflow.rs": "8369672fc1a3303a955f698cfc585b69ce519597a64266ac79fd47ce358cd6eb",
+    "crates/grandiose-stage0/src/coherence.rs": "dba16a51902096b7a1ccd91dffbf9e5b19c9ea3174d6aec286e7cf3919938bcc",
+    "crates/grandiose-stage0/src/core.rs": "8f69cbacad038d410dabc5d685c2a42c92e92800cddd4c39089f6b08131ab2d6",
+    "crates/grandiose-stage0/src/escape.rs": "232af61bd27a339b8cc56d6159f7e4491e815fd856bbf56f0f1337d0f07457cf",
+    "crates/grandiose-stage0/src/header.rs": "0944b93f889a305f98bd15f1e0d31718bd95c7d44e5cd71f8cec6e35a53e8512",
+    "crates/grandiose-stage0/src/instance.rs": "05c58831e1db18523db728db8429fe217831d183a077e910e63a62423e620ff0",
+    "crates/grandiose-stage0/src/mir.rs": "b7e416c72ad0592f5b6e4f0038d18a479264136bd13583be362677231bb89cdb",
+    "crates/grandiose-stage0/src/pattern.rs": "6f3ce8dc24c4321d81ff7e924a793e053c02b8f5f89ad70e33a536994a799cb9",
+    "crates/grandiose-stage0/src/placeflow.rs": "6d223cd9f7ecf9b49bdb81108588746d5c37f26d5949a95f7a26021c5bc62257",
     "crates/grandiose-stage0/src/request.rs": "6e2d53e2d34d80a47284b1305cd261c81a39973f7e81337927c4540f5e4461af",
     "crates/grandiose-stage0/src/resolution.rs": "704ffd8025d93d4bd2176283376e46cd61ec92da91e7946882e3e7cab5b8d19c",
     "crates/grandiose-stage0/src/runtime_manifest.rs": "c8b9aee4a468a43449f540798324eb43df49cab8e03d53dea7f9f0d5e87d3328",
-    "crates/grandiose-stage0/src/service.rs": "1cd9f9d5f871a53f52d1c373766f030b3f20c8f52e6932425a89a25ef9da931a",
-    "crates/grandiose-stage0/src/signature.rs": "b490adff17cf26d38b62daea17dd62dbb40a8a34f0a85aa050a26fb6ca64856d",
-    "crates/grandiose-stage0/src/trait_solver.rs": "9970afa66a79fedd42c411814f379d06fd9d1daafb1d033f45c649a53a639799",
+    "crates/grandiose-stage0/src/service.rs": "519e9a74b90516ef12b803dae50389252547e61c924c7da89c3f5a3640630ae4",
+    "crates/grandiose-stage0/src/signature.rs": "e596c7598d3dac25c7a791cde44580f83b3cac959bd72dc3524195e7108307e7",
+    "crates/grandiose-stage0/src/trait_solver.rs": "992a6b979219181348b2e1bcb4c8c2ec80641ffce2d2f6dff2218f3bd7d7c443",
+    "crates/grandiose-stage0/src/types.rs": "c01a7cb6158dc2e988252bcc74de16425c8807e94ec309c7d171ab5911700580",
     "crates/grandiose-stage0/src/vm_backend.rs": "e97810712412d9f273706bdadb71c1eaea086aac0e83a86b57ee5eca8da8ad07"
   },
   "capability_tests": {
@@ -74,6 +80,7 @@
     "crates/grandiose-stage0/tests/signature.rs": "1849baef78745e7010bd5f9b5dcc87841a1bb8c0b0b5be508f0b3f15811f8fc3",
     "crates/grandiose-stage0/tests/standard_library.rs": "484bd65fd5024dc932c27e7dde0838d7ef9d94695da2400faf6953bb22cd86c1",
     "crates/grandiose-stage0/tests/trait_solver.rs": "6628ce34ee731dcb0866ceba38cc12920175544505ceaae4d25a8b009ac58762",
+    "crates/grandiose-stage0/tests/unsafe_memory.rs": "f983819e5c5c09f7a2c1f227f0ddd94f472e3295b1e3a97a3e5082bf8727b8e8",
     "crates/grandiose-stage0/tests/vm_backend.rs": "1a05c5f5ce95024c15947c04ee5a75c76b6d35ce6a35ec5b0e4f4914c3d7aa56",
     "crates/grandiose-vm/tests/native_memory.rs": "b7883b752cc869248c4798dc0391a620686116ff2d5584e4dc3f6cd4c8c998ec"
   },

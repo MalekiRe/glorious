@@ -654,6 +654,10 @@ impl Elaborator<'_> {
                 referent: Box::new(self.source_type(span, referent)?),
             }),
             crate::HeaderType::Never => Some(Type::Never),
+            crate::HeaderType::RawPointer { mutability, pointee } => Some(Type::RawPointer {
+                mutability: *mutability,
+                pointee: Box::new(self.source_type(span, pointee)?),
+            }),
             crate::HeaderType::Callable {
                 parameters,
                 result,
@@ -955,7 +959,8 @@ fn nominal_subject(subject: &Type) -> Option<(DefKey, Vec<crate::GenericArgument
 
 fn binding_mode(ty: &Type) -> BindingMode {
     match ty {
-        Type::Unit | Type::Scalar(_) | Type::Reference { .. } | Type::Callable { .. } => {
+        Type::Unit | Type::Scalar(_) | Type::Reference { .. }
+        | Type::RawPointer { .. } | Type::Callable { .. } => {
             BindingMode::Copy
         }
         _ => BindingMode::Borrow,

@@ -680,7 +680,8 @@ fn owned_nominal_layout_cycle(
             .find_map(|element| owned_nominal_layout_cycle(element, signatures, active)),
         // Arrays are heap-backed in the Stage 0 VM. The remaining forms are
         // references or executable contracts, never inline nominal storage.
-        Type::Array(_) | Type::StaticData { .. } | Type::Reference { .. } | Type::Callable { .. } => {
+        Type::Array(_) | Type::StaticData { .. } | Type::Reference { .. }
+        | Type::RawPointer { .. } | Type::Callable { .. } => {
             None
         }
         Type::Unit
@@ -788,7 +789,8 @@ fn type_contains_generic_argument(value: &Type, argument: &GenericArgument) -> b
         Type::Array(value) | Type::StaticData { element: value, .. } => {
             type_contains_generic_argument(value, argument)
         }
-        Type::Reference { referent, .. } => type_contains_generic_argument(referent, argument),
+        Type::Reference { referent, .. }
+        | Type::RawPointer { pointee: referent, .. } => type_contains_generic_argument(referent, argument),
         Type::Callable {
             parameters,
             result,
@@ -1118,6 +1120,9 @@ impl ElaboratedInterface {
             // freely reusable regardless of the element's ordinary ownership
             // contract; raw handles never expose an owning element value.
             Type::StaticData { .. } => Some(Quantity::UNRESTRICTED),
+            // Raw pointer copies do not access or duplicate the pointee, and
+            // a mutable raw pointer does not assert an exclusive loan.
+            Type::RawPointer { .. } => Some(Quantity::UNRESTRICTED),
             Type::Reference { mutability, .. } => Some(match mutability {
                 Mutability::Shared => Quantity::UNRESTRICTED,
                 Mutability::Unique => Quantity::AFFINE,
@@ -2140,7 +2145,8 @@ impl ElaboratedInterface {
             Type::Array(value) | Type::StaticData { element: value, .. } => {
                 self.validate_type_projection_obligations(value, ambient, diagnostics)
             }
-            Type::Reference { referent, .. } => {
+            Type::Reference { referent, .. }
+            | Type::RawPointer { pointee: referent, .. } => {
                 self.validate_type_projection_obligations(referent, ambient, diagnostics);
             }
             Type::Callable {
@@ -3382,6 +3388,10 @@ fn normalize_selected_contract_type(
             solver,
             fuel - 1,
         ))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability,
+            pointee: Box::new(normalize_selected_contract_type(*pointee, solver, fuel - 1)),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -3598,6 +3608,10 @@ fn replace_trait_self_type(value: Type, self_ty: &Type) -> Type {
                 .collect(),
         ),
         Type::Array(value) => Type::Array(Box::new(replace_trait_self_type(*value, self_ty))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability,
+            pointee: Box::new(replace_trait_self_type(*pointee, self_ty)),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -3788,6 +3802,12 @@ fn rebase_method_lifetimes(
             trait_generic_count,
             implementation_generic_count,
         ))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability,
+            pointee: Box::new(rebase_method_lifetimes(
+                *pointee, trait_generic_count, implementation_generic_count,
+            )),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -5425,6 +5445,10 @@ impl Elaborator<'_> {
                 lifetime: self.lifetime(lifetime.as_deref()),
                 referent: Box::new(self.ty(referent)),
             },
+            HeaderType::RawPointer { mutability, pointee } => Type::RawPointer {
+                mutability: *mutability,
+                pointee: Box::new(self.ty(pointee)),
+            },
             HeaderType::Projection {
                 subject,
                 trait_path,
@@ -5897,7 +5921,7 @@ fn type_contains_elided_lifetime(ty: &Type) -> bool {
             *lifetime == Lifetime::Elided || type_contains_elided_lifetime(referent)
         }
         Type::Tuple(values) => values.iter().any(type_contains_elided_lifetime),
-        Type::Array(value) => type_contains_elided_lifetime(value),
+        Type::Array(value) | Type::RawPointer { pointee: value, .. } => type_contains_elided_lifetime(value),
         Type::Callable { parameters, result, .. } => {
             parameters.iter().any(type_contains_elided_lifetime)
                 || type_contains_elided_lifetime(result)
@@ -6136,6 +6160,10 @@ fn normalize_alias_type(
             stack,
             diagnostics,
         ))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability,
+            pointee: Box::new(normalize_alias_type(*pointee, definitions, stack, diagnostics)),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -6272,6 +6300,10 @@ fn substitute_alias_generic_identity(value: Type, arguments: &[GenericArgument])
         Type::Array(value) => Type::Array(Box::new(substitute_alias_generic_identity(
             *value, arguments,
         ))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability,
+            pointee: Box::new(substitute_alias_generic_identity(*pointee, arguments)),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -6490,6 +6522,10 @@ fn substitute_alias_generics(value: Type, arguments: &[Type]) -> Type {
                 .collect(),
         ),
         Type::Array(value) => Type::Array(Box::new(substitute_alias_generics(*value, arguments))),
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability,
+            pointee: Box::new(substitute_alias_generics(*pointee, arguments)),
+        },
         Type::Reference {
             mutability,
             lifetime,
@@ -6682,6 +6718,10 @@ fn substitute_trait_type_generics(value: Type, arguments: &[GenericArgument]) ->
         Type::Array(value) => {
             Type::Array(Box::new(substitute_trait_type_generics(*value, arguments)))
         }
+        Type::RawPointer { mutability, pointee } => Type::RawPointer {
+            mutability,
+            pointee: Box::new(substitute_trait_type_generics(*pointee, arguments)),
+        },
         Type::Reference {
             mutability,
             lifetime,
