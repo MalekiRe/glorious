@@ -615,6 +615,18 @@ pub(super) fn execute_memory_intrinsic(
     Ok(match primitive {
         SizeOf => VmValue::Usize(layout(0)?.memory.size() as u64),
         AlignOf => VmValue::Usize(layout(0)?.memory.alignment() as u64),
+        Forget => {
+            // The unsafe caller has deliberately discharged/transferred the
+            // logical obligations. Dropping a VM register is NOT source Drop.
+            let register = arguments[0];
+            registers[register as usize].take()
+                .ok_or(VmArtifactError::UseAfterMove { register })?;
+            VmValue::Unit
+        }
+        StaticBytesLen => {
+            let (_, _, length) = super::expect_static_utf8(arg(0)?)?;
+            VmValue::Usize(length as u64)
+        }
         Null => result_pointer(ptr::null_mut()),
         Dangling => {
             let alignment = layout(0)?.memory.alignment();

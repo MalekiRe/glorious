@@ -205,3 +205,5 @@ memory-as-raw-unique	202
 memory-cast-const	203
 memory-static-utf8-address	204
 memory-static-bytes-address	205
+memory-forget	206
+memory-static-bytes-len	207

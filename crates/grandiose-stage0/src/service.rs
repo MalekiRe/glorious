@@ -882,34 +882,10 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
                 PrimitiveRole::BytesToArray,
                 PrimitiveRole::Blake3,
                 PrimitiveRole::ArrayLen,
-                PrimitiveRole::ArrayUtf8ValidUpTo,
-                PrimitiveRole::ArrayPushUtf8Char,
-                PrimitiveRole::ArrayExtendFromSlice,
-                PrimitiveRole::ArrayInsertMove,
-                PrimitiveRole::ArrayRemoveMove,
-                PrimitiveRole::ArrayAppendMove,
-                PrimitiveRole::ArrayInsertFromSlice,
-                PrimitiveRole::ArrayInsertUtf8FromSlice,
-                PrimitiveRole::ArrayTruncateDiscard,
-                PrimitiveRole::ArrayReverseMove,
-                PrimitiveRole::ArraySplitOffMove,
-                PrimitiveRole::ArraySplitBorrowUnique,
-                PrimitiveRole::ArrayPopUtf8Char,
-                PrimitiveRole::ArrayUtf8CharAt,
                 PrimitiveRole::ArrayGetBorrowShared,
-                PrimitiveRole::ArrayGetBorrowUnique,
-                PrimitiveRole::ArrayGetMove,
-                PrimitiveRole::ArraySetMove,
                 PrimitiveRole::ArrayEmpty,
                 PrimitiveRole::ArrayPushMove,
-                PrimitiveRole::ArrayPopMove,
-                PrimitiveRole::ArrayCapacity,
-                PrimitiveRole::ArrayReserve,
                 PrimitiveRole::StaticLen,
-                PrimitiveRole::StaticSubslice,
-                PrimitiveRole::StaticGetShared,
-                PrimitiveRole::StaticAsArray,
-                PrimitiveRole::StaticRawAsArray,
                 PrimitiveRole::CharFromU32Checked,
                 PrimitiveRole::CharToU32,
                 PrimitiveRole::IntConvertWrappingToU32,
@@ -2374,6 +2350,12 @@ impl StageZeroCompiler {
             let Some(body) = typed_bodies.get(&caller.callable) else {
                 continue;
             };
+            // Trait executable keys contain selected evidence and a receiver,
+            // not the implementation body's binder slots. Discover nested
+            // calls with the SAME substitution used to materialize that body.
+            let caller_arguments = materialization_body_arguments(&caller, &signatures)
+                .map_err(|message| failed(input_fingerprint,
+                    vec![CompileDiagnostic::invariant("G7032", message)], &source_lengths))?;
             // A direct call owns its callable child in Core. Process that
             // child through the call below, rather than once as a first-class
             // function value and again as the call's callee. Retaining
@@ -2404,13 +2386,13 @@ impl StageZeroCompiler {
                         arguments.first().map(|receiver| {
                             specialize_type(
                                 &body.expression(*receiver).ty,
-                                caller.arguments(),
+                                &caller_arguments,
                             )
                         }).or_else(|| match &body.expression(*callee).ty {
                             crate::Type::Callable { parameters, result, .. }
                                 if parameters.is_empty() =>
                             {
-                                Some(specialize_type(result, caller.arguments()))
+                                Some(specialize_type(result, &caller_arguments))
                             }
                             _ => None,
                         })
@@ -2447,7 +2429,7 @@ impl StageZeroCompiler {
                             arguments
                                 .iter()
                                 .map(|argument| {
-                                    specialize_generic_argument(argument, caller.arguments())
+                                    specialize_generic_argument(argument, &caller_arguments)
                                 })
                                 .collect(),
                         )
@@ -2467,7 +2449,7 @@ impl StageZeroCompiler {
                             arguments
                                 .iter()
                                 .map(|argument| {
-                                    specialize_generic_argument(argument, caller.arguments())
+                                    specialize_generic_argument(argument, &caller_arguments)
                                 })
                                 .collect(),
                         )
@@ -2482,13 +2464,13 @@ impl StageZeroCompiler {
                         let trait_arguments = trait_arguments
                             .iter()
                             .map(|argument| {
-                                specialize_generic_argument(argument, caller.arguments())
+                                specialize_generic_argument(argument, &caller_arguments)
                             })
                             .collect::<Vec<_>>();
                         let method_arguments = method_arguments
                             .iter()
                             .map(|argument| {
-                                specialize_generic_argument(argument, caller.arguments())
+                                specialize_generic_argument(argument, &caller_arguments)
                             })
                             .collect::<Vec<_>>();
                         let (evidence, method) = if let Some(deferred) = deferred {
@@ -2499,12 +2481,12 @@ impl StageZeroCompiler {
                                     .arguments
                                     .iter()
                                     .map(|argument| {
-                                        specialize_generic_argument(argument, caller.arguments())
+                                        specialize_generic_argument(argument, &caller_arguments)
                                     })
                                     .collect(),
                             };
                             let subject =
-                                specialize_type(&deferred.subject, caller.arguments());
+                                specialize_type(&deferred.subject, &caller_arguments);
                             match instance_trait_solver.select_method(
                                 TraitGoal { relation, subject },
                                 &deferred.name,

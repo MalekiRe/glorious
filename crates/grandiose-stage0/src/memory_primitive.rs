@@ -31,10 +31,14 @@ pub enum MemoryPrimitive {
     CastConst,
     StaticUtf8Address,
     StaticBytesAddress,
+    /// Deliberately suppress source destruction after transferring/discharging
+    /// a value's obligations. Linear erasure is an unsafe caller obligation.
+    Forget,
+    StaticBytesLen,
 }
 
 impl MemoryPrimitive {
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 25] = [
         Self::SizeOf,
         Self::AlignOf,
         Self::Null,
@@ -58,6 +62,8 @@ impl MemoryPrimitive {
         Self::CastConst,
         Self::StaticUtf8Address,
         Self::StaticBytesAddress,
+        Self::Forget,
+        Self::StaticBytesLen,
     ];
 
     pub const fn selector_name(self) -> &'static str {
@@ -85,6 +91,8 @@ impl MemoryPrimitive {
             Self::CastConst => "memory-cast-const",
             Self::StaticUtf8Address => "memory-static-utf8-address",
             Self::StaticBytesAddress => "memory-static-bytes-address",
+            Self::Forget => "memory-forget",
+            Self::StaticBytesLen => "memory-static-bytes-len",
         }
     }
 
@@ -94,7 +102,7 @@ impl MemoryPrimitive {
 
     pub fn safety(self) -> Safety {
         match self {
-            Self::SizeOf | Self::AlignOf => Safety::Safe,
+            Self::SizeOf | Self::AlignOf | Self::StaticBytesLen => Safety::Safe,
             // All raw-pointer operations require explicit unsafe scopes,
             // including address-only construction and conversion.
             _ => Safety::Unsafe,
@@ -112,6 +120,11 @@ impl MemoryPrimitive {
         let count = Type::Scalar(ScalarType::Usize);
         let byte_pointer = writable(Type::Scalar(ScalarType::U8));
         let (generics, parameters, result) = match self {
+            Self::Forget => (1, vec![t], Type::Unit),
+            Self::StaticBytesLen => (0, vec![Type::StaticData {
+                element: Box::new(Type::Scalar(ScalarType::U8)),
+                tag: crate::STATIC_RAW_U8_DATA_TAG, alignment: 1,
+            }], count),
             Self::SizeOf | Self::AlignOf => (1, vec![], count),
             Self::Null | Self::Dangling => (1, vec![], writable(t)),
             // Allocation failure returns null; reallocation failure leaves the
@@ -258,7 +271,7 @@ mod tests {
             assert_eq!(instance.generics, 0);
             assert!(instance.generic_kinds.is_empty());
             assert_eq!(instance.safety, primitive.safety());
-            assert_eq!(instance.safety == Safety::Safe, index < 2);
+            assert_eq!(instance.safety == Safety::Safe, index < 2 || primitive == MemoryPrimitive::StaticBytesLen);
             assert_eq!(instance.effects, EffectRow::empty());
             let mut excessive = types.clone();
             excessive.push(concrete.clone());

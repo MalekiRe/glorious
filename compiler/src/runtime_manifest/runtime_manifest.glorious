@@ -23,6 +23,7 @@ pub enum MemoryPrimitive {
     Offset, OffsetConst, Cast, AsConst, Read, Write, Copy, CopyNonoverlapping,
     BorrowShared, BorrowUnique,
     AsRawShared, AsRawUnique, CastConst, StaticUtf8Address, StaticBytesAddress,
+    Forget, StaticBytesLen,
 }
 fn memory_ordinal(value: MemoryPrimitive) -> usize {
     handle value {
@@ -38,6 +39,7 @@ fn memory_ordinal(value: MemoryPrimitive) -> usize {
         MemoryPrimitive::AsRawShared => 18, MemoryPrimitive::AsRawUnique => 19,
         MemoryPrimitive::CastConst => 20, MemoryPrimitive::StaticUtf8Address => 21,
         MemoryPrimitive::StaticBytesAddress => 22,
+        MemoryPrimitive::Forget => 23, MemoryPrimitive::StaticBytesLen => 24,
     }
 }
 fn memory_name(value: MemoryPrimitive) -> Str<'static> {
@@ -54,6 +56,7 @@ fn memory_name(value: MemoryPrimitive) -> Str<'static> {
         MemoryPrimitive::AsRawShared => "memory-as-raw-shared", MemoryPrimitive::AsRawUnique => "memory-as-raw-unique",
         MemoryPrimitive::CastConst => "memory-cast-const", MemoryPrimitive::StaticUtf8Address => "memory-static-utf8-address",
         MemoryPrimitive::StaticBytesAddress => "memory-static-bytes-address",
+        MemoryPrimitive::Forget => "memory-forget", MemoryPrimitive::StaticBytesLen => "memory-static-bytes-len",
     }
 }
 pub enum PrimitiveRole {

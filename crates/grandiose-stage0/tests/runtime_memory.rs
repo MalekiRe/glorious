@@ -29,6 +29,7 @@ const DECLARATIONS: &str = r#"
     unsafe fn as_raw_shared<T>(value: &T) -> *const T;
     unsafe fn as_raw_unique<T>(value: &mut T) -> *mut T;
     unsafe fn cast_const<T, U>(pointer: *const T) -> *const U;
+    unsafe fn forget<T>(value: T) -> ();
 "#;
 
 const NATIVE_VIEWS: &str = r#"
@@ -96,7 +97,7 @@ fn request(source: &str) -> CompilationRequest {
                 .into_iter()
                 // Static-data spellings are sealed to canonical std. Their
                 // address leaves are exercised by the standard-library suite.
-                .filter(|primitive| !matches!(primitive, MemoryPrimitive::StaticUtf8Address | MemoryPrimitive::StaticBytesAddress))
+                .filter(|primitive| !matches!(primitive, MemoryPrimitive::StaticUtf8Address | MemoryPrimitive::StaticBytesAddress | MemoryPrimitive::StaticBytesLen))
                 .map(|primitive| PrimitiveSelector {
                     role: PrimitiveRole::Memory(primitive),
                     module_path: "crate".into(),

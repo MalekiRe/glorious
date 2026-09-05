@@ -38,51 +38,20 @@ unsafe fn __g1_memory_as_raw_unique<T>(value: &mut T) -> *mut T;
 unsafe fn __g1_memory_cast_const<T, U>(pointer: *const T) -> *const U;
 unsafe fn __g1_memory_static_utf8_address(value: __StaticData<Utf8Bytes>) -> *const u8;
 unsafe fn __g1_memory_static_bytes_address(value: __StaticData<u8>) -> *const u8;
+unsafe fn __g1_memory_forget<T>(value: T) -> ();
+__g1_memory_static_bytes_len(value: __StaticData<u8>) -> usize;
 
-// Trusted array leaves. Their exact declaration identities are bound only
-// when the compiler supplies this package; copied source spellings have no VM
-// authority. These compatibility leaves are bodyless external declarations;
-// their algorithms are being replaced with ordinary source implementations.
+// Temporary legacy byte bridge for the opaque BLAKE3 leaf only. None of the
+// Vec, Slice, String or hash-table storage algorithms use Array anymore.
 __g1_array_len<T>(value: &Array<T>) -> usize;
-__g1_array_utf8_valid_up_to(value: &Array<u8>) -> usize;
-__g1_array_push_utf8_char(value: &mut Array<u8>, character: char) -> ();
-__g1_array_extend_from_slice<T>(value: &mut Array<T>, source: &Array<T>, start: usize, length: usize) -> ()
-    where T: Use<[0, *]>;
-__g1_array_insert_move<T>(value: &mut Array<T>, index: usize, item: T) -> ();
-__g1_array_remove_move<T>(value: &mut Array<T>, index: usize) -> T;
-__g1_array_append_move<T>(value: &mut Array<T>, source: Array<T>) -> ();
-__g1_array_insert_from_slice<T>(value: &mut Array<T>, index: usize, source: &Array<T>, start: usize, length: usize) -> ()
-    where T: Use<[0, *]>;
-__g1_array_insert_utf8_from_slice(value: &mut Array<u8>, index: usize, source: &Array<u8>, start: usize, length: usize) -> usize;
-__g1_array_truncate_discard<T>(value: &mut Array<T>, length: usize) -> ()
-    where T: Use<[0, 1]>;
-__g1_array_reverse_move<T>(value: &mut Array<T>) -> ();
-__g1_array_split_off_move<T>(value: &mut Array<T>, index: usize) -> Array<T>;
-// This consumes one unique array window and returns two disjoint unique
-// windows.  It is a sealed runtime leaf: source code can only receive these
-// references through SliceMut::split_at, whose private fields retain the
-// checked start and length metadata.
-__g1_array_split_borrow_unique<'a, T>(value: &'a mut Array<T>, start: usize, length: usize, index: usize) -> (&'a mut Array<T>, &'a mut Array<T>);
-__g1_array_pop_utf8_char(value: &mut Array<u8>) -> (char, usize);
-__g1_array_utf8_char_at(value: &Array<u8>, start: usize, length: usize, index: usize) -> (char, usize);
 __g1_array_get_borrow_shared<'a, T>(value: &'a Array<T>, index: usize) -> &'a T;
-__g1_array_get_borrow_unique<'a, T>(value: &'a mut Array<T>, index: usize) -> &'a mut T;
-__g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T;
-__g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) -> ();
 __g1_array_empty<T>() -> Array<T>;
 __g1_array_push_move<T>(value: &mut Array<T>, item: T) -> ();
-__g1_array_pop_move<T>(value: &mut Array<T>) -> T;
-__g1_array_capacity<T>(value: &Array<T>) -> usize;
-__g1_array_reserve<T>(value: &mut Array<T>, additional: usize) -> ();
 // Existing deterministic byte mechanisms, admitted by their exact selectors.
 __g1_bytes_from_array_move(value: Array<u8>) -> Bytes;
 __g1_bytes_to_array(value: Bytes) -> Array<u8>;
 __g1_blake3(value: Bytes) -> Bytes;
 __g1_static_len(value: __StaticData<Utf8Bytes>) -> usize;
-__g1_static_subslice(value: __StaticData<Utf8Bytes>, start: usize, length: usize) -> __StaticData<Utf8Bytes>;
-__g1_static_get_shared(value: __StaticData<Utf8Bytes>, index: usize) -> &'static u8;
-__g1_static_as_array(value: __StaticData<Utf8Bytes>) -> &'static Array<u8>;
-__g1_static_raw_as_array(value: __StaticData<u8>) -> &'static Array<u8>;
 // Scalar leaves are private manifest bindings.  The public character API
 // validates before calling the checked conversion, so invalid code points are
 // represented as `None` rather than as a VM execution failure.
@@ -258,18 +227,16 @@ pub let Range::contains = range_contains;
 pub let Range::intersection = range_intersection;
 pub let Range::checked_offset = range_checked_offset;
 
-// Slices are ordinary library views.  The VM may keep hidden provenance for
-// their backing allocation, but the public representation is one borrowed
-// data window rather than a static/dynamic sum type.
+// Two-word source views. The zero-sized checked referent carries the owner
+// loan and the actual data address; the length bounds the initialized window.
+// Private unsafe operations recover T's pointer without a second stored address.
 pub struct Slice<'a, T> {
-    private storage: &'a Array<T>,
-    private start: usize,
+    private storage: &'a (),
     private length: usize,
 }
 
 pub struct SliceMut<'a, T> {
-    private storage: &'a mut Array<T>,
-    private start: usize,
+    private storage: &'a mut (),
     private length: usize,
 }
 
@@ -297,59 +264,72 @@ pub fn slice_mut_is_empty<'a, T>(value: &SliceMut<'a, T>) -> Bool {
     handle value.length { 0 => true, _ => false }
 }
 pub fn slice_get_unchecked<'a, T>(value: Slice<'a, T>, index: usize) -> &'a T {
-    __g1_array_get_borrow_shared(value.storage, value.start + index)
+    // Historical spelling is retained, but this is a SAFE export: invalid
+    // indexes abort before pointer arithmetic or reference construction.
+    handle index < value.length {
+        false => __g1_abort(),
+        true => unsafe {
+            __g1_memory_borrow_shared(__g1_memory_offset_const(
+                __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(value.storage)), index,
+            ))
+        },
+    }
 }
 pub fn slice_get<'a, T>(value: Slice<'a, T>, index: usize) -> Option<&'a T> {
     handle index < value.length {
-        true => Result::Ok(__g1_array_get_borrow_shared(value.storage, value.start + index)),
+        true => Result::Ok(slice_get_unchecked(value, index)),
         false => Result::Err(()),
     }
 }
 pub fn slice_mut_get_unchecked<T>(value: SliceMut<'_, T>, index: usize) -> &mut T {
-    __g1_array_get_borrow_unique(value.storage, value.start + index)
+    handle index < value.length {
+        false => __g1_abort(),
+        true => unsafe {
+            __g1_memory_borrow_unique(__g1_memory_offset(
+                __g1_memory_cast<(), T>(__g1_memory_as_raw_unique(value.storage)), index,
+            ))
+        },
+    }
 }
 pub fn slice_mut_get<T>(value: SliceMut<'_, T>, index: usize) -> Option<&mut T> {
     handle index < value.length {
-        true => Result::Ok(__g1_array_get_borrow_unique(value.storage, value.start + index)),
+        true => Result::Ok(slice_mut_get_unchecked(value, index)),
         false => Result::Err(()),
     }
 }
-// A unique subview consumes its parent view. Its retained window is checked
-// at every private array access, so it cannot be used to reach outside the
-// original SliceMut range.
+// Unique subviews consume their parent and retain only the checked window.
 pub fn slice_mut_slice<T>(value: SliceMut<'_, T>, range: Range<usize>) -> Result<SliceMut<'_, T>, SliceRangeError> {
     handle range.start > range.end {
         true => Result::Err(SliceRangeError::Reversed),
         false => handle range.end > value.length {
             true => Result::Err(SliceRangeError::OutOfBounds),
-            false => Result::Ok(SliceMut {
-                storage: value.storage,
-                start: value.start + range.start,
-                length: range.end - range.start,
-            }),
+            false => unsafe {
+                let pointer = __g1_memory_cast<(), T>(__g1_memory_as_raw_unique(value.storage));
+                Result::Ok(SliceMut {
+                    storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(
+                        __g1_memory_offset(pointer, range.start),
+                    )),
+                    length: range.end - range.start,
+                })
+            },
         },
     }
 }
 pub fn slice_mut_split_at<T>(value: SliceMut<'_, T>, index: usize) -> Result<(SliceMut<'_, T>, SliceMut<'_, T>), SliceRangeError> {
     handle index > value.length {
         true => Result::Err(SliceRangeError::OutOfBounds),
-        false => {
-            let windows = __g1_array_split_borrow_unique(
-                value.storage,
-                value.start,
-                value.length,
-                index,
-            );
-            handle windows {
-                (left_storage, right_storage) => Result::Ok((
-                    SliceMut { storage: left_storage, start: value.start, length: index },
-                    SliceMut {
-                        storage: right_storage,
-                        start: value.start + index,
-                        length: value.length - index,
-                    },
-                )),
-            }
+        false => unsafe {
+            let pointer = __g1_memory_cast<(), T>(__g1_memory_as_raw_unique(value.storage));
+            Result::Ok((
+                SliceMut {
+                    storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(pointer)),
+                    length: index,
+                },
+                SliceMut {
+                    storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(__g1_memory_offset(pointer, index))),
+                    length: value.length - index,
+                },
+            ))
         },
     }
 }
@@ -358,25 +338,33 @@ pub fn slice_slice<T>(value: Slice<'_, T>, range: Range<usize>) -> Result<Slice<
         true => Result::Err(SliceRangeError::Reversed),
         false => handle range.end > value.length {
             true => Result::Err(SliceRangeError::OutOfBounds),
-            false => Result::Ok(Slice {
-                storage: value.storage,
-                start: value.start + range.start,
-                length: range.end - range.start,
-            }),
+            false => unsafe {
+                let pointer = __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(value.storage));
+                Result::Ok(Slice {
+                    storage: __g1_memory_borrow_shared(__g1_memory_cast_const<T, ()>(
+                        __g1_memory_offset_const(pointer, range.start),
+                    )),
+                    length: range.end - range.start,
+                })
+            },
         },
     }
 }
 pub fn slice_split_at<T>(value: Slice<'_, T>, index: usize) -> Result<(Slice<'_, T>, Slice<'_, T>), SliceRangeError> {
     handle index > value.length {
         true => Result::Err(SliceRangeError::OutOfBounds),
-        false => Result::Ok((
-            Slice { storage: value.storage, start: value.start, length: index },
-            Slice {
-                storage: value.storage,
-                start: value.start + index,
-                length: value.length - index,
-            },
-        )),
+        false => unsafe {
+            let pointer = __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(value.storage));
+            Result::Ok((
+                Slice { storage: value.storage, length: index },
+                Slice {
+                    storage: __g1_memory_borrow_shared(__g1_memory_cast_const<T, ()>(
+                        __g1_memory_offset_const(pointer, index),
+                    )),
+                    length: value.length - index,
+                },
+            ))
+        },
     }
 }
 pub fn slice_iter<T>(value: Slice<'_, T>) -> SliceIter<'_, T> {
@@ -393,7 +381,6 @@ pub fn slice_mut_iter<T>(value: SliceMut<'_, T>) -> SliceIter<'_, T> {
             // view, and the iterator takes a shared view of precisely that
             // backing storage for the duration of the iterator lifetime.
             storage: &(*value.storage),
-            start: value.start,
             length: value.length,
         },
         position: 0,
@@ -405,10 +392,9 @@ pub fn slice_iter_next<T>(value: &mut SliceIter<'_, T>) -> Option<&T> {
         true => {
             let index = value.position;
             (*value).position = index + 1;
-            Result::Ok(__g1_array_get_borrow_shared(
-                value.slice.storage,
-                value.slice.start + index,
-            ))
+            Result::Ok(slice_get_unchecked(Slice {
+                storage: value.slice.storage, length: value.slice.length,
+            }, index))
         },
     }
 }
@@ -418,7 +404,7 @@ fn slice_lower_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usi
         false => start,
         true => {
             let middle = start + ((end - start) / 2);
-            let item = __g1_array_get_borrow_shared(value.storage, value.start + middle);
+            let item = slice_get_unchecked(value, middle);
             handle Ord::compare(item, needle) {
                 Ordering::Less => slice_lower_bound_from(value, needle, middle + 1, end),
                 _ => slice_lower_bound_from(value, needle, start, middle),
@@ -436,7 +422,7 @@ fn slice_upper_bound_from<T>(value: Slice<T>, needle: &T, start: usize, end: usi
         false => start,
         true => {
             let middle = start + ((end - start) / 2);
-            let item = __g1_array_get_borrow_shared(value.storage, value.start + middle);
+            let item = slice_get_unchecked(value, middle);
             handle Ord::compare(item, needle) {
                 Ordering::Greater => slice_upper_bound_from(value, needle, start, middle),
                 _ => slice_upper_bound_from(value, needle, middle + 1, end),
@@ -454,7 +440,7 @@ pub fn slice_binary_search<T>(value: Slice<T>, needle: &T) -> Result<usize, usiz
     handle index < value.length {
         false => Result::Err(index),
         true => handle Ord::compare(
-            __g1_array_get_borrow_shared(value.storage, value.start + index),
+            slice_get_unchecked(value, index),
             needle,
         ) {
             Ordering::Equal => Result::Ok(index),
@@ -472,8 +458,8 @@ fn slice_lex_compare_from<T>(left: Slice<T>, right: Slice<T>, index: usize) -> O
         false => handle index >= right.length {
             true => Ordering::Greater,
             false => handle Ord::compare(
-                __g1_array_get_borrow_shared(left.storage, left.start + index),
-                __g1_array_get_borrow_shared(right.storage, right.start + index),
+                slice_get_unchecked(left, index),
+                slice_get_unchecked(right, index),
             ) {
                 Ordering::Equal => slice_lex_compare_from(left, right, index + 1),
                 value => value,
@@ -511,13 +497,13 @@ pub let Slice::lex_compare = slice_lex_compare;
 // so the compiler can address the distributed package by its stable name;
 // callers still cannot construct or name the handle type themselves.
 fn __g1_wrap_static_str(value: __StaticData<Utf8Bytes>) -> Str<'static> {
-    let storage = __g1_static_as_array(value);
-    Str<'static> {
-        bytes: Slice<'static, u8> {
-            storage: storage,
-            start: 0,
-            length: __g1_array_len(storage),
-        },
+    unsafe {
+        Str<'static> {
+            bytes: Slice<'static, u8> {
+                storage: __g1_memory_borrow_shared(__g1_memory_cast_const<u8, ()>(__g1_memory_static_utf8_address(value))),
+                length: __g1_static_len(value),
+            },
+        }
     }
 }
 
@@ -525,11 +511,11 @@ fn __g1_wrap_static_str(value: __StaticData<Utf8Bytes>) -> Str<'static> {
 // arrays.  The raw static tag is preserved by the private manifest leaf and
 // never confers permission to construct a Str.
 fn __g1_wrap_static_slice(value: __StaticData<u8>) -> Slice<'static, u8> {
-    let storage = __g1_static_raw_as_array(value);
-    Slice<'static, u8> {
-        storage: storage,
-        start: 0,
-        length: __g1_array_len(storage),
+    unsafe {
+        Slice<'static, u8> {
+            storage: __g1_memory_borrow_shared(__g1_memory_cast_const<u8, ()>(__g1_memory_static_bytes_address(value))),
+            length: __g1_memory_static_bytes_len(value),
+        }
     }
 }
 
@@ -538,6 +524,70 @@ fn __g1_wrap_static_slice(value: __StaticData<u8>) -> Slice<'static, u8> {
 // over the same private source-level slice used by dynamic strings.
 pub enum StringRangeError { Reversed, OutOfBounds, NotCharBoundary }
 pub struct Chars<'a> { private text: Str<'a>, private position: usize }
+
+// Decode exactly one scalar. Every byte access is bounded before it occurs;
+// minimum values reject overlong encodings and char_from_u32 rejects surrogates
+// and values beyond Unicode's scalar range.
+fn utf8_decode_tail(value: Slice<u8>, index: usize, remaining: usize, code: u32, minimum: u32, width: usize) -> Option<(char, usize)> {
+    handle remaining {
+        0 => handle code < minimum {
+            true => None,
+            false => handle char_from_u32(code) {
+                Result::Ok(character) => Result::Ok((character, width)),
+                Result::Err(_) => None,
+            },
+        },
+        _ => {
+            let byte = as<u32>(*slice_get_unchecked(value, index));
+            handle byte >= 128 {
+                false => None,
+                true => handle byte < 192 {
+                    false => None,
+                    true => utf8_decode_tail(value, index + 1, remaining - 1, code * 64 + byte - 128, minimum, width),
+                },
+            }
+        },
+    }
+}
+fn utf8_decode_width(value: Slice<u8>, index: usize, code: u32, minimum: u32, width: usize) -> Option<(char, usize)> {
+    handle width <= value.length - index {
+        false => None,
+        true => utf8_decode_tail(value, index + 1, width - 1, code, minimum, width),
+    }
+}
+fn utf8_decode(value: Slice<u8>, index: usize) -> Option<(char, usize)> {
+    handle index < value.length {
+        false => None,
+        true => {
+            let first = as<u32>(*slice_get_unchecked(value, index));
+            handle first < 128 {
+                true => Result::Ok((__g1_char_from_u32_checked(first), 1)),
+                false => handle first < 194 {
+                    true => None,
+                    false => handle first < 224 {
+                        true => utf8_decode_width(value, index, first - 192, 128, 2),
+                        false => handle first < 240 {
+                            true => utf8_decode_width(value, index, first - 224, 2048, 3),
+                            false => handle first < 245 {
+                                true => utf8_decode_width(value, index, first - 240, 65536, 4),
+                                false => None,
+                            },
+                        },
+                    },
+                },
+            }
+        },
+    }
+}
+fn utf8_valid_up_to(value: Slice<u8>, index: usize) -> usize {
+    handle index < value.length {
+        false => index,
+        true => handle utf8_decode(value, index) {
+            Result::Err(_) => index,
+            Result::Ok((_, width)) => utf8_valid_up_to(value, index + width),
+        },
+    }
+}
 
 pub fn str_len(value: Str) -> usize { value.bytes.length }
 pub fn str_is_empty(value: Str) -> Bool {
@@ -576,13 +626,10 @@ pub fn str_slice(value: Str, range: Range<usize>) -> Result<Str, StringRangeErro
                 false => Result::Err(StringRangeError::NotCharBoundary),
                 true => handle str_is_char_boundary(value, range.end) {
                     false => Result::Err(StringRangeError::NotCharBoundary),
-                    true => Result::Ok(Str {
-                        bytes: Slice {
-                            storage: value.bytes.storage,
-                            start: value.bytes.start + range.start,
-                            length: range.end - range.start,
-                        },
-                    }),
+                    true => handle slice_slice(value.bytes, range) {
+                        Result::Ok(bytes) => Result::Ok(Str { bytes: bytes }),
+                        Result::Err(_) => __g1_abort(),
+                    },
                 },
             },
         },
@@ -610,25 +657,18 @@ pub fn str_char_at(value: Str, index: usize) -> Result<char, StringRangeError> {
         true => Result::Err(StringRangeError::OutOfBounds),
         false => handle str_is_char_boundary(value, index) {
             false => Result::Err(StringRangeError::NotCharBoundary),
-            true => handle __g1_array_utf8_char_at(
-                value.bytes.storage, value.bytes.start, value.bytes.length, index,
-            ) {
-                (character, 0) => Result::Err(StringRangeError::OutOfBounds),
-                (character, _) => Result::Ok(character),
+            true => handle utf8_decode(value.bytes, index) {
+                Result::Err(_) => Result::Err(StringRangeError::OutOfBounds),
+                Result::Ok((character, _)) => Result::Ok(character),
             },
         },
     }
 }
 pub fn str_chars(value: Str) -> Chars { Chars { text: value, position: 0 } }
 pub fn chars_next(value: &mut Chars) -> Option<char> {
-    handle __g1_array_utf8_char_at(
-        value.text.bytes.storage,
-        value.text.bytes.start,
-        value.text.bytes.length,
-        value.position,
-    ) {
-        (character, 0) => Result::Err(()),
-        (character, width) => {
+    handle utf8_decode(value.text.bytes, value.position) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok((character, width)) => {
             (*value).position = (*value).position + width;
             Result::Ok(character)
         },
@@ -646,17 +686,42 @@ pub let Str::char_at = str_char_at;
 pub let Chars::next = chars_next;
 
 
-// `Vec` is an ordinary opaque standard-library wrapper. It is intentionally
-// the public dense collection; `Array` and its leaves are implementation
-// details of this package.
-pub struct Vec<T> { private storage: Array<T> }
+// The allocation, initialized prefix and capacity policy are all source-owned.
+// Pointer copies do not copy ownership. The two zero-sized markers make an
+// owner nonduplicable and retain the quantity of its logical T residents.
+struct VecOwner {}
+impl Use<[0, 1]> for VecOwner {}
+pub struct Vec<T> {
+    private pointer: *mut T,
+    private length: usize,
+    private capacity: usize,
+    private ownership: PhantomData<T>,
+    private unique: VecOwner,
+}
 
 // BLAKE3's input is an exact borrowed byte window. The legacy immutable Bytes
 // representation remains private to these machine bindings.
 pub fn blake3(input: Slice<u8>) -> Vec<u8> {
-    let bytes = vec_new<u8>();
-    vec_extend_from_slice(&mut bytes, input);
-    Vec { storage: __g1_bytes_to_array(__g1_blake3(__g1_bytes_from_array_move(move bytes.storage))) }
+    // Compatibility bridge for the existing opaque hash leaf only. Vec's
+    // own allocation and operations never use this legacy Array storage.
+    let input_array = __g1_array_empty<u8>();
+    blake3_copy_input(&mut input_array, input, 0);
+    let digest = __g1_bytes_to_array(__g1_blake3(__g1_bytes_from_array_move(input_array)));
+    let output = vec_with_capacity<u8>(32);
+    blake3_copy_output(&mut output, &digest, 0);
+    output
+}
+fn blake3_copy_input(value: &mut Array<u8>, input: Slice<u8>, index: usize) -> () {
+    handle index < input.length {
+        false => (),
+        true => { __g1_array_push_move(&mut *value, *slice_get_unchecked(input, index)); blake3_copy_input(&mut *value, input, index + 1) },
+    }
+}
+fn blake3_copy_output(value: &mut Vec<u8>, digest: &Array<u8>, index: usize) -> () {
+    handle index < __g1_array_len(digest) {
+        false => (),
+        true => { vec_push(&mut *value, *__g1_array_get_borrow_shared(digest, index)); blake3_copy_output(&mut *value, digest, index + 1) },
+    }
 }
 
 // All extent checks precede mutation; a rejected fixed-width write leaves
@@ -774,28 +839,73 @@ pub let ByteCursor::u64 = byte_cursor_u64;
 
 pub struct VecIntoIter<T> { private remaining: Vec<T> }
 
-pub fn vec_new<T>() -> Vec<T> { Vec { storage: __g1_array_empty() } }
+pub fn vec_new<T>() -> Vec<T> {
+    unsafe {
+        Vec {
+            pointer: __g1_memory_dangling(),
+            length: 0,
+            capacity: handle __g1_memory_size_of<T>() { 0 => 18446744073709551615, _ => 0 },
+            ownership: PhantomData {},
+            unique: VecOwner {},
+        }
+    }
+}
 pub fn vec_with_capacity<T>(capacity: usize) -> Vec<T> {
     let value = vec_new();
-    __g1_array_reserve(&mut value.storage, capacity);
+    vec_reserve(&mut value, capacity);
     value
 }
-pub fn vec_len<T>(value: &Vec<T>) -> usize { __g1_array_len(&value.storage) }
-pub fn vec_capacity<T>(value: &Vec<T>) -> usize { __g1_array_capacity(&value.storage) }
+pub fn vec_len<T>(value: &Vec<T>) -> usize { value.length }
+pub fn vec_capacity<T>(value: &Vec<T>) -> usize { value.capacity }
 pub fn vec_reserve<T>(value: &mut Vec<T>, additional: usize) -> () {
-    __g1_array_reserve(&mut value.storage, additional)
+    let required = value.length + additional;
+    handle required > value.capacity {
+        false => (),
+        true => {
+            let size = __g1_memory_size_of<T>();
+            let maximum = 9223372036854775807 / size;
+            handle required > maximum {
+                true => __g1_abort(),
+                false => {
+                    let doubled = handle value.capacity > maximum / 2 {
+                        true => maximum,
+                        false => handle value.capacity { 0 => as<usize>(4), _ => value.capacity * 2 },
+                    };
+                    let capacity = handle doubled < required { true => required, false => doubled };
+                    unsafe {
+                        let pointer = __g1_memory_reallocate(
+                            __g1_memory_cast<T, u8>(value.pointer), value.capacity * size,
+                            __g1_memory_align_of<T>(), capacity * size,
+                        );
+                        let typed = __g1_memory_cast<u8, T>(pointer);
+                        handle __g1_memory_is_null(pointer) {
+                            0 => {
+                                (*value).pointer = typed;
+                                (*value).capacity = capacity;
+                            },
+                            _ => __g1_abort(),
+                        }
+                    }
+                },
+            }
+        },
+    }
 }
 pub fn vec_push<T>(value: &mut Vec<T>, item: T) -> () {
-    __g1_array_push_move(&mut value.storage, item)
+    vec_reserve(&mut *value, 1);
+    unsafe { __g1_memory_write(__g1_memory_offset(value.pointer, value.length), item); };
+    (*value).length = value.length + 1;
 }
 pub fn vec_extend_from_slice<T>(value: &mut Vec<T>, source: Slice<T>) -> ()
     where T: Use<[0, *]> {
-    __g1_array_extend_from_slice(
-        &mut value.storage,
-        source.storage,
-        source.start,
-        source.length,
-    )
+    vec_reserve(&mut *value, source.length);
+    unsafe {
+        __g1_memory_copy_nonoverlapping(
+            __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(source.storage)),
+            __g1_memory_offset(value.pointer, value.length), source.length,
+        );
+    };
+    (*value).length = value.length + source.length;
 }
 // Growing duplicates the supplied fill value. Shrinking is also valid under
 // this stronger bound because duplicable values may be discarded.
@@ -819,24 +929,54 @@ pub fn vec_resize<T>(value: &mut Vec<T>, length: usize, fill: T) -> ()
 // This deliberately remains a private leaf: `String` owns the UTF-8 policy,
 // while `Vec<u8>` only supplies the backing storage.
 fn vec_push_utf8_char(value: &mut Vec<u8>, character: char) -> () {
-    __g1_array_push_utf8_char(&mut value.storage, character)
+    let code = char_to_u32(character);
+    handle code < 128 {
+        true => vec_push(&mut *value, as<u8>(code)),
+        false => handle code < 2048 {
+            true => {
+                vec_push(&mut *value, as<u8>(192 + code / 64));
+                vec_push(&mut *value, as<u8>(128 + code % 64))
+            },
+            false => handle code < 65536 {
+                true => {
+                    vec_push(&mut *value, as<u8>(224 + code / 4096));
+                    vec_push(&mut *value, as<u8>(128 + (code / 64) % 64));
+                    vec_push(&mut *value, as<u8>(128 + code % 64))
+                },
+                false => {
+                    vec_push(&mut *value, as<u8>(240 + code / 262144));
+                    vec_push(&mut *value, as<u8>(128 + (code / 4096) % 64));
+                    vec_push(&mut *value, as<u8>(128 + (code / 64) % 64));
+                    vec_push(&mut *value, as<u8>(128 + code % 64))
+                },
+            },
+        },
+    }
 }
 pub fn vec_is_empty<T>(value: &Vec<T>) -> Bool {
     handle vec_len(value) { 0 => true, _ => false }
 }
 pub fn vec_pop<T>(value: &mut Vec<T>) -> Option<T> {
-    let length = __g1_array_len(&value.storage);
+    let length = value.length;
     handle length {
         0 => Result::Err(()),
-        _ => Result::Ok(__g1_array_pop_move(&mut value.storage)),
+        _ => {
+            (*value).length = length - 1;
+            unsafe { Result::Ok(__g1_memory_read(__g1_memory_as_const(__g1_memory_offset(value.pointer, length - 1)))) }
+        },
     }
 }
 pub fn vec_get_unchecked<'a, T>(value: &'a Vec<T>, index: usize) -> &'a T {
-    __g1_array_get_borrow_shared(&value.storage, index)
+    handle index < value.length {
+        false => __g1_abort(),
+        true => unsafe {
+            __g1_memory_borrow_shared(__g1_memory_as_const(__g1_memory_offset(value.pointer, index)))
+        },
+    }
 }
 pub fn vec_get<'a, T>(value: &'a Vec<T>, index: usize) -> Option<&'a T> {
     handle index < vec_len(value) {
-        true => Result::Ok(__g1_array_get_borrow_shared(&value.storage, index)),
+        true => Result::Ok(vec_get_unchecked(value, index)),
         false => Result::Err(()),
     }
 }
@@ -849,44 +989,55 @@ pub fn vec_last<'a, T>(value: &'a Vec<T>) -> Option<&'a T> {
     }
 }
 pub fn vec_get_mut<'a, T>(value: &'a mut Vec<T>, index: usize) -> Option<&'a mut T> {
-    let length = __g1_array_len(&value.storage);
+    let length = value.length;
     handle index < length {
-        true => Result::Ok(__g1_array_get_borrow_unique(&mut value.storage, index)),
+        true => unsafe { Result::Ok(__g1_memory_borrow_unique(__g1_memory_offset(value.pointer, index))) },
         false => Result::Err(()),
     }
 }
+fn vec_get_mut_unchecked<'a, T>(value: &'a mut Vec<T>, index: usize) -> &'a mut T {
+    handle vec_get_mut(value, index) { Result::Ok(item) => item, Result::Err(_) => __g1_abort() }
+}
 pub fn vec_swap<T>(value: &mut Vec<T>, left: usize, right: usize) -> () {
-    let first = __g1_array_get_move(&mut value.storage, left);
-    let second = __g1_array_get_move(&mut value.storage, right);
-    __g1_array_set_move(&mut value.storage, left, second);
-    __g1_array_set_move(&mut value.storage, right, first)
+    handle left < value.length {
+        false => __g1_abort(),
+        true => handle right < value.length {
+            false => __g1_abort(),
+            true => handle left == right {
+                true => (),
+                false => unsafe {
+                    let a = __g1_memory_offset(value.pointer, left);
+                    let b = __g1_memory_offset(value.pointer, right);
+                    let first = __g1_memory_read(__g1_memory_as_const(a));
+                    let second = __g1_memory_read(__g1_memory_as_const(b));
+                    __g1_memory_write(a, second);
+                    __g1_memory_write(b, first)
+                },
+            },
+        },
+    }
 }
 pub fn vec_swap_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
-    let length = __g1_array_len(&value.storage);
+    let length = value.length;
     handle index < length {
         false => Result::Err(()),
         true => {
             let last = length - 1;
-            let removed = __g1_array_get_move(&mut value.storage, index);
-            handle index == last {
-                true => {
-                    __g1_array_pop_move(&mut value.storage);
-                    Result::Ok(removed)
-                },
-                false => {
-                    let tail = __g1_array_get_move(&mut value.storage, last);
-                    __g1_array_set_move(&mut value.storage, index, tail);
-                    __g1_array_pop_move(&mut value.storage);
-                    Result::Ok(removed)
-                },
-            }
+            vec_swap(&mut *value, index, last);
+            vec_pop(&mut *value)
         },
     }
 }
 pub fn vec_insert<T>(value: &mut Vec<T>, index: usize, item: T) -> Option<()> {
-    handle index <= __g1_array_len(&value.storage) {
+    handle index <= value.length {
         true => {
-            __g1_array_insert_move(&mut value.storage, index, item);
+            vec_reserve(&mut *value, 1);
+            unsafe {
+                let pointer = __g1_memory_offset(value.pointer, index);
+                __g1_memory_copy(__g1_memory_as_const(pointer), __g1_memory_offset(pointer, 1), value.length - index);
+                __g1_memory_write(pointer, item);
+            };
+            (*value).length = value.length + 1;
             Result::Ok(())
         },
         false => Result::Err(()),
@@ -894,47 +1045,90 @@ pub fn vec_insert<T>(value: &mut Vec<T>, index: usize, item: T) -> Option<()> {
 }
 pub fn vec_insert_from_slice<T>(value: &mut Vec<T>, index: usize, source: Slice<T>) -> Option<()>
     where T: Use<[0, *]> {
-    handle index <= __g1_array_len(&value.storage) {
+    handle index <= value.length {
         false => Result::Err(()),
         true => {
-            __g1_array_insert_from_slice(
-                &mut value.storage,
-                index,
-                source.storage,
-                source.start,
-                source.length,
-            );
+            vec_reserve(&mut *value, source.length);
+            unsafe {
+                let pointer = __g1_memory_offset(value.pointer, index);
+                __g1_memory_copy(__g1_memory_as_const(pointer), __g1_memory_offset(pointer, source.length), value.length - index);
+                __g1_memory_copy_nonoverlapping(
+                    __g1_memory_cast_const<(), T>(__g1_memory_as_raw_shared(source.storage)), pointer, source.length,
+                );
+            };
+            (*value).length = value.length + source.length;
             Result::Ok(())
         },
     }
 }
 pub fn vec_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
-    handle index < __g1_array_len(&value.storage) {
-        true => Result::Ok(__g1_array_remove_move(&mut value.storage, index)),
+    handle index < value.length {
+        true => unsafe {
+            let pointer = __g1_memory_offset(value.pointer, index);
+            let removed = __g1_memory_read(__g1_memory_as_const(pointer));
+            (*value).length = value.length - 1;
+            __g1_memory_copy(__g1_memory_as_const(__g1_memory_offset(pointer, 1)), pointer, value.length - index);
+            Result::Ok(removed)
+        },
         false => Result::Err(()),
     }
 }
 pub fn vec_append<T>(value: &mut Vec<T>, source: Vec<T>) -> () {
-    __g1_array_append_move(&mut value.storage, source.storage)
+    vec_reserve(&mut *value, source.length);
+    unsafe {
+        __g1_memory_copy_nonoverlapping(__g1_memory_as_const(source.pointer),
+            __g1_memory_offset(value.pointer, value.length), source.length);
+    };
+    (*value).length = value.length + source.length;
+    source.length = as<usize>(0);
+    unsafe { vec_release_empty(source); }
 }
+// Caller has moved every initialized resident elsewhere. Release the exact
+// allocation and suppress this empty owner's hook without moving any field.
+unsafe fn vec_release_empty<T>(value: Vec<T>) -> () {
+    unsafe {
+        __g1_memory_deallocate(__g1_memory_cast<T, u8>(value.pointer),
+            value.capacity * __g1_memory_size_of<T>(), __g1_memory_align_of<T>());
+        __g1_memory_forget(value)
+    }
+}
+fn discard<T>(value: T) -> () where T: Use<[0, 1]> { () }
 pub fn vec_truncate<T>(value: &mut Vec<T>, length: usize) -> ()
     where T: Use<[0, 1]> {
-    handle length < __g1_array_len(&value.storage) {
-        true => __g1_array_truncate_discard(&mut value.storage, length),
+    handle length < value.length {
+        true => {
+            handle vec_pop(&mut *value) { Result::Ok(item) => discard(item), Result::Err(_) => () };
+            vec_truncate(&mut *value, length)
+        },
         false => (),
     }
 }
 pub fn vec_clear<T>(value: &mut Vec<T>) -> ()
     where T: Use<[0, 1]> {
-    __g1_array_truncate_discard(&mut value.storage, 0)
+    vec_truncate(&mut *value, 0)
 }
 pub fn vec_reverse<T>(value: &mut Vec<T>) -> () {
-    __g1_array_reverse_move(&mut value.storage)
+    vec_reverse_from(&mut *value, 0, value.length)
+}
+fn vec_reverse_from<T>(value: &mut Vec<T>, start: usize, end: usize) -> () {
+    handle start < end {
+        false => (),
+        true => { vec_swap(&mut *value, start, end - 1); vec_reverse_from(&mut *value, start + 1, end - 1) },
+    }
 }
 pub fn vec_split_off<T>(value: &mut Vec<T>, index: usize) -> Option<Vec<T>> {
-    handle index <= __g1_array_len(&value.storage) {
+    handle index <= value.length {
         false => Result::Err(()),
-        true => Result::Ok(Vec { storage: __g1_array_split_off_move(&mut value.storage, index) }),
+        true => {
+            let output = vec_with_capacity<T>(value.length - index);
+            unsafe {
+                __g1_memory_copy_nonoverlapping(__g1_memory_as_const(__g1_memory_offset(value.pointer, index)),
+                    output.pointer, value.length - index);
+            };
+            output.length = value.length - index;
+            (*value).length = index;
+            Result::Ok(output)
+        },
     }
 }
 // Draining transfers the selected residents into the existing owned iterator
@@ -943,17 +1137,19 @@ pub fn vec_split_off<T>(value: &mut Vec<T>, index: usize) -> Option<Vec<T>> {
 pub fn vec_drain<T>(value: &mut Vec<T>, range: Range<usize>) -> Option<VecIntoIter<T>> {
     handle range.start > range.end {
         true => Result::Err(()),
-        false => handle range.end > __g1_array_len(&value.storage) {
+        false => handle range.end > value.length {
             true => Result::Err(()),
             false => {
-                let tail = Vec {
-                    storage: __g1_array_split_off_move(&mut value.storage, range.end),
-                };
-                let drained = Vec {
-                    storage: __g1_array_split_off_move(&mut value.storage, range.start),
-                };
-                vec_append(value, tail);
-                Result::Ok(VecIntoIter { remaining: drained })
+                handle vec_split_off(&mut *value, range.end) {
+                    Result::Err(_) => __g1_abort(),
+                    Result::Ok(tail) => handle vec_split_off(&mut *value, range.start) {
+                        Result::Err(_) => __g1_abort(),
+                        Result::Ok(drained) => {
+                            vec_append(value, tail);
+                            Result::Ok(VecIntoIter { remaining: drained })
+                        },
+                    },
+                }
             },
         },
     }
@@ -1053,17 +1249,19 @@ pub fn vec_dedup<T>(value: &mut Vec<T>) -> ()
     vec_dedup_from(&mut *value, 0)
 }
 pub fn vec_as_slice<'a, T>(value: &'a Vec<T>) -> Slice<'a, T> {
-    Slice<'a, T> {
-        storage: &value.storage,
-        start: 0,
-        length: __g1_array_len(&value.storage),
+    unsafe {
+        Slice<'a, T> {
+            storage: __g1_memory_borrow_shared(__g1_memory_cast_const<T, ()>(__g1_memory_as_const(value.pointer))),
+            length: value.length,
+        }
     }
 }
 pub fn vec_as_mut_slice<'a, T>(value: &'a mut Vec<T>) -> SliceMut<'a, T> {
-    SliceMut<'a, T> {
-        storage: &mut value.storage,
-        start: 0,
-        length: __g1_array_len(&value.storage),
+    unsafe {
+        SliceMut<'a, T> {
+            storage: __g1_memory_borrow_unique(__g1_memory_cast<T, ()>(value.pointer)),
+            length: value.length,
+        }
     }
 }
 pub fn vec_iter<T>(value: &Vec<T>) -> SliceIter<'_, T> { slice_iter(vec_as_slice(value)) }
@@ -1140,7 +1338,7 @@ fn hash_bucket(fingerprint: usize, capacity: usize) -> usize {
     bit_and(fingerprint, capacity - 1)
 }
 fn hash_bucket_set(buckets: &mut Vec<usize>, bucket: usize, slot: usize) -> () {
-    __g1_array_set_move(&mut (*buckets).storage, bucket, slot)
+    *vec_get_mut_unchecked(buckets, bucket) = slot;
 }
 fn hash_map_matches<K, V>(value: &HashMap<K, V>, key: &K, fingerprint: usize, slot: usize) -> Bool
     where K: Eq {
@@ -1190,7 +1388,7 @@ fn hash_map_reindex(buckets: &mut Vec<usize>, indices: &mut Vec<HashMapIndex>, i
             let fingerprint = vec_get_unchecked(& *indices, index).fingerprint;
             let bucket = hash_map_vacant(& *buckets, hash_bucket(fingerprint, vec_len(& *buckets)));
             hash_bucket_set(&mut *buckets, bucket, index + 2);
-            let entry = __g1_array_get_borrow_unique(&mut (*indices).storage, index);
+            let entry = vec_get_mut_unchecked(&mut *indices, index);
             (*entry).bucket = bucket;
             hash_map_reindex(&mut *buckets, &mut *indices, index + 1)
         },
@@ -1259,7 +1457,7 @@ pub fn hash_map_get<'a, K, V>(value: &'a HashMap<K, V>, key: &K) -> Option<&'a V
     handle hash_map_find(value, key) {
         Result::Err(_) => Result::Err(()),
         Result::Ok(index) => {
-            let entry = __g1_array_get_borrow_shared(&(*value).entries.storage, index);
+            let entry = vec_get_unchecked(&(*value).entries, index);
             Result::Ok(&(*entry).value)
         },
     }
@@ -1269,7 +1467,7 @@ pub fn hash_map_get_mut<'a, K, V>(value: &'a mut HashMap<K, V>, key: &K) -> Opti
     handle hash_map_find(& *value, key) {
         Result::Err(_) => Result::Err(()),
         Result::Ok(index) => {
-            let entry = __g1_array_get_borrow_unique(&mut (*value).entries.storage, index);
+            let entry = vec_get_mut_unchecked(&mut (*value).entries, index);
             Result::Ok(&mut (*entry).value)
         },
     }
@@ -1283,7 +1481,7 @@ pub fn hash_map_insert<K, V>(value: &mut HashMap<K, V>, key: K, item: V) -> Opti
             Result::Err(())
         },
         Result::Ok(index) => {
-            let entry = __g1_array_get_borrow_unique(&mut (*value).entries.storage, index);
+            let entry = vec_get_mut_unchecked(&mut (*value).entries, index);
             // Preserve the canonical resident key. Only the value changes;
             // discarding the equal incoming key needs the bound above.
             Result::Ok(replace(&mut (*entry).value, item))
@@ -1454,7 +1652,7 @@ pub struct Utf8Error {
 
 pub fn string_new() -> String { String { storage: vec_new() } }
 pub fn string_from_utf8(value: Vec<u8>) -> Result<String, Utf8Error> {
-    let valid_up_to = __g1_array_utf8_valid_up_to(&value.storage);
+    let valid_up_to = utf8_valid_up_to(vec_as_slice(&value), 0);
     handle valid_up_to == vec_len(&value) {
         true => Result::Ok(String { storage: value }),
         false => Result::Err(Utf8Error {
@@ -1474,21 +1672,30 @@ pub fn string_push_str(value: &mut String, source: Str) -> () {
     vec_extend_from_slice(&mut value.storage, source.bytes)
 }
 pub fn string_insert(value: &mut String, index: usize, source: Str) -> Result<(), StringRangeError> {
-    handle __g1_array_insert_utf8_from_slice(
-        &mut value.storage.storage,
-        index,
-        source.bytes.storage,
-        source.bytes.start,
-        source.bytes.length,
-    ) {
-        0 => Result::Err(StringRangeError::NotCharBoundary),
-        _ => Result::Ok(()),
+    handle str_is_char_boundary(string_as_str(& *value), index) {
+        false => Result::Err(StringRangeError::NotCharBoundary),
+        true => handle vec_insert_from_slice(&mut value.storage, index, source.bytes) {
+            Result::Ok(_) => Result::Ok(()),
+            Result::Err(_) => __g1_abort(),
+        },
+    }
+}
+fn string_last_boundary(value: Str, index: usize) -> usize {
+    handle str_is_char_boundary(value, index) {
+        true => index,
+        false => string_last_boundary(value, index - 1),
     }
 }
 pub fn string_pop(value: &mut String) -> Option<char> {
-    handle __g1_array_pop_utf8_char(&mut value.storage.storage) {
-        (character, 0) => Result::Err(()),
-        (character, _) => Result::Ok(character),
+    handle string_len(& *value) {
+        0 => None,
+        length => {
+            let index = string_last_boundary(string_as_str(& *value), length - 1);
+            handle string_remove(&mut *value, index) {
+                Result::Ok(character) => Result::Ok(character),
+                Result::Err(_) => __g1_abort(),
+            }
+        },
     }
 }
 fn string_remove_character_info(storage: &Vec<u8>, index: usize) -> Result<(char, usize), StringRangeError> {
@@ -1497,14 +1704,9 @@ fn string_remove_character_info(storage: &Vec<u8>, index: usize) -> Result<(char
         true => Result::Err(StringRangeError::OutOfBounds),
         false => handle str_is_char_boundary(view, index) {
             false => Result::Err(StringRangeError::NotCharBoundary),
-            true => handle __g1_array_utf8_char_at(
-                &storage.storage,
-                0,
-                vec_len(storage),
-                index,
-            ) {
-                (character, 0) => Result::Err(StringRangeError::OutOfBounds),
-                (character, width) => Result::Ok((character, width)),
+            true => handle utf8_decode(view.bytes, index) {
+                Result::Err(_) => Result::Err(StringRangeError::OutOfBounds),
+                Result::Ok(info) => Result::Ok(info),
             },
         },
     }
@@ -1513,33 +1715,13 @@ pub fn string_remove(value: &mut String, index: usize) -> Result<char, StringRan
     handle string_remove_character_info(&value.storage, index) {
         Result::Err(error) => Result::Err(error),
         Result::Ok((character, width)) => {
-            handle width {
-                1 => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                    _ => Result::Ok(character),
-                },
-                2 => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                    _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                        _ => Result::Ok(character),
-                    },
-                },
-                3 => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                    _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                        _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                            _ => Result::Ok(character),
-                        },
-                    },
-                },
-                4 => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                    _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                        _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                            _ => handle __g1_array_remove_move(&mut value.storage.storage, index) {
-                                _ => Result::Ok(character),
-                            },
-                        },
-                    },
-                },
-                _ => Result::Err(StringRangeError::OutOfBounds),
-            }
+            unsafe {
+                let pointer = __g1_memory_offset(value.storage.pointer, index);
+                __g1_memory_copy(__g1_memory_as_const(__g1_memory_offset(pointer, width)), pointer,
+                    value.storage.length - index - width);
+            };
+            (*value).storage.length = value.storage.length - width;
+            Result::Ok(character)
         },
     }
 }

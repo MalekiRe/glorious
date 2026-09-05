@@ -19,11 +19,11 @@ alone is not proof that unsafe code is sound.
 |---|---|---|
 | U0 | Source library ownership, concrete bytecode specialization, unsafe profiles, shared representation, and self-host-before-LLVM sequencing | Direction recorded; no execution claim |
 | U1 | Bounded raw allocation, layout/alignment, uninitialized bytes, ownership handoff, native-address substrate tests | Rust substrate plus Stage0 per-run total/per-block memory accounting implemented; resident cleanup remains source-owned |
-| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Types/contracts and 23 bodyless memory leaves, including reference construction/address extraction, implemented |
-| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Initial Stage0 schema 96 executes raw memory for scalar/pointer/product/enum and native-reference residents, with native/static address leaves; independent G1 extension remains; untrusted-bytecode admission deferred |
+| U2 | Source raw pointers, unsafe scopes/callables/traits; propagation through inference, generics, interfaces, Core and MIR | Types/contracts and 25 bodyless memory leaves, including reference construction/address extraction and unsafe forgetting, implemented |
+| U3 | Versioned raw-memory bytecode and safety metadata; trusted execution of locally compiled source, preserving existing consistency checks | Stage0 schema 97 executes raw memory for scalar/pointer/product/enum and native-reference residents; independent G1 extension remains; untrusted-bytecode admission deferred |
 | U4 | Host-layout addressable storage, allocator/drop/borrow/call ABI, actual VM/native roundtrips and callbacks using host fixtures without marshalling | Missing |
-| U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Missing |
-| U6 | Execute strings/UTF-8/hashing and remaining collection algorithms as source bytecode, replacing specialized VM algorithms | Missing |
+| U5 | Source `Vec`/slices specialized to bytecode over U1–U4 for application-defined types; ownership, failure, cleanup, and measured performance without native specialization | Pointer-backed canonical Vec and two-word slices implemented; generic destruction and full resident ABI remain incomplete |
+| U6 | Execute strings/UTF-8/hashing and remaining collection algorithms as source bytecode, replacing specialized VM algorithms | Source UTF-8 and collection consumers migrated; legacy opcode removal, opaque BLAKE3 bridge and remaining work open |
 
 The initial Stage0 U3 path below exposes real raw storage to compiled source;
 it does not claim a safe-only sandbox or the complete shared ABI. U4 must cross the actual
@@ -343,3 +343,47 @@ Rust, source and the shared witness; cache/bytecode/verifier generations are
 nine/51/ten. Native register homes, callable residents, complete ownership/drop
 handoff and actual VM/native call fixtures remain open alongside the source
 collection migration.
+
+## Canonical source Vec, slices and UTF-8 algorithms
+
+The bundled `Vec<T>` now owns a typed pointer, initialized-prefix length and
+capacity. Source code implements growth/overflow policy, push/pop, insertion,
+removal, append, reserve, splitting, draining, swapping and truncation. Two
+zero-sized source markers retain logical element quantities and prevent copying
+an allocation owner. `Slice` and `SliceMut` use the previously tested two-word
+reference/length representation. Safe exports with historical `unchecked` names
+still check bounds and abort before deriving an invalid reference.
+
+`String` now encodes/decodes/validates UTF-8 and edits byte ranges in source;
+the hash tables access residents through source Vec functions. Obsolete array
+algorithm bindings and static-to-array view bindings have been removed from the
+bundled package and its default manifest. The older instructions still exist in
+the compatibility runtime. Four Array leaves remain solely for the existing
+opaque BLAKE3 input/output bridge; Vec's own representation never contains Array.
+
+This is an implementation checkpoint, **not completion of ownership cleanup**.
+`vec_release_empty` explicitly releases an emptied allocation after append, but
+ordinary owner destruction and generic `discard<T>` do not yet elaborate full
+source Drop glue. Truncation removes residents from the initialized prefix but
+does not yet reliably invoke their custom destructors. The per-execution native
+registry currently reclaims otherwise unreleased byte allocations at execution
+end, not at every source lifetime end. Until cleanup is implemented this can
+retain allocations and omit observable element hooks; nested owners, early
+exits and replacement still need correct structural/generic destruction.
+
+Other U4 gaps remain: references to ordinary VM-frame residents cannot yet be
+stored in native collections; callable residents and actual VM/native calls
+need their shared ABI. Existing passing collection tests do not certify these
+missing cases. No new Miri run was performed for this checkpoint.
+
+The rewrite exposed a trait specialization bug: dependency discovery used
+executable-key evidence as implementation binder arguments. It now uses the
+same receiver/head substitution as body materialization, including generic
+Default implementations. Profiled execution now has explicit unsafe entry
+points for trusted locally compiled source; existing safe runners retain their
+unsafe-execution rejection.
+
+Two further general leaves provide unsafe `forget<T>` (caller discharges the
+logical obligations; no Drop hook runs) and sealed raw-literal length. Authority
+tags 206–207 extend the shared inventory to 208. Stage0 schema/cache/bytecode/
+verifier generations are 97/ten/52/eleven.

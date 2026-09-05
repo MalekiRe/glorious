@@ -5,6 +5,32 @@ use grandiose_stage0::{
     SourceInput, StageZeroCompiler,
 };
 
+trait RunBundledStandardLibrary {
+    fn run_std_i64(&self) -> Result<i64, grandiose_stage0::VmArtifactError>;
+    fn run_std_usize(&self) -> Result<u64, grandiose_stage0::VmArtifactError>;
+    fn run_std_u8(&self) -> Result<u8, grandiose_stage0::VmArtifactError>;
+    fn run_std_u32(&self) -> Result<u32, grandiose_stage0::VmArtifactError>;
+}
+impl RunBundledStandardLibrary for grandiose_stage0::VerifiedVmProgram {
+    fn run_std_i64(&self) -> Result<i64, grandiose_stage0::VmArtifactError> {
+        // SAFETY: these fixtures execute freshly compiled source and the
+        // trusted bundled stdlib, never a supplied unsafe artifact. Negative
+        // source fixtures fail compilation and do not reach this runner.
+        unsafe { self.run_i64_with_unsafe(grandiose_stage0::VmExecutionLimits::default()) }
+    }
+    fn run_std_usize(&self) -> Result<u64, grandiose_stage0::VmArtifactError> {
+        // SAFETY: same locally compiled source contract as run_std_i64.
+        let text = unsafe { self.run_display_with_unsafe(Default::default(), None) }?;
+        Ok(text.parse().expect("usize fixture must return a decimal integer"))
+    }
+    fn run_std_u8(&self) -> Result<u8, grandiose_stage0::VmArtifactError> {
+        Ok(self.run_std_usize()?.try_into().expect("u8 fixture must fit u8"))
+    }
+    fn run_std_u32(&self) -> Result<u32, grandiose_stage0::VmArtifactError> {
+        Ok(self.run_std_usize()?.try_into().expect("u32 fixture must fit u32"))
+    }
+}
+
 fn request(application: &str) -> CompilationRequest {
     let app = PackageKey("app@0.1.0".into());
     let standard = PackageKey("std@0.1.0".into());
@@ -75,7 +101,7 @@ fn standard_prelude_and_source_defined_control_are_importable() {
         ))
         .expect("the distributed standard prelude must compile");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -99,7 +125,7 @@ fn standard_lifetime_generic_trait_method_preserves_nested_map_call_instances() 
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
     let decoded = grandiose_stage0::decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
-    assert_eq!(decoded.run_i64().unwrap(), 32);
+    assert_eq!(decoded.run_std_i64().unwrap(), 32);
 }
 
 #[test]
@@ -176,7 +202,7 @@ fn standard_string_traits_use_exact_bytes_and_resolve_hash_collisions() {
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let bytes = outcome.artifact.unwrap().canonical_bytes();
     let verified = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
-    assert_eq!(verified.run_i64().unwrap(), pairs.len() as i64 + 6);
+    assert_eq!(verified.run_std_i64().unwrap(), pairs.len() as i64 + 6);
 }
 
 #[test]
@@ -210,7 +236,7 @@ fn standard_slice_of_owned_strings_preserves_nested_view_provenance() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let program = grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
-    assert_eq!(program.run_i64().unwrap(), 2);
+    assert_eq!(program.run_std_i64().unwrap(), 2);
 }
 
 #[test]
@@ -228,7 +254,7 @@ fn slice_element_accessors_preserve_the_explicit_input_lifetime() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let program = grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
-    assert_eq!(program.run_i64().unwrap(), 14);
+    assert_eq!(program.run_std_i64().unwrap(), 14);
 }
 
 #[test]
@@ -262,7 +288,7 @@ fn hash_map_resident_views_borrow_move_only_values_without_exposing_mutable_keys
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let program = grandiose_stage0::decode_and_verify_program(&outcome.artifact.unwrap().canonical_bytes()).unwrap();
-    assert_eq!(program.run_i64().unwrap(), 37 + 59 + 80);
+    assert_eq!(program.run_std_i64().unwrap(), 37 + 59 + 80);
 }
 
 #[test]
@@ -322,7 +348,7 @@ fn standard_usize_display_preserves_unsigned_decimal_boundaries() {
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let bytes = outcome.artifact.unwrap().canonical_bytes();
     let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
-    assert_eq!(program.run_i64().unwrap(), values.len() as i64);
+    assert_eq!(program.run_std_i64().unwrap(), values.len() as i64);
 }
 
 #[test]
@@ -340,7 +366,7 @@ fn standard_take_uses_a_receiverless_default_constructor() {
         ))
         .expect("generic take must select Default::default from its result context");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 7);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 7);
 }
 
 #[test]
@@ -356,7 +382,7 @@ fn default_and_take_cover_empty_standard_library_collections() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -378,7 +404,7 @@ fn default_covers_optional_and_compiler_collection_types() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -398,7 +424,7 @@ fn option_get_or_insert_default_constructs_only_a_vacant_resident() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -417,7 +443,7 @@ fn bundled_vec_resize_copies_only_duplicable_fill_values() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 7);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 7);
 }
 
 #[test]
@@ -449,7 +475,7 @@ fn bundled_stable_sort_keeps_equal_values_in_source_order() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 2130);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 2130);
 }
 
 #[test]
@@ -472,7 +498,7 @@ fn capture_free_named_predicates_are_duplicable_callbacks() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -504,7 +530,7 @@ fn bundled_vec_partition_by_uses_a_reusable_source_predicate() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -523,7 +549,7 @@ fn bundled_vec_partition_by_accepts_a_duplicable_capturing_closure() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 2);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 2);
 }
 
 #[test]
@@ -544,7 +570,7 @@ fn scalar_eq_and_ord_are_standard_library_trait_implementations() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -569,7 +595,7 @@ fn scalar_ord_supports_byte_and_character_slice_algorithms() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 11);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 11);
 }
 
 #[test]
@@ -591,7 +617,7 @@ fn bundled_vec_sort_unstable_accepts_standard_byte_ordering() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -610,7 +636,7 @@ fn bundled_char_api_validates_unicode_scalars_and_reports_utf8_width() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -629,7 +655,7 @@ fn bundled_char_api_rejects_surrogates_and_out_of_range_values() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -654,7 +680,7 @@ fn bundled_checked_and_wrapping_numeric_conversions_are_source_wrappers() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -678,7 +704,7 @@ fn bundled_bitwise_and_shift_helpers_cover_multiple_integer_widths() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -700,7 +726,7 @@ fn bundled_trait_based_min_max_and_clamp_work_for_scalar_values() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -728,7 +754,7 @@ fn bundled_ord_covers_integer_widths_using_generic_vm_comparisons() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -763,7 +789,7 @@ fn bundled_vec_get_mut_checks_the_index_before_materializing_a_unique_borrow() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -791,7 +817,7 @@ fn bundled_option_lazy_insertion_only_constructs_an_empty_slot() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -810,7 +836,7 @@ fn bundled_hash_map_accepts_i64_keys_through_the_standard_hash_impl() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -831,7 +857,7 @@ fn bundled_ranges_and_str_subslices_reject_invalid_offsets_without_wrapping() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -846,7 +872,7 @@ fn bundled_string_borrows_coerce_to_str_at_standard_library_calls() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 9);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 9);
 }
 
 #[test]
@@ -873,7 +899,7 @@ fn bundled_hash_map_accepts_byte_and_character_keys() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -898,7 +924,7 @@ fn bundled_checked_float_to_integer_conversion_returns_option() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -910,7 +936,7 @@ fn bundled_str_lifetime_elision_ties_one_input_to_its_output_and_rejects_ambigui
     "#;
     let outcome = StageZeroCompiler::new().compile(request(accepted)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 2);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 2);
 
     let rejected = r#"
         use std::*;
@@ -935,7 +961,7 @@ fn hasher_is_source_defined_and_deterministic() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 177580);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 177580);
 }
 
 #[test]
@@ -953,7 +979,7 @@ fn hash_trait_dispatches_to_the_standard_library_scalar_implementation() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 177574);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 177574);
 }
 
 #[test]
@@ -970,7 +996,7 @@ fn explicit_output_lifetime_can_select_one_of_two_borrowed_inputs() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -1029,7 +1055,7 @@ fn nested_map_vector_views_preserve_the_explicit_owner_lifetime() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -1066,7 +1092,7 @@ fn nested_unique_field_reborrow_reaches_a_vec_push_call() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -1089,7 +1115,7 @@ fn generic_nested_unique_field_reborrow_reaches_a_vec_push_call() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -1114,7 +1140,7 @@ fn generic_hash_dispatch_before_a_vec_push_runs() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -1150,7 +1176,7 @@ fn generic_hash_map_style_recursive_lookup_runs_on_an_empty_vec() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 42);
 }
 
 #[test]
@@ -1190,7 +1216,7 @@ fn generic_hash_map_style_lookup_then_push_runs() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -1214,7 +1240,7 @@ fn hash_map_insert_remove_and_contains_are_source_defined() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 0);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 0);
 }
 
 #[test]
@@ -1235,7 +1261,7 @@ fn hash_map_get_borrows_from_the_map_not_the_lookup_key() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -1264,7 +1290,7 @@ fn hash_set_is_a_source_defined_deterministic_collection() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 7);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 7);
 }
 
 #[test]
@@ -1356,7 +1382,7 @@ fn hash_tables_preserve_affine_values_across_growth_collisions_and_relocation() 
         let bytes = outcome.artifact.unwrap().canonical_bytes();
         let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
         assert_eq!(
-            program.run_i64().unwrap(),
+            program.run_std_i64().unwrap(),
             42,
             "hash implementation: {hash}"
         );
@@ -1408,7 +1434,7 @@ fn hash_tables_preserve_the_original_affine_set_resident_on_duplicate_insert() {
     assert_eq!(
         grandiose_stage0::decode_and_verify_program(&bytes)
             .unwrap()
-            .run_i64()
+            .run_std_i64()
             .unwrap(),
         42
     );
@@ -1482,12 +1508,13 @@ fn hash_tables_probe_past_tombstones_and_reuse_empty_tables() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     let bytes = outcome.artifact.unwrap().canonical_bytes();
     let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
-    assert_eq!(program.run_i64().unwrap(), 42);
-    let (value, profile) = program
-        .run_i64_for_authoring(grandiose_stage0::VmExecutionLimits {
+    assert_eq!(program.run_std_i64().unwrap(), 42);
+    // SAFETY: same freshly compiled, trusted source as the ordinary run above.
+    let (value, profile) = unsafe { program
+        .run_i64_for_authoring_with_unsafe(grandiose_stage0::VmExecutionLimits {
             max_call_depth: 64,
             ..Default::default()
-        })
+        }) }
         .unwrap();
     assert_eq!(value, 42);
     assert!(profile.peak_call_depth < 64);
@@ -1540,7 +1567,7 @@ fn hash_table_mutable_lookup_and_entry_removal_preserve_the_resident_key() {
     assert_eq!(
         grandiose_stage0::decode_and_verify_program(&bytes)
             .unwrap()
-            .run_i64()
+            .run_std_i64()
             .unwrap(),
         42
     );
@@ -1561,11 +1588,12 @@ fn hash_table_indexed_lookup_work_does_not_scan_unrelated_entries() {
             let outcome = StageZeroCompiler::new().compile(request(&source)).unwrap();
             let bytes = outcome.artifact.unwrap().canonical_bytes();
             let program = grandiose_stage0::decode_and_verify_program(&bytes).unwrap();
-            let (value, profile) = program
-                .run_i64_for_authoring(grandiose_stage0::VmExecutionLimits {
+            // SAFETY: this fixed source fixture uses only trusted stdlib unsafe code.
+            let (value, profile) = unsafe { program
+                .run_i64_for_authoring_with_unsafe(grandiose_stage0::VmExecutionLimits {
                     max_call_depth: 64,
                     ..Default::default()
-                })
+                }) }
                 .unwrap();
             assert_eq!(value, 42);
             assert!(profile.peak_call_depth < 64);
@@ -1605,7 +1633,7 @@ fn vec_drain_moves_a_checked_window_into_the_owned_iterator() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 60);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 60);
 }
 
 #[test]
@@ -1637,7 +1665,7 @@ fn source_defined_slice_search_and_vec_algorithms_preserve_ordered_results() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 7);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 7);
 }
 
 #[test]
@@ -1659,7 +1687,7 @@ fn conditional_move_of_generic_value_keeps_the_selected_arm_live() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -1682,7 +1710,7 @@ fn result_branch_move_of_generic_value_keeps_the_selected_arm_live() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -1705,7 +1733,7 @@ fn returned_non_reference_result_releases_a_shared_reborrow_before_mutation() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -1723,7 +1751,7 @@ fn range_helpers_are_source_defined_half_open_operations() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 3);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 3);
 }
 
 #[test]
@@ -1740,7 +1768,7 @@ fn range_checked_offset_is_a_source_defined_checked_operation() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 6);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 6);
 }
 
 #[test]
@@ -1766,7 +1794,7 @@ fn bundled_fold_until_threads_state_and_can_leave_through_a_label() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 3);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 3);
 }
 
 #[test]
@@ -1783,7 +1811,7 @@ fn bundled_loop_state_uses_source_defined_break_and_continue_values() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 3);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 3);
 }
 
 #[test]
@@ -1795,7 +1823,7 @@ fn bundled_return_forwards_to_a_named_function_implicit_label() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -1812,7 +1840,7 @@ fn bundled_return_can_be_selected_from_a_conditional_branch() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 43);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 43);
 }
 
 #[test]
@@ -1839,7 +1867,7 @@ fn bundled_yield_await_and_fail_are_source_defined_effect_operations() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 126);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 126);
 }
 
 #[test]
@@ -1855,11 +1883,11 @@ fn compiler_bundles_std_for_regular_application_requests() {
         .compile(input)
         .expect("regular requests must receive the bundled standard package");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
-fn bundled_vec_is_an_opaque_array_backed_source_collection() {
+fn bundled_vec_owns_native_storage_in_source() {
     let mut input = request(
         r#"
             use std::*;
@@ -1877,9 +1905,22 @@ fn bundled_vec_is_an_opaque_array_backed_source_collection() {
     input.sources.truncate(1);
     let outcome = StageZeroCompiler::new()
         .compile(input)
-        .expect("bundled Vec must lower only through trusted array leaves");
+        .unwrap_or_else(|failure| {
+            for diagnostic in failure.diagnostics() {
+                let source = include_str!("../../../stdlib/src/lib.glorious");
+                let location = diagnostic.primary.map(|span| {
+                    let start = span.start as usize;
+                    let end = span.end as usize;
+                    format!("line {}: {}", source[..start.min(source.len())].lines().count(), source.get(start..end).unwrap_or("<application>"))
+                }).unwrap_or_default();
+                eprintln!("{} {} {location}", diagnostic.code, diagnostic.message);
+            }
+            panic!("bundled source Vec failed to compile")
+        });
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 22);
+    // SAFETY: this fixture executes the locally compiled bundled library;
+    // no user-defined unsafe function or untrusted bytecode is supplied.
+    assert_eq!(unsafe { outcome.artifact.unwrap().run_i64_with_unsafe(grandiose_stage0::VmExecutionLimits::default()) }.unwrap(), 22);
 }
 
 #[test]
@@ -1897,7 +1938,7 @@ fn bundled_vec_exposes_borrowed_element_access_through_library_functions() {
         ))
         .expect("Vec borrowed access must lower through trusted array leaves");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -1912,7 +1953,7 @@ fn bundled_vec_uses_source_capacity_helper() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert!(outcome.artifact.unwrap().run_usize().unwrap() >= 4);
+    assert!(outcome.artifact.unwrap().run_std_usize().unwrap() >= 4);
 }
 
 #[test]
@@ -1928,7 +1969,7 @@ fn bundled_vec_exposes_an_ordinary_borrowed_slice_view() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -1947,7 +1988,7 @@ fn bundled_slice_get_checks_its_window_and_preserves_the_borrow() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -1967,7 +2008,7 @@ fn bundled_slice_subslice_is_checked_and_uses_the_same_backing_storage() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -1986,7 +2027,7 @@ fn bundled_slice_split_at_returns_two_checked_views() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2008,7 +2049,7 @@ fn bundled_mut_slice_exposes_checked_unique_element_borrows() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2037,7 +2078,7 @@ fn bundled_mut_slice_split_at_returns_two_disjoint_mutable_views() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2055,7 +2096,7 @@ fn bundled_vec_get_is_checked() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2077,7 +2118,7 @@ fn bundled_vec_first_and_last_are_source_defined_checked_borrows() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2094,7 +2135,7 @@ fn bundled_vec_swap_moves_elements_out_and_restores_them() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2113,7 +2154,7 @@ fn bundled_vec_swap_remove_transfers_the_selected_element() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2137,7 +2178,7 @@ fn bundled_vec_insert_and_remove_preserve_element_order() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 49);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 49);
 }
 
 #[test]
@@ -2158,7 +2199,7 @@ fn bundled_vec_insert_from_slice_copies_a_borrowed_window() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2181,7 +2222,7 @@ fn bundled_vec_append_transfers_exact_linear_elements() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2201,7 +2242,7 @@ fn bundled_vec_truncate_and_clear_discard_affine_or_duplicable_residents() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 2);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 2);
 }
 
 #[test]
@@ -2217,7 +2258,7 @@ fn bundled_vec_clear_discards_duplicable_residents() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 0);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 0);
 }
 
 #[test]
@@ -2260,7 +2301,7 @@ fn bundled_vec_reverse_preserves_exact_linear_elements() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2287,7 +2328,7 @@ fn bundled_vec_split_off_transfers_an_exact_linear_suffix() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2309,7 +2350,7 @@ fn bundled_vec_deque_is_a_source_level_fifo_wrapper() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2334,7 +2375,7 @@ fn bundled_stack_and_work_list_are_source_level_lifo_wrappers() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 80);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 80);
 }
 
 #[test]
@@ -2350,7 +2391,7 @@ fn bundled_formatter_and_generic_display_dispatch_are_source_defined() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 4);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 4);
 }
 
 #[test]
@@ -2370,7 +2411,7 @@ fn string_insert_splices_utf8_at_a_character_boundary() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_u8().unwrap(), b'l');
+    assert_eq!(outcome.artifact.unwrap().run_std_u8().unwrap(), b'l');
 }
 
 #[test]
@@ -2387,7 +2428,7 @@ fn string_insert_rejects_a_non_character_boundary() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 3);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 3);
 }
 
 #[test]
@@ -2408,7 +2449,7 @@ fn string_pop_removes_one_complete_utf8_character() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 3);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 3);
 }
 
 #[test]
@@ -2438,7 +2479,7 @@ fn str_chars_iterates_complete_utf8_characters_from_static_data() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 3);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 3);
 }
 
 #[test]
@@ -2483,7 +2524,7 @@ fn str_char_at_checks_byte_boundaries_and_returns_owned_scalars_from_static_and_
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 16);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 16);
 }
 
 #[test]
@@ -2506,7 +2547,7 @@ fn str_chars_uses_the_same_iterator_for_dynamic_string_storage() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 2);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 2);
 }
 
 #[test]
@@ -2520,7 +2561,7 @@ fn string_owns_a_vec_and_borrows_the_same_str_view() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 0);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 0);
 }
 
 #[test]
@@ -2538,7 +2579,7 @@ fn named_string_views_preserve_the_nested_owner_lifetime() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 49);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 49);
 }
 
 #[test]
@@ -2588,7 +2629,7 @@ fn static_literal_views_satisfy_generic_lifetime_call_contexts() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 17);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 17);
 }
 
 #[test]
@@ -2633,7 +2674,7 @@ fn empty_string_views_survive_nested_vector_extraction_and_calls() {
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
     let program = outcome.artifact.unwrap();
-    assert_eq!(program.run_usize().unwrap(), 32);
+    assert_eq!(program.run_std_usize().unwrap(), 32);
 }
 
 #[test]
@@ -2648,7 +2689,7 @@ fn string_borrow_coerces_to_an_elided_str_parameter() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 5);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 5);
 }
 
 #[test]
@@ -2664,7 +2705,7 @@ fn string_push_encodes_a_char_into_its_vec_backing() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 3);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 3);
 }
 
 #[test]
@@ -2684,7 +2725,7 @@ fn vec_extend_from_slice_and_string_push_str_copy_borrowed_bytes() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 5);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 5);
 }
 
 #[test]
@@ -2698,7 +2739,7 @@ fn str_to_string_allocates_an_owned_utf8_copy() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 3);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 3);
 }
 
 #[test]
@@ -2717,7 +2758,7 @@ fn string_from_utf8_validates_its_vec_storage_without_a_text_scalar() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 2);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 2);
 }
 
 #[test]
@@ -2740,7 +2781,7 @@ fn string_from_utf8_returns_its_bytes_and_valid_prefix_on_error() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 1);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 1);
 }
 
 #[test]
@@ -2768,7 +2809,7 @@ fn str_slice_checks_range_order_bounds_and_utf8_boundaries() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_usize().unwrap(), 2);
+    assert_eq!(outcome.artifact.unwrap().run_std_usize().unwrap(), 2);
 }
 
 #[test]
@@ -2796,7 +2837,7 @@ fn option_is_the_source_defined_temporary_slot_without_default() {
         .compile(input)
         .expect("Option must supply take/insert without requiring Default");
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2813,7 +2854,7 @@ fn option_replace_preserves_the_complete_previous_state() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 41);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 41);
 }
 
 #[test]
@@ -2832,7 +2873,7 @@ fn option_insertion_helpers_borrow_the_resident_value() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2858,7 +2899,7 @@ fn bundled_vec_iter_lends_elements_in_source_defined_order() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2881,7 +2922,7 @@ fn bundled_vec_into_iter_transfers_elements_in_source_defined_order() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2911,7 +2952,7 @@ fn bundled_mut_slice_subslice_transfers_the_unique_view() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2928,7 +2969,7 @@ fn bundled_wrapping_integer_helpers_preserve_each_scalar_width() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), -42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), -42);
 }
 
 #[test]
@@ -2944,7 +2985,7 @@ fn bundled_checked_i64_narrowing_returns_option_without_vm_overflow() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_u8().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_u8().unwrap(), 42);
 }
 
 #[test]
@@ -2963,7 +3004,7 @@ fn bundled_checked_i64_narrowing_rejects_out_of_range_values_in_source() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -2974,7 +3015,7 @@ fn bundled_i64_wrapping_conversions_follow_twos_complement_widths() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_u8().unwrap(), 255);
+    assert_eq!(outcome.artifact.unwrap().run_std_u8().unwrap(), 255);
 }
 
 #[test]
@@ -3000,7 +3041,7 @@ fn bundled_try_propagates_result_errors_through_the_named_function_label() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -3016,7 +3057,7 @@ fn bundled_f32_to_i64_conversion_is_checked_in_the_public_library() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -3032,7 +3073,7 @@ fn bundled_f32_to_i64_rejects_the_rounded_upper_boundary() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -3052,7 +3093,7 @@ fn bundled_f32_arithmetic_and_comparison_are_source_level_wrappers() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -3072,7 +3113,7 @@ fn bundled_f64_arithmetic_and_comparison_are_source_level_wrappers() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -3089,7 +3130,7 @@ fn string_remove_checks_character_boundaries_and_moves_one_utf8_scalar() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_u32().unwrap(), 233);
+    assert_eq!(outcome.artifact.unwrap().run_std_u32().unwrap(), 233);
 }
 
 #[test]
@@ -3107,7 +3148,7 @@ fn string_remove_rejects_a_utf8_continuation_offset() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }
 
 #[test]
@@ -3133,5 +3174,5 @@ fn bundled_mut_slice_iter_consumes_the_unique_view_and_lends_elements() {
     "#;
     let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
     assert!(outcome.diagnostics.is_empty(), "{:#?}", outcome.diagnostics);
-    assert_eq!(outcome.artifact.unwrap().run_i64().unwrap(), 42);
+    assert_eq!(outcome.artifact.unwrap().run_std_i64().unwrap(), 42);
 }

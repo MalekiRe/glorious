@@ -34,7 +34,7 @@ pub struct CompilationRequest {
 // from an independently versioned compiler retains its explicit build fields.
 pub fn stage0_identity(compiler: Digest) -> CompilerBuildIdentity {
     CompilerBuildIdentity { compiler: compiler, language_generation: 2, query_generation: 1,
-        interface_generation: 2, cache_generation: 9, bytecode_generation: 51, verifier_generation: 10 }
+        interface_generation: 2, cache_generation: 10, bytecode_generation: 52, verifier_generation: 11 }
 }
 pub fn mode_tag(mode: &CompilationMode) -> u8 {
     handle *mode {
